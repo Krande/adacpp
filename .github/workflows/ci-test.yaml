@@ -1,4 +1,4 @@
-name: ci-nano-min
+name: ci-ada-cpp-test
 
 # bump 1
 on:
