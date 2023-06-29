@@ -1,0 +1,43 @@
+context:
+  name: ada-cpp
+  version: 0.0.1
+
+package:
+  name: '{{ name|lower }}'
+  version: '{{ version }}'
+
+source:
+  path: ../
+
+build:
+  number: 1
+  script: python -m pip install --no-deps --ignore-installed .
+
+requirements:
+  host:
+    - python
+    - occt
+    - scikit-build-core
+    - nanobind
+    - pip
+  run:
+    - python
+    - "{{ pin_compatible('occt', max_pin='x.x.x') }}"
+
+test:
+  source_files:
+    - tests
+  requires:
+    - pytest
+  commands:
+    - pytest tests
+
+about:
+  home: https://github.com/Krande/adacpp
+  license: "GPL-3.0-or-later"
+  license_family: GPL3
+  summary: "A module with drop-in replacement functions for ada-py written in c++ to improve performance."
+
+extra:
+  recipe-maintainers:
+    - Krande
