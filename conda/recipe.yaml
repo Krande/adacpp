@@ -20,6 +20,7 @@ requirements:
     - scikit-build-core
     - nanobind
     - pip
+    - sel(unix): mesa-libgl-devel
   run:
     - python
     - "{{ pin_compatible('occt', max_pin='x.x.x') }}"

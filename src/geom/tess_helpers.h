@@ -7,6 +7,7 @@
 
 #include <TopoDS_Shape.hxx>
 #include "ShapeTesselator.h"
+#include <memory>
 #include "../models/Mesh.h"
 #include "../binding_core.h"
 
