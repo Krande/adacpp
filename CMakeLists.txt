@@ -4,6 +4,9 @@ project(ada-cpp LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 
 if (APPLE)
+    set(CMAKE_OSX_SYSROOT "/Users/runner/work/adacpp/MacOSX10.14.sdk" CACHE PATH "macOS SDK path" FORCE)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.14" CACHE STRING "macOS deployment target" FORCE)
+
     if (DEFINED CMAKE_OSX_SYSROOT)
         message(STATUS "Setting macOS sysroot to ${CMAKE_OSX_SYSROOT}")
     else ()
