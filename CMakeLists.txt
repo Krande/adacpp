@@ -3,6 +3,24 @@ cmake_minimum_required(VERSION 3.20)
 project(ada-cpp LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 
+if (APPLE)
+    if (DEFINED CMAKE_OSX_SYSROOT)
+        message(STATUS "Setting macOS sysroot to ${CMAKE_OSX_SYSROOT}")
+    else ()
+        message(FATAL_ERROR "CMAKE_OSX_SYSROOT is not defined. Please set it to the path of the macOS SDK you want to use.")
+    endif ()
+
+    if (DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
+        message(STATUS "Setting macOS deployment target to ${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    else ()
+        message(FATAL_ERROR "CMAKE_OSX_DEPLOYMENT_TARGET is not defined. Please set it to the minimum macOS version you want to support.")
+    endif ()
+
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -isysroot ${CMAKE_OSX_SYSROOT} -mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -isysroot ${CMAKE_OSX_SYSROOT} -mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET}")
+endif ()
+
+
 if (CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(STATUS "Building for x64 architecture")
 else ()

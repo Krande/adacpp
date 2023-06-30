@@ -21,6 +21,7 @@ requirements:
   host:
     - python
     - occt
+    - cgal-cpp
     - scikit-build-core
     - nanobind
     - pip
