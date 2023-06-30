@@ -1,4 +1,4 @@
-name: ci-nano-min
+name: ci-ada-cpp-test
 
 # bump 1
 on:
@@ -6,10 +6,11 @@ on:
     paths-ignore:
       - README.md
       - .gitignore
+      - .github/workflows/basic_test.yaml
 
 jobs:
   build_test:
-    name: nano-min-${{ matrix.platform.name }}-${{ matrix.pyver.name }}
+    name: ada-cpp-${{ matrix.platform.name }}-${{ matrix.pyver.name }}
     runs-on: ${{ matrix.platform.distver }}
     defaults:
       run:
@@ -27,7 +28,11 @@ jobs:
         ]
     steps:
       - uses: actions/checkout@v3
-        # Add ninja
+      - name: Download and extract MacOSX SDK
+        if: ${{ matrix.platform.name == 'macOS' }}
+        run: |
+          curl -L https://github.com/phracker/MacOSX-SDKs/releases/download/11.3/MacOSX10.15.sdk.tar.xz | tar -xvJf - -C /Users/runner/work/adacpp/
+
       - name: Install ninja
         run: |
           if [[ "$OSTYPE" == "linux-gnu"* ]]; then
@@ -46,4 +51,4 @@ jobs:
 
       - name: build local packages
         run: |
-          boa build conda --python ${{ matrix.pyver.distver }} -m ./conda/conda_build_config.yaml
+          boa build conda --python ${{ matrix.pyver.distver }} -m ./conda/conda_build_config.yaml --no-remove-work-dir

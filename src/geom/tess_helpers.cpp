@@ -4,6 +4,7 @@
 
 #include <TopoDS_Shape.hxx>
 #include <algorithm>
+#include <memory>
 #include "ShapeTesselator.h"
 #include "../models/Mesh.h"
 #include "../models/OccShape.h"
