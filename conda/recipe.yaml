@@ -14,13 +14,16 @@ build:
   script: python -m pip install --no-deps --ignore-installed .
 
 requirements:
+  build:
+    - "{{ compiler('c') }}"
+    - "{{ compiler('cxx') }}"
+    - sel('unix'): "{{ cdt('mesa-libGL-devel') }}"  # provides OpenGL development libraries
   host:
     - python
     - occt
     - scikit-build-core
     - nanobind
     - pip
-    - sel(unix): mesa-libgl-devel
   run:
     - python
     - "{{ pin_compatible('occt', max_pin='x.x.x') }}"
