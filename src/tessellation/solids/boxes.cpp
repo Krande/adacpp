@@ -6,6 +6,7 @@
 
 typedef CGAL::Simple_cartesian<double> Kernel;
 typedef Kernel::Point_3 Point_3;
+typedef Kernel::Vector_3 Vector_3;
 typedef CGAL::Polyhedron_3<Kernel> Polyhedron;
 
 struct Box {
