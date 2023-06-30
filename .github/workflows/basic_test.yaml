@@ -56,4 +56,5 @@ jobs:
 
       - name: build local packages
         run: |
+          export CONDA_BUILD_SYSROOT=$RUNNER_TEMP/MacOSX10.14.sdk
           boa build conda --python ${{ matrix.pyver.distver }} -m ./conda/conda_build_config.yaml --no-remove-work-dir
