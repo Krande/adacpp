@@ -1,7 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
 
-set(CMAKE_OSX_DEPLOYMENT_TARGET "10.14" CACHE STRING "Minimum OS X deployment version")
-
 project(ada-cpp LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 
@@ -10,8 +8,6 @@ if (CMAKE_SIZEOF_VOID_P EQUAL 8)
 else ()
     message(FATAL_ERROR "This project requires a 64-bit toolchain. Please update your toolchain arch to 'x86_amd64'")
 endif ()
-
-
 
 if (NOT CMAKE_BUILD_TYPE)
     message(STATUS "Build type not set, defaulting to Release")
