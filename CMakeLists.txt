@@ -9,6 +9,8 @@ else ()
     message(FATAL_ERROR "This project requires a 64-bit toolchain. Please update your toolchain arch to 'x86_amd64'")
 endif ()
 
+set(CMAKE_OSX_DEPLOYMENT_TARGET "10.14" CACHE STRING "Minimum OS X deployment version")
+
 if (NOT CMAKE_BUILD_TYPE)
     message(STATUS "Build type not set, defaulting to Release")
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build." FORCE)
