@@ -2,8 +2,3 @@ occt:
   - 7.7.0
   - 7.7.1=*novtk*
   - 7.7.1=*all*
-
-CFLAGS:
-  - "-mmacosx-version-min=10.14"
-CXXFLAGS:
-  - "-mmacosx-version-min=10.14"
