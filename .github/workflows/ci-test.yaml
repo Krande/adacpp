@@ -23,10 +23,16 @@ jobs:
         platform: [
           { name: win, distver: windows-latest },
           { name: linux, distver: ubuntu-latest },
-          { name: macOS, distver: macos-10.14 }
+          { name: macOS, distver: macos-latest }
         ]
     steps:
       - uses: actions/checkout@v3
+      # if osx then install osx sdk version 10.14
+      - name: Install MacOSX SDK
+        if: ${{ matrix.platform.name == 'macOS' }}
+        run: |
+          ls /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/
+
         # Add ninja
       - name: Install ninja
         run: |
