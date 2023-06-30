@@ -4,8 +4,8 @@ project(ada-cpp LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 
 if (APPLE)
-    set(CMAKE_OSX_SYSROOT "/Users/runner/work/adacpp/MacOSX10.14.sdk" CACHE PATH "macOS SDK path" FORCE)
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.14" CACHE STRING "macOS deployment target" FORCE)
+    set(CMAKE_OSX_SYSROOT "/Users/runner/work/adacpp/MacOSX10.15.sdk" CACHE PATH "macOS SDK path" FORCE)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15" CACHE STRING "macOS deployment target" FORCE)
 
     if (DEFINED CMAKE_OSX_SYSROOT)
         message(STATUS "Setting macOS sysroot to ${CMAKE_OSX_SYSROOT}")
@@ -50,7 +50,22 @@ set(ADA_CPP_SOURCES
         src/exchange/gltf_writer.cpp
         src/geom/ShapeTesselator.cpp
         src/geom/tess_helpers.cpp
+        src/tessellation/solids/boxes.cpp
         )
+
+# Find CGAL
+find_package(CGAL REQUIRED)
+
+if (CGAL_FOUND)
+    message(STATUS "CGAL version found: " ${CGAL_VERSION})
+    message(STATUS "CGAL include directory: " ${CGAL_INCLUDE_DIRS})
+    message(STATUS "CGAL binary directory: " ${CGAL_DIR})
+    message(STATUS "CGAL library directory: " ${CGAL_LIBRARY_DIRS})
+
+    include_directories(${CGAL_INCLUDE_DIRS})
+    link_directories(${CGAL_LIBRARY_DIRS})
+endif (CGAL_FOUND)
+
 
 # Find OpenCASCADE
 find_package(OpenCASCADE REQUIRED)

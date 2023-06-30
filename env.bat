@@ -20,5 +20,7 @@ set CMAKE_PREFIX_PATH=%PREFIX%;%LIBRARY_PREFIX%/include;%LIBRARY_PREFIX%/lib;%LI
 set OpenCASCADE_DIR=%LIBRARY_PREFIX%/lib/cmake/opencascade
 set OpenCASCADE_INCLUDE_DIR=%LIBRARY_PREFIX%/include/opencascade
 
+set CGAL_DIR=%LIBRARY_PREFIX%/lib/cmake/CGAL
+
 set PYTHON_EXECUTABLE=%PREFIX%/python.exe
 set PYTHON_LIBRARY=%PREFIX%/libs/python%MY_PY_VER%.lib
