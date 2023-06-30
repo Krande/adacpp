@@ -9,7 +9,7 @@ on:
 
 jobs:
   build_test:
-    name: nano-min-${{ matrix.platform.name }}-${{ matrix.pyver.name }}
+    name: ada-cpp-${{ matrix.platform.name }}-${{ matrix.pyver.name }}
     runs-on: ${{ matrix.platform.distver }}
     defaults:
       run:

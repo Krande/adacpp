@@ -11,13 +11,13 @@ source:
 
 build:
   number: 1
-  script: python -m pip install --no-deps --ignore-installed .
+  script: python -m pip install . --no-build-isolation -v
 
 requirements:
   build:
     - "{{ compiler('c') }}"
     - "{{ compiler('cxx') }}"
-    - sel('unix'): "{{ cdt('mesa-libGL-devel') }}"  # provides OpenGL development libraries
+    - sel(unix): "{{ cdt('mesa-libGL-devel') }}"  # provides OpenGL development libraries
   host:
     - python
     - occt
