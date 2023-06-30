@@ -28,13 +28,11 @@ jobs:
         ]
     steps:
       - uses: actions/checkout@v3
-
-      - name: List MacOSX SDKs
+      - name: Download and extract MacOSX SDK
         if: ${{ matrix.platform.name == 'macOS' }}
         run: |
-          ls /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/
-          ls /Applications/
-        # Add ninja
+          curl -L https://github.com/phracker/MacOSX-SDKs/releases/download/11.3/MacOSX10.14.sdk.tar.xz | tar -xvJf - -C /Users/runner/work/adacpp/
+
       - name: Install ninja
         run: |
           if [[ "$OSTYPE" == "linux-gnu"* ]]; then
