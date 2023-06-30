@@ -2,3 +2,9 @@ occt:
   - 7.7.0
   - 7.7.1=*novtk*
   - 7.7.1=*all*
+
+CMAKE_ARGS:
+    - "-DCMAKE_OSX_DEPLOYMENT_TARGET:STRING=10.14" # [osx]
+
+CONDA_BUILD_SYSROOT:
+  - "/Users/runner/work/adacpp/MacOSX10.14.sdk"  # [osx]
