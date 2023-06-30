@@ -32,7 +32,7 @@ classifiers = [
 "Bug Tracker" = "https://github.com/Krande/adacpp/issues"
 
 [tool.scikit-build]
-cmake.args = ["-DCMAKE_OSX_DEPLOYMENT_TARGET:STRING=10.14", "-DCMAKE_OSX_SYSROOT:STRING=/Users/runner/work/adacpp/MacOSX10.14.sdk", '-DCMAKE_CXX_FLAGS:STRING="-mmacosx-version-min=10.14"', "-Wno-dev"]
+cmake.args = ["-DCMAKE_OSX_DEPLOYMENT_TARGET:STRING=10.14", "-DCMAKE_OSX_SYSROOT:STRING=/Users/runner/work/adacpp/MacOSX10.14.sdk", "-Wno-dev"]
 cmake.verbose = true
 #cmake.build-type = "Debug"
 
