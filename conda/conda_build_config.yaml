@@ -4,4 +4,4 @@ occt:
   - 7.7.1=*all*
 
 CONDA_BUILD_SYSROOT:
-  - /opt/MacOSX10.14.sdk       # [osx]
+  - /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX13.1.sdk      # [osx]
