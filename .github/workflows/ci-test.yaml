@@ -31,7 +31,7 @@ jobs:
       - name: Download and extract MacOSX SDK
         if: ${{ matrix.platform.name == 'macOS' }}
         run: |
-          curl -L https://github.com/phracker/MacOSX-SDKs/releases/download/11.3/MacOSX10.15.sdk.tar.xz | tar -xvJf - -C /Users/runner/work/adacpp/
+          curl -L https://github.com/phracker/MacOSX-SDKs/releases/download/11.3/MacOSX10.15.sdk.tar.xz | tar -xvJf - -C /Users/runner/work/
 
       - name: Install ninja
         run: |
