@@ -36,4 +36,6 @@ def test_basic_mesh():
     assert hasattr(mesh, "positions")
     assert hasattr(mesh, "normals")
     assert hasattr(mesh, "indices")
+
+    adacpp.write_mesh_to_gltf("mybox.gltf", mesh)
     print(mesh)

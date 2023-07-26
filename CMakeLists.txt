@@ -14,6 +14,7 @@ set(ADA_CPP_SOURCES
         src/models/Models.cpp
         src/exchange/step_writer.cpp
         src/exchange/gltf_writer.cpp
+        src/exchange/tiny.cpp
         src/geom/ShapeTesselator.cpp
         src/geom/tess_helpers.cpp
         src/tessellation/solids/boxes.cpp

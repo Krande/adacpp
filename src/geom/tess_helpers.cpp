@@ -110,3 +110,11 @@ nanobind::class_<Mesh> geom_module(nb::module_ &m) {
                         nb::class_<GroupReference>(m, "GroupReference"));
     };
 }
+
+nanobind::class_<Color> geom_module_color(nb::module_ &m) {
+    return nb::class_<Color>(m, "Color")
+            .def_rw("r", &Color::r)
+            .def_rw("g", &Color::g)
+            .def_rw("b", &Color::b)
+            .def_rw("a", &Color::a);
+}

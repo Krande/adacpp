@@ -14,5 +14,5 @@
 Mesh tessellate_shape(const TopoDS_Shape &shape, bool compute_edges, float mesh_quality, bool parallel_meshing);
 
 nanobind::class_<Mesh> geom_module(nb::module_ &m);
-
+nanobind::class_<Color> geom_module_color(nb::module_ &m);
 #endif //NANO_OCCT_TESS_HELPERS_H
