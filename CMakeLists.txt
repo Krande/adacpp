@@ -15,6 +15,7 @@ set(ADA_CPP_SOURCES
         src/exchange/step_writer.cpp
         src/exchange/gltf_writer.cpp
         src/exchange/tiny.cpp
+        src/fem/simple_mesh.cpp
         src/geom/ShapeTesselator.cpp
         src/geom/tess_helpers.cpp
         src/tessellation/solids/boxes.cpp
@@ -26,6 +27,7 @@ set(ADA_CPP_LINK_LIBS)
 # Add dependencies
 include(cmake/deps_cgal.cmake)
 include(cmake/deps_occ.cmake)
+include(cmake/deps_gmsh.cmake)
 
 # Add Nanobind
 include(cmake/nanobind.cmake)

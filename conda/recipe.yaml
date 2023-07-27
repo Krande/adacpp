@@ -25,6 +25,7 @@ requirements:
     - scikit-build-core
     - nanobind
     - tinygltf
+    - gmsh
     - pip
   run:
     - python

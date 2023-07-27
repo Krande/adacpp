@@ -12,3 +12,4 @@ dependencies:
   - nomkl
   - boa ==0.15.1
   - tinygltf ==2.8.13
+  - gmsh

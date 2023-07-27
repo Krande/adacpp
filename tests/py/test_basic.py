@@ -39,3 +39,7 @@ def test_basic_mesh():
 
     adacpp.write_mesh_to_gltf("mybox.gltf", mesh)
     print(mesh)
+
+
+def test_simple_gmsh():
+    adacpp.create_gmesh("my_fem_mesh.msh")
