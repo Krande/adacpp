@@ -1,7 +1,7 @@
 //
 // Created by Kristoffer on 26/07/2023.
 //
-#include "../binding_core.h"
+#include "../../binding_core.h"
 
 
 #ifndef ADA_CPP_TINY_H

@@ -41,5 +41,10 @@ def test_basic_mesh():
     print(mesh)
 
 
+def test_boxes_mesh_gltf():
+    origins, dimensions = create_box_grid(10)
+    adacpp.write_boxes_to_gltf("myboxes.glb", origins, dimensions)
+
+
 def test_simple_gmsh():
     adacpp.create_gmesh("my_fem_mesh.msh")

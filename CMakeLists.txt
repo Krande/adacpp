@@ -12,13 +12,13 @@ set(ADA_CPP_SOURCES
         src/adacpp.cpp
         src/helpers/helpers.cpp
         src/models/Models.cpp
-        src/exchange/step_writer.cpp
-        src/exchange/gltf_writer.cpp
-        src/exchange/tiny.cpp
+        src/exchange/occt/step_writer.cpp
+        src/exchange/occt/gltf_writer.cpp
+        src/exchange/tinygltf/tiny.cpp
         src/fem/simple_mesh.cpp
-        src/geom/ShapeTesselator.cpp
-        src/geom/tess_helpers.cpp
-        src/tessellation/solids/boxes.cpp
+        src/tessellation/ShapeTesselator.cpp
+        src/tessellation/tess_helpers.cpp
+        src/tessellation/manual/solids/boxes.cpp
         )
 
 # Create a empty list to hold all the linked libs

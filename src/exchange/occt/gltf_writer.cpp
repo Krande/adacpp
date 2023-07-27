@@ -19,10 +19,10 @@
 #include <XCAFDoc_ColorTool.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
-#include "../models/OccShape.h"
-#include "../helpers/helpers.h"
-#include "../geom/tess_helpers.h"
-#include "../models/Mesh.h"
+#include "../../models/OccShape.h"
+#include "../../helpers/helpers.h"
+#include "../../tessellation/tess_helpers.h"
+#include "../../models/Mesh.h"
 
 
 enum class Units {

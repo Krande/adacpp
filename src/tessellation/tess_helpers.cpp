@@ -6,16 +6,11 @@
 #include <algorithm>
 #include <memory>
 #include "ShapeTesselator.h"
-#include "../models/Mesh.h"
-#include "../models/OccShape.h"
-#include "../models/GroupReference.h"
-#include "../models/MeshType.h"
-#include "../binding_core.h"
+#include "tess_helpers.h"
 #include "../helpers/helpers.h"
 
 
-Mesh
-tessellate_shape(int id, const TopoDS_Shape &shape, bool compute_edges, float mesh_quality, bool parallel_meshing) {
+Mesh tessellate_shape(int id, const TopoDS_Shape &shape, bool compute_edges, float mesh_quality, bool parallel_meshing) {
     ShapeTesselator shape_tess(shape);
     shape_tess.Compute(compute_edges, mesh_quality, parallel_meshing);
     std::vector pos = shape_tess.GetVerticesPositionAsTuple();
@@ -29,6 +24,12 @@ tessellate_shape(int id, const TopoDS_Shape &shape, bool compute_edges, float me
     Mesh mesh(id, pos, faces);
     return mesh;
 }
+
+// take a vector of meshes, organize them by color and make a new concatenated mesh per color
+std::vector<std::shared_ptr<Mesh>> meshes_by_color(const std::vector<std::shared_ptr<Mesh>> &meshes) {
+
+}
+
 
 
 Mesh concatenate_meshes(const std::vector<std::shared_ptr<Mesh>> &meshes) {
