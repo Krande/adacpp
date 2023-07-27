@@ -24,6 +24,7 @@ requirements:
     - cgal-cpp
     - scikit-build-core
     - nanobind
+    - tinygltf
     - pip
   run:
     - python
