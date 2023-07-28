@@ -5,6 +5,7 @@
 #include <TopoDS_Shape.hxx>
 #include <algorithm>
 #include <memory>
+#include <map>
 #include "ShapeTesselator.h"
 #include "tess_helpers.h"
 #include "../helpers/helpers.h"
@@ -24,12 +25,6 @@ Mesh tessellate_shape(int id, const TopoDS_Shape &shape, bool compute_edges, flo
     Mesh mesh(id, pos, faces);
     return mesh;
 }
-
-// take a vector of meshes, organize them by color and make a new concatenated mesh per color
-std::vector<std::shared_ptr<Mesh>> meshes_by_color(const std::vector<std::shared_ptr<Mesh>> &meshes) {
-
-}
-
 
 
 Mesh concatenate_meshes(const std::vector<std::shared_ptr<Mesh>> &meshes) {
@@ -88,6 +83,29 @@ Mesh concatenate_meshes(const std::vector<std::shared_ptr<Mesh>> &meshes) {
                             groups);
     return merged_mesh;
 }
+
+// take a vector of meshes, organize them by color and make a new concatenated mesh per color class
+std::vector<std::shared_ptr<Mesh>> meshes_by_color(const std::vector<std::shared_ptr<Mesh>> &meshes) {
+    std::vector<std::shared_ptr<Mesh>> result;
+    std::map<std::vector<float>, std::vector<std::shared_ptr<Mesh>>> color_map;
+
+    for (const auto &mesh: meshes) {
+        // Create a vector that includes the RGB(A) values of the color object
+        std::vector<float> color_key {mesh->color.r, mesh->color.g, mesh->color.b, mesh->color.a};
+
+        // Use this vector as the key for the color_map
+        color_map[color_key].push_back(mesh);
+    }
+
+    for (const auto &color_meshes: color_map) {
+        result.push_back(std::make_shared<Mesh>(concatenate_meshes(color_meshes.second)));
+    }
+
+    return result;
+}
+
+
+
 
 Mesh get_box_mesh(const std::vector<float> &box_origin,
                   const std::vector<float> &box_dims) {

@@ -29,11 +29,18 @@ include(cmake/deps_cgal.cmake)
 include(cmake/deps_occ.cmake)
 include(cmake/deps_gmsh.cmake)
 
+# Create a library from your sources
+add_library(ada_cpp_lib STATIC ${ADA_CPP_SOURCES})
+target_link_libraries(ada_cpp_lib PRIVATE ${ADA_CPP_LINK_LIBS})
+
 # Add Nanobind
 include(cmake/nanobind.cmake)
 
-# Link libraries to the module
-target_link_libraries(_ada_cpp_ext_impl PRIVATE ${ADA_CPP_LINK_LIBS})
+# Link the module to your library instead of the sources directly
+target_link_libraries(_ada_cpp_ext_impl PRIVATE ada_cpp_lib)
 
-# Link the module to OpenCASCADE
+# Include the tests directory
+add_subdirectory(tests/cpp)
+
+# Install the module
 install(TARGETS _ada_cpp_ext_impl LIBRARY DESTINATION .)
