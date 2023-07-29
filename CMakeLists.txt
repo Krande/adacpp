@@ -19,7 +19,8 @@ set(ADA_CPP_SOURCES
         src/tessellation/ShapeTesselator.cpp
         src/tessellation/tess_helpers.cpp
         src/tessellation/manual/solids/boxes.cpp
-        )
+        src/tessellation/TessellateFactory.cpp
+)
 
 # Create a empty list to hold all the linked libs
 set(ADA_CPP_LINK_LIBS)
@@ -40,7 +41,10 @@ include(cmake/nanobind.cmake)
 target_link_libraries(_ada_cpp_ext_impl PRIVATE ada_cpp_lib)
 
 # Include the tests directory
-add_subdirectory(tests/cpp)
+OPTION(BUILD_TESTING "Build the testing tree." OFF)
+if (BUILD_TESTING)
+    add_subdirectory(tests/cpp)
+endif (BUILD_TESTING)
 
 # Install the module
 install(TARGETS _ada_cpp_ext_impl LIBRARY DESTINATION .)
