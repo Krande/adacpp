@@ -48,3 +48,6 @@ def test_boxes_mesh_gltf():
 
 def test_simple_gmsh():
     adacpp.create_gmesh("my_fem_mesh.msh")
+
+def test_tess_factory():
+    tess_factory = adacpp.TessellateFactory()

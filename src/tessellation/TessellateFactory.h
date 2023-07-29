@@ -4,6 +4,7 @@
 
 #ifndef ADA_CPP_TESSELLATEFACTORY_H
 #define ADA_CPP_TESSELLATEFACTORY_H
+#include "../binding_core.h"
 
 // Enum for different tessellation algorithms
 enum class TessellationAlgorithm {
@@ -18,5 +19,7 @@ public:
 
     TessellationAlgorithm algorithm;
 };
+
+nanobind::class_<TessellateFactory> tess_module(nb::module_ &m);
 
 #endif //ADA_CPP_TESSELLATEFACTORY_H

@@ -12,7 +12,14 @@
 // a geometry store that can batch tessellate shapes to meshes using different tessellation algorithms
 TessellateFactory::TessellateFactory(TessellationAlgorithm algorithm) {
     this->algorithm = algorithm;
+}
 
+nanobind::class_<TessellateFactory> tess_module(nb::module_ &m) {
+
+    nb::class_<TessellateFactory>(m, "TessellateFactory")
+            .def(nb::init<const TessellationAlgorithm &>())
+            .def_ro("algorithm", &TessellateFactory::algorithm, "Tessellation algorithm");
+    nb::enum_<TessellationAlgorithm>(m, "TessellationAlgorithm");
 }
 
 

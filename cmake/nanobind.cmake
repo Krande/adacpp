@@ -14,4 +14,4 @@ string(REPLACE ";" " " ADA_CPP_SOURCES_STR "${ADA_CPP_SOURCES}")
 message(STATUS "AdaCpp sources: " ${ADA_CPP_SOURCES_STR})
 
 # Create a Python module
-nanobind_add_module(_ada_cpp_ext_impl ${ADA_CPP_SOURCES})
+nanobind_add_module(_ada_cpp_ext_impl STABLE_ABI ${ADA_CPP_SOURCES})
