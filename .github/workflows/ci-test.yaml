@@ -44,7 +44,6 @@ jobs:
           fi
       - uses: mamba-org/setup-micromamba@v1 # https://github.com/mamba-org/setup-micromamba
         with:
-          channels: conda-forge
           environment-file: environment.build.yml
           create-args: >-
             python=${{ matrix.pyver.distver }}

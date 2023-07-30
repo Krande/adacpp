@@ -52,5 +52,13 @@ def test_simple_gmsh():
 
 def test_tess_factory():
     tess_factory = adacpp.TessellateFactory()
+    num = 50
+    boxes = []
+    for x in range(num):
+        for y in range(num):
+            for z in range(num):
+                boxes.append(adacpp.Box((x * 10, y * 10, z * 10), 10, 10, 10))
+    box0 = boxes[0]
+    assert box0.id == 0
     assert tess_factory.algorithm == adacpp.TessellationAlgorithm.OCCT_DEFAULT
     tess_factory.tessellate()
