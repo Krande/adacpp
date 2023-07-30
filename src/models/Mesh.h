@@ -1,7 +1,3 @@
-//
-// Created by Kristoffer on 07/05/2023.
-//
-
 #ifndef NANO_OCCT_MESH_H
 #define NANO_OCCT_MESH_H
 

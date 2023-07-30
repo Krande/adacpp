@@ -115,23 +115,20 @@ Mesh get_box_mesh(const std::vector<float> &box_origin,
     return mesh;
 }
 
-nanobind::class_<Mesh> geom_module(nb::module_ &m) {
+void tess_helper_module(nb::module_ &m) {
     m.def("get_box_mesh", &get_box_mesh, "box_origin"_a, "box_dims"_a, "Write a box to a step file");
-    {
-        return nb::class_<Mesh>(m, "Mesh")
-                .def_ro("id", &Mesh::id, "The id of the mesh")
-                .def_ro("positions", &Mesh::positions, "The positions of the mesh")
-                .def_ro("indices", &Mesh::indices, "The indices of the mesh")
-                .def_ro("normals", &Mesh::normals, "The normals of the mesh")
-                .def_ro("mesh_type", &Mesh::mesh_type, "The type of mesh", nb::enum_<MeshType>(m, "MeshType"))
-                .def_ro("color", &Mesh::color, "The color of the mesh", nb::class_<Color>(m, "Color"))
-                .def_ro("groups", &Mesh::group_reference, "The groups of the mesh",
-                        nb::class_<GroupReference>(m, "GroupReference"));
-    };
-}
 
-nanobind::class_<Color> geom_module_color(nb::module_ &m) {
-    return nb::class_<Color>(m, "Color")
+    nb::class_<Mesh>(m, "Mesh")
+            .def_ro("id", &Mesh::id, "The id of the mesh")
+            .def_ro("positions", &Mesh::positions, "The positions of the mesh")
+            .def_ro("indices", &Mesh::indices, "The indices of the mesh")
+            .def_ro("normals", &Mesh::normals, "The normals of the mesh")
+            .def_ro("mesh_type", &Mesh::mesh_type, "The type of mesh", nb::enum_<MeshType>(m, "MeshType"))
+            .def_ro("color", &Mesh::color, "The color of the mesh", nb::class_<Color>(m, "Color"))
+            .def_ro("groups", &Mesh::group_reference, "The groups of the mesh",
+                    nb::class_<GroupReference>(m, "GroupReference"));
+
+    nb::class_<Color>(m, "Color")
             .def_rw("r", &Color::r)
             .def_rw("g", &Color::g)
             .def_rw("b", &Color::b)

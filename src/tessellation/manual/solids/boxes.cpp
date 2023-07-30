@@ -1,17 +1,11 @@
 #include <CGAL/Simple_cartesian.h>
 #include <CGAL/Polyhedron_3.h>
+#include "../../../models/geometries.h"
 
 typedef CGAL::Simple_cartesian<double> Kernel;
 typedef Kernel::Point_3 Point_3;
 typedef Kernel::Vector_3 Vector_3;
 typedef CGAL::Polyhedron_3<Kernel> Polyhedron;
-
-struct Box {
-  Point_3 origin;
-  double height;
-  double width;
-  double length;
-};
 
 std::vector<Box> generate_boxes();  // Replace with your actual function.
 

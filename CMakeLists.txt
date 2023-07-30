@@ -14,6 +14,7 @@ set(ADA_CPP_SOURCES
         src/adacpp.cpp
         src/helpers/helpers.cpp
         src/models/Models.cpp
+        src/models/geometries.cpp
         src/exchange/occt/step_writer.cpp
         src/exchange/occt/gltf_writer.cpp
         src/exchange/tinygltf/tiny.cpp
