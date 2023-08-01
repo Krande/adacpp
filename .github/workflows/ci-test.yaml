@@ -49,11 +49,14 @@ jobs:
             python=${{ matrix.pyver.distver }}
             anaconda-client
 
+      - name: create dist dir
+        run: |
+          mkdir -p ${{ github.workspace }}/dist
+
       - name: build local packages
         run: |
           boa build conda --python ${{ matrix.pyver.distver }} -m ./conda/conda_build_config.yaml --no-remove-work-dir --output-folder ${{ github.workspace }}/dist
 
       - name: upload to anaconda
-        if: ${{ matrix.platform.name == 'linux' }}
         run: |
           anaconda -t ${{ secrets.ANACONDA_TOKEN }} upload --force --user krande --label dev ${{ github.workspace }}/dist/*.tar.bz2
