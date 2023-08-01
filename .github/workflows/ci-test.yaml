@@ -59,4 +59,4 @@ jobs:
 
       - name: upload to anaconda
         run: |
-          anaconda -t ${{ secrets.ANACONDA_TOKEN }} upload --force --user krande --label dev ${{ github.workspace }}/dist/${{ matrix.pyver.pkg_dir }}/*.tar.bz2
+          anaconda -t ${{ secrets.ANACONDA_TOKEN }} upload --force --user krande --label dev ${{ github.workspace }}/dist/${{ matrix.platform.pkg_dir }}/*.tar.bz2
