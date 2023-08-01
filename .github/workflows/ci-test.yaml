@@ -61,8 +61,14 @@ jobs:
       - name: list files in dist dir
         if: ${{ matrix.platform.name == 'win' }}
         run: |
-          ls -l ${{ github.workspace }}/dist/${{ matrix.platform.pkg_dir }}
+          ls -l '${{ github.workspace }}/dist/${{ matrix.platform.pkg_dir }}'
 
       - name: upload to anaconda
+        if: ${{ matrix.platform.name == 'win' }}
         run: |
           anaconda -t ${{ secrets.ANACONDA_TOKEN }} upload --force --user krande --label dev '${{ github.workspace }}/dist/${{ matrix.platform.pkg_dir }}/*.tar.bz2'
+
+      - name: upload to anaconda
+        if: ${{ matrix.platform.name != 'win' }}
+        run: |
+          anaconda -t ${{ secrets.ANACONDA_TOKEN }} upload --force --user krande --label dev ${{ github.workspace }}/dist/${{ matrix.platform.pkg_dir }}/*.tar.bz2
