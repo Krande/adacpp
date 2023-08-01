@@ -57,6 +57,12 @@ jobs:
         run: |
           boa build conda --python ${{ matrix.pyver.distver }} -m ./conda/conda_build_config.yaml --no-remove-work-dir --output-folder '${{ github.workspace }}/dist'
 
+      # list files in dist dir for windows
+      - name: list files in dist dir
+        if: ${{ matrix.platform.name == 'win' }}
+        run: |
+          ls -l ${{ github.workspace }}/dist/${{ matrix.platform.pkg_dir }}
+
       - name: upload to anaconda
         run: |
           anaconda -t ${{ secrets.ANACONDA_TOKEN }} upload --force --user krande --label dev '${{ github.workspace }}/dist/${{ matrix.platform.pkg_dir }}/*.tar.bz2'
