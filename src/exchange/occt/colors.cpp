@@ -21,11 +21,8 @@ void setInstanceColorIfAvailable(XCAFDoc_ColorTool *color_tool, const TDF_Label 
         color_tool->SetInstanceColor(shape, c2, c);
         color_tool->SetInstanceColor(shape, c3, c);
     }
-    // now that the underlying shape has been colored, we must relinquish the ownership of the objects back to the
-    // caller
-    color_tool->UnSetColor(lab, c1);
-    color_tool->UnSetColor(lab, c2);
-    color_tool->UnSetColor(lab, c3);
+    // now that the underlying shape has been colored, we must return updated pointer address of the shape
+    // so that the python object can be updated
 }
 
 // add nanobind wrapping to the function
