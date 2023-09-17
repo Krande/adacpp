@@ -17,6 +17,7 @@ set(ADA_CPP_SOURCES
         src/models/geometries.cpp
         src/exchange/occt/step_writer.cpp
         src/exchange/occt/gltf_writer.cpp
+        src/exchange/occt/colors.cpp
         src/exchange/tinygltf/tiny.cpp
         src/fem/simple_mesh.cpp
         src/tessellation/ShapeTesselator.cpp

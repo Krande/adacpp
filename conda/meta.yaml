@@ -1,6 +1,5 @@
-context:
-  name: ada-cpp
-  version: 0.0.1
+{% set name = 'ada-cpp' %}
+{% set version = '0.0.1' %}
 
 package:
   name: '{{ name|lower }}'
@@ -17,7 +16,8 @@ requirements:
   build:
     - "{{ compiler('c') }}"
     - "{{ compiler('cxx') }}"
-    - sel(unix): "{{ cdt('mesa-libGL-devel') }}"  # provides OpenGL development libraries
+    - "{{ cdt('mesa-libGL-devel') }}" # [unix] provides OpenGL development libraries
+
   host:
     - python
     - occt
@@ -27,6 +27,7 @@ requirements:
     - tinygltf
     - gmsh
     - pip
+
   run:
     - python
     - "{{ pin_compatible('occt', max_pin='x.x.x') }}"
