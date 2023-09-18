@@ -10,7 +10,7 @@ dependencies:
   - scikit-build-core ==0.5.0
   - cmake ==3.26.3
   - numpy
-  - cgal-cpp
+  - cgal-cpp ==5.6
   - nomkl
   - boa ==0.15.1
   - tinygltf ==2.8.13 # This must be installed in target dir also if you want to compile

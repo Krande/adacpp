@@ -12,6 +12,7 @@ find_package(Python 3
 # Create a list called ADA_CPP_SOURCES of all cpp files inside the src dir
 set(ADA_CPP_SOURCES
         src/adacpp.cpp
+        src/cadit/ifc/ifcop.cpp
         src/helpers/helpers.cpp
         src/geom/Models.cpp
         src/geom/geometries.cpp
@@ -33,6 +34,7 @@ set(ADA_CPP_LINK_LIBS)
 include(cmake/deps_cgal.cmake)
 include(cmake/deps_occ.cmake)
 include(cmake/deps_gmsh.cmake)
+#include(cmake/deps_ifc.cmake)
 
 # Add Nanobind
 include(cmake/nanobind.cmake)

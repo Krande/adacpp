@@ -5,24 +5,25 @@
 #include "colors.h"
 #include <TDF_Label.hxx>
 #include <TopoDS_Shape.hxx>
+#include <TopoDS_Shell.hxx>
 #include <Quantity_Color.hxx>
 #include <XCAFDoc_ColorTool.hxx>
 
 
-void setInstanceColorIfAvailable(XCAFDoc_ColorTool *color_tool, const TDF_Label &lab, const TopoDS_Shape &shape,
-                                 Quantity_Color &c) {
+TopoDS_Shape setInstanceColorIfAvailable(XCAFDoc_ColorTool *color_tool, const TDF_Label &lab, const TopoDS_Shape &shape,
+                                         Quantity_Color &c) {
     auto c1 = static_cast<const XCAFDoc_ColorType>(0);
     auto c2 = static_cast<const XCAFDoc_ColorType>(1);
     auto c3 = static_cast<const XCAFDoc_ColorType>(2);
 
-    if (XCAFDoc_ColorTool::GetColor(lab, c1,c) || XCAFDoc_ColorTool::GetColor(lab,c2, c) ||
+    if (XCAFDoc_ColorTool::GetColor(lab, c1, c) || XCAFDoc_ColorTool::GetColor(lab, c2, c) ||
         XCAFDoc_ColorTool::GetColor(lab, c3, c)) {
         color_tool->SetInstanceColor(shape, c1, c);
         color_tool->SetInstanceColor(shape, c2, c);
         color_tool->SetInstanceColor(shape, c3, c);
     }
-    // now that the underlying shape has been colored, we must return updated pointer address of the shape
-    // so that the python object can be updated
+
+    return shape;
 }
 
 // add nanobind wrapping to the function
@@ -36,7 +37,16 @@ void occt_color_module(nb::module_ &m) {
                 return reinterpret_cast<uintptr_t>(&self);
             })
             .def_static("from_ptr", [](uintptr_t ptr) {
-                return reinterpret_cast<TopoDS_Shape*>(ptr);
+                return reinterpret_cast<TopoDS_Shape *>(ptr);
+            });
+
+    // TopoDS_Shell
+    nanobind::class_<TopoDS_Shell, TopoDS_Shape>(m, "TopoDS_Shell")
+            .def("get_ptr", [](TopoDS_Shell &self) {
+                return reinterpret_cast<uintptr_t>(&self);
+            })
+            .def_static("from_ptr", [](uintptr_t ptr) {
+                return reinterpret_cast<TopoDS_Shell *>(ptr);
             });
 
     // XCAFDoc_ColorTool
@@ -45,7 +55,7 @@ void occt_color_module(nb::module_ &m) {
                 return reinterpret_cast<uintptr_t>(&self);
             })
             .def_static("from_ptr", [](uintptr_t ptr) {
-                return reinterpret_cast<XCAFDoc_ColorTool*>(ptr);
+                return reinterpret_cast<XCAFDoc_ColorTool *>(ptr);
             });
 
     // TDF_Label
@@ -54,7 +64,7 @@ void occt_color_module(nb::module_ &m) {
                 return reinterpret_cast<uintptr_t>(&self);
             })
             .def_static("from_ptr", [](uintptr_t ptr) {
-                return reinterpret_cast<TDF_Label*>(ptr);
+                return reinterpret_cast<TDF_Label *>(ptr);
             });
 
     // Quantity_Color
@@ -63,6 +73,6 @@ void occt_color_module(nb::module_ &m) {
                 return reinterpret_cast<uintptr_t>(&self);
             })
             .def_static("from_ptr", [](uintptr_t ptr) {
-                return reinterpret_cast<Quantity_Color*>(ptr);
+                return reinterpret_cast<Quantity_Color *>(ptr);
             });
 }
