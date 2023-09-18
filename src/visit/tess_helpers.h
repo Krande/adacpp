@@ -8,7 +8,7 @@
 #include <TopoDS_Shape.hxx>
 #include "ShapeTesselator.h"
 #include <memory>
-#include "../models/Mesh.h"
+#include "../geom/Mesh.h"
 #include "../binding_core.h"
 
 Mesh tessellate_shape(int id, const TopoDS_Shape &shape, bool compute_edges, float mesh_quality, bool parallel_meshing);

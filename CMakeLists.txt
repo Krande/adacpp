@@ -13,17 +13,17 @@ find_package(Python 3
 set(ADA_CPP_SOURCES
         src/adacpp.cpp
         src/helpers/helpers.cpp
-        src/models/Models.cpp
-        src/models/geometries.cpp
-        src/exchange/occt/step_writer.cpp
-        src/exchange/occt/gltf_writer.cpp
-        src/exchange/occt/colors.cpp
-        src/exchange/tinygltf/tiny.cpp
+        src/geom/Models.cpp
+        src/geom/geometries.cpp
+        src/cadit/occt/step_writer.cpp
+        src/cadit/occt/gltf_writer.cpp
+        src/cadit/occt/colors.cpp
+        src/cadit/tinygltf/tiny.cpp
         src/fem/simple_mesh.cpp
-        src/tessellation/ShapeTesselator.cpp
-        src/tessellation/tess_helpers.cpp
-        src/tessellation/manual/solids/boxes.cpp
-        src/tessellation/TessellateFactory.cpp
+        src/visit/ShapeTesselator.cpp
+        src/visit/tess_helpers.cpp
+        src/visit/manual/solids/boxes.cpp
+        src/visit/TessellateFactory.cpp
 )
 
 # Create a empty list to hold all the linked libs

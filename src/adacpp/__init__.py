@@ -1,6 +1,4 @@
-from ._ada_cpp_ext_impl import write_box_to_step, write_boxes_to_step, get_box_mesh, write_mesh_to_gltf, create_gmesh, \
-    write_boxes_to_gltf, TessellateFactory, TessellationAlgorithm, Box, Shape
-from ._ada_cpp_ext_impl import setInstanceColorIfAvailable, TopoDS_Shape, XCAFDoc_ColorTool, TDF_Label, Quantity_Color
 from .utils import do_this
+from . import cadit, visit, fem, geom
 
 __doc__ = "A module with drop-in replacement functions for ada-py written in c++ to improve performance."

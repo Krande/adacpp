@@ -7,9 +7,9 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 
 #include "tiny_gltf.h"
-#include "../../models/Mesh.h"
+#include "../../geom/Mesh.h"
 #include "../../binding_core.h"
-#include "../../tessellation/tess_helpers.h"
+#include "../../visit/tess_helpers.h"
 #include "../../helpers/helpers.h"
 
 std::pair<std::vector<double>, std::vector<double>> calculateBounds(const std::vector<float>& positions) {

@@ -2,15 +2,12 @@
 // Created by Kristoffer on 07/05/2023.
 //
 
-#include <iostream>
-#include <string>
 #include <vector>
 #include <filesystem>
 
 #include <Message_ProgressRange.hxx>
 #include <RWGltf_CafWriter.hxx>
 #include <RWGltf_WriterTrsfFormat.hxx>
-#include <RWMesh_CoordinateSystem.hxx>
 #include <TCollection_AsciiString.hxx>
 #include <TCollection_ExtendedString.hxx>
 #include <TColStd_IndexedDataMapOfStringString.hxx>
@@ -19,10 +16,9 @@
 #include <XCAFDoc_ColorTool.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
-#include "../../models/OccShape.h"
+#include "../../geom/OccShape.h"
 #include "../../helpers/helpers.h"
-#include "../../tessellation/tess_helpers.h"
-#include "../../models/Mesh.h"
+
 
 
 enum class Units {

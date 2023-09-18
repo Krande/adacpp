@@ -1,19 +1,24 @@
 #include "binding_core.h"
-#include "exchange/occt/step_writer.h"
-#include "exchange/occt/colors.h"
-#include "tessellation/tess_helpers.h"
-#include "exchange/tinygltf/tiny.h"
+#include "cadit/occt/step_writer.h"
+#include "cadit/occt/colors.h"
+#include "cadit/tinygltf/tiny.h"
 #include "fem/simple_mesh.h"
-#include "tessellation/TessellateFactory.h"
-#include "models/geometries.h"
+#include "geom/geometries.h"
+#include "visit/TessellateFactory.h"
+#include "visit/tess_helpers.h"
 
 // Define the modules that will be exposed in python
 NB_MODULE(_ada_cpp_ext_impl, m) {
-    shape_module(m);
-    occt_color_module(m);
-    step_writer_module(m);
-    tess_helper_module(m);
-    tiny_gltf_module(m);
-    gmsh_module(m);
-    tess_module(m);
+    auto cadit_module = m.def_submodule("cadit", "CAD Interoperability toolkit");
+        step_writer_module(cadit_module);
+        tiny_gltf_module(cadit_module);
+    auto occt_module = cadit_module.def_submodule("occt", "Opencascade interface toolkit");
+        occt_color_module(occt_module);
+    auto visit_module = m.def_submodule("visit", "Visualization Interoperability toolkit");
+        tess_helper_module(visit_module);
+        tess_module(visit_module);
+    auto fem_module = m.def_submodule("fem", "fem module");
+        gmsh_module(fem_module);
+    auto geom_module = m.def_submodule("geom", "Geometry module");
+        shape_module(geom_module);
 }

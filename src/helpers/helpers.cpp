@@ -1,3 +1,4 @@
+
 #include <vector>
 #include <random>
 #include <gp_XYZ.hxx>
@@ -10,7 +11,7 @@
 #include <XCAFDoc_ColorType.hxx>
 #include <XCAFDoc_ColorTool.hxx>
 #include <optional>
-#include "../models/Color.h"
+#include "../geom/Color.h"
 
 
 TopoDS_Solid create_box(const std::vector<float> &box_origin, const std::vector<float> &box_dims) {

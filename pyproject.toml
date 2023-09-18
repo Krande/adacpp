@@ -34,6 +34,7 @@ classifiers = [
 cmake.args = ["-Wno-dev"]
 cmake.verbose = true
 #cmake.build-type = "Debug"
+#ninja.make-fallback = false
 
 build-dir = "build/{wheel_tag}"
 

@@ -17,7 +17,7 @@ mamba env update -f environment.build.yml --prune
 Activate the environment and install the package in editable mode.
 
 ```bash
-pip install --no-build-isolation .
+pip install --no-build-isolation -e .
 ```
 
 ### Conda Build install
