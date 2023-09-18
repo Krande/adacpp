@@ -62,3 +62,7 @@ def test_tess_factory():
     assert box0.id == 0
     assert tess_factory.algorithm == adacpp.visit.TessellationAlgorithm.OCCT_DEFAULT
     tess_factory.tessellate()
+
+
+def test_ifc_file_read(files_dir):
+    adacpp.cadit.ifc.read_ifc_file(files_dir / "my_test.if")

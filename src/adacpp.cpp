@@ -1,6 +1,7 @@
 #include "binding_core.h"
 #include "cadit/occt/step_writer.h"
 #include "cadit/occt/colors.h"
+#include "cadit/ifc/ifcop.h"
 #include "cadit/tinygltf/tiny.h"
 #include "fem/simple_mesh.h"
 #include "geom/geometries.h"
@@ -12,6 +13,7 @@ NB_MODULE(_ada_cpp_ext_impl, m) {
     auto cadit_module = m.def_submodule("cadit", "CAD Interoperability toolkit");
         step_writer_module(cadit_module);
         tiny_gltf_module(cadit_module);
+        ifc_module(cadit_module);
     auto occt_module = cadit_module.def_submodule("occt", "Opencascade interface toolkit");
         occt_color_module(occt_module);
     auto visit_module = m.def_submodule("visit", "Visualization Interoperability toolkit");

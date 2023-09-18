@@ -34,7 +34,7 @@ set(ADA_CPP_LINK_LIBS)
 include(cmake/deps_cgal.cmake)
 include(cmake/deps_occ.cmake)
 include(cmake/deps_gmsh.cmake)
-#include(cmake/deps_ifc.cmake)
+include(cmake/deps_ifc.cmake)
 
 # Add Nanobind
 include(cmake/nanobind.cmake)
