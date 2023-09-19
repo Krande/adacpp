@@ -1,10 +1,10 @@
 #include "ifcop.h"
-#include "ifcparse/Ifc4.h"
+#include "ifcparse/Ifc4x1.h"
 #include "ifcparse/IfcFile.h"
 //#include "ifcparse/IfcHierarchyHelper.h"
 //#include "ifcparse/IfcBaseClass.h"
 //#include "ifcgeom_schema_agnostic/Serialization.h"
-#define IfcSchema Ifc4
+#define IfcSchema Ifc4x1
 
 
 using namespace std::string_literals;
@@ -17,7 +17,9 @@ int read_ifc_file(const std::string &file_name) {
         return 1;
     }
 
-    IfcSchema::IfcBuildingElement::list::ptr elements = file.instances_by_type<IfcSchema::IfcBuildingElement>();
+//    std::cout << "file name: " << file.header().file_name().name() << std::endl;
+
+    IfcSchema::IfcBeam::list::ptr elements = file.instances_by_type<IfcSchema::IfcBeam>();
 
     std::cout << "Found " << elements->size() << " elements in " << file_name << ":" << std::endl;
 

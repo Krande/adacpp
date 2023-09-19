@@ -65,4 +65,4 @@ def test_tess_factory():
 
 
 def test_ifc_file_read(files_dir):
-    adacpp.cadit.ifc.read_ifc_file(files_dir / "my_test.if")
+    adacpp.cadit.ifc.read_ifc_file(str(files_dir / "my_test.ifc"))
