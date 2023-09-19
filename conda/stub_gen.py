@@ -33,18 +33,19 @@ def run(
     writer = pybind11_stubgen.Writer()
 
     out_dir.mkdir(exist_ok=True)
+    logger.info(f"Writing stubs to {out_dir}")
     writer.write_module(module, printer, to=out_dir, sub_dir=sub_dir)
 
 
 def main():
     module_name = "adacpp"
-    pyi_dest_dir = pathlib.Path(__import__(module_name).__file__).parent
+    pyi_dest_dir = pathlib.Path(__import__(module_name).__file__).parent.parent
     # pyi_dest_dir = ".stubs"
 
     args = argparse.Namespace(
         module_name=module_name,
         ignore_all_errors=None,
-        ignore_invalid_identifiers=True,
+        ignore_invalid_identifiers=None,
         ignore_invalid_expressions=None,
         ignore_unresolved_names=None,
         print_invalid_expressions_as_is=False,
