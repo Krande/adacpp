@@ -10,7 +10,7 @@
 #include <XCAFDoc_ColorTool.hxx>
 
 
-TopoDS_Shape setInstanceColorIfAvailable(XCAFDoc_ColorTool *color_tool, const TDF_Label &lab, const TopoDS_Shape &shape,
+void setInstanceColorIfAvailable(XCAFDoc_ColorTool *color_tool, const TDF_Label &lab, TopoDS_Shape &shape,
                                          Quantity_Color &c) {
     auto c1 = static_cast<const XCAFDoc_ColorType>(0);
     auto c2 = static_cast<const XCAFDoc_ColorType>(1);
@@ -22,8 +22,6 @@ TopoDS_Shape setInstanceColorIfAvailable(XCAFDoc_ColorTool *color_tool, const TD
         color_tool->SetInstanceColor(shape, c2, c);
         color_tool->SetInstanceColor(shape, c3, c);
     }
-
-    return shape;
 }
 
 // add nanobind wrapping to the function
