@@ -61,6 +61,8 @@ jobs:
       - uses: mamba-org/setup-micromamba@v1 # https://github.com/mamba-org/setup-micromamba
         with:
           environment-name: test-env
+          cache-environment: true
+          cache-downloads: true
           condarc: |
             conda-build:
               root-dir: ${{ env.CROOT_DIR }}
@@ -76,20 +78,15 @@ jobs:
             anaconda-client
             boa
 
-      - name: create dist dir
+      - name: make dirs
         run: |
-          mkdir -p ${{ github.workspace }}/dist
+          mkdir -p ${{ env.ARTIFACTS_DIR }}
+          mkdir -p ${{ env.CROOT_DIR }}
 
       - name: build local packages
         run: |
           conda mambabuild . --python ${{ matrix.pyver.distver }} --variants "{ '${{matrix.variant.name}}': '${{matrix.variant.value}}'}"
         working-directory: conda
-
-      # list files in dist dir for windows
-      - name: list files in dist dir
-        if: ${{ matrix.platform.name == 'win' }}
-        run: |
-          ls -l '${{ github.workspace }}/dist/${{ matrix.platform.pkg_dir }}'
 
       - name: upload to anaconda
         run: |
