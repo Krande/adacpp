@@ -30,6 +30,10 @@ jobs:
           { name: linux, distver: ubuntu-latest, pkg_dir: 'linux-64' },
           { name: macOS, distver: macos-latest, pkg_dir: 'osx-64' }
         ]
+        variant: [
+          { name: occt, value: '7.7.2=*novtk*' },
+          { name: occt, value: '7.7.2=*all*' }
+        ]
     steps:
       - uses: actions/checkout@v3
 
@@ -78,7 +82,8 @@ jobs:
 
       - name: build local packages
         run: |
-          conda mambabuild conda --python ${{ matrix.pyver.distver }} -m ./conda/conda_build_config.yaml --no-remove-work-dir --output-folder '${{ github.workspace }}/dist'
+          conda mambabuild . --python ${{ matrix.pyver.distver }} --variants "{ '${{matrix.variant.name}}': '${{matrix.variant.value}}'}"
+        working-directory: conda
 
       # list files in dist dir for windows
       - name: list files in dist dir
