@@ -8,6 +8,10 @@ on:
       - .gitignore
       - .github/workflows/basic_test.yaml
 
+env:
+  CROOT_DIR: /home/runner/work/build
+  ARTIFACTS_DIR: /home/runner/work/artifacts
+
 jobs:
   build_test:
     name: ada-cpp-${{ matrix.platform.name }}-${{ matrix.pyver.name }}
@@ -28,15 +32,41 @@ jobs:
         ]
     steps:
       - uses: actions/checkout@v3
+
+      - name: set ENV WORK_DIR
+        run: |
+          pwd
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            echo "PKG_DIR=win-64" >> $GITHUB_ENV
+            echo "ARTIFACTS_DIR=D:/a/artifacts" >> $GITHUB_ENV
+            echo "CROOT_DIR=D:/a/build" >> $GITHUB_ENV
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            echo "PKG_DIR=osx-64" >> $GITHUB_ENV
+            echo "ARTIFACTS_DIR=/Users/runner/work/artifacts" >> $GITHUB_ENV
+            echo "CROOT_DIR=/Users/runner/work/build" >> $GITHUB_ENV
+          elif [[ "$RUNNER_OS" == "Linux" ]]; then
+            echo "PKG_DIR=linux-64" >> $GITHUB_ENV
+          fi
+
       - name: Download and extract MacOSX SDK
         if: ${{ matrix.platform.name == 'macOS' }}
         run: |
           curl -L https://github.com/phracker/MacOSX-SDKs/releases/download/11.3/MacOSX10.15.sdk.tar.xz | tar -xvJf - -C /Users/runner/work/
-
+          
 
       - uses: mamba-org/setup-micromamba@v1 # https://github.com/mamba-org/setup-micromamba
         with:
           environment-name: test-env
+          condarc: |
+            conda-build:
+              root-dir: ${{ env.CROOT_DIR }}
+              output_folder: ${{ env.ARTIFACTS_DIR }}
+              pkg_format: 2
+              zstd_compression_level: 19
+            channel_priority: strict
+            channels:
+              - krande
+              - conda-forge
           create-args: >-
             python=${{ matrix.pyver.distver }}
             anaconda-client
@@ -57,11 +87,5 @@ jobs:
           ls -l '${{ github.workspace }}/dist/${{ matrix.platform.pkg_dir }}'
 
       - name: upload to anaconda
-        if: ${{ matrix.platform.name == 'win' }}
         run: |
-          anaconda -t ${{ secrets.ANACONDA_TOKEN }} upload --force --user krande --label dev '${{ github.workspace }}/dist/${{ matrix.platform.pkg_dir }}/*.tar.bz2'
-
-      - name: upload to anaconda
-        if: ${{ matrix.platform.name != 'win' }}
-        run: |
-          anaconda -t ${{ secrets.ANACONDA_TOKEN }} upload --force --user krande --label dev ${{ github.workspace }}/dist/${{ matrix.platform.pkg_dir }}/*.tar.bz2
+          anaconda -t ${{ secrets.ANACONDA_TOKEN }} upload --force --user krande --label dev ${{ env.ARTIFACTS_DIR }}/*.conda
