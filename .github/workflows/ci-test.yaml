@@ -14,7 +14,7 @@ env:
 
 jobs:
   build_test:
-    name: ada-cpp-${{ matrix.platform.name }}-${{ matrix.pyver.name }}
+    name: ada-cpp-${{ matrix.platform.name }}-${{ matrix.pyver.name }}-${{ matrix.variant.name }}=${{ matrix.variant.value }}
     runs-on: ${{ matrix.platform.distver }}
     defaults:
       run:
@@ -93,4 +93,4 @@ jobs:
 
       - name: upload to anaconda
         run: |
-          anaconda -t ${{ secrets.ANACONDA_TOKEN }} upload --force --user krande --label dev ${{ env.ARTIFACTS_DIR }}/*.conda
+          anaconda -t ${{ secrets.ANACONDA_TOKEN }} upload --force --user krande --label dev ${{ env.ARTIFACTS_DIR }}/${{ env.PKG_DIR }}/*.conda
