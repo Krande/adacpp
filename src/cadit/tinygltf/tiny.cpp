@@ -2,11 +2,7 @@
 // Created by Kristoffer on 26/07/2023.
 //
 #include <iostream>
-#define TINYGLTF_IMPLEMENTATION
-#define STB_IMAGE_IMPLEMENTATION
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-
-#include "tiny_gltf.h"
+#include "tinyload.h"
 #include "../../geom/Mesh.h"
 #include "../../binding_core.h"
 #include "../../visit/tess_helpers.h"

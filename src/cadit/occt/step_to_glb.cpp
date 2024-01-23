@@ -1,13 +1,7 @@
 //
 // Created by ofskrand on 23.01.2024.
 //
-#define TINYGLTF_IMPLEMENTATION
-#define STB_IMAGE_IMPLEMENTATION
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-
 #include "step_to_glb.h"
-
-#include "../../binding_core.h"
 
 #include <STEPControl_Reader.hxx>
 #include <BRep_Tool.hxx>
@@ -17,10 +11,9 @@
 #include <TopExp_Explorer.hxx>
 #include <TopoDS_Face.hxx>
 
-#include <tiny_gltf.h>
-
 #include <vector>
 #include <string>
+#include "tiny_gltf.h"
 #include <TopoDS.hxx>
 
 // Function to process a single shape and add it to the GLB model
@@ -41,7 +34,7 @@ void ProcessShape(const TopoDS_Shape&shape, tinygltf::Model&gltfModel) {
         Handle(Poly_Triangulation) triangulation = BRep_Tool::Triangulation(face, loc);
 
         if (!triangulation.IsNull()) {
-            const TColgp_Array1OfPnt&nodes = triangulation->Nodes();
+            const TColgp_Array1OfPnt&nodes = triangulation->MapNodeArray()->Array1();
             for (int i = 1; i <= nodes.Length(); i++) {
                 gp_Pnt pnt = nodes(i).Transformed(loc.Transformation());
                 vertices.push_back(static_cast<float>(pnt.X()));
@@ -93,8 +86,4 @@ void stp_to_glb(const std::string&stp_file, const std::string&glb_file) {
     else {
         throw std::runtime_error("Error reading STEP file");
     }
-}
-
-NB_MODULE(stp_to_glb_module, m) {
-    m.def("stp_to_glb", &stp_to_glb, nb::arg("stp_file"), nb::arg("glb_file"));
 }

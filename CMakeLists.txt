@@ -27,9 +27,30 @@ set(ADA_CPP_SOURCES
         src/visit/manual/solids/boxes.cpp
         src/visit/TessellateFactory.cpp
 )
-
+set(ADA_CPP_HEADERS
+        src/cadit/ifc/ifcop.h
+        src/helpers/helpers.h
+        src/geom/geometries.h
+        src/cadit/occt/step_to_glb.h
+        src/cadit/occt/step_writer.h
+        src/cadit/occt/gltf_writer.h
+        src/cadit/occt/colors.h
+        src/cadit/tinygltf/tiny.h
+        src/cadit/tinygltf/tinyload.h
+        src/fem/simple_mesh.h
+        src/visit/ShapeTesselator.h
+        src/visit/tess_helpers.h
+        src/visit/TessellateFactory.h
+)
 # Create a empty list to hold all the linked libs
 set(ADA_CPP_LINK_LIBS)
+
+set(TINYGLTF_HEADER_ONLY ON CACHE INTERNAL "" FORCE)
+set(TINYGLTF_INSTALL OFF CACHE INTERNAL "" FORCE)
+
+# set the path to the tinygltf source which is in the conda env $PREFIX/include
+#set(TINYGLTF_SOURCE_DIR ${CMAKE_PREFIX_PATH}/include)
+#add_subdirectory(TINYGLTF_SOURCE_DIR)
 
 # Add dependencies
 include(cmake/deps_cgal.cmake)
@@ -43,16 +64,18 @@ include(cmake/nanobind.cmake)
 # Link libraries to the module
 target_link_libraries(_ada_cpp_ext_impl PRIVATE ${ADA_CPP_LINK_LIBS})
 
-
 # Install the module
 install(TARGETS _ada_cpp_ext_impl LIBRARY DESTINATION .)
 
 # Include the tests directory
 OPTION(BUILD_TESTING "Build the testing tree." OFF)
 if (BUILD_TESTING)
-    set(SOURCES src/main.cpp src/cadit/occt/step_to_glb.cpp )
-    set(HEADERS src/cadit/occt/step_to_glb.h)
+    # create a new list called SOURCES that appends src/main.cpp to the ADA_CPP_SOURCES list
+    #set(SOURCES src/main.cpp ${ADA_CPP_SOURCES})
+    set(SOURCES src/main.cpp src/cadit/occt/step_to_glb.cpp)
+    set(HEADERS src/cadit/tinygltf/tinyload.h src/cadit/occt/step_to_glb.h)
     add_executable(STP2GLB ${SOURCES} ${HEADERS})
     target_link_libraries(STP2GLB ${ADA_CPP_LINK_LIBS})
+    install(TARGETS STP2GLB DESTINATION .)
     include(tests/cpp/tests.cmake)
 endif (BUILD_TESTING)
