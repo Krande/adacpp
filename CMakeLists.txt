@@ -16,6 +16,7 @@ set(ADA_CPP_SOURCES
         src/helpers/helpers.cpp
         src/geom/Models.cpp
         src/geom/geometries.cpp
+        src/cadit/occt/step_to_glb.cpp
         src/cadit/occt/step_writer.cpp
         src/cadit/occt/gltf_writer.cpp
         src/cadit/occt/colors.cpp
@@ -42,11 +43,16 @@ include(cmake/nanobind.cmake)
 # Link libraries to the module
 target_link_libraries(_ada_cpp_ext_impl PRIVATE ${ADA_CPP_LINK_LIBS})
 
-# Include the tests directory
-OPTION(BUILD_TESTING "Build the testing tree." OFF)
-if (BUILD_TESTING)
-    add_subdirectory(tests/cpp)
-endif (BUILD_TESTING)
 
 # Install the module
 install(TARGETS _ada_cpp_ext_impl LIBRARY DESTINATION .)
+
+# Include the tests directory
+OPTION(BUILD_TESTING "Build the testing tree." OFF)
+if (BUILD_TESTING)
+    set(SOURCES src/main.cpp src/cadit/occt/step_to_glb.cpp )
+    set(HEADERS src/cadit/occt/step_to_glb.h)
+    add_executable(STP2GLB ${SOURCES} ${HEADERS})
+    target_link_libraries(STP2GLB ${ADA_CPP_LINK_LIBS})
+    include(tests/cpp/tests.cmake)
+endif (BUILD_TESTING)

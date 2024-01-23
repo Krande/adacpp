@@ -1,18 +1,19 @@
 name: ada-cpp
 channels:
-  - krande
   - conda-forge
 dependencies:
   - occt ==7.7.2=*novtk*
   - ifcopenshell
-  - nanobind ==1.5.2
+  - nanobind ==1.8.0
   - pytest ==7.3.1
-  - scikit-build-core ==0.5.0
+  - scikit-build-core ==0.7.1
   - cmake ==3.26.3
   - numpy
   - cgal-cpp ==5.6
   - nomkl
-  - boa ==0.15.1
-  - tinygltf ==2.8.13 # This must be installed in target dir also if you want to compile
+  - cli11
+  - boa ==0.16
+  - tinygltf ==2.8.19 # This must be installed in target dir also if you want to compile
   - gmsh
+  - python ==3.11
   - gtest
