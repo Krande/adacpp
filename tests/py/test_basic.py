@@ -29,6 +29,8 @@ def test_basic_write_list_of_boxes_to_step():
     origins, dimensions = create_box_grid(10)
     adacpp.cadit.write_boxes_to_step("myboxes.stp", origins, dimensions)
 
+    adacpp.cadit.conversion.stp_to_glb("myboxes.stp", "myboxes_convert.glb")
+
 
 def test_basic_mesh():
     mesh = adacpp.visit.get_box_mesh((0, 0, 0), (10, 10, 10))

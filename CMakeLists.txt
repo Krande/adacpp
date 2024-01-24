@@ -3,6 +3,13 @@ cmake_minimum_required(VERSION 3.20)
 project(ada-cpp LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 
+OPTION(CONDA_LOCAL_DEV "Install into activate local development conda env." OFF)
+
+if (CONDA_LOCAL_DEV)
+    message(STATUS "Building for local development conda env.")
+    set(EXE_BIN_DIR ${CMAKE_INSTALL_PREFIX}/bin)
+endif ()
+
 include(cmake/pre_checks.cmake)
 
 find_package(Python 3
@@ -17,6 +24,7 @@ set(ADA_CPP_SOURCES
         src/geom/Models.cpp
         src/geom/geometries.cpp
         src/cadit/occt/step_to_glb.cpp
+        src/cadit/occt/occt_convert.cpp
         src/cadit/occt/step_writer.cpp
         src/cadit/occt/gltf_writer.cpp
         src/cadit/occt/colors.cpp
@@ -31,6 +39,7 @@ set(ADA_CPP_HEADERS
         src/cadit/ifc/ifcop.h
         src/helpers/helpers.h
         src/geom/geometries.h
+        src/cadit/occt/occt_convert.h
         src/cadit/occt/step_to_glb.h
         src/cadit/occt/step_writer.h
         src/cadit/occt/gltf_writer.h
@@ -44,13 +53,6 @@ set(ADA_CPP_HEADERS
 )
 # Create a empty list to hold all the linked libs
 set(ADA_CPP_LINK_LIBS)
-
-set(TINYGLTF_HEADER_ONLY ON CACHE INTERNAL "" FORCE)
-set(TINYGLTF_INSTALL OFF CACHE INTERNAL "" FORCE)
-
-# set the path to the tinygltf source which is in the conda env $PREFIX/include
-#set(TINYGLTF_SOURCE_DIR ${CMAKE_PREFIX_PATH}/include)
-#add_subdirectory(TINYGLTF_SOURCE_DIR)
 
 # Add dependencies
 include(cmake/deps_cgal.cmake)
@@ -67,15 +69,22 @@ target_link_libraries(_ada_cpp_ext_impl PRIVATE ${ADA_CPP_LINK_LIBS})
 # Install the module
 install(TARGETS _ada_cpp_ext_impl LIBRARY DESTINATION .)
 
+# Install the C++ executable
+set(SOURCES src/main.cpp src/cadit/occt/step_to_glb.cpp)
+set(HEADERS src/cadit/occt/step_to_glb.h)
+
+add_executable(STP2GLB ${SOURCES} ${HEADERS})
+target_link_libraries(STP2GLB ${ADA_CPP_LINK_LIBS})
+
+set_target_properties(STP2GLB PROPERTIES
+        INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/lib"
+)
+# install to executable into the bin dir
+install(TARGETS STP2GLB DESTINATION ${EXE_BIN_DIR})
+
 # Include the tests directory
 OPTION(BUILD_TESTING "Build the testing tree." OFF)
 if (BUILD_TESTING)
-    # create a new list called SOURCES that appends src/main.cpp to the ADA_CPP_SOURCES list
-    #set(SOURCES src/main.cpp ${ADA_CPP_SOURCES})
-    set(SOURCES src/main.cpp src/cadit/occt/step_to_glb.cpp)
-    set(HEADERS src/cadit/tinygltf/tinyload.h src/cadit/occt/step_to_glb.h)
-    add_executable(STP2GLB ${SOURCES} ${HEADERS})
-    target_link_libraries(STP2GLB ${ADA_CPP_LINK_LIBS})
-    install(TARGETS STP2GLB DESTINATION .)
+    message(STATUS "Building the testing tree.")
     include(tests/cpp/tests.cmake)
 endif (BUILD_TESTING)

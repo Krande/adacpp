@@ -18,5 +18,7 @@ if (OpenCASCADE_FOUND)
             TKTopAlgo
             TKSTEP
             TKXDESTEP
+            TKLCAF
+            TKXCAF
             TKRWMesh)
 endif (OpenCASCADE_FOUND)

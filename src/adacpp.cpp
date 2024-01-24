@@ -7,6 +7,7 @@
 #include "geom/geometries.h"
 #include "visit/TessellateFactory.h"
 #include "visit/tess_helpers.h"
+#include "cadit/occt/occt_convert.h"
 
 // Define the modules that will be exposed in python
 NB_MODULE(_ada_cpp_ext_impl, m) {
@@ -17,6 +18,8 @@ NB_MODULE(_ada_cpp_ext_impl, m) {
         ifc_module(ifc_submod);
     auto occt_module = cadit_module.def_submodule("occt", "Opencascade interface toolkit");
         occt_color_module(occt_module);
+    auto occt_conversion_module = cadit_module.def_submodule("conversion", "OCCT conversion module");
+        step_to_glb_module(occt_conversion_module);
     auto visit_module = m.def_submodule("visit", "Visualization Interoperability toolkit");
         tess_helper_module(visit_module);
         tess_module(visit_module);

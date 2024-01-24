@@ -1,89 +1,60 @@
-//
-// Created by ofskrand on 23.01.2024.
-//
-#include "step_to_glb.h"
-
-#include <STEPControl_Reader.hxx>
-#include <BRep_Tool.hxx>
+#include <STEPCAFControl_Reader.hxx>
+#include <XCAFDoc_DocumentTool.hxx>
+#include <RWGltf_CafWriter.hxx>
+#include <TDocStd_Document.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
-#include <IFSelect_ReturnStatus.hxx>
-#include <Poly_Triangulation.hxx>
-#include <TopExp_Explorer.hxx>
-#include <TopoDS_Face.hxx>
+#include <XCAFDoc_ShapeTool.hxx>
 
-#include <vector>
-#include <string>
-#include "tiny_gltf.h"
-#include <TopoDS.hxx>
 
-// Function to process a single shape and add it to the GLB model
-void ProcessShape(const TopoDS_Shape&shape, tinygltf::Model&gltfModel) {
-    BRepMesh_IncrementalMesh mesh(shape, 0.1);
+void stp_to_glb(const std::string& stp_file,
+                const std::string& glb_file,
+                double linearDeflection = 0.1,
+                double angularDeflection = 0.5,
+                bool relativeDeflection = false)
+{
+    // Initialize the STEPCAFControl_Reader
+    STEPCAFControl_Reader reader;
+    reader.SetColorMode(true);
+    reader.SetNameMode(true);
+    reader.SetLayerMode(true);
+    reader.SetPropsMode(true);
+    reader.SetGDTMode(true);
+    reader.SetMatMode(true);
+    reader.SetViewMode(true);
 
-    // For each shape, a new mesh will be created
-    tinygltf::Mesh gltfMesh;
-    tinygltf::Primitive primitive;
-
-    std::vector<float> vertices;
-    std::vector<unsigned int> indices;
-
-    TopExp_Explorer explorer(shape, TopAbs_FACE);
-    for (; explorer.More(); explorer.Next()) {
-        TopoDS_Face face = TopoDS::Face(explorer.Current());
-        TopLoc_Location loc;
-        Handle(Poly_Triangulation) triangulation = BRep_Tool::Triangulation(face, loc);
-
-        if (!triangulation.IsNull()) {
-            const TColgp_Array1OfPnt&nodes = triangulation->MapNodeArray()->Array1();
-            for (int i = 1; i <= nodes.Length(); i++) {
-                gp_Pnt pnt = nodes(i).Transformed(loc.Transformation());
-                vertices.push_back(static_cast<float>(pnt.X()));
-                vertices.push_back(static_cast<float>(pnt.Y()));
-                vertices.push_back(static_cast<float>(pnt.Z()));
-            }
-
-            const Poly_Array1OfTriangle&triangles = triangulation->Triangles();
-            for (int i = 1; i <= triangulation->NbTriangles(); i++) {
-                Standard_Integer n1, n2, n3;
-                triangles(i).Get(n1, n2, n3);
-                indices.push_back(n1 - 1);
-                indices.push_back(n2 - 1);
-                indices.push_back(n3 - 1);
-            }
-        }
-    }
-
-    // Here you should add the logic to create buffer views and accessors for vertices and indices
-    // ...
-
-    // Setup the primitive
-    // ...
-
-    gltfMesh.primitives.push_back(primitive);
-    gltfModel.meshes.push_back(gltfMesh);
-}
-
-void stp_to_glb(const std::string&stp_file, const std::string&glb_file) {
-    STEPControl_Reader reader;
-    IFSelect_ReturnStatus status = reader.ReadFile(stp_file.c_str());
-
-    if (status == IFSelect_RetDone) {
-        tinygltf::Model gltfModel;
-
-        Standard_Integer nbRoots = reader.NbRootsForTransfer();
-        for (Standard_Integer n = 1; n <= nbRoots; n++) {
-            reader.TransferRoot(n);
-            int nbShapes = reader.NbShapes();
-            for (int i = 1; i <= nbShapes; i++) {
-                TopoDS_Shape shape = reader.Shape(i);
-                ProcessShape(shape, gltfModel);
-            }
-        }
-
-        tinygltf::TinyGLTF gltfContext;
-        gltfContext.WriteGltfSceneToFile(&gltfModel, glb_file, true, true, true, true);
-    }
-    else {
+    // Read the STEP file
+    // print to console
+    std::cout << "Reading STEP file: " << stp_file << std::endl;
+    if (reader.ReadFile(stp_file.c_str()) != IFSelect_RetDone)
         throw std::runtime_error("Error reading STEP file");
+
+    // Transfer to a document
+    Handle(TDocStd_Document) doc = new TDocStd_Document("MDTV-XCAF");
+    if (!reader.Transfer(doc))
+        throw std::runtime_error("Error transferring data to document");
+
+    // Tessellation
+    Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+    TDF_LabelSequence labelSeq;
+    shapeTool->GetShapes(labelSeq);
+    for (Standard_Integer i = 1; i <= labelSeq.Length(); ++i)
+    {
+        TopoDS_Shape shape = shapeTool->GetShape(labelSeq.Value(i));
+        BRepMesh_IncrementalMesh(shape, linearDeflection, relativeDeflection, angularDeflection, true);
+    }
+
+    // Write to GLB
+    RWGltf_CafWriter writer(glb_file.c_str(), true); // true for binary format
+
+    // Additional file information (can be empty if not needed)
+    TColStd_IndexedDataMapOfStringString file_info;
+
+    // Progress indicator (can be null if progress tracking is not needed)
+    Message_ProgressRange progress;
+
+    if (!writer.Perform(doc, file_info, progress))
+    {
+        throw std::runtime_error("Error writing GLB file");
     }
 }
+

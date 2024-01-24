@@ -16,4 +16,3 @@ dependencies:
   - tinygltf ==2.8.19 # This must be installed in target dir also if you want to compile
   - gmsh
   - python ==3.11
-  - gtest
