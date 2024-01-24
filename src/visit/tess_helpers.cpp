@@ -5,17 +5,13 @@
 #include <TopoDS_Shape.hxx>
 #include <algorithm>
 #include <memory>
+#include <map>
 #include "ShapeTesselator.h"
-#include "../models/Mesh.h"
-#include "../models/OccShape.h"
-#include "../models/GroupReference.h"
-#include "../models/MeshType.h"
-#include "../binding_core.h"
+#include "tess_helpers.h"
 #include "../helpers/helpers.h"
 
 
-Mesh
-tessellate_shape(int id, const TopoDS_Shape &shape, bool compute_edges, float mesh_quality, bool parallel_meshing) {
+Mesh tessellate_shape(int id, const TopoDS_Shape &shape, bool compute_edges, float mesh_quality, bool parallel_meshing) {
     ShapeTesselator shape_tess(shape);
     shape_tess.Compute(compute_edges, mesh_quality, parallel_meshing);
     std::vector pos = shape_tess.GetVerticesPositionAsTuple();
@@ -88,6 +84,29 @@ Mesh concatenate_meshes(const std::vector<std::shared_ptr<Mesh>> &meshes) {
     return merged_mesh;
 }
 
+// take a vector of meshes, organize them by color and make a new concatenated mesh per color class
+std::vector<std::shared_ptr<Mesh>> meshes_by_color(const std::vector<std::shared_ptr<Mesh>> &meshes) {
+    std::vector<std::shared_ptr<Mesh>> result;
+    std::map<std::vector<float>, std::vector<std::shared_ptr<Mesh>>> color_map;
+
+    for (const auto &mesh: meshes) {
+        // Create a vector that includes the RGB(A) values of the color object
+        std::vector<float> color_key {mesh->color.r, mesh->color.g, mesh->color.b, mesh->color.a};
+
+        // Use this vector as the key for the color_map
+        color_map[color_key].push_back(mesh);
+    }
+
+    for (const auto &color_meshes: color_map) {
+        result.push_back(std::make_shared<Mesh>(concatenate_meshes(color_meshes.second)));
+    }
+
+    return result;
+}
+
+
+
+
 Mesh get_box_mesh(const std::vector<float> &box_origin,
                   const std::vector<float> &box_dims) {
 
@@ -96,17 +115,22 @@ Mesh get_box_mesh(const std::vector<float> &box_origin,
     return mesh;
 }
 
-nanobind::class_<Mesh> geom_module(nb::module_ &m) {
+void tess_helper_module(nb::module_ &m) {
     m.def("get_box_mesh", &get_box_mesh, "box_origin"_a, "box_dims"_a, "Write a box to a step file");
-    {
-        return nb::class_<Mesh>(m, "Mesh")
-                .def_ro("id", &Mesh::id, "The id of the mesh")
-                .def_ro("positions", &Mesh::positions, "The positions of the mesh")
-                .def_ro("indices", &Mesh::indices, "The indices of the mesh")
-                .def_ro("normals", &Mesh::normals, "The normals of the mesh")
-                .def_ro("mesh_type", &Mesh::mesh_type, "The type of mesh", nb::enum_<MeshType>(m, "MeshType"))
-                .def_ro("color", &Mesh::color, "The color of the mesh", nb::class_<Color>(m, "Color"))
-                .def_ro("groups", &Mesh::group_reference, "The groups of the mesh",
-                        nb::class_<GroupReference>(m, "GroupReference"));
-    };
+
+    nb::class_<Mesh>(m, "Mesh")
+            .def_ro("id", &Mesh::id, "The id of the mesh")
+            .def_ro("positions", &Mesh::positions, "The positions of the mesh")
+            .def_ro("indices", &Mesh::indices, "The indices of the mesh")
+            .def_ro("normals", &Mesh::normals, "The normals of the mesh")
+            .def_ro("mesh_type", &Mesh::mesh_type, "The type of mesh", nb::enum_<MeshType>(m, "MeshType"))
+            .def_ro("color", &Mesh::color, "The color of the mesh", nb::class_<Color>(m, "Color"))
+            .def_ro("groups", &Mesh::group_reference, "The groups of the mesh",
+                    nb::class_<GroupReference>(m, "GroupReference"));
+
+    nb::class_<Color>(m, "Color")
+            .def_rw("r", &Color::r)
+            .def_rw("g", &Color::g)
+            .def_rw("b", &Color::b)
+            .def_rw("a", &Color::a);
 }

@@ -1,0 +1,35 @@
+if (APPLE)
+    set(CMAKE_OSX_SYSROOT "/Users/runner/work/MacOSX10.15.sdk" CACHE PATH "macOS SDK path" FORCE)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15" CACHE STRING "macOS deployment target" FORCE)
+
+    if (DEFINED CMAKE_OSX_SYSROOT)
+        message(STATUS "Setting macOS sysroot to ${CMAKE_OSX_SYSROOT}")
+    else ()
+        message(FATAL_ERROR "CMAKE_OSX_SYSROOT is not defined. Please set it to the path of the macOS SDK you want to use.")
+    endif ()
+
+    if (DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
+        message(STATUS "Setting macOS deployment target to ${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    else ()
+        message(FATAL_ERROR "CMAKE_OSX_DEPLOYMENT_TARGET is not defined. Please set it to the minimum macOS version you want to support.")
+    endif ()
+
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -isysroot ${CMAKE_OSX_SYSROOT} -mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -isysroot ${CMAKE_OSX_SYSROOT} -mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET}")
+else ()
+    message(STATUS "Not building for macOS")
+endif ()
+
+
+if (CMAKE_SIZEOF_VOID_P EQUAL 8)
+    message(STATUS "Building for x64 architecture")
+else ()
+    message(FATAL_ERROR "This project requires a 64-bit toolchain. Please update your toolchain arch to 'x86_amd64'")
+endif ()
+
+if (NOT CMAKE_BUILD_TYPE)
+    message(STATUS "Build type not set, defaulting to Release")
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build." FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
+endif ()
+message(STATUS "Build type: " ${CMAKE_BUILD_TYPE})

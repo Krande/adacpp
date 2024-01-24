@@ -13,8 +13,8 @@
 #include <TDF_Label.hxx>
 #include <XCAFDoc_ColorTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
-#include "../binding_core.h"
-#include "../helpers/helpers.h"
+#include "../../binding_core.h"
+#include "../../helpers/helpers.h"
 
 
 

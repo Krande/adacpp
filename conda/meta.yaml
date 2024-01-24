@@ -1,6 +1,6 @@
-context:
-  name: ada-cpp
-  version: 0.0.1
+{% set name = 'ada-cpp' %}
+{% set data = load_setup_py_data() %}
+{% set version = load_file_data('pyproject.toml')["project"]["version"] %}
 
 package:
   name: '{{ name|lower }}'
@@ -11,27 +11,36 @@ source:
 
 build:
   number: 1
-  script: python -m pip install . --no-build-isolation -v
 
 requirements:
   build:
     - "{{ compiler('c') }}"
     - "{{ compiler('cxx') }}"
-    - sel(unix): "{{ cdt('mesa-libGL-devel') }}"  # provides OpenGL development libraries
+    - "{{ cdt('mesa-libGL-devel') }}" # [unix] provides OpenGL development libraries
+
   host:
     - python
     - occt
+    - pybind11-stubgen 2.1
+    - ifcopenshell
     - cgal-cpp
     - scikit-build-core
     - nanobind
+    - cli11
+    - tinygltf
+    - gmsh
     - pip
+
   run:
     - python
     - "{{ pin_compatible('occt', max_pin='x.x.x') }}"
+    - "{{ pin_compatible('gmsh', max_pin='x.x.x') }}"
+    - "{{ pin_compatible('ifcopenshell', max_pin='x.x.x') }}"
 
 test:
   source_files:
     - tests
+    - files
   requires:
     - pytest
   commands:
