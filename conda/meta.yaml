@@ -11,7 +11,6 @@ source:
 
 build:
   number: 1
-  script: {{ PYTHON }} -m pip install . --no-build-isolation -v && python {{ RECIPE_DIR }}/stub_gen.py
 
 requirements:
   build:
@@ -27,6 +26,7 @@ requirements:
     - cgal-cpp
     - scikit-build-core
     - nanobind
+    - cli11
     - tinygltf
     - gmsh
     - pip
