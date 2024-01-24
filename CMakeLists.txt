@@ -75,15 +75,11 @@ set(HEADERS src/cadit/occt/step_to_glb.h)
 
 add_executable(STP2GLB ${SOURCES} ${HEADERS})
 
-
 set_target_properties(STP2GLB PROPERTIES
         INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/bin")
 
 target_link_libraries(STP2GLB ${ADA_CPP_LINK_LIBS})
 
-#set_target_properties(STP2GLB PROPERTIES
-#        INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/lib"
-#)
 # install to executable into the bin dir
 message(STATUS "Installing executable to ${EXE_BIN_DIR}")
 install(TARGETS STP2GLB DESTINATION ${EXE_BIN_DIR})
