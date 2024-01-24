@@ -3,6 +3,8 @@ name: ci-ada-cpp-test
 # bump 1
 on:
   push:
+#    branches:
+#      - donotrun
     paths-ignore:
       - README.md
       - .gitignore
