@@ -3,14 +3,15 @@
 #include <RWGltf_CafWriter.hxx>
 #include <TDocStd_Document.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
+#include <filesystem>
 #include <XCAFDoc_ShapeTool.hxx>
 
 
 void stp_to_glb(const std::string& stp_file,
                 const std::string& glb_file,
-                double linearDeflection = 0.1,
-                double angularDeflection = 0.5,
-                bool relativeDeflection = false)
+                const double linearDeflection = 0.1,
+                const double angularDeflection = 0.5,
+                const bool relativeDeflection = false)
 {
     // Initialize the STEPCAFControl_Reader
     STEPCAFControl_Reader reader;
@@ -23,18 +24,16 @@ void stp_to_glb(const std::string& stp_file,
     reader.SetViewMode(true);
 
     // Read the STEP file
-    // print to console
-    std::cout << "Reading STEP file: " << stp_file << std::endl;
     if (reader.ReadFile(stp_file.c_str()) != IFSelect_RetDone)
         throw std::runtime_error("Error reading STEP file");
 
     // Transfer to a document
-    Handle(TDocStd_Document) doc = new TDocStd_Document("MDTV-XCAF");
+    const Handle(TDocStd_Document) doc = new TDocStd_Document("MDTV-XCAF");
     if (!reader.Transfer(doc))
         throw std::runtime_error("Error transferring data to document");
 
     // Tessellation
-    Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+    const Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
     TDF_LabelSequence labelSeq;
     shapeTool->GetShapes(labelSeq);
     for (Standard_Integer i = 1; i <= labelSeq.Length(); ++i)
@@ -47,10 +46,17 @@ void stp_to_glb(const std::string& stp_file,
     RWGltf_CafWriter writer(glb_file.c_str(), true); // true for binary format
 
     // Additional file information (can be empty if not needed)
-    TColStd_IndexedDataMapOfStringString file_info;
+    const TColStd_IndexedDataMapOfStringString file_info;
 
     // Progress indicator (can be null if progress tracking is not needed)
-    Message_ProgressRange progress;
+    const Message_ProgressRange progress;
+
+    // if output parent directory is != "" and does not exist, create it
+    const std::filesystem::path glb_path(glb_file);
+    if (const std::filesystem::path glb_dir = glb_path.parent_path(); !glb_dir.empty() && !exists(glb_dir))
+    {
+        create_directories(glb_dir);
+    }
 
     if (!writer.Perform(doc, file_info, progress))
     {

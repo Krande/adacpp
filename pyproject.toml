@@ -45,3 +45,14 @@ editable.mode = "redirect"
 wheel.packages = ["src/adacpp"]
 wheel.install-dir = "adacpp"
 wheel.license-files = []
+
+[tool.black]
+line-length = 120
+
+[tool.ruff]
+line-length = 120
+ignore = ["E741"]
+exclude = ["examples/experiments/"]
+
+[tool.isort]
+profile = "black"

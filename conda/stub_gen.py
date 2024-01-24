@@ -67,9 +67,7 @@ def main():
     )
 
     parser = pybind11_stubgen.stub_parser_from_args(args)
-    printer = pybind11_stubgen.Printer(
-        invalid_expr_as_ellipses=not args.print_invalid_expressions_as_is
-    )
+    printer = pybind11_stubgen.Printer(invalid_expr_as_ellipses=not args.print_invalid_expressions_as_is)
 
     out_dir = pathlib.Path(args.output_dir)
     out_dir.mkdir(exist_ok=True)
