@@ -10,12 +10,12 @@ logger = logging.getLogger(__name__)
 
 
 def run(
-        parser: pybind11_stubgen.IParser,
-        printer: pybind11_stubgen.Printer,
-        module_name: str,
-        out_dir: pathlib.Path,
-        sub_dir: Union[pathlib.Path, None],
-        dry_run: bool,
+    parser: pybind11_stubgen.IParser,
+    printer: pybind11_stubgen.Printer,
+    module_name: str,
+    out_dir: pathlib.Path,
+    sub_dir: Union[pathlib.Path, None],
+    dry_run: bool,
 ):
     module = parser.handle_module(
         pybind11_stubgen.QualifiedName.from_str(module_name),
@@ -88,7 +88,7 @@ def main():
             dry_run=args.dry_run,
         )
     except BaseException as e:
-        logger.error(f'generator error -> {e}')
+        logger.error(f"generator error -> {e}")
 
 
 if __name__ == "__main__":
