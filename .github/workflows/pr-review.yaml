@@ -5,6 +5,7 @@ on:
     types: [ opened, synchronize, edited, unlabeled ]
     branches:
       - main
+      - master
       - develop
 
 permissions:
