@@ -1,6 +1,6 @@
 if (APPLE)
-    set(CMAKE_OSX_SYSROOT "/Users/runner/work/MacOSX10.15.sdk" CACHE PATH "macOS SDK path" FORCE)
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15" CACHE STRING "macOS deployment target" FORCE)
+#    set(CMAKE_OSX_SYSROOT "/Users/runner/work/MacOSX10.15.sdk" CACHE PATH "macOS SDK path" FORCE)
+#    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15" CACHE STRING "macOS deployment target" FORCE)
 
     if (DEFINED CMAKE_OSX_SYSROOT)
         message(STATUS "Setting macOS sysroot to ${CMAKE_OSX_SYSROOT}")
