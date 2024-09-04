@@ -1,0 +1,49 @@
+name: ci-tests
+
+# bump 1
+on:
+  push:
+
+# Use concurrency to ensure that only one instance of this workflow is running at a time
+concurrency:
+  group: ci-tests-${{ github.ref_name }}
+  cancel-in-progress: true
+
+env:
+  CROOT_DIR: /home/runner/work/build
+  ARTIFACTS_DIR: /home/runner/work/artifacts
+  PKG_DIR: linux-64
+
+jobs:
+
+  build_test:
+    name: ada-cpp-test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -l {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+
+      # Install OpenGL dependencies
+      - name: Install OpenGL dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev
+
+      - uses: mamba-org/setup-micromamba@v1 # https://github.com/mamba-org/setup-micromamba
+        with:
+          environment-file: environment.build.yml
+          cache-environment: true
+          cache-downloads: true
+          create-args: >-
+            python=3.12
+            ada-py
+
+      - name: install package
+        run: |
+          pip install .
+
+      - name: test package
+        run: |
+          pytest tests

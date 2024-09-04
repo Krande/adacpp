@@ -1,4 +1,5 @@
 #include <iostream>
+#include <memory>
 #include <filesystem>
 
 #include <BRep_Builder.hxx>
@@ -15,7 +16,7 @@
 #include <XCAFDoc_ShapeTool.hxx>
 #include "../../binding_core.h"
 #include "../../helpers/helpers.h"
-
+#include <nanobind/stl/shared_ptr.h>
 
 
 class AdaCPPStepWriter {
@@ -113,9 +114,31 @@ void write_box_to_step(const std::string &filename, const std::vector<float> &bo
     writer.Write(filename.c_str());
 }
 
+std::string step_writer_to_string(STEPCAFControl_Writer& writer) {
+    std::ostringstream stream;
+    writer.WriteStream(stream);  // Write to the string stream
+    return stream.str();  // Convert the stream to a string and return it
+}
+
 void step_writer_module(nb::module_ &m) {
     m.def("write_box_to_step", &write_box_to_step, "filename"_a, "box_origin"_a, "box_dims"_a,
           "Write a box to a step file");
     m.def("write_boxes_to_step", &write_boxes_to_step, "filename"_a, "box_origins"_a, "box_dims"_a,
           "Write a list of boxes to a step file");
+    m.def("step_writer_to_string", &step_writer_to_string, "writer"_a);
+
+    nanobind::class_<STEPCAFControl_Writer>(m, "STEPCAFControl_Writer")
+            .def_static("from_ptr", [](uintptr_t ptr) {
+                // Return a shared_ptr to manage the lifetime of the object
+                return std::shared_ptr<STEPCAFControl_Writer>(
+                        reinterpret_cast<STEPCAFControl_Writer *>(ptr),
+                        [](STEPCAFControl_Writer *p) {
+                            // Custom deleter (can be empty if you want to avoid deletion)
+                            // But in most cases, deleting the object should be safe if it’s properly managed
+                            // delete p;
+                            // Chose to not delete because this object will always grab the ptr from an existing
+                            // swig object and should not be responsible for deleting it
+                        }
+                );
+            });
 }

@@ -10,19 +10,24 @@ source:
   path: ../
 
 build:
+  skip: True  # [py<310]
   number: 0
-  string: py{{ CONDA_PY }}_{{ variant }}_h{{ PKG_HASH }}_{{ PKG_BUILDNUM }}
+  run_exports:
+    - {{ pin_subpackage(name, max_pin='x.x.x') }}
 
 requirements:
   build:
-    - "{{ compiler('c') }}"
-    - "{{ compiler('cxx') }}"
-    - "{{ cdt('mesa-libGL-devel') }}" # [unix] provides OpenGL development libraries
+    - {{ stdlib("c") }}
+    - {{ compiler('c') }}
+    - {{ compiler('cxx') }}
+    - {{ cdt('mesa-libGL-devel') }}  # [linux]
+    - cmake
+    - ninja   # [win]
+    - make    # [unix]
 
   host:
     - python
-    - occt
-    - pybind11-stubgen 2.1
+    - occt * *{{ variant }}*
     - ifcopenshell
     - cgal-cpp
     - scikit-build-core
@@ -34,9 +39,7 @@ requirements:
 
   run:
     - python
-    - "{{ pin_compatible('occt', max_pin='x.x.x') }}"
     - "{{ pin_compatible('gmsh', max_pin='x.x.x') }}"
-    - "{{ pin_compatible('ifcopenshell', max_pin='x.x.x') }}"
 
 test:
   source_files:
@@ -44,6 +47,7 @@ test:
     - files
   requires:
     - pytest
+    - ada-py
   commands:
     - pytest tests
 

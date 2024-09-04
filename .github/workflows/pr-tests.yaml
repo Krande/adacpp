@@ -1,20 +1,36 @@
-name: ci-ada-cpp-test
+name: pr-tests
 
 # bump 1
 on:
-  push:
-#    branches:
-#      - donotrun
-    paths-ignore:
-      - README.md
-      - .gitignore
-      - .github/workflows/basic_test.yaml
+  pull_request:
+    branches:
+      - main
+
+# Use concurrency to ensure that only one instance of this workflow is running at a time
+concurrency:
+  group: pr-tests-${{ github.ref_name }}
+  cancel-in-progress: true
 
 env:
   CROOT_DIR: /home/runner/work/build
   ARTIFACTS_DIR: /home/runner/work/artifacts
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+
+      - uses: prefix-dev/setup-pixi@v0.8.1  # https://github.com/prefix-dev/setup-pixi
+        with:
+          pixi-version: v0.28.2
+          cache: true
+          environments: lint
+
+      - run: pixi run lint
+
   build_test:
     name: ada-cpp-${{ matrix.platform.name }}-${{ matrix.pyver.name }}-${{ matrix.variant.name }}=${{ matrix.variant.value }}
     runs-on: ${{ matrix.platform.distver }}
@@ -25,19 +41,26 @@ jobs:
       fail-fast: false
       matrix:
         pyver: [
-          { name: py311, distver: '3.11' },
+          { name: py312, distver: '3.12' },
         ]
         platform: [
           { name: win, distver: windows-latest, pkg_dir: 'win-64' },
           { name: linux, distver: ubuntu-latest, pkg_dir: 'linux-64' },
-          { name: macOS, distver: macos-latest, pkg_dir: 'osx-64' }
+          { name: macOS, distver: macos-13, pkg_dir: 'osx-64' }
         ]
         variant: [
-          { name: occt, value: '7.7.2=*novtk*' },
-          { name: occt, value: '7.7.2=*all*' }
+          { name: variant, value: 'novtk' },
+          { name: variant, value: 'all' }
         ]
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+
+      # Install OpenGL dependencies
+      - name: Install OpenGL dependencies
+        if: ${{ matrix.platform.name == 'linux' }}
+        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev
 
       - name: set ENV WORK_DIR
         run: |
@@ -58,7 +81,7 @@ jobs:
         if: ${{ matrix.platform.name == 'macOS' }}
         run: |
           curl -L https://github.com/phracker/MacOSX-SDKs/releases/download/11.3/MacOSX10.15.sdk.tar.xz | tar -xvJf - -C /Users/runner/work/
-          
+
 
       - uses: mamba-org/setup-micromamba@v1 # https://github.com/mamba-org/setup-micromamba
         with:
@@ -73,11 +96,9 @@ jobs:
               zstd_compression_level: 19
             channel_priority: strict
             channels:
-              - krande
               - conda-forge
           create-args: >-
-            python=${{ matrix.pyver.distver }}
-            anaconda-client
+            python=3.12
             boa
 
       - name: make dirs
@@ -89,7 +110,3 @@ jobs:
         run: |
           conda mambabuild . --python ${{ matrix.pyver.distver }} --variants "{ '${{matrix.variant.name}}': '${{matrix.variant.value}}'}"
         working-directory: conda
-
-      - name: upload to anaconda
-        run: |
-          anaconda -t ${{ secrets.ANACONDA_TOKEN }} upload --force --user krande --label dev ${{ env.ARTIFACTS_DIR }}/${{ env.PKG_DIR }}/*.conda

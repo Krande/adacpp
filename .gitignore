@@ -4,3 +4,4 @@ cmake-build*/
 .env
 .env.json
 temp/
+.pixi/
