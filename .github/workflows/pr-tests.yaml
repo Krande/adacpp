@@ -1,4 +1,4 @@
-name: ci-ada-cpp-test
+name: pr-tests
 
 # bump 1
 on:
