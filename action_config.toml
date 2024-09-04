@@ -2,24 +2,6 @@
 enabled = true
 pre_release_tag = "dev"
 
-[tool.python.conda]
-enabled = false
-recipe_dir = "./conda"
-
-# Anaconda Related
-use_anaconda_server = false
-owner = "Krande"
-label = "main"
-#
-# info
-#
-# If you are uploading to public/private anaconda you need to set this
-# secrets.CONDA_API_TOKEN
-#
-# Or if you will use a private QUETZ server you need to set these
-# secrets.QUETZ_API_KEY
-# secrets.QUETZ_URL
-
 [tool.semantic_release]
 version_toml = ["pyproject.toml:project.version"]
 # info

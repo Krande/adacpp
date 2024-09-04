@@ -28,7 +28,7 @@ def test_basic_write_step(tmp_path):
 def test_convert_step_to_glb(files_dir, tmp_path):
     adacpp.cadit.conversion.stp_to_glb(
         str(files_dir / "flat_plate_abaqus_10x10_m_wColors.stp"),
-        str(tmp_path / "flat_plate_abaqus_10x10_m_wColors.glb")
+        str(tmp_path / "flat_plate_abaqus_10x10_m_wColors.glb"),
     )
 
 

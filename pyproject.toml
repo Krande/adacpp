@@ -64,7 +64,7 @@ skip_glob=["**/node_modules/**", "**/temp/**"]
 
 [tool.pixi.project]
 channels = ["conda-forge"]
-platforms = ["win-64"]
+platforms = ["win-64", "linux-64"]
 
 [tool.pixi.environments]
 lint = { features = ["lint"], no-default-feature = true}
