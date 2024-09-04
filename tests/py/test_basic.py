@@ -21,41 +21,42 @@ def create_box_grid(grid_size):
     return origins, dimensions
 
 
-def test_basic_write_step():
-    adacpp.cadit.write_box_to_step("mybox.stp", (0, 0, 0), (10, 10, 10))
+def test_basic_write_step(tmp_path):
+    adacpp.cadit.write_box_to_step(str(tmp_path / "mybox.stp"), (0, 0, 0), (10, 10, 10))
 
 
-def test_convert_step_to_glb(files_dir):
+def test_convert_step_to_glb(files_dir, tmp_path):
     adacpp.cadit.conversion.stp_to_glb(
-        str(files_dir / "flat_plate_abaqus_10x10_m_wColors.stp"), str("temp/flat_plate_abaqus_10x10_m_wColors.glb")
+        str(files_dir / "flat_plate_abaqus_10x10_m_wColors.stp"),
+        str(tmp_path / "flat_plate_abaqus_10x10_m_wColors.glb")
     )
 
 
-def test_basic_write_list_of_boxes_to_step():
+def test_basic_write_list_of_boxes_to_step(tmp_path):
     origins, dimensions = create_box_grid(10)
-    adacpp.cadit.write_boxes_to_step("myboxes.stp", origins, dimensions)
+    adacpp.cadit.write_boxes_to_step(str(tmp_path / "myboxes.stp"), origins, dimensions)
 
-    adacpp.cadit.conversion.stp_to_glb("myboxes.stp", "myboxes_convert.glb")
+    adacpp.cadit.conversion.stp_to_glb(str(tmp_path / "myboxes.stp"), str(tmp_path / "myboxes_convert.glb"))
 
 
-def test_basic_mesh():
+def test_basic_mesh(tmp_path):
     mesh = adacpp.visit.get_box_mesh((0, 0, 0), (10, 10, 10))
     assert mesh.__class__.__name__ == "Mesh"
     assert hasattr(mesh, "positions")
     assert hasattr(mesh, "normals")
     assert hasattr(mesh, "indices")
 
-    adacpp.cadit.write_mesh_to_gltf("mybox.gltf", mesh)
+    adacpp.cadit.write_mesh_to_gltf(str(tmp_path / "mybox.gltf"), mesh)
     print(mesh)
 
 
-def test_boxes_mesh_gltf():
+def test_boxes_mesh_gltf(tmp_path):
     origins, dimensions = create_box_grid(10)
-    adacpp.cadit.write_boxes_to_gltf("myboxes.glb", origins, dimensions)
+    adacpp.cadit.write_boxes_to_gltf(str(tmp_path / "myboxes.glb"), origins, dimensions)
 
 
-def test_simple_gmsh():
-    adacpp.fem.create_gmesh("my_fem_mesh.msh")
+def test_simple_gmsh(tmp_path):
+    adacpp.fem.create_gmesh(str(tmp_path / "my_fem_mesh.msh"))
 
 
 def test_tess_factory():
