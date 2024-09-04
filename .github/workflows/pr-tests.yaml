@@ -6,6 +6,11 @@ on:
     branches:
       - main
 
+# Use concurrency to ensure that only one instance of this workflow is running at a time
+concurrency:
+  group: pr-tests-${{ github.ref_name }}
+  cancel-in-progress: true
+
 env:
   CROOT_DIR: /home/runner/work/build
   ARTIFACTS_DIR: /home/runner/work/artifacts
