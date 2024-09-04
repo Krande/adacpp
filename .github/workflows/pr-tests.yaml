@@ -34,8 +34,8 @@ jobs:
           { name: macOS, distver: macos-13, pkg_dir: 'osx-64' }
         ]
         variant: [
-          { name: occt, value: 'novtk' },
-          { name: occt, value: 'all' }
+          { name: variant, value: 'novtk' },
+          { name: variant, value: 'all' }
         ]
     steps:
       - uses: actions/checkout@v4
