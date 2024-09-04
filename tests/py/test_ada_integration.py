@@ -1,10 +1,11 @@
+
+import OCC.Core.Interface as OCCInterface
 import pytest
+from OCC.Core.STEPCAFControl import STEPCAFControl_Writer as OCC_STEPCAFControl_Writer
 from OCC.Core.STEPControl import STEPControl_AsIs
 from OCC.Core.XSControl import XSControl_WorkSession
-import OCC.Core.Interface as OCCInterface
-from OCC.Core.STEPCAFControl import STEPCAFControl_Writer as OCC_STEPCAFControl_Writer
-from adacpp.cadit import step_writer_to_string, STEPCAFControl_Writer
-import weakref
+
+from adacpp.cadit import STEPCAFControl_Writer, step_writer_to_string
 
 try:
     import ada

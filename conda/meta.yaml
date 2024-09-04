@@ -20,7 +20,7 @@ requirements:
     - {{ stdlib("c") }}
     - {{ compiler('c') }}
     - {{ compiler('cxx') }}
-    - {{ cdt('mesa-libGL-devel') }}   # [unix] provides OpenGL development libraries
+    - {{ cdt('mesa-libGL-devel') }}  # [linux]
     - cmake
     - ninja   # [win]
     - make    # [unix]
