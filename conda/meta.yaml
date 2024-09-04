@@ -47,6 +47,7 @@ test:
     - files
   requires:
     - pytest
+    - ada-py
   commands:
     - pytest tests
 
