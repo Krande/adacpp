@@ -3,11 +3,11 @@ enabled = true
 pre_release_tag = "dev"
 
 [tool.python.conda]
-enabled = true
+enabled = false
 recipe_dir = "./conda"
 
 # Anaconda Related
-use_anaconda_server = true
+use_anaconda_server = false
 owner = "Krande"
 label = "main"
 #
