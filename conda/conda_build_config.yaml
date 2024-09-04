@@ -1,6 +1,10 @@
 occt:
   - 7.7.2=*novtk*
   - 7.7.2=*all*
+c_stdlib:
+  - vs # [win]
+  - sysroot # [linux]
+  - macosx_deployment_target # [osx and x86_64]
 
 c_stdlib_version:          # [osx and x86_64]
   - "10.15"                # [osx and x86_64]
@@ -9,6 +13,18 @@ MACOSX_SDK_VERSION:        # [osx and x86_64]
 
 c_compiler:
   - vs2022  # [win]
+  - gcc     # [linux]
+  - clang   # [osx]
+
+c_compiler_version:
+  - '17'    # [osx]
+  - '13'    # [linux]
 
 cxx_compiler:
   - vs2022  # [win]
+  - gcc     # [linux]
+  - clang   # [osx]
+
+cxx_compiler_version:
+  - '17'    # [osx]
+  - '13'    # [linux]

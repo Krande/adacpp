@@ -16,9 +16,12 @@ build:
 requirements:
   build:
     - {{ stdlib("c") }}
-    - "{{ compiler('c') }}"
-    - "{{ compiler('cxx') }}"
-    - "{{ cdt('mesa-libGL-devel') }}" # [unix] provides OpenGL development libraries
+    - {{ compiler('c') }}
+    - {{ compiler('cxx') }}
+    - {{ cdt('mesa-libGL-devel') }}   # [unix] provides OpenGL development libraries
+    - cmake
+    - ninja   # [win]
+    - make    # [unix]
 
   host:
     - python

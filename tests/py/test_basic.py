@@ -26,8 +26,9 @@ def test_basic_write_step():
 
 
 def test_convert_step_to_glb(files_dir):
-    adacpp.cadit.conversion.stp_to_glb(str(files_dir / "flat_plate_abaqus_10x10_m_wColors.stp"),
-                                       str("temp/flat_plate_abaqus_10x10_m_wColors.glb"))
+    adacpp.cadit.conversion.stp_to_glb(
+        str(files_dir / "flat_plate_abaqus_10x10_m_wColors.stp"), str("temp/flat_plate_abaqus_10x10_m_wColors.glb")
+    )
 
 
 def test_basic_write_list_of_boxes_to_step():
