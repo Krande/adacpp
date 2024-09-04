@@ -23,9 +23,13 @@ int read_ifc_file(const std::string &file_name) {
 
     std::cout << "Found " << elements->size() << " elements in " << file_name << ":" << std::endl;
 
+    std::ostringstream oss;
     for (auto element : *elements) {
-
-        std::cout << element->data().toString() << std::endl;
+        element->data().toString(oss);
+        oss << "\n";
+        std::cout << oss.str();
+        oss.str("");  // Clear the contents of the stringstream
+        oss.clear();  // Reset any error flags
     }
 
     return 0;
