@@ -27,7 +27,7 @@ requirements:
 
   host:
     - python
-    - occt
+    - occt * {{ variant }}
     - ifcopenshell
     - cgal-cpp
     - scikit-build-core
