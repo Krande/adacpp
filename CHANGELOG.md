@@ -2,6 +2,19 @@
 
 
 
+## v0.1.1 (2024-09-04)
+
+### Fix
+
+* fix: ifco v08 support (#6) ([`539d503`](https://github.com/Krande/adacpp/commit/539d5037af0bdbee8ab3fcc407bb9a5e8369d14d))
+
+### Unknown
+
+* remove hardcoded osx sysroot and deployment target ([`03aef29`](https://github.com/Krande/adacpp/commit/03aef299b4a61103a92440b1b10c9ee6625f8544))
+
+* update conda build variant name ([`17a2a88`](https://github.com/Krande/adacpp/commit/17a2a88f19fc872ade4e557c2ab9636ec17a161e))
+
+
 ## v0.1.0 (2024-01-24)
 
 ### Chore
