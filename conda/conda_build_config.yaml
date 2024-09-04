@@ -2,8 +2,10 @@ occt:
   - 7.7.2=*novtk*
   - 7.7.2=*all*
 
-#CONDA_BUILD_SYSROOT:
-#  - "/Users/runner/work/MacOSX10.15.sdk"  # [osx]
+c_stdlib_version:          # [osx and x86_64]
+  - "10.15"                # [osx and x86_64]
+MACOSX_SDK_VERSION:        # [osx and x86_64]
+  - "10.15"                # [osx and x86_64]
 
 c_compiler:
   - vs2022  # [win]

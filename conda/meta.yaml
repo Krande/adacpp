@@ -10,10 +10,12 @@ source:
   path: ../
 
 build:
+  skip: True  # [py<310]
   number: 0
 
 requirements:
   build:
+    - {{ stdlib("c") }}
     - "{{ compiler('c') }}"
     - "{{ compiler('cxx') }}"
     - "{{ cdt('mesa-libGL-devel') }}" # [unix] provides OpenGL development libraries
@@ -21,7 +23,6 @@ requirements:
   host:
     - python
     - occt
-    - pybind11-stubgen 2.1
     - ifcopenshell
     - cgal-cpp
     - scikit-build-core
@@ -33,9 +34,7 @@ requirements:
 
   run:
     - python
-    - "{{ pin_compatible('occt', max_pin='x.x.x') }}"
     - "{{ pin_compatible('gmsh', max_pin='x.x.x') }}"
-    - "{{ pin_compatible('ifcopenshell', max_pin='x.x.x') }}"
 
 test:
   source_files:
