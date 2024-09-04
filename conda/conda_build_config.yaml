@@ -9,9 +9,11 @@ c_stdlib:
   - vs # [win]
   - sysroot # [linux]
   - macosx_deployment_target # [osx and x86_64]
+
 c_stdlib_version:
   - "10.15"                # [osx and x86_64]
   - '2.17'                 # [linux]
+
 MACOSX_SDK_VERSION:        # [osx and x86_64]
   - "10.15"                # [osx and x86_64]
 
