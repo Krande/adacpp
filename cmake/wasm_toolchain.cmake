@@ -2,6 +2,9 @@
 set(CMAKE_SYSTEM_NAME WebAssembly)
 set(CMAKE_SYSTEM_VERSION 1)
 
+#set(CMAKE_C_COMPILER "em++" CACHE STRING "Path to emscripten C compiler")
+#set(CMAKE_CXX_COMPILER "em++" CACHE STRING "Path to emscripten C++ compiler")
+
 set(CMAKE_C_COMPILER "emcc")
 set(CMAKE_CXX_COMPILER "em++")
 

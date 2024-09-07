@@ -69,7 +69,8 @@ else ()
 endif ()
 
 # Add Nanobind
-if (!BUILD_WASM)
+if (NOT BUILD_WASM)
+    message(STATUS "Not a WASM build")
     include(cmake/nanobind.cmake)
 
     # Link libraries to the module
@@ -92,12 +93,10 @@ if (!BUILD_WASM)
     # install to executable into the bin dir
     message(STATUS "Installing executable to ${EXE_BIN_DIR}")
     install(TARGETS STP2GLB DESTINATION ${EXE_BIN_DIR})
-
 endif ()
 
 # WebAssembly-specific settings
 if (BUILD_WASM)
-
     set(WASM_SOURCES src/wasm_utils.cpp)
     set(WASM_HEADERS src/wasm_utils.h)
 
