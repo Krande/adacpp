@@ -41,7 +41,6 @@ jobs:
           create-args: >-
             python=3.12
             emscripten
-            ada-py
 
       - name: install package
         run: |
