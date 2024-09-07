@@ -2,6 +2,8 @@ name: ci-tests
 
 # bump 1
 on:
+  workflow_dispatch:
+
   push:
 
 # Use concurrency to ensure that only one instance of this workflow is running at a time
