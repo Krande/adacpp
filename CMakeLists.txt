@@ -11,19 +11,6 @@ if (CONDA_LOCAL_DEV)
     set(EXE_BIN_DIR ${CMAKE_INSTALL_PREFIX}/bin)
 endif ()
 
-# If building for WebAssembly, use the custom WASM toolchain
-if (BUILD_WASM)
-    message(STATUS "Building for WebAssembly using Emscripten")
-    set(CMAKE_TOOLCHAIN_FILE "${CMAKE_SOURCE_DIR}/cmake/wasm_toolchain.cmake")
-endif ()
-
-include(cmake/pre_checks.cmake)
-
-find_package(Python 3
-        REQUIRED COMPONENTS Interpreter Development.Module
-        OPTIONAL_COMPONENTS Development.SABIModule
-)
-
 # Create a list called ADA_CPP_SOURCES of all cpp files inside the src dir
 set(ADA_CPP_SOURCES
         src/adacpp.cpp
@@ -62,11 +49,24 @@ set(ADA_CPP_HEADERS
 # Create a empty list to hold all the linked libs
 set(ADA_CPP_LINK_LIBS)
 
-# Add dependencies
-include(cmake/deps_cgal.cmake)
-include(cmake/deps_occ.cmake)
-include(cmake/deps_gmsh.cmake)
-include(cmake/deps_ifc.cmake)
+# If building for WebAssembly, use the custom WASM toolchain
+if (BUILD_WASM)
+    message(STATUS "Building for WebAssembly using Emscripten")
+    #set(CMAKE_TOOLCHAIN_FILE "${CMAKE_SOURCE_DIR}/cmake/wasm_toolchain.cmake")
+    include(cmake/wasm_toolchain.cmake)
+else ()
+    include(cmake/pre_checks.cmake)
+
+    find_package(Python 3
+            REQUIRED COMPONENTS Interpreter Development.Module
+            OPTIONAL_COMPONENTS Development.SABIModule
+    )
+    # Add dependencies
+    include(cmake/deps_cgal.cmake)
+    include(cmake/deps_occ.cmake)
+    include(cmake/deps_gmsh.cmake)
+    include(cmake/deps_ifc.cmake)
+endif ()
 
 # Add Nanobind
 if (!BUILD_WASM)
@@ -94,8 +94,6 @@ if (!BUILD_WASM)
     install(TARGETS STP2GLB DESTINATION ${EXE_BIN_DIR})
 
 endif ()
-
-
 
 # WebAssembly-specific settings
 if (BUILD_WASM)
