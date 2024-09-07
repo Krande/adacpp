@@ -32,7 +32,7 @@ classifiers = [
 
 [tool.scikit-build]
 cmake.args = ["-Wno-dev"]
-cmake.verbose = true
+build.verbose = true
 cmake.build-type = "Release"
 #cmake.build-type = "Debug"
 #ninja.make-fallback = false
