@@ -4,17 +4,25 @@ project(ada-cpp LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 
 OPTION(CONDA_LOCAL_DEV "Install into activate local development conda env." OFF)
+OPTION(BUILD_WASM "Build the project for WebAssembly" OFF)
 
 if (CONDA_LOCAL_DEV)
     message(STATUS "Building for local development conda env.")
     set(EXE_BIN_DIR ${CMAKE_INSTALL_PREFIX}/bin)
 endif ()
 
+# If building for WebAssembly, use the custom WASM toolchain
+if (BUILD_WASM)
+    message(STATUS "Building for WebAssembly using Emscripten")
+    set(CMAKE_TOOLCHAIN_FILE "${CMAKE_SOURCE_DIR}/cmake/wasm_toolchain.cmake")
+endif ()
+
 include(cmake/pre_checks.cmake)
 
 find_package(Python 3
         REQUIRED COMPONENTS Interpreter Development.Module
-        OPTIONAL_COMPONENTS Development.SABIModule)
+        OPTIONAL_COMPONENTS Development.SABIModule
+)
 
 # Create a list called ADA_CPP_SOURCES of all cpp files inside the src dir
 set(ADA_CPP_SOURCES
@@ -61,28 +69,54 @@ include(cmake/deps_gmsh.cmake)
 include(cmake/deps_ifc.cmake)
 
 # Add Nanobind
-include(cmake/nanobind.cmake)
+if (!BUILD_WASM)
+    include(cmake/nanobind.cmake)
 
-# Link libraries to the module
-target_link_libraries(_ada_cpp_ext_impl PRIVATE ${ADA_CPP_LINK_LIBS})
+    # Link libraries to the module
+    target_link_libraries(_ada_cpp_ext_impl PRIVATE ${ADA_CPP_LINK_LIBS})
 
-# Install the module
-install(TARGETS _ada_cpp_ext_impl LIBRARY DESTINATION .)
+    # Install the module
+    install(TARGETS _ada_cpp_ext_impl LIBRARY DESTINATION .)
 
-# Install the C++ executable
-set(SOURCES src/main.cpp src/cadit/occt/step_to_glb.cpp)
-set(HEADERS src/cadit/occt/step_to_glb.h)
+    # Install the C++ executable
+    set(SOURCES src/main.cpp src/cadit/occt/step_to_glb.cpp)
+    set(HEADERS src/cadit/occt/step_to_glb.h)
 
-add_executable(STP2GLB ${SOURCES} ${HEADERS})
+    add_executable(STP2GLB ${SOURCES} ${HEADERS})
 
-set_target_properties(STP2GLB PROPERTIES
-        INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/bin")
+    set_target_properties(STP2GLB PROPERTIES
+            INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/bin"
+    )
+    target_link_libraries(STP2GLB ${ADA_CPP_LINK_LIBS})
 
-target_link_libraries(STP2GLB ${ADA_CPP_LINK_LIBS})
+    # install to executable into the bin dir
+    message(STATUS "Installing executable to ${EXE_BIN_DIR}")
+    install(TARGETS STP2GLB DESTINATION ${EXE_BIN_DIR})
 
-# install to executable into the bin dir
-message(STATUS "Installing executable to ${EXE_BIN_DIR}")
-install(TARGETS STP2GLB DESTINATION ${EXE_BIN_DIR})
+endif ()
+
+
+
+# WebAssembly-specific settings
+if (BUILD_WASM)
+
+    set(WASM_SOURCES src/wasm_utils.cpp)
+    set(WASM_HEADERS src/wasm_utils.h)
+
+    add_library(WASM_UTILS ${WASM_SOURCES} ${WASM_HEADERS})
+    # Custom output for WebAssembly
+    set_target_properties(WASM_UTILS PROPERTIES
+            OUTPUT_NAME "adacpp_utils"
+            SUFFIX ".wasm")
+
+    # Export the `multiply` function for use in JS
+    # Properly escape EXPORTED_FUNCTIONS flag
+    target_link_options(WASM_UTILS PRIVATE
+        "-sEXPORTED_FUNCTIONS=[\"_multiply\"]"
+        "-sEXPORTED_RUNTIME_METHODS=['ccall','cwrap']")
+endif ()
+
+
 
 # Include the tests directory
 OPTION(BUILD_TESTING "Build the testing tree." OFF)
