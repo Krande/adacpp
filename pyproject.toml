@@ -63,7 +63,7 @@ skip = [".pixi", "node_modules", "temp"]
 skip_glob=["**/node_modules/**", "**/temp/**"]
 
 [tool.pixi.project]
-channels = ["conda-forge"]
+channels = ["conda-forge/label/llvm_rc", "conda-forge"]
 platforms = ["win-64", "linux-64"]
 
 [tool.pixi.environments]
@@ -78,6 +78,8 @@ ruff = "0.4.10"
 [tool.pixi.feature.wasm.dependencies]
 nodejs = "*"
 ninja = "*"
+clangxx = { version = ">=19", channel = "conda-forge/label/llvm_rc" }
+clang = { version = ">=19", channel = "conda-forge/label/llvm_rc" }
 emscripten = "*"
 occt = { version = "7.7.2", build = "*novtk*"}
 ifcopenshell = "0.8.0"
@@ -91,4 +93,4 @@ lint = "isort . && black . --config pyproject.toml && ruff check ."
 
 [tool.pixi.feature.wasm.tasks]
 clean = { cmd="mkdir -p build-wasm" }
-wbuild = { cmd="emcmake cmake . -B build-wasm -DBUILD_WASM=ON && cmake --build build-wasm", depends-on = ["clean"] }
+wbuild = { cmd="emcmake cmake . -B build-wasm -G Ninja -DBUILD_WASM=ON && cmake --build build-wasm", depends-on = ["clean"] }
