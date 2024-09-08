@@ -68,10 +68,27 @@ platforms = ["win-64", "linux-64"]
 
 [tool.pixi.environments]
 lint = { features = ["lint"], no-default-feature = true}
+wasm = { features = ["wasm"], no-default-feature = true}
+
 [tool.pixi.feature.lint.dependencies]
 black = "24.4.2"
 isort = "5.13.2"
 ruff = "0.4.10"
 
+[tool.pixi.feature.wasm.dependencies]
+nodejs = "*"
+ninja = "*"
+emscripten = "*"
+occt = { version = "7.7.2", build = "*novtk*"}
+ifcopenshell = "0.8.0"
+cmake = "3.30.3"
+cgal-cpp = "5.6.1"
+tinygltf = "2.8.21"
+gmsh = "*"
+
 [tool.pixi.feature.lint.tasks]
 lint = "isort . && black . --config pyproject.toml && ruff check ."
+
+[tool.pixi.feature.wasm.tasks]
+clean = { cmd="mkdir -p build-wasm" }
+wbuild = { cmd="emcmake cmake . -B build-wasm -DBUILD_WASM=ON && cmake --build build-wasm", depends-on = ["clean"] }

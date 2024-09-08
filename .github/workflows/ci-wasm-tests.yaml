@@ -45,5 +45,5 @@ jobs:
       - name: install package
         run: |
           mkdir build && cd build
-          emcmake cmake ..
+          emcmake cmake .. -DBUILD_WASM=ON
           emmake make

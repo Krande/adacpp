@@ -1,6 +1,7 @@
 build/
 .idea/
 cmake-build*/
+build*/
 .env
 .env.json
 temp/
