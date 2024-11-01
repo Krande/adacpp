@@ -31,7 +31,7 @@ jobs:
       - name: Install OpenGL dependencies
         run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev
 
-      - uses: mamba-org/setup-micromamba@v1 # https://github.com/mamba-org/setup-micromamba
+      - uses: mamba-org/setup-micromamba@v2 # https://github.com/mamba-org/setup-micromamba
         with:
           environment-file: environment.build.yml
           cache-environment: true

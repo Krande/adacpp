@@ -83,7 +83,7 @@ jobs:
           curl -L https://github.com/phracker/MacOSX-SDKs/releases/download/11.3/MacOSX10.15.sdk.tar.xz | tar -xvJf - -C /Users/runner/work/
 
 
-      - uses: mamba-org/setup-micromamba@v1 # https://github.com/mamba-org/setup-micromamba
+      - uses: mamba-org/setup-micromamba@v2 # https://github.com/mamba-org/setup-micromamba
         with:
           environment-name: test-env
           cache-environment: true
