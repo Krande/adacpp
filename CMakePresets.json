@@ -1,16 +1,13 @@
 {
   "version": 6,
-  "include": [
-    ".env.json"
-  ],
   "configurePresets": [
     {
       "name": "win-local",
-      "inherits": ["env-vars"],
       "generator": "Ninja",
       "hidden": false,
       "environment": {
-        "LIBRARY_PREFIX": "$env{PREFIX}/Library"
+        "PREFIX": "${sourceDir}/.pixi/envs/build",
+        "LIBRARY_PREFIX": "${sourceDir}/.pixi/envs/build/Library"
       },
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelwithDebInfo",
@@ -20,7 +17,7 @@
         "OpenCASCADE_DIR": "$env{LIBRARY_PREFIX}/lib/cmake/opencascade",
         "OpenCASCADE_INCLUDE_DIR": "$env{LIBRARY_PREFIX}/include/opencascade",
         "Python_EXECUTABLE": "$env{PREFIX}/python.exe",
-        "Python_LIBRARIES": "$env{PREFIX}/libs/python311.lib",
+        "Python_LIBRARIES": "$env{PREFIX}/libs/python312.lib",
         "Python_INCLUDE_DIRS": "$env{LIBRARY_PREFIX}/include",
         "BUILD_TESTING": "ON",
         "CONDA_LOCAL_DEV": "ON"
@@ -28,7 +25,6 @@
     },
      {
       "name": "win-local-wasm",
-      "inherits": ["env-vars"],
       "generator": "Ninja",
       "hidden": false,
       "environment": {
@@ -51,7 +47,6 @@
     },
     {
       "name": "gcc-local-wasm",
-      "inherits": ["env-vars"],
       "hidden": false,
       "environment": {
         "LIBRARY_PREFIX": "$env{PREFIX}"
@@ -71,7 +66,6 @@
     },
     {
       "name": "gcc-local",
-      "inherits": ["env-vars"],
       "hidden": false,
       "environment": {
         "LIBRARY_PREFIX": "$env{PREFIX}"

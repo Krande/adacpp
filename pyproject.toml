@@ -60,37 +60,46 @@ ignore = ["E741"]
 [tool.isort]
 profile = "black"
 skip = [".pixi", "node_modules", "temp"]
-skip_glob=["**/node_modules/**", "**/temp/**"]
+skip_glob = ["**/node_modules/**", "**/temp/**"]
 
 [tool.pixi.project]
-channels = ["conda-forge/label/llvm_rc", "conda-forge"]
+channels = ["conda-forge"]
 platforms = ["win-64", "linux-64"]
 
 [tool.pixi.environments]
-lint = { features = ["lint"], no-default-feature = true}
-wasm = { features = ["wasm"], no-default-feature = true}
+lint = { features = ["lint"], no-default-feature = true }
+common = { features = ["common"], no-default-feature = true }
+wasm = { features = ["wasm", "common"], no-default-feature = true }
+build = { features = ["build", "common"], no-default-feature = true }
+
+[tool.pixi.feature.common.dependencies]
+python = "==3.12"
+occt = { version = "==7.8.1", build = "*novtk*" }
+ifcopenshell = "==0.8.0"
+nanobind = "==2.1.0"
+pytest = "==8.3.2"
+scikit-build-core = "==0.10.7"
+cmake = "==3.30.3"
+numpy = "*"
+cgal-cpp = "==6.0.1"
+cli11 = "*"
+tinygltf = "==2.8.21" # This must be installed in target dir also if you want to compile
+gmsh = "*"
+[tool.pixi.feature.build.dependencies]
 
 [tool.pixi.feature.lint.dependencies]
-black = "24.4.2"
-isort = "5.13.2"
-ruff = "0.4.10"
+black = "==24.4.2"
+isort = "==5.13.2"
+ruff = "==0.4.10"
 
 [tool.pixi.feature.wasm.dependencies]
 nodejs = "*"
 ninja = "*"
-clangxx = { version = ">=19", channel = "conda-forge/label/llvm_rc" }
-clang = { version = ">=19", channel = "conda-forge/label/llvm_rc" }
 emscripten = "*"
-occt = { version = "7.7.2", build = "*novtk*"}
-ifcopenshell = "0.8.0"
-cmake = "3.30.3"
-cgal-cpp = "5.6.1"
-tinygltf = "2.8.21"
-gmsh = "*"
 
 [tool.pixi.feature.lint.tasks]
 lint = "isort . && black . --config pyproject.toml && ruff check ."
 
 [tool.pixi.feature.wasm.tasks]
-clean = { cmd="mkdir -p build-wasm" }
-wbuild = { cmd="emcmake cmake . -B build-wasm -G Ninja -DBUILD_WASM=ON && cmake --build build-wasm", depends-on = ["clean"] }
+clean = { cmd = "mkdir -p build-wasm" }
+wbuild = { cmd = "emcmake cmake . -B build-wasm -G Ninja -DBUILD_WASM=ON && cmake --build build-wasm", depends-on = ["clean"] }

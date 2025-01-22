@@ -11,14 +11,6 @@ if (OpenCASCADE_FOUND)
 
     list(APPEND
             ADA_CPP_LINK_LIBS
-            TKernel
-            TKMath
-            TKBRep
-            TKPrim
-            TKTopAlgo
-            TKSTEP
-            TKXDESTEP
-            TKLCAF
-            TKXCAF
-            TKRWMesh)
+            ${OpenCASCADE_LIBRARIES}
+    )
 endif (OpenCASCADE_FOUND)
