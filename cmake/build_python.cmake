@@ -15,3 +15,9 @@ message(STATUS "AdaCpp sources: " ${ADA_CPP_SOURCES_STR})
 
 # Create a Python module
 nanobind_add_module(_ada_cpp_ext_impl STABLE_ABI ${ADA_CPP_SOURCES})
+
+# Link libraries to the module
+target_link_libraries(_ada_cpp_ext_impl PRIVATE ${ADA_CPP_LINK_LIBS})
+
+# Install the module
+install(TARGETS _ada_cpp_ext_impl LIBRARY DESTINATION .)

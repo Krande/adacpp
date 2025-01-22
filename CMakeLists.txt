@@ -5,6 +5,9 @@ set(CMAKE_CXX_STANDARD 20)
 
 OPTION(CONDA_LOCAL_DEV "Install into activate local development conda env." OFF)
 OPTION(BUILD_WASM "Build the project for WebAssembly" OFF)
+OPTION(BUILD_PYTHON "Build the project for Python" OFF)
+OPTION(BUILD_STP2GLB "Build the STP2GLB executable" OFF)
+OPTION(BUILD_TESTING "Build the testing tree." OFF)
 
 if (CONDA_LOCAL_DEV)
     message(STATUS "Building for local development conda env.")
@@ -52,7 +55,6 @@ set(ADA_CPP_LINK_LIBS)
 # If building for WebAssembly, use the custom WASM toolchain
 if (BUILD_WASM)
     message(STATUS "Building for WebAssembly using Emscripten")
-    #set(CMAKE_TOOLCHAIN_FILE "${CMAKE_SOURCE_DIR}/cmake/wasm_toolchain.cmake")
     include(cmake/wasm_toolchain.cmake)
 else ()
     include(cmake/pre_checks.cmake)
@@ -68,45 +70,17 @@ else ()
     include(cmake/deps_ifc.cmake)
 endif ()
 
-# Add Nanobind
-if (NOT BUILD_WASM)
-    message(STATUS "Not a WASM build")
-    include(cmake/nanobind.cmake)
+if (BUILD_STP2GLB)
+    message(STATUS "Building the STP2GLB executable")
+    include(cmake/build_stp2glb.cmake)
+endif ()
 
-    # Link libraries to the module
-    target_link_libraries(_ada_cpp_ext_impl PRIVATE ${ADA_CPP_LINK_LIBS})
-
-    # Install the module
-    install(TARGETS _ada_cpp_ext_impl LIBRARY DESTINATION .)
-
-    # Install the C++ executable
-    set(SOURCES src/main.cpp src/cadit/occt/step_to_glb.cpp)
-    set(HEADERS src/cadit/occt/step_to_glb.h)
-
-    add_executable(STP2GLB ${SOURCES} ${HEADERS})
-
-    set_target_properties(STP2GLB PROPERTIES
-            INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/bin"
-    )
-    target_link_libraries(STP2GLB ${ADA_CPP_LINK_LIBS})
-
-    # install to executable into the bin dir
-    message(STATUS "Installing executable to ${EXE_BIN_DIR}")
-    install(TARGETS STP2GLB DESTINATION ${EXE_BIN_DIR})
+if (BUILD_PYTHON)
+    message(STATUS "Building for Python")
+    include(cmake/build_python.cmake)
 endif ()
 
 # WebAssembly-specific settings
 if (BUILD_WASM)
     include(cmake/wasm_build.cmake)
 endif ()
-
-
-
-# Include the tests directory
-OPTION(BUILD_TESTING "Build the testing tree." OFF)
-if (BUILD_TESTING)
-    message(STATUS "Building the testing tree.")
-    set(CMAKE_INSTALL_RPATH "${EXE_BIN_DIR}")
-    set(CMAKE_BUILD_RPATH "${EXE_BIN_DIR}")
-    include(tests/cpp/tests.cmake)
-endif (BUILD_TESTING)

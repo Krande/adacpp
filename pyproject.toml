@@ -71,6 +71,10 @@ lint = { features = ["lint"], no-default-feature = true }
 common = { features = ["common"], no-default-feature = true }
 wasm = { features = ["wasm", "common"], no-default-feature = true }
 build = { features = ["build", "common"], no-default-feature = true }
+conda = { features = ["conda"], no-default-feature = true }
+
+[tool.pixi.feature.conda.dependencies]
+rattler-build = "*"
 
 [tool.pixi.feature.common.dependencies]
 python = "==3.12"
@@ -103,3 +107,6 @@ lint = "isort . && black . --config pyproject.toml && ruff check ."
 [tool.pixi.feature.wasm.tasks]
 clean = { cmd = "mkdir -p build-wasm" }
 wbuild = { cmd = "emcmake cmake . -B build-wasm -G Ninja -DBUILD_WASM=ON && cmake --build build-wasm", depends-on = ["clean"] }
+
+[tool.pixi.feature.conda.tasks]
+build = { cmd = "rattler-build build -r conda/recipe.yaml --experimental", description = "Build the conda package" }
