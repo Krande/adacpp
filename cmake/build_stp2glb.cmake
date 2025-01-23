@@ -1,6 +1,21 @@
+# Get .h files from src/stp2glb/core
+file(GLOB_RECURSE CORE_HEADERS src/stp2glb/core/*.h)
+# Get .cpp files from src/stp2glb/core
+file(GLOB_RECURSE CORE_SOURCES src/stp2glb/core/*.cpp)
 # Install the C++ executable
-set(SOURCES src/main.cpp src/cadit/occt/step_to_glb.cpp)
-set(HEADERS src/cadit/occt/step_to_glb.h)
+set(SOURCES
+        src/geom/Color.cpp
+        src/stp2glb/main.cpp
+        src/stp2glb/config_utils.cpp
+        ${CORE_SOURCES}
+
+)
+set(HEADERS
+        src/geom/Color.h
+        src/stp2glb/config_structs.h
+        src/stp2glb/config_utils.h
+        ${CORE_HEADERS}
+)
 
 add_executable(STP2GLB ${SOURCES} ${HEADERS})
 
@@ -10,13 +25,24 @@ set_target_properties(STP2GLB PROPERTIES
 target_link_libraries(STP2GLB ${ADA_CPP_LINK_LIBS})
 
 # install to executable into the bin dir
-# If part of EXE_BIN_DIR contains project name, use different install dir
-message(STATUS "Installing executable to ${EXE_BIN_DIR}")
-install(TARGETS STP2GLB DESTINATION ${EXE_BIN_DIR})
+# If EXE_BIN_DIR is not set, use root bin dir
+if (NOT DEFINED STP2GLB_BIN_DIR)
+    message(STATUS "STP2GLB_BIN_DIR not set, using default")
+    set(CONDA_PREFIX $ENV{CONDA_PREFIX})
+    message(STATUS "CONDA_PREFIX: ${CONDA_PREFIX}")
+    if (DEFINED CONDA_PREFIX)
+        set(STP2GLB_BIN_DIR "${CONDA_PREFIX}/Library/bin")
+    else ()
+        set(STP2GLB_BIN_DIR ${CMAKE_INSTALL_PREFIX}/bin)
+    endif ()
+endif ()
+
+message(STATUS "Installing executable to ${STP2GLB_BIN_DIR}")
+install(TARGETS STP2GLB DESTINATION ${STP2GLB_BIN_DIR})
 
 if (BUILD_TESTING)
     message(STATUS "Building the testing tree.")
-    set(CMAKE_INSTALL_RPATH "${EXE_BIN_DIR}")
-    set(CMAKE_BUILD_RPATH "${EXE_BIN_DIR}")
+    set(CMAKE_INSTALL_RPATH "${STP2GLB_BIN_DIR}")
+    set(CMAKE_BUILD_RPATH "${STP2GLB_BIN_DIR}")
     include(tests/cpp/tests.cmake)
 endif (BUILD_TESTING)

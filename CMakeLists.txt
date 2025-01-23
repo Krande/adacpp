@@ -3,16 +3,11 @@ cmake_minimum_required(VERSION 3.20)
 project(ada-cpp LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 
-OPTION(CONDA_LOCAL_DEV "Install into activate local development conda env." OFF)
 OPTION(BUILD_WASM "Build the project for WebAssembly" OFF)
 OPTION(BUILD_PYTHON "Build the project for Python" ON)
 OPTION(BUILD_STP2GLB "Build the STP2GLB executable" ON)
 OPTION(BUILD_TESTING "Build the testing tree." OFF)
 
-if (CONDA_LOCAL_DEV)
-    message(STATUS "Building for local development conda env.")
-    set(EXE_BIN_DIR ${CMAKE_INSTALL_PREFIX}/bin)
-endif ()
 
 # Create a list called ADA_CPP_SOURCES of all cpp files inside the src dir
 set(ADA_CPP_SOURCES

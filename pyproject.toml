@@ -31,7 +31,7 @@ classifiers = [
 "Bug Tracker" = "https://github.com/Krande/adacpp/issues"
 
 [tool.scikit-build]
-cmake.args = ["-Wno-dev","-DBUILD_TYPE=Release", "-DBUILD_TESTING=ON", "-DBUILD_PYTHON=ON", "-DBUILD_STP2GLB=ON", "-DBUILD_WASM=OFF"]
+cmake.args = ["-Wno-dev","-DCMAKE_BUILD_TYPE=Release", "-DBUILD_TESTING=ON", "-DBUILD_PYTHON=ON", "-DBUILD_STP2GLB=ON", "-DBUILD_WASM=OFF"]
 build-dir = "build/{wheel_tag}"
 
 # This is the only editable mode currently
@@ -116,6 +116,10 @@ wbuild = { cmd = "emcmake cmake . -B build-wasm -G Ninja -DBUILD_WASM=ON && cmak
 build = { cmd = "rattler-build build -r conda/recipe.yaml --experimental", description = "Build the conda package" }
 
 [tool.pixi.feature.test.tasks]
-update = { cmd = "pip install -e .", description = "Update the package" }
+update = { cmd = "pip install -e . -v", description = "Update the package" }
 pytest = { cmd = "pytest tests/py", description = "Run the tests", depends-on = ["update"] }
-cpptest = { cmd = "ctest -V", description = "Run the C++ tests" }
+stp2glb = { cmd = "STP2GLB.exe", description = "Run the C++ tests" }
+echo = { cmd = "echo \"$CONDA_PREFIX\"", description = "Echo Hello World" }
+
+[tool.pixi.feature.test.activation.env]
+STP2GLB_EXE_DIR = "$CONDA_PREFIX/Library/bin"
