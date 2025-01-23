@@ -28,7 +28,7 @@ requirements:
       then: make
   host:
     - python
-    - occt * *${{ variant }}*
+    - occt
     - ifcopenshell
     - cgal-cpp
     - scikit-build-core
@@ -46,14 +46,15 @@ requirements:
 tests:
   - files:
       source:
-        - tests
-        - files
+        - tests/*
+        - files/*
     requirements:
       run:
         - pytest
         - ada-py
+        - cmake
     script:
-      - pytest tests
+      - pytest tests/py
 
 about:
   license: GPL-3.0-or-later

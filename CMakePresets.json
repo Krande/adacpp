@@ -4,19 +4,21 @@
     {
       "name": "win-shared",
       "generator": "Ninja",
-      "hidden": false,
+      "hidden": true,
       "cacheVariables": {
         "CMAKE_PREFIX_PATH": "$env{LIBRARY_PREFIX};$env{LIBRARY_PREFIX}/include;$env{LIBRARY_PREFIX}/lib;$env{LIBRARY_PREFIX}/bin",
         "CMAKE_INSTALL_PREFIX": "$env{LIBRARY_PREFIX}",
         "CGAL_DIR": "$env{LIBRARY_PREFIX}/lib/cmake/CGAL",
         "OpenCASCADE_DIR": "$env{LIBRARY_PREFIX}/lib/cmake/opencascade",
         "OpenCASCADE_INCLUDE_DIR": "$env{LIBRARY_PREFIX}/include/opencascade",
+        "Python_LIBRARIES": "$env{PREFIX}/libs/python312.lib",
         "Python_EXECUTABLE": "$env{PREFIX}/python.exe",
         "Python_INCLUDE_DIRS": "$env{LIBRARY_PREFIX}/include"
       }
     },
     {
       "name": "win-local",
+      "inherits": "win-shared",
       "generator": "Ninja",
       "hidden": false,
       "binaryDir": "${sourceDir}/build/${presetName}",

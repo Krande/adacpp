@@ -9,6 +9,9 @@ if (OpenCASCADE_FOUND)
     include_directories(${OpenCASCADE_INCLUDE_DIR})
     link_directories(${OpenCASCADE_LIBRARY_DIR})
 
+    # Remove TKIVtk from the list of OpenCASCADE libraries (if it exists) because it is causing issues with VTK
+    list(REMOVE_ITEM OpenCASCADE_LIBRARIES TKIVtk)
+
     list(APPEND
             ADA_CPP_LINK_LIBS
             ${OpenCASCADE_LIBRARIES}

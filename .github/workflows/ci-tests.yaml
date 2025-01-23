@@ -33,19 +33,12 @@ jobs:
       - name: Install OpenGL dependencies
         run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev
 
-      - uses: mamba-org/setup-micromamba@v1 # https://github.com/mamba-org/setup-micromamba
+      - uses: prefix-dev/setup-pixi@v0.8.1
         with:
-          environment-file: environment.build.yml
-          cache-environment: true
-          cache-downloads: true
-          create-args: >-
-            python=3.12
-            ada-py
+          pixi-version: v0.40.3
+          environments: test
+          cache: true
 
       - name: install package
         run: |
-          pip install .
-
-      - name: test package
-        run: |
-          pytest tests
+          pixi run pytest

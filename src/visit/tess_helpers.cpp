@@ -124,7 +124,7 @@ void tess_helper_module(nb::module_ &m) {
             .def_ro("indices", &Mesh::indices, "The indices of the mesh")
             .def_ro("normals", &Mesh::normals, "The normals of the mesh")
             .def_ro("mesh_type", &Mesh::mesh_type, "The type of mesh", nb::enum_<MeshType>(m, "MeshType"))
-            .def_ro("color", &Mesh::color, "The color of the mesh", nb::class_<Color>(m, "Color"))
+            .def_ro("color", &Mesh::color, "The color of the mesh")
             .def_ro("groups", &Mesh::group_reference, "The groups of the mesh",
                     nb::class_<GroupReference>(m, "GroupReference"));
 

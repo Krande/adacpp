@@ -10,6 +10,7 @@ set_target_properties(STP2GLB PROPERTIES
 target_link_libraries(STP2GLB ${ADA_CPP_LINK_LIBS})
 
 # install to executable into the bin dir
+# If part of EXE_BIN_DIR contains project name, use different install dir
 message(STATUS "Installing executable to ${EXE_BIN_DIR}")
 install(TARGETS STP2GLB DESTINATION ${EXE_BIN_DIR})
 

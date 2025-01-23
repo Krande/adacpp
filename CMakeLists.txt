@@ -5,8 +5,8 @@ set(CMAKE_CXX_STANDARD 20)
 
 OPTION(CONDA_LOCAL_DEV "Install into activate local development conda env." OFF)
 OPTION(BUILD_WASM "Build the project for WebAssembly" OFF)
-OPTION(BUILD_PYTHON "Build the project for Python" OFF)
-OPTION(BUILD_STP2GLB "Build the STP2GLB executable" OFF)
+OPTION(BUILD_PYTHON "Build the project for Python" ON)
+OPTION(BUILD_STP2GLB "Build the STP2GLB executable" ON)
 OPTION(BUILD_TESTING "Build the testing tree." OFF)
 
 if (CONDA_LOCAL_DEV)
@@ -59,8 +59,7 @@ if (BUILD_WASM)
 else ()
     include(cmake/pre_checks.cmake)
 
-    find_package(Python 3
-            REQUIRED COMPONENTS Interpreter Development.Module
+    find_package(Python REQUIRED COMPONENTS Interpreter Development.Module
             OPTIONAL_COMPONENTS Development.SABIModule
     )
     # Add dependencies
