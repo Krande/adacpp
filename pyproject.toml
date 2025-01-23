@@ -85,6 +85,10 @@ cli11 = "*"
 tinygltf = "==2.8.21" # This must be installed in target dir also if you want to compile
 gmsh = "*"
 
+[tool.pixi.feature.common.target.linux-64.dependencies]
+gxx="*"
+mesa-libgl-cos7-aarch64="*"
+
 [tool.pixi.feature.build.dependencies]
 
 [tool.pixi.feature.test.dependencies]

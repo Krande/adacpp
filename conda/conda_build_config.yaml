@@ -30,7 +30,7 @@ c_compiler_version:
 
 cxx_compiler:
   - vs2022  # [win]
-  - gcc     # [linux]
+  - gxx     # [linux]
   - clang   # [osx]
 
 cxx_compiler_version:
