@@ -143,6 +143,7 @@ int write_to_gltf(const std::string& filename, Mesh mesh) {
 int write_boxes_to_gltf(const std::string &filename, const std::vector<std::vector<float>> &box_origins,
                          const std::vector<std::vector<float>> &box_dims) {
     tinygltf::Model model;
+    std::cout << "Exporting to " << filename <<"\n";
 
     // Create a scene
     tinygltf::Scene scene;
@@ -150,9 +151,13 @@ int write_boxes_to_gltf(const std::string &filename, const std::vector<std::vect
     model.defaultScene = 0;
 
     for (int i = 0; i < box_origins.size(); i++) {
-        TopoDS_Solid box = create_box(box_origins[i], box_dims[i]);
+        const auto& origin = box_origins[i];
+        const auto& dim = box_dims[i];
+        TopoDS_Solid box = create_box(origin, dim);
         Mesh mesh = tessellate_shape(0, box, true, 1.0, false);
         mesh.color = random_color();
+
+        std::cout << "Adding mesh" << i << "\n";
         AddMesh(model, "mesh", mesh);
     }
     // If filename contains .glb set variable "glb" to true

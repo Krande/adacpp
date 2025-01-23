@@ -97,9 +97,6 @@ pytest = "==8.3.2"
 ada-py = "*"
 pip = "*"
 
-[tool.pixi.feature.test.pypi-dependencies]
-#ada-cpp = { path = ".", editable = true}
-
 [tool.pixi.feature.lint.dependencies]
 black = "==24.4.2"
 isort = "==5.13.2"
