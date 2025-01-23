@@ -1,7 +1,9 @@
 # Get .h files from src/stp2glb/core
 file(GLOB_RECURSE CORE_HEADERS src/stp2glb/core/*.h)
+
 # Get .cpp files from src/stp2glb/core
 file(GLOB_RECURSE CORE_SOURCES src/stp2glb/core/*.cpp)
+
 # Install the C++ executable
 set(SOURCES
         src/geom/Color.cpp
@@ -31,7 +33,11 @@ if (NOT DEFINED STP2GLB_BIN_DIR)
     set(CONDA_PREFIX $ENV{CONDA_PREFIX})
     message(STATUS "CONDA_PREFIX: ${CONDA_PREFIX}")
     if (DEFINED CONDA_PREFIX)
+        if (WIN)
         set(STP2GLB_BIN_DIR "${CONDA_PREFIX}/Library/bin")
+        else()
+            set(STP2GLB_BIN_DIR "${CONDA_PREFIX}/bin")
+        endif ()
     else ()
         set(STP2GLB_BIN_DIR ${CMAKE_INSTALL_PREFIX}/bin)
     endif ()

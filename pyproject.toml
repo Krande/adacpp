@@ -87,7 +87,8 @@ gmsh = "*"
 
 [tool.pixi.feature.common.target.linux-64.dependencies]
 gxx="*"
-mesa-libgl-cos7-aarch64="*"
+mesa-libgl-devel-cos7-x86_64="*"
+libxext-conda-x86_64="*"
 
 [tool.pixi.feature.build.dependencies]
 
@@ -122,8 +123,17 @@ build = { cmd = "rattler-build build -r conda/recipe.yaml --experimental", descr
 [tool.pixi.feature.test.tasks]
 update = { cmd = "pip install -e . -v", description = "Update the package" }
 pytest = { cmd = "pytest tests/py", description = "Run the tests", depends-on = ["update"] }
-stp2glb = { cmd = "STP2GLB.exe", description = "Run the C++ tests" }
 echo = { cmd = "echo \"$CONDA_PREFIX\"", description = "Echo Hello World" }
 
-[tool.pixi.feature.test.activation.env]
+[tool.pixi.feature.test.target.win-64.tasks]
+stp2glb = { cmd = "STP2GLB.exe", description = "Run the C++ tests" }
+
+[tool.pixi.feature.test.target.linux-64.tasks]
+stp2glb = { cmd = "STP2GLB", description = "Run the C++ tests" }
+
+[tool.pixi.feature.test.target.win-64.activation.env]
 STP2GLB_EXE_DIR = "$CONDA_PREFIX/Library/bin"
+
+[tool.pixi.feature.test.target.linux-64.activation.env]
+STP2GLB_EXE_DIR = "$CONDA_PREFIX/bin"
+#CMAKE_PREFIX_PATH = "$CONDA_PREFIX:$CONDA_PREFIX/include:$CONDA_PREFIX/lib:$CONDA_PREFIX/bin"

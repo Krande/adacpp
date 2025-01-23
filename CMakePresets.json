@@ -17,6 +17,20 @@
       }
     },
     {
+      "name": "linux-shared",
+      "generator": "Ninja",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "$env{PREFIX}:$env{PREFIX}/include:$env{PREFIX}/lib:$env{PREFIX}/bin",
+        "CMAKE_INSTALL_PREFIX": "$env{PREFIX}",
+        "CGAL_DIR": "$env{PREFIX}/lib/cmake/CGAL",
+        "OpenCASCADE_DIR": "$env{PREFIX}/lib/cmake/opencascade",
+        "OpenCASCADE_INCLUDE_DIR": "$env{PREFIX}/include/opencascade",
+        "Python_EXECUTABLE": "$env{PREFIX}/bin/python",
+        "Python_INCLUDE_DIRS": "$env{PREFIX}/include"
+      }
+    },
+    {
       "name": "win-local",
       "inherits": "win-shared",
       "generator": "Ninja",
@@ -32,6 +46,22 @@
         "BUILD_PYTHON": "ON",
         "BUILD_STP2GLB": "ON",
         "CONDA_LOCAL_DEV": "ON"
+      }
+    },
+    {
+      "name": "linux-local",
+      "inherits": "linux-shared",
+      "generator": "Ninja",
+      "hidden": false,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "environment": {
+        "PREFIX": "${sourceDir}/.pixi/envs/build"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelwithDebInfo",
+        "BUILD_TESTING": "ON",
+        "BUILD_PYTHON": "ON",
+        "BUILD_STP2GLB": "ON"
       }
     },
     {
