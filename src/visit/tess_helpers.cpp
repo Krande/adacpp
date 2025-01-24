@@ -11,7 +11,7 @@
 #include "../helpers/helpers.h"
 
 
-Mesh tessellate_shape(int id, const TopoDS_Shape &shape, bool compute_edges, float mesh_quality, bool parallel_meshing) {
+Mesh tessellate_shape(const int id, const TopoDS_Shape &shape, const bool compute_edges, const float mesh_quality, const bool parallel_meshing) {
     ShapeTesselator shape_tess(shape);
     shape_tess.Compute(compute_edges, mesh_quality, parallel_meshing);
     std::vector pos = shape_tess.GetVerticesPositionAsTuple();

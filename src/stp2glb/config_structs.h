@@ -1,7 +1,3 @@
-//
-// Created by ofskrand on 07.01.2025.
-//
-
 #ifndef CONFIG_STRUCTS_H
 #define CONFIG_STRUCTS_H
 

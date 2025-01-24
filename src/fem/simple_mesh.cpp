@@ -1,11 +1,8 @@
-//
-// Created by Kristoffer on 27/07/2023.
-//
 #include "simple_mesh.h"
 #include <gmsh.h>
 #include "../binding_core.h"
 
-void simple_gmesh(std::string filename) {
+void simple_gmesh(const std::string& filename) {
     gmsh::initialize();
     gmsh::model::add("square");
     gmsh::model::geo::addPoint(0, 0, 0, 0.1, 1);

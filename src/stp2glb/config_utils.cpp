@@ -1,7 +1,3 @@
-//
-// Created by ofskrand on 13.01.2025.
-//
-
 #include "config_utils.h"
 #include <fstream>
 #include <iostream>

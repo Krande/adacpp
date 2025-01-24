@@ -5,8 +5,7 @@
 #include "cadit/tinygltf/tiny.h"
 #include "fem/simple_mesh.h"
 #include "geom/geometries.h"
-#include "visit/TessellateFactory.h"
-#include "visit/tess_py_wrap.h"
+#include "visit/visit_py_wrap.h"
 #include "cadit/occt/occt_convert.h"
 
 // Define the modules that will be exposed in python

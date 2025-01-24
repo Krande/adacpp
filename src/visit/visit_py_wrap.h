@@ -6,3 +6,4 @@
 #include "../binding_core.h"
 
 void tess_helper_module(nb::module_ &m);
+void tess_module(nb::module_ &m);
