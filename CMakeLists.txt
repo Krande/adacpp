@@ -6,54 +6,67 @@ set(CMAKE_CXX_STANDARD 20)
 OPTION(BUILD_WASM "Build the project for WebAssembly" OFF)
 OPTION(BUILD_PYTHON "Build the project for Python" ON)
 OPTION(BUILD_STP2GLB "Build the STP2GLB executable" ON)
-OPTION(BUILD_TESTING "Build the testing tree." OFF)
+OPTION(BUILD_STP2GLB_TESTING "Build the testing tree." OFF)
+OPTION(BUILD_DEBUG_TESTS "Build the testing tree used primarily for debugging." OFF)
 
+if (DEFINED TINY_INCLUDE_DIR)
+    include_directories(${TINY_INCLUDE_DIR})
+    message(STATUS "TINY_INCLUDE_DIR set to ${TINY_INCLUDE_DIR}")
+else()
+    message(STATUS "TINY_INCLUDE_DIR not set")
+endif ()
 
 # Create a list called ADA_CPP_SOURCES of all cpp files inside the src dir
 set(ADA_CPP_SOURCES
-        src/adacpp.cpp
         src/cadit/ifc/ifcop.cpp
-        src/cadit/ifc/ifc_py_wrap.cpp
+        src/cadit/occt/step_to_glb.cpp
+        src/cadit/occt/step_writer.cpp
+        src/cadit/occt/colors.cpp
+        src/cadit/tinygltf/tinygltf.cpp
+        src/cadit/tinygltf/tiny_helpers.cpp
         src/helpers/helpers.cpp
         src/geom/Color.cpp
         src/geom/Models.cpp
         src/geom/geometries.cpp
-        src/geom/geom_py_wrap.cpp
-        src/cadit/occt/step_to_glb.cpp
-        src/cadit/occt/step_writer.cpp
-        src/cadit/occt/occt_py_wrap.cpp
-        src/cadit/occt/colors.cpp
-        src/cadit/tinygltf/tinygltf.cpp
-        src/cadit/tinygltf/tiny_helpers.cpp
-        src/cadit/tinygltf/tiny_py_wrap.cpp
         src/fem/simple_mesh.cpp
-        src/fem/fem_py_wrap.cpp
         src/visit/ShapeTesselator.cpp
         src/visit/tess_helpers.cpp
-        src/visit/visit_py_wrap.cpp
         src/visit/manual/solids/boxes.cpp
         src/visit/TessellateFactory.cpp
 )
 set(ADA_CPP_HEADERS
         src/cadit/ifc/ifcop.h
-        src/cadit/ifc/ifc_py_wrap.h
-        src/helpers/helpers.h
-        src/geom/Color.h
-        src/geom/geometries.h
-        src/geom/geom_py_wrap.h
         src/cadit/occt/step_to_glb.h
         src/cadit/occt/step_writer.h
-        src/cadit/occt/occt_py_wrap.h
         src/cadit/occt/colors.h
         src/cadit/tinygltf/tiny_helpers.h
-        src/cadit/tinygltf/tiny_py_wrap.h
         src/fem/simple_mesh.h
-        src/fem/fem_py_wrap.h
+        src/geom/Color.h
+        src/geom/geometries.h
+        src/helpers/helpers.h
         src/visit/ShapeTesselator.h
         src/visit/tess_helpers.h
-        src/visit/visit_py_wrap.h
         src/visit/TessellateFactory.h
 )
+
+set(ADA_CPP_PY_SOURCES
+        src/adacpp_py_wrap.cpp
+        src/cadit/ifc/ifc_py_wrap.cpp
+        src/cadit/occt/occt_py_wrap.cpp
+        src/cadit/tinygltf/tiny_py_wrap.cpp
+        src/geom/geom_py_wrap.cpp
+        src/fem/fem_py_wrap.cpp
+        src/visit/visit_py_wrap.cpp
+)
+set(ADA_CPP_PY_HEADERS
+        src/cadit/ifc/ifc_py_wrap.h
+        src/cadit/occt/occt_py_wrap.h
+        src/cadit/tinygltf/tiny_py_wrap.h
+        src/geom/geom_py_wrap.h
+        src/fem/fem_py_wrap.h
+        src/visit/visit_py_wrap.h
+)
+
 # Create a empty list to hold all the linked libs
 set(ADA_CPP_LINK_LIBS)
 
@@ -89,7 +102,7 @@ if (BUILD_WASM)
     include(cmake/wasm_build.cmake)
 endif ()
 
-if (BUILD_TESTING)
+if (BUILD_DEBUG_TESTS)
     message(STATUS "Building the testing tree.")
-    #include(tests/cpp/test1.cmake)
-endif ()
+    include(tests/cpp/test1.cmake)
+endif (BUILD_DEBUG_TESTS)

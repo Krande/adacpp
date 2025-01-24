@@ -1,16 +1,12 @@
-//
-// Created by ofskrand on 24.01.2025.
-//
 #include <iostream>
 
 #include "../../src/geom/Mesh.h"
 #include "../../src/visit/tess_helpers.h"
 #include "../../src/helpers/helpers.h"
 #include "../../src/cadit/tinygltf/tiny_helpers.h"
-#include <tiny_gltf.h>
 
 int main(int argc, char *argv[]) {
-    std::vector<std::vector<float>> box_origins = {
+    const std::vector<std::vector<float>> box_origins = {
         {0.0, 0.0, 0.0},
         {1.0, 1.0, 1.0},
         {2.0, 2.0, 2.0}

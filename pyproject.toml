@@ -118,7 +118,7 @@ wbuild = { cmd = "emcmake cmake . -B build-wasm -G Ninja -DBUILD_WASM=ON && cmak
 build = { cmd = "rattler-build build -r conda/recipe.yaml --experimental", description = "Build the conda package" }
 
 [tool.pixi.feature.test.tasks]
-update = { cmd = "pip install -e . -v", description = "Update the package" }
+update = { cmd = "pip install -e . -v", description = "Update the package", env = {"CMAKE_ARGS" = "-DTINY_INCLUDE_DIR=\"$CONDA_PREFIX/include\""} }
 pytest = { cmd = "pytest tests/py", description = "Run the tests", depends-on = ["update"] }
 echo = { cmd = "echo \"$CONDA_PREFIX\"", description = "Echo Hello World" }
 
