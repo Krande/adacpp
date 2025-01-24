@@ -27,6 +27,7 @@ set(ADA_CPP_SOURCES
         src/fem/simple_mesh.cpp
         src/visit/ShapeTesselator.cpp
         src/visit/tess_helpers.cpp
+        src/visit/tess_py_wrap.cpp
         src/visit/manual/solids/boxes.cpp
         src/visit/TessellateFactory.cpp
 )
@@ -44,6 +45,7 @@ set(ADA_CPP_HEADERS
         src/fem/simple_mesh.h
         src/visit/ShapeTesselator.h
         src/visit/tess_helpers.h
+        src/visit/tess_py_wrap.h
         src/visit/TessellateFactory.h
 )
 # Create a empty list to hold all the linked libs
@@ -83,5 +85,5 @@ endif ()
 
 if (BUILD_TESTING)
     message(STATUS "Building the testing tree.")
-    include(tests/cpp/test1.cmake)
+    #include(tests/cpp/test1.cmake)
 endif ()

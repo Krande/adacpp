@@ -3,9 +3,7 @@
 
 #include <vector>
 #include <TopoDS_Solid.hxx>
-#include <BRepPrimAPI_MakeBox.hxx>
 #include <TDF_Label.hxx>
-#include <Quantity_Color.hxx>
 #include <XCAFDoc_ColorTool.hxx>
 #include <optional>
 #include "../geom/Color.h"

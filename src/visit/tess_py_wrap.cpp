@@ -1,6 +1,8 @@
 //
 // Created by ofskrand on 24.01.2025.
 //
+#include "../geom/Mesh.h"
+#include "tess_helpers.h"
 #include "tess_py_wrap.h"
 
 void tess_helper_module(nb::module_ &m) {
