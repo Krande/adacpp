@@ -21,6 +21,8 @@ set(ADA_CPP_SOURCES
         src/cadit/occt/step_writer.cpp
         src/cadit/occt/gltf_writer.cpp
         src/cadit/occt/colors.cpp
+        src/cadit/tinygltf/tinygltf.cpp
+        src/cadit/tinygltf/tiny_helpers.cpp
         src/cadit/tinygltf/tiny.cpp
         src/fem/simple_mesh.cpp
         src/visit/ShapeTesselator.cpp
@@ -37,8 +39,8 @@ set(ADA_CPP_HEADERS
         src/cadit/occt/step_writer.h
         src/cadit/occt/gltf_writer.h
         src/cadit/occt/colors.h
+        src/cadit/tinygltf/tiny_helpers.h
         src/cadit/tinygltf/tiny.h
-        src/cadit/tinygltf/tinyload.h
         src/fem/simple_mesh.h
         src/visit/ShapeTesselator.h
         src/visit/tess_helpers.h
@@ -77,4 +79,9 @@ endif ()
 # WebAssembly-specific settings
 if (BUILD_WASM)
     include(cmake/wasm_build.cmake)
+endif ()
+
+if (BUILD_TESTING)
+    message(STATUS "Building the testing tree.")
+    include(tests/cpp/test1.cmake)
 endif ()

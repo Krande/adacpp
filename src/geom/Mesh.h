@@ -3,7 +3,6 @@
 
 #include <vector>
 #include <cstdint>
-#include <optional>
 #include "MeshType.h"
 #include "GroupReference.h"
 #include "Color.h"

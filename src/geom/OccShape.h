@@ -6,7 +6,6 @@
 #define NANO_OCCT_OCCSHAPE_H
 
 #include <optional>
-#include <vector>
 #include <TopoDS_Shape.hxx>
 #include "Color.h"
 
