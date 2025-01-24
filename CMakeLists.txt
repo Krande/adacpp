@@ -13,18 +13,21 @@ OPTION(BUILD_TESTING "Build the testing tree." OFF)
 set(ADA_CPP_SOURCES
         src/adacpp.cpp
         src/cadit/ifc/ifcop.cpp
+        src/cadit/ifc/ifc_py_wrap.cpp
         src/helpers/helpers.cpp
+        src/geom/Color.cpp
         src/geom/Models.cpp
         src/geom/geometries.cpp
+        src/geom/geom_py_wrap.cpp
         src/cadit/occt/step_to_glb.cpp
-        src/cadit/occt/occt_convert.cpp
         src/cadit/occt/step_writer.cpp
-        src/cadit/occt/gltf_writer.cpp
+        src/cadit/occt/occt_py_wrap.cpp
         src/cadit/occt/colors.cpp
         src/cadit/tinygltf/tinygltf.cpp
         src/cadit/tinygltf/tiny_helpers.cpp
-        src/cadit/tinygltf/tiny.cpp
+        src/cadit/tinygltf/tiny_py_wrap.cpp
         src/fem/simple_mesh.cpp
+        src/fem/fem_py_wrap.cpp
         src/visit/ShapeTesselator.cpp
         src/visit/tess_helpers.cpp
         src/visit/visit_py_wrap.cpp
@@ -33,16 +36,19 @@ set(ADA_CPP_SOURCES
 )
 set(ADA_CPP_HEADERS
         src/cadit/ifc/ifcop.h
+        src/cadit/ifc/ifc_py_wrap.h
         src/helpers/helpers.h
+        src/geom/Color.h
         src/geom/geometries.h
-        src/cadit/occt/occt_convert.h
+        src/geom/geom_py_wrap.h
         src/cadit/occt/step_to_glb.h
         src/cadit/occt/step_writer.h
-        src/cadit/occt/gltf_writer.h
+        src/cadit/occt/occt_py_wrap.h
         src/cadit/occt/colors.h
         src/cadit/tinygltf/tiny_helpers.h
-        src/cadit/tinygltf/tiny.h
+        src/cadit/tinygltf/tiny_py_wrap.h
         src/fem/simple_mesh.h
+        src/fem/fem_py_wrap.h
         src/visit/ShapeTesselator.h
         src/visit/tess_helpers.h
         src/visit/visit_py_wrap.h

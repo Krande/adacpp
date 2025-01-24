@@ -1,12 +1,10 @@
 #include "binding_core.h"
-#include "cadit/occt/step_writer.h"
-#include "cadit/occt/colors.h"
-#include "cadit/ifc/ifcop.h"
-#include "cadit/tinygltf/tiny.h"
-#include "fem/simple_mesh.h"
-#include "geom/geometries.h"
+#include "cadit/occt/occt_py_wrap.h"
+#include "cadit/ifc/ifc_py_wrap.h"
+#include "cadit/tinygltf/tiny_py_wrap.h"
+#include "fem/fem_py_wrap.h"
+#include "geom/geom_py_wrap.h"
 #include "visit/visit_py_wrap.h"
-#include "cadit/occt/occt_convert.h"
 
 // Define the modules that will be exposed in python
 NB_MODULE(_ada_cpp_ext_impl, m) {

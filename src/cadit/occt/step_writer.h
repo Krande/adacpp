@@ -1,26 +1,15 @@
 #ifndef NANO_OCCT_STEP_WRITER_H
 #define NANO_OCCT_STEP_WRITER_H
 
-#include <iostream>
 #include <filesystem>
-
-#include <BRep_Builder.hxx>
-#include <Interface_Static.hxx>
 #include <STEPCAFControl_Writer.hxx>
-#include <TCollection_ExtendedString.hxx>
-#include <TDocStd_Application.hxx>
-#include <TDocStd_Document.hxx>
-#include <TopoDS_Compound.hxx>
-#include <XCAFDoc_DocumentTool.hxx>
-#include <XSControl_WorkSession.hxx>
-#include <TDF_Label.hxx>
-#include <XCAFDoc_ColorTool.hxx>
-#include <XCAFDoc_ShapeTool.hxx>
-#include "../../binding_core.h"
-#include "../../helpers/helpers.h"
 
+void write_boxes_to_step(const std::string &filename, const std::vector<std::vector<float>> &box_origins,
+                         const std::vector<std::vector<float>> &box_dims);
 
+void write_box_to_step(const std::string &filename, const std::vector<float> &box_origin,
+                       const std::vector<float> &box_dims);
 
-void step_writer_module(nb::module_ &m);
+std::string step_writer_to_string(STEPCAFControl_Writer& writer);
 
 #endif // NANO_OCCT_STEP_WRITER_H

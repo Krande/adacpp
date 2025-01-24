@@ -1,4 +1,4 @@
-#include "../../binding_core.h"
+#pragma once
+#include <string>
 
-
-void ifc_module(nb::module_ &m);
+int read_ifc_file(const std::string &file_name);

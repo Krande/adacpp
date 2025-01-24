@@ -1,6 +1,5 @@
 #include "simple_mesh.h"
 #include <gmsh.h>
-#include "../binding_core.h"
 
 void simple_gmesh(const std::string& filename) {
     gmsh::initialize();
@@ -22,6 +21,3 @@ void simple_gmesh(const std::string& filename) {
     gmsh::write(filename);
 };
 
-void gmsh_module(nb::module_ &m) {
-    m.def("create_gmesh", &simple_gmesh, "filename"_a, "Write a Mesh to GLTF");
-}
