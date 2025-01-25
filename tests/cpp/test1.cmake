@@ -5,7 +5,6 @@ set(SOURCES
         tests/cpp/test1.cpp
 )
 
-
 add_executable(TestInstantiator ${SOURCES} ${ADA_CPP_HEADERS})
 
 set_target_properties(TestInstantiator PROPERTIES

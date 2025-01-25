@@ -1,5 +1,5 @@
 #include <iostream>
-
+#include <TopoDS_Shape.hxx>
 #include "../../src/geom/Mesh.h"
 #include "../../src/visit/tess_helpers.h"
 #include "../../src/helpers/helpers.h"

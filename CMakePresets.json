@@ -22,8 +22,9 @@
       "generator": "Ninja",
       "hidden": true,
       "cacheVariables": {
-        "CMAKE_PREFIX_PATH": "$env{PREFIX}:$env{PREFIX}/include:$env{PREFIX}/lib:$env{PREFIX}/bin",
+        "CMAKE_PREFIX_PATH": "$env{PREFIX} $env{PREFIX}/include $env{PREFIX}/lib $env{PREFIX}/bin",
         "CMAKE_INSTALL_PREFIX": "$env{PREFIX}",
+        "TINY_INCLUDE_DIR": "$env{PREFIX}/include",
         "CGAL_DIR": "$env{PREFIX}/lib/cmake/CGAL",
         "OpenCASCADE_DIR": "$env{PREFIX}/lib/cmake/opencascade",
         "OpenCASCADE_INCLUDE_DIR": "$env{PREFIX}/include/opencascade",
@@ -43,7 +44,8 @@
       },
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelwithDebInfo",
-        "BUILD_TESTING": "ON",
+        "BUILD_STP2GLB_TESTING": "ON",
+        "BUILD_DEBUG_TESTING": "ON",
         "BUILD_PYTHON": "ON",
         "BUILD_STP2GLB": "ON"
       }
@@ -58,8 +60,9 @@
         "PREFIX": "${sourceDir}/.pixi/envs/build"
       },
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "RelwithDebInfo",
-        "BUILD_TESTING": "ON",
+        "CMAKE_BUILD_TYPE": "Debug",
+        "BUILD_STP2GLB_TESTING": "ON",
+        "BUILD_DEBUG_TESTING": "ON",
         "BUILD_PYTHON": "ON",
         "BUILD_STP2GLB": "ON"
       }

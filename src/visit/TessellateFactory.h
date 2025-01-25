@@ -3,6 +3,10 @@
 
 #include <iostream>
 
+#if defined(__unix__) || defined(__unix)
+#include <cstdint>
+#endif
+
 
 // Enum for different tessellation algorithms
 enum class TessellationAlgorithm : uint32_t
