@@ -14,8 +14,8 @@
 Mesh tessellate_shape(const int id, const TopoDS_Shape &shape, const bool compute_edges, const float mesh_quality, const bool parallel_meshing) {
     ShapeTesselator shape_tess(shape);
     shape_tess.Compute(compute_edges, mesh_quality, parallel_meshing);
-    std::vector pos = shape_tess.GetVerticesPositionAsTuple();
-    int number_of_triangles = shape_tess.ObjGetTriangleCount();
+    const std::vector pos = shape_tess.GetVerticesPositionAsTuple();
+    const int number_of_triangles = shape_tess.ObjGetTriangleCount();
 
     std::vector<uint32_t> faces(number_of_triangles * 3);
     for (size_t i = 0; i < faces.size(); ++i) {

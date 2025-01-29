@@ -12,9 +12,18 @@
 #include "step_to_glb.h"
 #include "step_writer.h"
 #include "occt_py_wrap.h"
+
+#include <TopoDS_Solid.hxx>
+
 #include "colors.h"
 #include <nanobind/stl/shared_ptr.h>
 
+template <typename T>
+std::shared_ptr<T> from_ptr(uintptr_t ptr) {
+    return std::shared_ptr<T>(reinterpret_cast<T *>(ptr), [](T *p) {
+        // Custom deleter or leave empty if you don't want to delete the object
+    });
+}
 
 // Main function or other appropriate entry point
 void step_to_glb_module(nb::module_& m)
@@ -25,34 +34,26 @@ void step_to_glb_module(nb::module_& m)
 }
 
 // add nanobind wrapping to the function
-void occt_color_module(nb::module_ &m) {
+void occt_module(nb::module_ &m) {
     m.def("setInstanceColorIfAvailable", &setInstanceColorIfAvailable, "color_tool"_a, "lab"_a, "shape"_a, "c"_a,
           "sets a color");
 
-    // TopoDS_Shape
+    // Usage for TopoDS_Shape and its derived classes
     nb::class_<TopoDS_Shape>(m, "TopoDS_Shape")
-            .def("get_ptr", [](TopoDS_Shape &self) {
-                return reinterpret_cast<uintptr_t>(&self);
-            })
-            .def_static("from_ptr", [](uintptr_t ptr) {
-                return reinterpret_cast<TopoDS_Shape *>(ptr);
-            });
+        .def_static("from_ptr", &from_ptr<TopoDS_Shape>);
 
-    // TopoDS_Shell
     nb::class_<TopoDS_Shell, TopoDS_Shape>(m, "TopoDS_Shell")
-            .def("get_ptr", [](TopoDS_Shell &self) {
-                return reinterpret_cast<uintptr_t>(&self);
-            })
-            .def_static("from_ptr", [](uintptr_t ptr) {
-                return reinterpret_cast<TopoDS_Shell *>(ptr);
-            });
+        .def_static("from_ptr", &from_ptr<TopoDS_Shell>);
+
+    nb::class_<TopoDS_Solid, TopoDS_Shape>(m, "TopoDS_Solid")
+        .def_static("from_ptr", &from_ptr<TopoDS_Solid>);
 
     // XCAFDoc_ColorTool
     nb::class_<XCAFDoc_ColorTool>(m, "XCAFDoc_ColorTool")
             .def("get_ptr", [](XCAFDoc_ColorTool &self) {
                 return reinterpret_cast<uintptr_t>(&self);
             })
-            .def_static("from_ptr", [](uintptr_t ptr) {
+            .def_static("from_ptr", [](const uintptr_t ptr) {
                 return reinterpret_cast<XCAFDoc_ColorTool *>(ptr);
             });
 
@@ -61,7 +62,7 @@ void occt_color_module(nb::module_ &m) {
             .def("get_ptr", [](TDF_Label &self) {
                 return reinterpret_cast<uintptr_t>(&self);
             })
-            .def_static("from_ptr", [](uintptr_t ptr) {
+            .def_static("from_ptr", [](const uintptr_t ptr) {
                 return reinterpret_cast<TDF_Label *>(ptr);
             });
 
@@ -70,7 +71,7 @@ void occt_color_module(nb::module_ &m) {
             .def("get_ptr", [](Quantity_Color &self) {
                 return reinterpret_cast<uintptr_t>(&self);
             })
-            .def_static("from_ptr", [](uintptr_t ptr) {
+            .def_static("from_ptr", [](const uintptr_t ptr) {
                 return reinterpret_cast<Quantity_Color *>(ptr);
             });
 }

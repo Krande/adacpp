@@ -7,7 +7,7 @@
 
 #include "../../binding_core.h"
 
-void occt_color_module(nb::module_ &m);
+void occt_module(nb::module_ &m);
 
 void step_to_glb_module(nb::module_ &m);
 

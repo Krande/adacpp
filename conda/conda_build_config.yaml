@@ -1,6 +1,10 @@
 occt:
   - 7.8.1
 
+variant:
+  - all
+  - novtk
+
 python:
   - 3.12
 

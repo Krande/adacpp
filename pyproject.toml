@@ -119,6 +119,7 @@ build = { cmd = "rattler-build build -r conda/recipe.yaml --experimental", descr
 
 [tool.pixi.feature.test.tasks]
 update = { cmd = "pip install -e . -v", description = "Update the package", env = {"CMAKE_ARGS" = "-DTINY_INCLUDE_DIR=\"$CONDA_PREFIX/include\""} }
+remove = { cmd = "pip uninstall -y ada-cpp", description = "Remove the package" }
 pytest = { cmd = "pytest tests/py", description = "Run the tests", depends-on = ["update"] }
 echo = { cmd = "echo \"$CONDA_PREFIX\"", description = "Echo Hello World" }
 
