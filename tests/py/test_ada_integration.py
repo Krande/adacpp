@@ -56,8 +56,12 @@ def test_basic_occ_shapes_tessellated():
     box2 = ada.PrimBox('box2', (1.1, 0, 0), (2, 2, 2))
     box3 = ada.PrimBox('box3', (2.2, 0, 0), (3, 3, 3))
 
+    shapes = []
     for box in [box1, box2, box3]:
         occ_geom = box.solid_occ()
         ptr = int(occ_geom.this)
         shape = TopoDS_Solid.from_ptr(ptr)
+        shapes.append(shape)
+
+
 

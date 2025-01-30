@@ -31,7 +31,7 @@ classifiers = [
 "Bug Tracker" = "https://github.com/Krande/adacpp/issues"
 
 [tool.scikit-build]
-cmake.args = ["-Wno-dev","-DCMAKE_BUILD_TYPE=Release", "-DBUILD_TESTING=ON", "-DBUILD_PYTHON=ON", "-DBUILD_STP2GLB=ON", "-DBUILD_WASM=OFF"]
+cmake.args = ["-G","Ninja","-Wno-dev","-DCMAKE_BUILD_TYPE=Release", "-DBUILD_TESTING=ON", "-DBUILD_PYTHON=ON", "-DBUILD_STP2GLB=ON", "-DBUILD_WASM=OFF"]
 build-dir = "build/{wheel_tag}"
 
 # This is the only editable mode currently
@@ -84,6 +84,7 @@ cgal-cpp = "==6.0.1"
 cli11 = "*"
 tinygltf = "==2.8.21" # This must be installed in target dir also if you want to compile
 gmsh = "*"
+ninja = "*"
 
 [tool.pixi.feature.common.target.linux-64.dependencies]
 gxx="*"
