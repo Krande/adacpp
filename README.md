@@ -6,49 +6,23 @@ The compilation and binding methods are based on the [nanobind-minimal repo](htt
 
 ## Installation
 
-First install the pre-requisites for both occt and nanobind + build requirements from conda-forge.
-
-```bash
-mamba env update -f environment.build.yml --prune
-```
-
-Activate the environment and install the package in editable mode.
-
-```bash
-pip install --no-build-isolation -e .
-```
+Adacpp uses [pixi.sh](https://pixi.sh/latest/) to handle dependencies and building the project.
 
 ### Conda Build install
 
-Installing as conda package
+Build and test conda package
 
 ```bash
-mamba mambabuild . -c conda-forge --python 3.11 --override-channels
-mamba install --use-local ada-cpp
+pixi run build
 ```
 
 ### Local IDE development
 
-You can use the presets in the CMakePresets.json file. 
-But first you must create a `.env.json` file (which will be ignored by git) where you point to 
-the conda env `environment.build.yml`. The .env.json file should look like this,
-where you fill in the path to your conda env as the "PREFIX" value.
+The presets in the CMakePresets.json file are set to use the pixi `build` environment. So for local development, you can use the following commands:
 
-```json
-{
-  "version": 6,
-  "configurePresets": [
-    {
-      "name": "env-vars",
-      "hidden": true,
-      "environment": {
-        "PREFIX": "C:/miniforge3/envs/ada-cpp"
-      }
-    }
-  ]
-}
-```
-
+```bash
+pixi install -e build
+``` 
 
 ## Performance metrics
 Todo
