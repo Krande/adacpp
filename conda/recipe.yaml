@@ -14,7 +14,7 @@ source:
 
 build:
   number: ${{ build }}
-  string: py${{ python | replace('.', '') }}_${{ variant }}_h${{ hash }}_${{ build }}
+  string: py${{ python | replace('.', '') }}_h${{ hash }}_${{ build }}
 
 requirements:
   build:
@@ -30,7 +30,7 @@ requirements:
       then: make
   host:
     - python
-    - occt * *${{ variant }}*
+    - occt
     - ifcopenshell
     - cgal-cpp
     - scikit-build-core
@@ -53,6 +53,7 @@ tests:
     requirements:
       run:
         - pytest
+        - occt * *novtk*
         - ada-py
         - cmake
     script:
