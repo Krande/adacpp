@@ -1,4 +1,3 @@
-
 import OCC.Core.Interface as OCCInterface
 import pytest
 from OCC.Core.STEPCAFControl import STEPCAFControl_Writer as OCC_STEPCAFControl_Writer
@@ -47,14 +46,15 @@ def test_ada_integration(beams_model):
     result = step_writer_to_string(ada_cpp_writer)
     assert len(result) == 227399
 
+
 @pytest.mark.skipif(not has_ada, reason="ada is not installed")
 def test_basic_occ_shapes_tessellated():
     """Create 3 boxes in pythonocc-core and move them to adacpp using pointer reference and tesselate the shapes"""
-    from adacpp.cadit.occt import TopoDS_Shape, TopoDS_Solid
+    from adacpp.cadit.occt import TopoDS_Solid
 
-    box1 = ada.PrimBox('box1', (0, 0, 0), (1, 1, 1))
-    box2 = ada.PrimBox('box2', (1.1, 0, 0), (2, 2, 2))
-    box3 = ada.PrimBox('box3', (2.2, 0, 0), (3, 3, 3))
+    box1 = ada.PrimBox("box1", (0, 0, 0), (1, 1, 1))
+    box2 = ada.PrimBox("box2", (1.1, 0, 0), (2, 2, 2))
+    box3 = ada.PrimBox("box3", (2.2, 0, 0), (3, 3, 3))
 
     shapes = []
     for box in [box1, box2, box3]:
@@ -62,6 +62,3 @@ def test_basic_occ_shapes_tessellated():
         ptr = int(occ_geom.this)
         shape = TopoDS_Solid.from_ptr(ptr)
         shapes.append(shape)
-
-
-

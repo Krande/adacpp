@@ -109,7 +109,7 @@ ninja = "*"
 emscripten = "*"
 
 [tool.pixi.feature.lint.tasks]
-lint = "isort . && black . --config pyproject.toml && ruff check ."
+lint = "isort . && black . --config pyproject.toml && ruff check . --fix"
 
 [tool.pixi.feature.wasm.tasks]
 clean = { cmd = "mkdir -p build-wasm" }
