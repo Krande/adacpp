@@ -11,11 +11,11 @@
 #include "../helpers/helpers.h"
 
 
-Mesh tessellate_shape(int id, const TopoDS_Shape &shape, bool compute_edges, float mesh_quality, bool parallel_meshing) {
+Mesh tessellate_shape(const int id, const TopoDS_Shape &shape, const bool compute_edges, const float mesh_quality, const bool parallel_meshing) {
     ShapeTesselator shape_tess(shape);
     shape_tess.Compute(compute_edges, mesh_quality, parallel_meshing);
-    std::vector pos = shape_tess.GetVerticesPositionAsTuple();
-    int number_of_triangles = shape_tess.ObjGetTriangleCount();
+    const std::vector pos = shape_tess.GetVerticesPositionAsTuple();
+    const int number_of_triangles = shape_tess.ObjGetTriangleCount();
 
     std::vector<uint32_t> faces(number_of_triangles * 3);
     for (size_t i = 0; i < faces.size(); ++i) {
@@ -113,24 +113,4 @@ Mesh get_box_mesh(const std::vector<float> &box_origin,
     TopoDS_Solid box = create_box(box_origin, box_dims);
     Mesh mesh = tessellate_shape(0, box, true, 1.0, false);
     return mesh;
-}
-
-void tess_helper_module(nb::module_ &m) {
-    m.def("get_box_mesh", &get_box_mesh, "box_origin"_a, "box_dims"_a, "Write a box to a step file");
-
-    nb::class_<Mesh>(m, "Mesh")
-            .def_ro("id", &Mesh::id, "The id of the mesh")
-            .def_ro("positions", &Mesh::positions, "The positions of the mesh")
-            .def_ro("indices", &Mesh::indices, "The indices of the mesh")
-            .def_ro("normals", &Mesh::normals, "The normals of the mesh")
-            .def_ro("mesh_type", &Mesh::mesh_type, "The type of mesh", nb::enum_<MeshType>(m, "MeshType"))
-            .def_ro("color", &Mesh::color, "The color of the mesh", nb::class_<Color>(m, "Color"))
-            .def_ro("groups", &Mesh::group_reference, "The groups of the mesh",
-                    nb::class_<GroupReference>(m, "GroupReference"));
-
-    nb::class_<Color>(m, "Color")
-            .def_rw("r", &Color::r)
-            .def_rw("g", &Color::g)
-            .def_rw("b", &Color::b)
-            .def_rw("a", &Color::a);
 }

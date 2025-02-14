@@ -1,9 +1,8 @@
 occt:
-  - 7.7.2
+  - 7.8.1
 
-variant:
-  - novtk
-  - all
+python:
+  - 3.12
 
 c_stdlib:
   - vs # [win]
@@ -31,7 +30,7 @@ c_compiler_version:
 
 cxx_compiler:
   - vs2022  # [win]
-  - gcc     # [linux]
+  - gxx     # [linux]
   - clang   # [osx]
 
 cxx_compiler_version:

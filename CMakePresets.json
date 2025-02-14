@@ -1,29 +1,122 @@
 {
   "version": 6,
-  "include": [
-    ".env.json"
-  ],
   "configurePresets": [
     {
-      "name": "win-local",
-      "inherits": ["env-vars"],
+      "name": "win-shared",
       "generator": "Ninja",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "$env{LIBRARY_PREFIX};$env{LIBRARY_PREFIX}/include;$env{PREFIX}/include;$env{LIBRARY_PREFIX}/lib;$env{LIBRARY_PREFIX}/bin",
+        "CMAKE_INSTALL_PREFIX": "$env{LIBRARY_PREFIX}",
+        "TINY_INCLUDE_DIR": "$env{PREFIX}/include",
+        "CGAL_DIR": "$env{LIBRARY_PREFIX}/lib/cmake/CGAL",
+        "OpenCASCADE_DIR": "$env{LIBRARY_PREFIX}/lib/cmake/opencascade",
+        "OpenCASCADE_INCLUDE_DIR": "$env{LIBRARY_PREFIX}/include/opencascade",
+        "Python_LIBRARIES": "$env{PREFIX}/libs/python312.lib",
+        "Python_EXECUTABLE": "$env{PREFIX}/python.exe",
+        "Python_INCLUDE_DIRS": "$env{LIBRARY_PREFIX}/include"
+      }
+    },
+    {
+      "name": "linux-shared",
+      "generator": "Ninja",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "$env{PREFIX} $env{PREFIX}/include $env{PREFIX}/lib $env{PREFIX}/bin",
+        "CMAKE_INSTALL_PREFIX": "$env{PREFIX}",
+        "TINY_INCLUDE_DIR": "$env{PREFIX}/include",
+        "CGAL_DIR": "$env{PREFIX}/lib/cmake/CGAL",
+        "OpenCASCADE_DIR": "$env{PREFIX}/lib/cmake/opencascade",
+        "OpenCASCADE_INCLUDE_DIR": "$env{PREFIX}/include/opencascade",
+        "Python_EXECUTABLE": "$env{PREFIX}/bin/python",
+        "Python_INCLUDE_DIRS": "$env{PREFIX}/include"
+      }
+    },
+    {
+      "name": "win-local",
+      "inherits": "win-shared",
+      "generator": "Ninja",
+      "hidden": false,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "environment": {
+        "PREFIX": "${sourceDir}/.pixi/envs/build",
+        "LIBRARY_PREFIX": "${sourceDir}/.pixi/envs/build/Library"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelwithDebInfo",
+        "BUILD_STP2GLB_TESTING": "ON",
+        "BUILD_DEBUG_TESTING": "ON",
+        "BUILD_PYTHON": "ON",
+        "BUILD_STP2GLB": "ON"
+      }
+    },
+    {
+      "name": "linux-local",
+      "inherits": "linux-shared",
+      "generator": "Ninja",
+      "hidden": false,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "environment": {
+        "PREFIX": "${sourceDir}/.pixi/envs/build"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "BUILD_STP2GLB_TESTING": "ON",
+        "BUILD_DEBUG_TESTING": "ON",
+        "BUILD_PYTHON": "ON",
+        "BUILD_STP2GLB": "ON"
+      }
+    },
+    {
+      "name": "win-local-wasm",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
       "hidden": false,
       "environment": {
         "LIBRARY_PREFIX": "$env{PREFIX}/Library"
       },
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "RelwithDebInfo",
-        "CMAKE_PREFIX_PATH": "$env{LIBRARY_PREFIX};$env{LIBRARY_PREFIX}/include;$env{LIBRARY_PREFIX}/lib;$env{LIBRARY_PREFIX}/bin",
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_TESTING": "ON",
+        "CONDA_LOCAL_DEV": "OFF",
+        "BUILD_WASM": "ON"
+      }
+    },
+    {
+      "name": "gcc-local-wasm",
+      "hidden": false,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "environment": {
+        "LIBRARY_PREFIX": "$env{PREFIX}"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_PREFIX_PATH": "$env{LIBRARY_PREFIX};$env{LIBRARY_PREFIX}/include;$env{LIBRARY_PREFIX}/lib;$env{LIBRARY_PREFIX}/bin;$env{LIBRARY_PREFIX}/lib/emscripten-3.1.58/system/include",
         "CMAKE_INSTALL_PREFIX": "$env{LIBRARY_PREFIX}",
         "CGAL_DIR": "$env{LIBRARY_PREFIX}/lib/cmake/CGAL",
         "OpenCASCADE_DIR": "$env{LIBRARY_PREFIX}/lib/cmake/opencascade",
         "OpenCASCADE_INCLUDE_DIR": "$env{LIBRARY_PREFIX}/include/opencascade",
-        "Python_EXECUTABLE": "$env{PREFIX}/python.exe",
-        "Python_LIBRARIES": "$env{PREFIX}/libs/python311.lib",
-        "Python_INCLUDE_DIRS": "$env{LIBRARY_PREFIX}/include",
+        "Python_EXECUTABLE": "$env{PREFIX}/bin/python",
         "BUILD_TESTING": "ON",
-        "CONDA_LOCAL_DEV": "ON"
+        "BUILD_WASM": "ON"
+      }
+    },
+    {
+      "name": "gcc-local",
+      "hidden": false,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "environment": {
+        "LIBRARY_PREFIX": "$env{PREFIX}"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_PREFIX_PATH": "$env{LIBRARY_PREFIX};$env{LIBRARY_PREFIX}/include;$env{LIBRARY_PREFIX}/lib;$env{LIBRARY_PREFIX}/bin;$env{LIBRARY_PREFIX}/lib/emscripten-3.1.58/system/include",
+        "CMAKE_INSTALL_PREFIX": "$env{LIBRARY_PREFIX}",
+        "CGAL_DIR": "$env{LIBRARY_PREFIX}/lib/cmake/CGAL",
+        "OpenCASCADE_DIR": "$env{LIBRARY_PREFIX}/lib/cmake/opencascade",
+        "OpenCASCADE_INCLUDE_DIR": "$env{LIBRARY_PREFIX}/include/opencascade",
+        "BUILD_TESTING": "ON",
+        "BUILD_WASM": "OFF"
       }
     }
   ]

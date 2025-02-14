@@ -1,11 +1,7 @@
-//
-// Created by Kristoffer on 27/07/2023.
-//
 #include "simple_mesh.h"
 #include <gmsh.h>
-#include "../binding_core.h"
 
-void simple_gmesh(std::string filename) {
+void simple_gmesh(const std::string& filename) {
     gmsh::initialize();
     gmsh::model::add("square");
     gmsh::model::geo::addPoint(0, 0, 0, 0.1, 1);
@@ -25,6 +21,3 @@ void simple_gmesh(std::string filename) {
     gmsh::write(filename);
 };
 
-void gmsh_module(nb::module_ &m) {
-    m.def("create_gmesh", &simple_gmesh, "filename"_a, "Write a Mesh to GLTF");
-}

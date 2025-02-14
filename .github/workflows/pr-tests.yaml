@@ -23,16 +23,16 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.ref }}
 
-      - uses: prefix-dev/setup-pixi@v0.8.1  # https://github.com/prefix-dev/setup-pixi
+      - uses: prefix-dev/setup-pixi@v0.8.2  # https://github.com/prefix-dev/setup-pixi
         with:
-          pixi-version: v0.28.2
+          pixi-version: v0.41.3
           cache: true
           environments: lint
 
       - run: pixi run lint
 
   build_test:
-    name: ada-cpp-${{ matrix.platform.name }}-${{ matrix.pyver.name }}-${{ matrix.variant.name }}=${{ matrix.variant.value }}
+    name: ada-cpp-${{ matrix.platform.name }}-test
     runs-on: ${{ matrix.platform.distver }}
     defaults:
       run:
@@ -40,17 +40,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pyver: [
-          { name: py312, distver: '3.12' },
-        ]
         platform: [
           { name: win, distver: windows-latest, pkg_dir: 'win-64' },
           { name: linux, distver: ubuntu-latest, pkg_dir: 'linux-64' },
           { name: macOS, distver: macos-13, pkg_dir: 'osx-64' }
-        ]
-        variant: [
-          { name: variant, value: 'novtk' },
-          { name: variant, value: 'all' }
         ]
     steps:
       - uses: actions/checkout@v4
@@ -82,31 +75,12 @@ jobs:
         run: |
           curl -L https://github.com/phracker/MacOSX-SDKs/releases/download/11.3/MacOSX10.15.sdk.tar.xz | tar -xvJf - -C /Users/runner/work/
 
-
-      - uses: mamba-org/setup-micromamba@v1 # https://github.com/mamba-org/setup-micromamba
+      - uses: prefix-dev/setup-pixi@v0.8.2
         with:
-          environment-name: test-env
-          cache-environment: true
-          cache-downloads: true
-          condarc: |
-            conda-build:
-              root-dir: ${{ env.CROOT_DIR }}
-              output_folder: ${{ env.ARTIFACTS_DIR }}
-              pkg_format: 2
-              zstd_compression_level: 19
-            channel_priority: strict
-            channels:
-              - conda-forge
-          create-args: >-
-            python=3.12
-            boa
+          pixi-version: v0.41.3
+          environments: conda
+          cache: true
 
-      - name: make dirs
+      - name: install package
         run: |
-          mkdir -p ${{ env.ARTIFACTS_DIR }}
-          mkdir -p ${{ env.CROOT_DIR }}
-
-      - name: build local packages
-        run: |
-          conda mambabuild . --python ${{ matrix.pyver.distver }} --variants "{ '${{matrix.variant.name}}': '${{matrix.variant.value}}'}"
-        working-directory: conda
+          pixi run build

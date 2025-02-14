@@ -1,23 +1,25 @@
-//
-// Created by Kristoffer on 26/07/2023.
-//
 #include <iostream>
-#include "tinyload.h"
 #include "../../geom/Mesh.h"
-#include "../../binding_core.h"
+
 #include "../../visit/tess_helpers.h"
 #include "../../helpers/helpers.h"
+#include "tiny_gltf.h"
+#include "tiny_helpers.h"
 
-std::pair<std::vector<double>, std::vector<double>> calculateBounds(const std::vector<float>& positions) {
+std::pair<std::vector<double>, std::vector<double> > calculateBounds(const std::vector<float> &positions) {
     assert(positions.size() % 3 == 0); // Ensure there is 3D data
 
-    std::vector<double> minValues = { std::numeric_limits<double>::max(),
-                                      std::numeric_limits<double>::max(),
-                                      std::numeric_limits<double>::max() };
+    std::vector<double> minValues = {
+        std::numeric_limits<double>::max(),
+        std::numeric_limits<double>::max(),
+        std::numeric_limits<double>::max()
+    };
 
-    std::vector<double> maxValues = { std::numeric_limits<double>::lowest(),
-                                      std::numeric_limits<double>::lowest(),
-                                      std::numeric_limits<double>::lowest() };
+    std::vector<double> maxValues = {
+        std::numeric_limits<double>::lowest(),
+        std::numeric_limits<double>::lowest(),
+        std::numeric_limits<double>::lowest()
+    };
 
     for (size_t i = 0; i < positions.size(); i += 3) {
         minValues[0] = std::min(static_cast<double>(minValues[0]), static_cast<double>(positions[i]));
@@ -33,20 +35,22 @@ std::pair<std::vector<double>, std::vector<double>> calculateBounds(const std::v
 }
 
 
-void AddMesh(tinygltf::Model &model, const std::string &name, Mesh my_mesh) {
-    std::vector<float> positions = my_mesh.positions;
-    std::vector<uint32_t> indices = my_mesh.indices;
+void AddMesh(tinygltf::Model &model, const std::string &name, const Mesh &my_mesh) {
+    const std::vector<float> positions = my_mesh.positions;
+    const std::vector<uint32_t> indices = my_mesh.indices;
 
     // Append buffer for position data
     tinygltf::Buffer posBuffer;
-    posBuffer.data = std::vector<unsigned char>(reinterpret_cast<const unsigned char*>(positions.data()),
-                                                reinterpret_cast<const unsigned char*>(positions.data() + positions.size()));
+    posBuffer.data = std::vector<unsigned char>(reinterpret_cast<const unsigned char *>(positions.data()),
+                                                reinterpret_cast<const unsigned char *>(
+                                                    positions.data() + positions.size()));
     model.buffers.push_back(posBuffer);
 
     // Buffer for indices
     tinygltf::Buffer indexBuffer;
-    indexBuffer.data = std::vector<unsigned char>(reinterpret_cast<const unsigned char*>(indices.data()),
-                                                  reinterpret_cast<const unsigned char*>(indices.data() + indices.size()));
+    indexBuffer.data = std::vector<unsigned char>(reinterpret_cast<const unsigned char *>(indices.data()),
+                                                  reinterpret_cast<const unsigned char *>(
+                                                      indices.data() + indices.size()));
     model.buffers.push_back(indexBuffer);
 
     // BufferView for positions
@@ -97,13 +101,15 @@ void AddMesh(tinygltf::Model &model, const std::string &name, Mesh my_mesh) {
 
     // Create a material with PBR properties
     tinygltf::Material material;
-    material.pbrMetallicRoughness.baseColorFactor = {my_mesh.color.r, my_mesh.color.g, my_mesh.color.b, my_mesh.color.a};
+    material.pbrMetallicRoughness.baseColorFactor = {
+        my_mesh.color.r, my_mesh.color.g, my_mesh.color.b, my_mesh.color.a
+    };
     material.pbrMetallicRoughness.metallicFactor = 1.0;
     material.pbrMetallicRoughness.roughnessFactor = 0.5;
     material.alphaMode = "OPAQUE";
 
     // Add the material to the model
-    int materialIndex = model.materials.size();
+    const int materialIndex = model.materials.size();
     model.materials.push_back(material);
 
     // Assign the material to the primitive
@@ -120,7 +126,8 @@ void AddMesh(tinygltf::Model &model, const std::string &name, Mesh my_mesh) {
     model.scenes[0].nodes.push_back(model.nodes.size() - 1);
 }
 
-int write_to_gltf(const std::string& filename, Mesh mesh) {
+
+int write_to_gltf(const std::string& filename, const Mesh& mesh) {
     tinygltf::Model model;
 
     // Create a scene
@@ -130,8 +137,7 @@ int write_to_gltf(const std::string& filename, Mesh mesh) {
     AddMesh(model, "mesh", mesh);
 
     // Save to file
-    tinygltf::TinyGLTF gltf;
-    if (!gltf.WriteGltfSceneToFile(&model, filename, true, true, true, false)) {
+    if (tinygltf::TinyGLTF gltf; !gltf.WriteGltfSceneToFile(&model, filename, true, true, true, false)) {
         std::cerr << "Failed to write glTF file" << std::endl;
         return -1;
     }
@@ -143,6 +149,7 @@ int write_to_gltf(const std::string& filename, Mesh mesh) {
 int write_boxes_to_gltf(const std::string &filename, const std::vector<std::vector<float>> &box_origins,
                          const std::vector<std::vector<float>> &box_dims) {
     tinygltf::Model model;
+    std::cout << "Exporting to " << filename <<"\n";
 
     // Create a scene
     tinygltf::Scene scene;
@@ -150,9 +157,13 @@ int write_boxes_to_gltf(const std::string &filename, const std::vector<std::vect
     model.defaultScene = 0;
 
     for (int i = 0; i < box_origins.size(); i++) {
-        TopoDS_Solid box = create_box(box_origins[i], box_dims[i]);
+        const auto& origin = box_origins[i];
+        const auto& dim = box_dims[i];
+        TopoDS_Solid box = create_box(origin, dim);
         Mesh mesh = tessellate_shape(0, box, true, 1.0, false);
         mesh.color = random_color();
+
+        std::cout << "Adding mesh" << i << "\n";
         AddMesh(model, "mesh", mesh);
     }
     // If filename contains .glb set variable "glb" to true
@@ -166,10 +177,4 @@ int write_boxes_to_gltf(const std::string &filename, const std::vector<std::vect
     }
 
     return 0;
-}
-
-
-void tiny_gltf_module(nb::module_ &m) {
-    m.def("write_mesh_to_gltf", &write_to_gltf, "filename"_a, "mesh"_a, "Write a Mesh to GLTF");
-    m.def("write_boxes_to_gltf", &write_boxes_to_gltf, "filename"_a, "box_origins"_a, "box_dims"_a, "Write a list of boxes to GLTF");
 }

@@ -2,7 +2,7 @@
 #define ADA_CPP_GEOMETRIES_H
 
 #include <CGAL/Simple_cartesian.h>
-#include "../binding_core.h"
+
 
 typedef CGAL::Simple_cartesian<double> Kernel;
 typedef Kernel::Point_3 Point_3;
@@ -28,7 +28,5 @@ public:
                                                                                          width(width), length(length),
                                                                                          height(height) {}
 };
-
-void shape_module(nb::module_ &m);
 
 #endif //ADA_CPP_GEOMETRIES_H

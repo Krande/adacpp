@@ -31,12 +31,7 @@ classifiers = [
 "Bug Tracker" = "https://github.com/Krande/adacpp/issues"
 
 [tool.scikit-build]
-cmake.args = ["-Wno-dev"]
-cmake.verbose = true
-cmake.build-type = "Release"
-#cmake.build-type = "Debug"
-#ninja.make-fallback = false
-
+cmake.args = ["-G","Ninja","-Wno-dev","-DCMAKE_BUILD_TYPE=Release", "-DBUILD_TESTING=ON", "-DBUILD_PYTHON=ON", "-DBUILD_STP2GLB=ON", "-DBUILD_WASM=OFF"]
 build-dir = "build/{wheel_tag}"
 
 # This is the only editable mode currently
@@ -60,18 +55,84 @@ ignore = ["E741"]
 [tool.isort]
 profile = "black"
 skip = [".pixi", "node_modules", "temp"]
-skip_glob=["**/node_modules/**", "**/temp/**"]
+skip_glob = ["**/node_modules/**", "**/temp/**"]
 
 [tool.pixi.project]
 channels = ["conda-forge"]
-platforms = ["win-64", "linux-64"]
+platforms = ["win-64", "linux-64", "osx-64"]
 
 [tool.pixi.environments]
-lint = { features = ["lint"], no-default-feature = true}
+lint = { features = ["lint"], no-default-feature = true }
+common = { features = ["common"], no-default-feature = true }
+wasm = { features = ["wasm", "common"], no-default-feature = true }
+build = { features = ["build", "common"], no-default-feature = true }
+conda = { features = ["conda"], no-default-feature = true }
+test = { features = ["test", "common"], no-default-feature = true }
+
+[tool.pixi.feature.conda.dependencies]
+rattler-build = "*"
+
+[tool.pixi.feature.common.dependencies]
+python = "==3.12"
+occt = { version = "==7.8.1", build = "*novtk*" }
+ifcopenshell = "==0.8.0"
+nanobind = "==2.1.0"
+scikit-build-core = "==0.10.7"
+cmake = "==3.30.3"
+numpy = "*"
+cgal-cpp = "==6.0.1"
+cli11 = "*"
+tinygltf = "==2.8.21" # This must be installed in target dir also if you want to compile
+gmsh = "*"
+ninja = "*"
+
+[tool.pixi.feature.common.target.linux-64.dependencies]
+gxx="*"
+mesa-libgl-devel-cos7-x86_64="*"
+libxext-conda-x86_64="*"
+
+[tool.pixi.feature.build.dependencies]
+
+[tool.pixi.feature.test.dependencies]
+pytest = "==8.3.2"
+ada-py = "*"
+pip = "*"
+
 [tool.pixi.feature.lint.dependencies]
-black = "24.4.2"
-isort = "5.13.2"
-ruff = "0.4.10"
+black = "==24.4.2"
+isort = "==5.13.2"
+ruff = "==0.4.10"
+
+[tool.pixi.feature.wasm.dependencies]
+nodejs = "*"
+ninja = "*"
+emscripten = "*"
 
 [tool.pixi.feature.lint.tasks]
-lint = "isort . && black . --config pyproject.toml && ruff check ."
+lint = "isort . && black . --config pyproject.toml && ruff check . --fix"
+
+[tool.pixi.feature.wasm.tasks]
+clean = { cmd = "mkdir -p build-wasm" }
+wbuild = { cmd = "emcmake cmake . -B build-wasm -G Ninja -DBUILD_WASM=ON -DBUILD_PYTHON=OFF -DBUILD_TESTS=OFF -DBUILD_STP2GLB=OFF && cmake --build build-wasm", depends-on = ["clean"] }
+
+[tool.pixi.feature.conda.tasks]
+build = { cmd = "rattler-build build -r conda/recipe.yaml --experimental", description = "Build the conda package" }
+
+[tool.pixi.feature.test.tasks]
+update = { cmd = "pip install -e . -v", description = "Update the package", env = {"CMAKE_ARGS" = "-DTINY_INCLUDE_DIR=\"$CONDA_PREFIX/include\""} }
+remove = { cmd = "pip uninstall -y ada-cpp", description = "Remove the package" }
+pytest = { cmd = "pytest tests/py", description = "Run the tests", depends-on = ["update"] }
+echo = { cmd = "echo \"$CONDA_PREFIX\"", description = "Echo Hello World" }
+
+[tool.pixi.feature.test.target.win-64.tasks]
+stp2glb = { cmd = "STP2GLB.exe", description = "Run the C++ tests" }
+
+[tool.pixi.feature.test.target.linux-64.tasks]
+stp2glb = { cmd = "STP2GLB", description = "Run the C++ tests" }
+
+[tool.pixi.feature.test.target.win-64.activation.env]
+STP2GLB_EXE_DIR = "$CONDA_PREFIX/Library/bin"
+
+[tool.pixi.feature.test.target.linux-64.activation.env]
+STP2GLB_EXE_DIR = "$CONDA_PREFIX/bin"
+#CMAKE_PREFIX_PATH = "$CONDA_PREFIX:$CONDA_PREFIX/include:$CONDA_PREFIX/lib:$CONDA_PREFIX/bin"

@@ -1,7 +1,3 @@
-//
-// Created by Kristoffer on 07/05/2023.
-//
-
 #ifndef NANO_OCCT_GROUPREFERENCE_H
 #define NANO_OCCT_GROUPREFERENCE_H
 

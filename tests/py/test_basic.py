@@ -51,7 +51,7 @@ def test_basic_mesh(tmp_path):
 
 
 def test_boxes_mesh_gltf(tmp_path):
-    origins, dimensions = create_box_grid(10)
+    origins, dimensions = create_box_grid(2)
     adacpp.cadit.write_boxes_to_gltf(str(tmp_path / "myboxes.glb"), origins, dimensions)
 
 

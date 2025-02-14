@@ -1,13 +1,10 @@
 #include "binding_core.h"
-#include "cadit/occt/step_writer.h"
-#include "cadit/occt/colors.h"
-#include "cadit/ifc/ifcop.h"
-#include "cadit/tinygltf/tiny.h"
-#include "fem/simple_mesh.h"
-#include "geom/geometries.h"
-#include "visit/TessellateFactory.h"
-#include "visit/tess_helpers.h"
-#include "cadit/occt/occt_convert.h"
+#include "cadit/occt/occt_py_wrap.h"
+#include "cadit/ifc/ifc_py_wrap.h"
+#include "cadit/tinygltf/tiny_py_wrap.h"
+#include "fem/fem_py_wrap.h"
+#include "geom/geom_py_wrap.h"
+#include "visit/visit_py_wrap.h"
 
 // Define the modules that will be exposed in python
 NB_MODULE(_ada_cpp_ext_impl, m) {
@@ -16,8 +13,8 @@ NB_MODULE(_ada_cpp_ext_impl, m) {
         tiny_gltf_module(cadit_module);
     auto ifc_submod = cadit_module.def_submodule("ifc", "IfcOpenShell interface toolkit");
         ifc_module(ifc_submod);
-    auto occt_module = cadit_module.def_submodule("occt", "Opencascade interface toolkit");
-        occt_color_module(occt_module);
+    auto occt_sub_module = cadit_module.def_submodule("occt", "Opencascade interface toolkit");
+        occt_module(occt_sub_module);
     auto occt_conversion_module = cadit_module.def_submodule("conversion", "OCCT conversion module");
         step_to_glb_module(occt_conversion_module);
     auto visit_module = m.def_submodule("visit", "Visualization Interoperability toolkit");

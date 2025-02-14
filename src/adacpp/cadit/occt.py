@@ -3,6 +3,7 @@ from adacpp._ada_cpp_ext_impl.cadit.occt import (
     TDF_Label,
     TopoDS_Shape,
     TopoDS_Shell,
+    TopoDS_Solid,
     XCAFDoc_ColorTool,
     setInstanceColorIfAvailable,
 )
@@ -14,4 +15,5 @@ __all__ = [
     TDF_Label,
     Quantity_Color,
     TopoDS_Shell,
+    TopoDS_Solid,
 ]

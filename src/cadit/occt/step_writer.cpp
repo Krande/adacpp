@@ -14,9 +14,8 @@
 #include <TDF_Label.hxx>
 #include <XCAFDoc_ColorTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
-#include "../../binding_core.h"
 #include "../../helpers/helpers.h"
-#include <nanobind/stl/shared_ptr.h>
+#include "step_writer.h"
 
 
 class AdaCPPStepWriter {
@@ -42,7 +41,7 @@ public:
     }
 
     void add_shape(const TopoDS_Shape &shape, const std::string &name,
-                   Color &rgb_color,
+                   const Color &rgb_color,
                    const TDF_Label &parent = TDF_Label()) {
         comp_builder_.Add(comp_, shape);
         TDF_Label parent_label = parent.IsNull() ? tll_ : parent;
@@ -55,7 +54,8 @@ public:
         set_name(shape_label, name);
     }
 
-    void export_step(const std::filesystem::path &step_file) {
+    void export_step(const std::filesystem::path &step_file) const
+    {
         // Create the directory if it doesn't exist and check that step_file.parent_path() is not ""
 
         if (!step_file.parent_path().empty() && step_file.parent_path() != "") {
@@ -108,7 +108,7 @@ void write_boxes_to_step(const std::string &filename, const std::vector<std::vec
 void write_box_to_step(const std::string &filename, const std::vector<float> &box_origin,
                        const std::vector<float> &box_dims) {
 
-    TopoDS_Solid aBox = create_box(box_origin, box_dims);
+    const TopoDS_Solid aBox = create_box(box_origin, box_dims);
     STEPControl_Writer writer;
     writer.Transfer(aBox, STEPControl_AsIs);
     writer.Write(filename.c_str());
@@ -118,27 +118,4 @@ std::string step_writer_to_string(STEPCAFControl_Writer& writer) {
     std::ostringstream stream;
     writer.WriteStream(stream);  // Write to the string stream
     return stream.str();  // Convert the stream to a string and return it
-}
-
-void step_writer_module(nb::module_ &m) {
-    m.def("write_box_to_step", &write_box_to_step, "filename"_a, "box_origin"_a, "box_dims"_a,
-          "Write a box to a step file");
-    m.def("write_boxes_to_step", &write_boxes_to_step, "filename"_a, "box_origins"_a, "box_dims"_a,
-          "Write a list of boxes to a step file");
-    m.def("step_writer_to_string", &step_writer_to_string, "writer"_a);
-
-    nanobind::class_<STEPCAFControl_Writer>(m, "STEPCAFControl_Writer")
-            .def_static("from_ptr", [](uintptr_t ptr) {
-                // Return a shared_ptr to manage the lifetime of the object
-                return std::shared_ptr<STEPCAFControl_Writer>(
-                        reinterpret_cast<STEPCAFControl_Writer *>(ptr),
-                        [](STEPCAFControl_Writer *p) {
-                            // Custom deleter (can be empty if you want to avoid deletion)
-                            // But in most cases, deleting the object should be safe if it’s properly managed
-                            // delete p;
-                            // Chose to not delete because this object will always grab the ptr from an existing
-                            // swig object and should not be responsible for deleting it
-                        }
-                );
-            });
 }
