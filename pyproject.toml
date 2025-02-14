@@ -113,7 +113,7 @@ lint = "isort . && black . --config pyproject.toml && ruff check ."
 
 [tool.pixi.feature.wasm.tasks]
 clean = { cmd = "mkdir -p build-wasm" }
-wbuild = { cmd = "emcmake cmake . -B build-wasm -G Ninja -DBUILD_WASM=ON && cmake --build build-wasm", depends-on = ["clean"] }
+wbuild = { cmd = "emcmake cmake . -B build-wasm -G Ninja -DBUILD_WASM=ON -DBUILD_PYTHON=OFF -DBUILD_TESTS=OFF -DBUILD_STP2GLB=OFF && cmake --build build-wasm", depends-on = ["clean"] }
 
 [tool.pixi.feature.conda.tasks]
 build = { cmd = "rattler-build build -r conda/recipe.yaml --experimental", description = "Build the conda package" }
