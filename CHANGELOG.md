@@ -2,6 +2,13 @@
 
 
 
+## v0.2.0 (2025-02-14)
+
+### Feature
+
+* feat: Add test wasm output and major refactor (#8) ([`276e3c9`](https://github.com/Krande/adacpp/commit/276e3c9902948b8912aea2ce6f3f95cdecffeba4))
+
+
 ## v0.1.1 (2024-09-04)
 
 ### Fix
