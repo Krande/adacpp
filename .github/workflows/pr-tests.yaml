@@ -19,11 +19,11 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.event.pull_request.head.sha || github.ref }}
 
-      - uses: prefix-dev/setup-pixi@v0.8.14  # https://github.com/prefix-dev/setup-pixi
+      - uses: prefix-dev/setup-pixi@v0.9.0  # https://github.com/prefix-dev/setup-pixi
         with:
           pixi-version: v0.41.3
           cache: true
@@ -46,7 +46,7 @@ jobs:
           { name: macOS, distver: macos-13, pkg_dir: 'osx-64' }
         ]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.event.pull_request.head.sha || github.ref }}
 
@@ -75,7 +75,7 @@ jobs:
         run: |
           curl -L https://github.com/phracker/MacOSX-SDKs/releases/download/11.3/MacOSX10.15.sdk.tar.xz | tar -xvJf - -C /Users/runner/work/
 
-      - uses: prefix-dev/setup-pixi@v0.8.14
+      - uses: prefix-dev/setup-pixi@v0.9.0
         with:
           pixi-version: v0.41.3
           environments: conda
