@@ -1,4 +1,9 @@
-find_library(GMSH_LIB gmsh)
+if(WIN32)
+    find_library(GMSH_LIB NAMES gmsh.dll gmsh)
+else()
+    find_library(GMSH_LIB gmsh)
+endif()
+
 if(NOT GMSH_LIB)
     message(FATAL_ERROR "Could not find libgmsh")
 endif()
@@ -12,4 +17,4 @@ include_directories(${GMSH_INC})
 
 list(APPEND
         ADA_CPP_LINK_LIBS
-        gmsh)
+        ${GMSH_LIB})
