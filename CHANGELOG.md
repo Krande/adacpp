@@ -2,6 +2,50 @@
 
 
 
+## v0.2.1 (2025-11-28)
+
+### Chore
+
+* chore: bump prefix-dev/setup-pixi from 0.9.1 to 0.9.2 in the dependencies group (#15)
+
+Signed-off-by: dependabot[bot] &lt;support@github.com&gt;
+Co-authored-by: dependabot[bot] &lt;49699333+dependabot[bot]@users.noreply.github.com&gt; ([`cb9fac3`](https://github.com/Krande/adacpp/commit/cb9fac36f22ec5be3fb82338af6916a3a9258ca4))
+
+* chore: bump prefix-dev/setup-pixi from 0.9.0 to 0.9.1 in the dependencies group (#14)
+
+Signed-off-by: dependabot[bot] &lt;support@github.com&gt;
+Co-authored-by: dependabot[bot] &lt;49699333+dependabot[bot]@users.noreply.github.com&gt; ([`d42c93a`](https://github.com/Krande/adacpp/commit/d42c93acd9810c84ed8ebc08da146b9029dd02e7))
+
+* chore: bump the dependencies group with 2 updates (#13)
+
+Signed-off-by: dependabot[bot] &lt;support@github.com&gt;
+Co-authored-by: dependabot[bot] &lt;49699333+dependabot[bot]@users.noreply.github.com&gt; ([`07cd9bf`](https://github.com/Krande/adacpp/commit/07cd9bf3fba0a8d89e3c56f1b4b80c71aac109d9))
+
+* chore: bump prefix-dev/setup-pixi from 0.8.10 to 0.8.14 in the dependencies group (#12)
+
+Signed-off-by: dependabot[bot] &lt;support@github.com&gt;
+Co-authored-by: dependabot[bot] &lt;49699333+dependabot[bot]@users.noreply.github.com&gt; ([`993c351`](https://github.com/Krande/adacpp/commit/993c3514642fa37414e1e3c4c555df0e002b8d44))
+
+* chore: bump prefix-dev/setup-pixi from 0.8.8 to 0.8.10 in the dependencies group (#11)
+
+Signed-off-by: dependabot[bot] &lt;support@github.com&gt;
+Co-authored-by: dependabot[bot] &lt;49699333+dependabot[bot]@users.noreply.github.com&gt; ([`cda452a`](https://github.com/Krande/adacpp/commit/cda452ad48180f835a2058564e98c17482f6ef7f))
+
+* chore: bump prefix-dev/setup-pixi from 0.8.3 to 0.8.8 in the dependencies group (#10)
+
+Signed-off-by: dependabot[bot] &lt;support@github.com&gt;
+Co-authored-by: dependabot[bot] &lt;49699333+dependabot[bot]@users.noreply.github.com&gt; ([`a1aa818`](https://github.com/Krande/adacpp/commit/a1aa8180b1961fcd0cbd07bb6d1fe4d889ab62bd))
+
+* chore: bump prefix-dev/setup-pixi from 0.8.2 to 0.8.3 in the dependencies group (#9)
+
+Signed-off-by: dependabot[bot] &lt;support@github.com&gt;
+Co-authored-by: dependabot[bot] &lt;49699333+dependabot[bot]@users.noreply.github.com&gt; ([`02c5305`](https://github.com/Krande/adacpp/commit/02c5305d477baba3e8a84a3b150283474f74f9a6))
+
+### Fix
+
+* fix: improve GMSH library detection and enhance STEP file reader para… (#16) ([`7c55a3a`](https://github.com/Krande/adacpp/commit/7c55a3ac5f92ffca984e4bd3b1595937c94930df))
+
+
 ## v0.2.0 (2025-02-14)
 
 ### Feature
