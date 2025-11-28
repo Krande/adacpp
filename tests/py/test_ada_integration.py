@@ -1,15 +1,14 @@
-import OCC.Core.Interface as OCCInterface
 import pytest
-from OCC.Core.STEPCAFControl import STEPCAFControl_Writer as OCC_STEPCAFControl_Writer
-from OCC.Core.STEPControl import STEPControl_AsIs
-from OCC.Core.XSControl import XSControl_WorkSession
 
 from adacpp.cadit import STEPCAFControl_Writer, step_writer_to_string
 
 try:
     import ada
     from ada.occ.store import OCCStore
-
+    import OCC.Core.Interface as OCCInterface
+    from OCC.Core.STEPCAFControl import STEPCAFControl_Writer as OCC_STEPCAFControl_Writer
+    from OCC.Core.STEPControl import STEPControl_AsIs
+    from OCC.Core.XSControl import XSControl_WorkSession
     has_ada = True
 except ModuleNotFoundError:
     has_ada = False
