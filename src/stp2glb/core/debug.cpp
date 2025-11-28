@@ -52,23 +52,17 @@ bool should_process_geometry(const Handle(Standard_Transient) &brep, const Produ
 void debug_stp_to_glb(const GlobalConfig &config) {
     // Initialize the STEPCAFControl_Reader
     STEPCAFControl_Reader reader;
+    reader.SetColorMode(true);
+    reader.SetNameMode(true);
+    reader.SetLayerMode(true);
+    reader.SetPropsMode(false);
+    reader.SetGDTMode(true);
+    reader.SetMatMode(true);
+    reader.SetViewMode(false);
+
     Interface_Static::SetIVal("FromSTEP.FixShape.FixShellOrientationMode", 0);
     Interface_Static::SetIVal("read.step.shape.repair.mode", 0);
     Interface_Static::SetIVal("read.precision.mode", 0);
-
-    // Set reader parameters
-    StepData_ConfParameters params;
-    params.ReadProps = false;
-    params.ReadRelationship = true;
-    params.ReadLayer = true;
-    params.ReadAllShapes = true;
-    params.ReadName = true;
-    params.ReadSubshapeNames = true;
-    params.ReadResourceName = true;
-    params.ReadColor = true;
-    params.ReadPrecisionMode = StepData_ConfParameters::ReadMode_Precision_User;
-    params.ReadPrecisionVal = 1;
-    params.ReadNonmanifold = true;
 
     // Mesh parameters
     IMeshTools_Parameters meshParams;
@@ -85,7 +79,7 @@ void debug_stp_to_glb(const GlobalConfig &config) {
     {
         TIME_BLOCK("Reading STEP file");
 
-        if (reader.ReadFile(config.stpFile.string().c_str(), params) != IFSelect_RetDone)
+        if (reader.ReadFile(config.stpFile.string().c_str()) != IFSelect_RetDone)
             throw std::runtime_error("Error reading STEP file");
     }
 
