@@ -22,7 +22,7 @@ requirements:
     - ${{ compiler('c') }}
     - ${{ compiler('cxx') }}
     - if: linux
-      then: ${{ cdt('mesa-libGL-devel') }}
+      then: libgl-devel
     - cmake
     - if: win
       then: ninja

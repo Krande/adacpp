@@ -123,5 +123,5 @@ SP_DIR = "%CONDA_PREFIX%/Lib/site-packages"
 
 [tool.pixi.feature.test.target.linux-64.activation.env]
 STP2GLB_EXE_DIR = "$CONDA_PREFIX/bin"
-SP_DIR = "$CONDA_PREFIX/lib/site-packages"
+SP_DIR = "$CONDA_PREFIX/lib/python3.12/site-packages"
 #CMAKE_PREFIX_PATH = "$CONDA_PREFIX:$CONDA_PREFIX/include:$CONDA_PREFIX/lib:$CONDA_PREFIX/bin"
