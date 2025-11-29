@@ -42,7 +42,6 @@ exclude = ["examples/", ".pixi/", "temp/"]
 [tool.ruff.lint]
 ignore = ["E741"]
 
-
 [tool.isort]
 profile = "black"
 skip = [".pixi", "node_modules", "temp"]
@@ -56,7 +55,6 @@ platforms = ["win-64", "linux-64", "osx-64"]
 lint = { features = ["lint"], no-default-feature = true }
 common = { features = ["common"], no-default-feature = true }
 wasm = { features = ["wasm", "common"], no-default-feature = true }
-build = { features = ["build", "common"], no-default-feature = true }
 conda = { features = ["conda"], no-default-feature = true }
 test = { features = ["test", "common"], no-default-feature = true }
 
@@ -65,8 +63,8 @@ rattler-build = "*"
 
 [tool.pixi.feature.common.dependencies]
 python = "==3.12"
-occt = { version = "==7.8.1", build = "*novtk*" }
-ifcopenshell = "==0.8.0"
+occt = { version = "==7.9.0", build = "*novtk*" }
+ifcopenshell = ">=0.8.3"
 nanobind = "==2.1.0"
 cmake = "==3.30.3"
 numpy = "*"
@@ -75,13 +73,12 @@ cli11 = "*"
 tinygltf = "==2.8.21" # This must be installed in target dir also if you want to compile
 gmsh = "*"
 ninja = "*"
+cxx-compiler = "*"
 
 [tool.pixi.feature.common.target.linux-64.dependencies]
 gxx="*"
 mesa-libgl-devel-cos7-x86_64="*"
 libxext-conda-x86_64="*"
-
-[tool.pixi.feature.build.dependencies]
 
 [tool.pixi.feature.test.dependencies]
 pytest = "==8.3.2"
@@ -109,22 +106,22 @@ wbuild = { cmd = "emcmake cmake . -B build-wasm -G Ninja -DBUILD_WASM=ON -DBUILD
 conda-build = { cmd = "rattler-build build -r conda/recipe.yaml --experimental", description = "Build the conda package" }
 
 [tool.pixi.feature.test.tasks]
-update = { cmd = "pip install -e . --no-deps --no-build-isolation -v", description = "Install Python package" }
-remove = { cmd = "pip uninstall -y ada-cpp", description = "Remove the package" }
-pytest = { cmd = "pytest tests/py", description = "Run the tests" }
+install = { cmd = "cmake -B build -S . -G Ninja -DCMAKE_INSTALL_PREFIX=$CONDA_PREFIX -DCMAKE_BUILD_TYPE=Release -DBUILD_PYTHON=ON -DBUILD_STP2GLB=ON -DBUILD_WASM=OFF -DTINY_INCLUDE_DIR=$CONDA_PREFIX/include -DPYTHON_SITE_PACKAGES=$SP_DIR && cmake --build build; cmake --install build", description = "Build and install with CMake" }
+test = { cmd = "pytest tests/py", description = "Run the tests" }
 echo = { cmd = "echo \"$CONDA_PREFIX\"", description = "Echo Hello World" }
+echo2 = { cmd = "echo \"$SP_DIR\"", description = "Echo Hello World" }
 
 [tool.pixi.feature.test.target.win-64.tasks]
-build = { cmd = "powershell -Command \"$site_pkgs = python -c 'import sysconfig; print(sysconfig.get_path(\"\"purelib\"\"))'; cmake -B build -S . -G Ninja -DCMAKE_INSTALL_PREFIX=\"\"$env:CONDA_PREFIX\"\" -DCMAKE_BUILD_TYPE=Release -DBUILD_PYTHON=ON -DBUILD_STP2GLB=ON -DBUILD_WASM=OFF -DTINY_INCLUDE_DIR=\"\"$env:CONDA_PREFIX/include\"\" -DPYTHON_SITE_PACKAGES=\"\"$site_pkgs\"\"; cmake --build build; cmake --install build\"", description = "Build with CMake (Windows)" }
 stp2glb = { cmd = "STP2GLB.exe", description = "Run the C++ tests" }
 
 [tool.pixi.feature.test.target.linux-64.tasks]
-build = { cmd = "bash -c 'PYTHON_SITE_PACKAGES=$(python -c \"import sysconfig; print(sysconfig.get_path(\\\"purelib\\\"))\"); cmake -B build -S . -G Ninja -DCMAKE_INSTALL_PREFIX=\"$CONDA_PREFIX\" -DCMAKE_BUILD_TYPE=Release -DBUILD_PYTHON=ON -DBUILD_STP2GLB=ON -DBUILD_WASM=OFF -DTINY_INCLUDE_DIR=\"$CONDA_PREFIX/include\" -DPYTHON_SITE_PACKAGES=\"$PYTHON_SITE_PACKAGES\" && cmake --build build && cmake --install build'", description = "Build with CMake (Linux)" }
 stp2glb = { cmd = "STP2GLB", description = "Run the C++ tests" }
 
 [tool.pixi.feature.test.target.win-64.activation.env]
-STP2GLB_EXE_DIR = "$CONDA_PREFIX/Library/bin"
+STP2GLB_EXE_DIR = "%CONDA_PREFIX%/Library/bin"
+SP_DIR = "%CONDA_PREFIX%/Lib/site-packages"
 
 [tool.pixi.feature.test.target.linux-64.activation.env]
 STP2GLB_EXE_DIR = "$CONDA_PREFIX/bin"
+SP_DIR = "$CONDA_PREFIX/lib/site-packages"
 #CMAKE_PREFIX_PATH = "$CONDA_PREFIX:$CONDA_PREFIX/include:$CONDA_PREFIX/lib:$CONDA_PREFIX/bin"

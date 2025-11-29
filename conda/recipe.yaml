@@ -55,7 +55,7 @@ tests:
       run:
         - pytest
         - occt * *novtk*
-        - ada-py
+        #- ada-py
         - cmake
     script:
       - pytest tests/py
