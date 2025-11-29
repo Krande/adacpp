@@ -33,12 +33,13 @@ requirements:
     - occt
     - ifcopenshell
     - cgal-cpp
-    - scikit-build-core
     - nanobind
     - cli11
     - tinygltf
     - gmsh
     - pip
+    - setuptools
+    - wheel
   run:
     - python
     - ${{ pin_compatible('gmsh', upper_bound='x.x.x') }}

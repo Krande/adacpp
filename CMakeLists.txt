@@ -3,6 +3,12 @@ cmake_minimum_required(VERSION 3.20)
 project(ada-cpp LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 
+# Set policy CMP0167 to OLD to suppress warning about FindBoost module deprecation
+# CGAL still uses the old FindBoost module, so we need to allow it
+if(POLICY CMP0167)
+    cmake_policy(SET CMP0167 OLD)
+endif()
+
 OPTION(BUILD_WASM "Build the project for WebAssembly" OFF)
 OPTION(BUILD_PYTHON "Build the project for Python" ON)
 OPTION(BUILD_STP2GLB "Build the STP2GLB executable" ON)
