@@ -85,6 +85,9 @@ else ()
     include(cmake/deps_occ.cmake)
     include(cmake/deps_gmsh.cmake)
     include(cmake/deps_ifc.cmake)
+
+    # Find Threads package for pthread support on Linux
+    find_package(Threads REQUIRED)
 endif ()
 
 if (BUILD_STP2GLB)
