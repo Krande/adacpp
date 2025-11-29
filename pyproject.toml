@@ -99,7 +99,7 @@ emscripten = "*"
 lint = "isort . && black . --config pyproject.toml && ruff check . --fix"
 
 [tool.pixi.feature.wasm.tasks]
-clean = { cmd = "mkdir -p build-wasm" }
+clean = { cmd = "rm -rf build-wasm && mkdir -p build-wasm" }
 wbuild = { cmd = "emcmake cmake . -B build-wasm -G Ninja -DBUILD_WASM=ON -DBUILD_PYTHON=OFF -DBUILD_TESTS=OFF -DBUILD_STP2GLB=OFF && cmake --build build-wasm", depends-on = ["clean"] }
 
 [tool.pixi.feature.conda.tasks]
