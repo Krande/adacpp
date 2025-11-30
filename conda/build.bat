@@ -8,6 +8,7 @@ set PYTHON_SITE_PACKAGES=%SP_DIR:\=/%
 
 @REM Build with CMake
 cmake -B build -S . -G Ninja ^
+    @
     -DCMAKE_INSTALL_PREFIX="%LIBRARY_PREFIX%" ^
     -DCMAKE_BUILD_TYPE=Release ^
     -DBUILD_PYTHON=ON ^
@@ -15,6 +16,8 @@ cmake -B build -S . -G Ninja ^
     -DSTP2GLB_BIN_DIR="%LIBRARY_PREFIX%/bin" ^
     -DBUILD_WASM=OFF ^
     -DPython_EXECUTABLE="%PYTHON%" ^
+    -DPYTHON_INCLUDE_DIR="%LIBRARY_INC%" ^
+    -DPYTHON_LIBRARY="%PYTHON_LIB%" ^
     -DPYTHON_SITE_PACKAGES="%PYTHON_SITE_PACKAGES%"
 
 if errorlevel 1 exit 1
