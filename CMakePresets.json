@@ -118,6 +118,50 @@
         "BUILD_TESTING": "ON",
         "BUILD_WASM": "OFF"
       }
+    },
+    {
+      "name": "pixi-test-win",
+      "generator": "Ninja",
+      "hidden": false,
+      "binaryDir": "${sourceDir}/build",
+      "environment": {
+        "SP_DIR": "$env{CONDA_PREFIX}/Lib/site-packages"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_INSTALL_PREFIX": "$env{CONDA_PREFIX}/Library",
+        "CMAKE_PREFIX_PATH": "$env{CONDA_PREFIX}/Library",
+        "TINY_INCLUDE_DIR": "$env{CONDA_PREFIX}/Library/include",
+        "PYTHON_SITE_PACKAGES": "$penv{SP_DIR}",
+        "Python_EXECUTABLE": "$env{CONDA_PREFIX}/python.exe",
+        "Python_ROOT_DIR": "$env{CONDA_PREFIX}",
+        "Python_FIND_STRATEGY": "LOCATION",
+        "BUILD_PYTHON": "ON",
+        "BUILD_STP2GLB": "ON",
+        "BUILD_WASM": "OFF"
+      }
+    },
+    {
+      "name": "pixi-test-linux",
+      "generator": "Ninja",
+      "hidden": false,
+      "binaryDir": "${sourceDir}/build",
+      "environment": {
+        "SP_DIR": "$env{CONDA_PREFIX}/lib/python3.12/site-packages"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_INSTALL_PREFIX": "$env{CONDA_PREFIX}",
+        "CMAKE_PREFIX_PATH": "$env{CONDA_PREFIX}",
+        "TINY_INCLUDE_DIR": "$env{CONDA_PREFIX}/include",
+        "PYTHON_SITE_PACKAGES": "$penv{SP_DIR}",
+        "Python_EXECUTABLE": "$env{CONDA_PREFIX}/bin/python",
+        "Python_ROOT_DIR": "$env{CONDA_PREFIX}",
+        "Python_FIND_STRATEGY": "LOCATION",
+        "BUILD_PYTHON": "ON",
+        "BUILD_STP2GLB": "ON",
+        "BUILD_WASM": "OFF"
+      }
     }
   ]
 }
