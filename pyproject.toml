@@ -106,15 +106,16 @@ wbuild = { cmd = "emcmake cmake . -B build-wasm -G Ninja -DBUILD_WASM=ON -DBUILD
 conda-build = { cmd = "rattler-build build -r conda/recipe.yaml --experimental", description = "Build the conda package" }
 
 [tool.pixi.feature.test.tasks]
-install = { cmd = "cmake -B build -S . -G Ninja -DCMAKE_INSTALL_PREFIX=$CONDA_PREFIX -DCMAKE_BUILD_TYPE=Release -DBUILD_PYTHON=ON -DBUILD_STP2GLB=ON -DBUILD_WASM=OFF -DTINY_INCLUDE_DIR=$CONDA_PREFIX/include -DPYTHON_SITE_PACKAGES=$SP_DIR && cmake --build build; cmake --install build", description = "Build and install with CMake" }
 test = { cmd = "pytest tests/py", description = "Run the tests" }
 echo = { cmd = "echo \"$CONDA_PREFIX\"", description = "Echo Hello World" }
 echo2 = { cmd = "echo \"$SP_DIR\"", description = "Echo Hello World" }
 
 [tool.pixi.feature.test.target.win-64.tasks]
+install = { cmd = "cmake --preset pixi-test-win && cmake --build build && cmake --install build", description = "Build and install with CMake" }
 stp2glb = { cmd = "STP2GLB.exe", description = "Run the C++ tests" }
 
 [tool.pixi.feature.test.target.linux-64.tasks]
+install = { cmd = "cmake --preset pixi-test-linux && cmake --build build && cmake --install build", description = "Build and install with CMake" }
 stp2glb = { cmd = "STP2GLB", description = "Run the C++ tests" }
 
 [tool.pixi.feature.test.target.win-64.activation.env]
