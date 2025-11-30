@@ -22,7 +22,7 @@ requirements:
     - ${{ compiler('c') }}
     - ${{ compiler('cxx') }}
     - if: linux
-      then: ${{ cdt('mesa-libGL-devel') }}
+      then: libgl-devel
     - cmake
     - if: win
       then: ninja
@@ -33,12 +33,13 @@ requirements:
     - occt
     - ifcopenshell
     - cgal-cpp
-    - scikit-build-core
     - nanobind
     - cli11
     - tinygltf
     - gmsh
     - pip
+    - setuptools
+    - wheel
   run:
     - python
     - ${{ pin_compatible('gmsh', upper_bound='x.x.x') }}
@@ -54,7 +55,7 @@ tests:
       run:
         - pytest
         - occt * *novtk*
-        - ada-py
+        #- ada-py
         - cmake
     script:
       - pytest tests/py
