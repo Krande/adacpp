@@ -14,6 +14,7 @@ cmake -B build -S . -G Ninja ^
     -DBUILD_STP2GLB=ON ^
     -DSTP2GLB_BIN_DIR="%LIBRARY_PREFIX%/bin" ^
     -DBUILD_WASM=OFF ^
+    -DPython_EXECUTABLE="%PYTHON%" ^
     -DPYTHON_SITE_PACKAGES="%PYTHON_SITE_PACKAGES%"
 
 if errorlevel 1 exit 1
