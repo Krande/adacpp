@@ -124,6 +124,9 @@
       "generator": "Ninja",
       "hidden": false,
       "binaryDir": "${sourceDir}/build",
+      "environment": {
+        "SP_DIR": "$env{CONDA_PREFIX}/Lib/site-packages"
+      },
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_INSTALL_PREFIX": "$env{CONDA_PREFIX}/Library",
@@ -143,6 +146,9 @@
       "generator": "Ninja",
       "hidden": false,
       "binaryDir": "${sourceDir}/build",
+      "environment": {
+        "SP_DIR": "$env{CONDA_PREFIX}/lib/python3.12/site-packages"
+      },
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_INSTALL_PREFIX": "$env{CONDA_PREFIX}",

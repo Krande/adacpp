@@ -37,15 +37,15 @@ line-length = 120
 
 [tool.ruff]
 line-length = 120
-exclude = ["examples/", ".pixi/", "temp/"]
+exclude = ["examples/", ".pixi/", "temp/", "node_modules/", "output/"]
 
 [tool.ruff.lint]
 ignore = ["E741"]
 
 [tool.isort]
 profile = "black"
-skip = [".pixi", "node_modules", "temp"]
-skip_glob = ["**/node_modules/**", "**/temp/**"]
+skip = [".pixi", "node_modules", "temp", "output"]
+skip_glob = ["**/node_modules/**", "**/temp/**", "**/output/**"]
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
