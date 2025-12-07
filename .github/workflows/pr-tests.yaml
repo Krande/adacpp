@@ -11,10 +11,6 @@ concurrency:
   group: pr-tests-${{ github.ref_name }}
   cancel-in-progress: true
 
-env:
-  CROOT_DIR: /home/runner/work/build
-  ARTIFACTS_DIR: /home/runner/work/artifacts
-
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -25,7 +21,7 @@ jobs:
 
       - uses: prefix-dev/setup-pixi@v0.9.3  # https://github.com/prefix-dev/setup-pixi
         with:
-          pixi-version: v0.41.3
+          pixi-version: latest
           cache: true
           environments: lint
 
@@ -43,44 +39,19 @@ jobs:
         platform: [
           { name: win, distver: windows-latest, pkg_dir: 'win-64' },
           { name: linux, distver: ubuntu-latest, pkg_dir: 'linux-64' },
-          { name: macOS, distver: macos-13, pkg_dir: 'osx-64' }
+          { name: macOS, distver: macos-15, pkg_dir: 'osx-64' }
         ]
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha || github.ref }}
 
-      # Install OpenGL dependencies
-      - name: Install OpenGL dependencies
-        if: ${{ matrix.platform.name == 'linux' }}
-        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev
-
-      - name: set ENV WORK_DIR
-        run: |
-          pwd
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            echo "PKG_DIR=win-64" >> $GITHUB_ENV
-            echo "ARTIFACTS_DIR=D:/a/artifacts" >> $GITHUB_ENV
-            echo "CROOT_DIR=D:/a/build" >> $GITHUB_ENV
-          elif [[ "$RUNNER_OS" == "macOS" ]]; then
-            echo "PKG_DIR=osx-64" >> $GITHUB_ENV
-            echo "ARTIFACTS_DIR=/Users/runner/work/artifacts" >> $GITHUB_ENV
-            echo "CROOT_DIR=/Users/runner/work/build" >> $GITHUB_ENV
-          elif [[ "$RUNNER_OS" == "Linux" ]]; then
-            echo "PKG_DIR=linux-64" >> $GITHUB_ENV
-          fi
-
-      - name: Download and extract MacOSX SDK
-        if: ${{ matrix.platform.name == 'macOS' }}
-        run: |
-          curl -L https://github.com/phracker/MacOSX-SDKs/releases/download/11.3/MacOSX10.15.sdk.tar.xz | tar -xvJf - -C /Users/runner/work/
-
       - uses: prefix-dev/setup-pixi@v0.9.3
         with:
-          pixi-version: v0.41.3
+          pixi-version: latest
           environments: conda
           cache: true
 
       - name: install package
         run: |
-          pixi run build
+          pixi run conda-build
