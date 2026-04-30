@@ -2,6 +2,22 @@
 
 
 
+## v0.3.0 (2026-04-30)
+
+### Chore
+
+* chore: bump the dependencies group with 2 updates (#18)
+
+Signed-off-by: dependabot[bot] &lt;support@github.com&gt;
+Co-authored-by: dependabot[bot] &lt;49699333+dependabot[bot]@users.noreply.github.com&gt; ([`9d60d04`](https://github.com/Krande/adacpp/commit/9d60d0420184b3e7e224abb8676f2d66e61dae86))
+
+### Feature
+
+* feat: Remove scikit-build-core in favor of using only cmake (#17)
+
+Co-authored-by: Claude Opus 4.7 (1M context) &lt;noreply@anthropic.com&gt; ([`6bb17d8`](https://github.com/Krande/adacpp/commit/6bb17d839e411e836bfa2ec734290225db1ea082))
+
+
 ## v0.2.1 (2025-11-28)
 
 ### Chore
