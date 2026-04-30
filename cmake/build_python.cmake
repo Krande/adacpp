@@ -19,5 +19,20 @@ nanobind_add_module(_ada_cpp_ext_impl STABLE_ABI ${ADA_CPP_SOURCES} ${ADA_CPP_PY
 # Link libraries to the module
 target_link_libraries(_ada_cpp_ext_impl PRIVATE ${ADA_CPP_LINK_LIBS})
 
-# Install the module
-install(TARGETS _ada_cpp_ext_impl LIBRARY DESTINATION .)
+# Set Python site-packages directory (can be overridden via -DPYTHON_SITE_PACKAGES)
+if(NOT DEFINED PYTHON_SITE_PACKAGES)
+    execute_process(
+            COMMAND "${Python_EXECUTABLE}" -c "import sysconfig; print(sysconfig.get_path('purelib'))"
+            OUTPUT_STRIP_TRAILING_WHITESPACE OUTPUT_VARIABLE PYTHON_SITE_PACKAGES)
+endif()
+
+message(STATUS "Python site-packages: ${PYTHON_SITE_PACKAGES}")
+
+# Install the module to site-packages/adacpp
+install(TARGETS _ada_cpp_ext_impl LIBRARY DESTINATION ${PYTHON_SITE_PACKAGES}/adacpp)
+
+# Install the Python package files
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/src/adacpp/
+        DESTINATION ${PYTHON_SITE_PACKAGES}/adacpp
+        FILES_MATCHING PATTERN "*.py")
+

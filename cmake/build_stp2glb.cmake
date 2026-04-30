@@ -24,7 +24,7 @@ add_executable(STP2GLB ${SOURCES} ${HEADERS})
 set_target_properties(STP2GLB PROPERTIES
         INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/bin"
 )
-target_link_libraries(STP2GLB ${ADA_CPP_LINK_LIBS})
+target_link_libraries(STP2GLB ${ADA_CPP_LINK_LIBS} Threads::Threads)
 
 # install to executable into the bin dir
 # If EXE_BIN_DIR is not set, use root bin dir

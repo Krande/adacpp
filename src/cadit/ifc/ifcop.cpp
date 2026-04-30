@@ -22,7 +22,7 @@ int read_ifc_file(const std::string &file_name) {
 
     std::ostringstream oss;
     for (const auto element : *elements) {
-        element->data().toString(oss);
+        element->toString(oss);
         oss << "\n";
         std::cout << oss.str();
         oss.str("");  // Clear the contents of the stringstream
