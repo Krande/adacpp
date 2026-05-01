@@ -19,7 +19,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.ref }}
 
-      - uses: prefix-dev/setup-pixi@v0.9.3  # https://github.com/prefix-dev/setup-pixi
+      - uses: prefix-dev/setup-pixi@v0.9.5  # https://github.com/prefix-dev/setup-pixi
         with:
           pixi-version: latest
           cache: true
@@ -46,7 +46,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.ref }}
 
-      - uses: prefix-dev/setup-pixi@v0.9.3
+      - uses: prefix-dev/setup-pixi@v0.9.5
         with:
           pixi-version: latest
           environments: conda
