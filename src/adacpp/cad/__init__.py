@@ -11,7 +11,19 @@ from .._ada_cpp_ext_impl.cad import (
     GroupReference,
     Mesh,
     MeshType,
+    ShapeHandle,
+    make_box,
+    tessellate,
     tessellate_box,
 )
 
-__all__ = ["Color", "GroupReference", "Mesh", "MeshType", "tessellate_box"]
+__all__ = [
+    "Color",
+    "GroupReference",
+    "Mesh",
+    "MeshType",
+    "ShapeHandle",
+    "make_box",
+    "tessellate",
+    "tessellate_box",
+]

@@ -94,3 +94,23 @@ def test_cad_tessellate_box():
 def test_cad_mesh_is_visit_mesh():
     """adacpp.cad.Mesh and adacpp.visit.Mesh must be the same class."""
     assert adacpp.cad.Mesh is adacpp.visit.Mesh
+
+
+def test_cad_make_box_and_tessellate():
+    box = adacpp.cad.make_box(2.0, 3.0, 4.0)
+    assert type(box).__name__ == "ShapeHandle"
+
+    mesh = adacpp.cad.tessellate(box)
+    positions = list(mesh.positions)
+    xs, ys, zs = positions[0::3], positions[1::3], positions[2::3]
+    assert min(xs) == -1.0 and max(xs) == 1.0
+    assert min(ys) == -1.5 and max(ys) == 1.5
+    assert min(zs) == -2.0 and max(zs) == 2.0
+    assert len(mesh.indices) >= 12 * 3
+
+
+def test_cad_shape_handle_is_opaque():
+    """ShapeHandle must not leak its kernel internals to Python."""
+    box = adacpp.cad.make_box(1.0, 1.0, 1.0)
+    public_attrs = [a for a in dir(box) if not a.startswith("_")]
+    assert public_attrs == []
