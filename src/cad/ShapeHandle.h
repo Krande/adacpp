@@ -3,6 +3,8 @@
 
 #ifndef __EMSCRIPTEN__
 #include <TopoDS_Shape.hxx>
+#else
+#include <array>
 #endif
 
 // Backend-agnostic opaque shape handle. Native builds wrap an OCCT TopoDS_Shape
@@ -24,22 +26,28 @@ private:
     TopoDS_Shape shape_;
 #else
     enum class Kind {
-        Box,
+        Box,        // params: dx, dy, dz, _
+        Cylinder,   // params: radius, height, _, _
+        Sphere,     // params: radius, _, _, _
     };
 
-    ShapeHandle(Kind kind, float dx, float dy, float dz)
-        : kind_(kind), dx_(dx), dy_(dy), dz_(dz) {}
+    static ShapeHandle box(float dx, float dy, float dz) {
+        return ShapeHandle(Kind::Box, {dx, dy, dz, 0.0f});
+    }
+    static ShapeHandle cylinder(float radius, float height) {
+        return ShapeHandle(Kind::Cylinder, {radius, height, 0.0f, 0.0f});
+    }
+    static ShapeHandle sphere(float radius) {
+        return ShapeHandle(Kind::Sphere, {radius, 0.0f, 0.0f, 0.0f});
+    }
 
     Kind kind() const { return kind_; }
-    float dx() const { return dx_; }
-    float dy() const { return dy_; }
-    float dz() const { return dz_; }
+    float param(int i) const { return params_[i]; }
 
 private:
+    ShapeHandle(Kind kind, std::array<float, 4> params) : kind_(kind), params_(params) {}
     Kind kind_;
-    float dx_;
-    float dy_;
-    float dz_;
+    std::array<float, 4> params_;
 #endif
 };
 

@@ -59,9 +59,21 @@ if (EMSCRIPTEN)
     target_link_options(_ada_cpp_ext_impl PRIVATE
             "-sSIDE_MODULE=2"
             "-sWASM_BIGINT"
+            "-fexceptions"
             "-Wl,--export=PyInit__ada_cpp_ext_impl"
             "-Wl,--no-gc-sections"
     )
+    # The matching compile flag is required so try/catch in our code (and in
+    # nanobind's dispatch) actually emit unwind tables. -fexceptions (the older
+    # JS-trampoline-based model) is what pyodide 0.27.x ships; switch to
+    # -fwasm-exceptions when targeting pyodide 0.28+.
+    target_compile_options(_ada_cpp_ext_impl PRIVATE "-fexceptions")
+    # nanobind's static lib (nanobind-static-abi3) holds the dispatch code that
+    # actually converts C++ exceptions into Python ones — without -fexceptions
+    # there it'll pass them through as fatal aborts. Apply the same flag.
+    if (TARGET nanobind-static-abi3)
+        target_compile_options(nanobind-static-abi3 PRIVATE "-fexceptions")
+    endif ()
 endif ()
 
 if (EMSCRIPTEN)

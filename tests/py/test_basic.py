@@ -114,3 +114,51 @@ def test_cad_shape_handle_is_opaque():
     box = adacpp.cad.make_box(1.0, 1.0, 1.0)
     public_attrs = [a for a in dir(box) if not a.startswith("_")]
     assert public_attrs == []
+
+
+def test_cad_make_cylinder():
+    cyl = adacpp.cad.make_cylinder(2.0, 5.0)
+    mesh = adacpp.cad.tessellate(cyl)
+    positions = list(mesh.positions)
+    xs, ys, zs = positions[0::3], positions[1::3], positions[2::3]
+    # Cylinder along +Z, radius 2, base at z=0, top at z=5.
+    assert min(zs) == 0.0 and max(zs) == 5.0
+    # XY radius is approximately 2 (tessellation chord-deflects slightly inward).
+    assert abs(max(xs) - 2.0) < 0.2
+    assert abs(min(xs) - -2.0) < 0.2
+
+
+def test_cad_make_sphere():
+    sph = adacpp.cad.make_sphere(3.0)
+    mesh = adacpp.cad.tessellate(sph)
+    positions = list(mesh.positions)
+    xs, ys, zs = positions[0::3], positions[1::3], positions[2::3]
+    # Sphere centered at origin, radius 3.
+    assert abs(max(xs) - 3.0) < 0.3 and abs(min(xs) - -3.0) < 0.3
+    assert abs(max(ys) - 3.0) < 0.3 and abs(min(ys) - -3.0) < 0.3
+    assert abs(max(zs) - 3.0) < 0.3 and abs(min(zs) - -3.0) < 0.3
+
+
+def test_cad_from_topods_pointer():
+    """Native interop: round-trip an adacpp.cadit.occt.TopoDS_Shape into cad."""
+    if adacpp.cad.from_topods_pointer is None:
+        pytest.skip("from_topods_pointer is native-only")
+
+    # Create a TopoDS_Shape on the C++ side via the existing cadit path, then
+    # expose its address (cadit.occt.TopoDS_Shape stores a shared_ptr<TopoDS_Shape>
+    # whose underlying pointer is the .get_ptr() — but we already have a Python
+    # path that goes the other way. Easier: feed write_box_to_step a temporary
+    # path so we know that path lights up the OCCT side, then build via pyocc.
+    from OCC.Core.BRepPrimAPI import BRepPrimAPI_MakeBox
+    from OCC.Core.gp import gp_Pnt
+
+    pyocc_shape = BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 1.0, 2.0, 3.0).Shape()
+    handle = adacpp.cad.from_topods_pointer(int(pyocc_shape.this))
+
+    mesh = adacpp.cad.tessellate(handle)
+    positions = list(mesh.positions)
+    xs, ys, zs = positions[0::3], positions[1::3], positions[2::3]
+    # Corner at origin, dims 1×2×3.
+    assert min(xs) == 0.0 and max(xs) == 1.0
+    assert min(ys) == 0.0 and max(ys) == 2.0
+    assert min(zs) == 0.0 and max(zs) == 3.0

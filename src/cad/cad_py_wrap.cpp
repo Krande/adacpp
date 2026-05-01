@@ -5,32 +5,52 @@
 #include "../geom/Mesh.h"
 #include "../geom/MeshType.h"
 
+#include <stdexcept>
+
 #ifndef __EMSCRIPTEN__
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRepPrimAPI_MakeSphere.hxx>
 #include <Poly_Triangulation.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
 #include <TopoDS.hxx>
 #include <gp_Pnt.hxx>
-#include <stdexcept>
+#include <cstdint>
 #endif
 
 namespace {
 
 // ----------------------------------------------------------------------------
-// make_box
+// Primitive factories
 // ----------------------------------------------------------------------------
 
 ShapeHandle make_box_impl(float dx, float dy, float dz) {
 #ifdef __EMSCRIPTEN__
-    return ShapeHandle(ShapeHandle::Kind::Box, dx, dy, dz);
+    return ShapeHandle::box(dx, dy, dz);
 #else
     const gp_Pnt corner(-dx * 0.5, -dy * 0.5, -dz * 0.5);
     return ShapeHandle(BRepPrimAPI_MakeBox(corner, dx, dy, dz).Shape());
+#endif
+}
+
+ShapeHandle make_cylinder_impl(float radius, float height) {
+#ifdef __EMSCRIPTEN__
+    return ShapeHandle::cylinder(radius, height);
+#else
+    return ShapeHandle(BRepPrimAPI_MakeCylinder(radius, height).Shape());
+#endif
+}
+
+ShapeHandle make_sphere_impl(float radius) {
+#ifdef __EMSCRIPTEN__
+    return ShapeHandle::sphere(radius);
+#else
+    return ShapeHandle(BRepPrimAPI_MakeSphere(radius).Shape());
 #endif
 }
 
@@ -40,14 +60,15 @@ ShapeHandle make_box_impl(float dx, float dy, float dz) {
 
 #ifdef __EMSCRIPTEN__
 
-// Wasm stub: dispatches on the kind tag. Will be replaced once a real wasm
-// kernel is wired in. ``linear_deflection`` is accepted for API parity but
-// unused — the stub is hand-built and exact.
+// Wasm stub: only Box has a hand-built mesh today. Cylinder and Sphere can be
+// constructed (so callers can build the same code path used on native), but
+// tessellation throws — there's no value in faking a mesh that doesn't match
+// the OCCT geometry, and a clear failure is better than silently wrong data.
 Mesh tessellate_impl(const ShapeHandle &sh, double /*linear_deflection*/) {
     if (sh.kind() == ShapeHandle::Kind::Box) {
-        const float x = sh.dx() * 0.5f;
-        const float y = sh.dy() * 0.5f;
-        const float z = sh.dz() * 0.5f;
+        const float x = sh.param(0) * 0.5f;
+        const float y = sh.param(1) * 0.5f;
+        const float z = sh.param(2) * 0.5f;
         std::vector<float> positions = {
             -x, -y, -z,   x, -y, -z,   x,  y, -z,  -x,  y, -z,
             -x, -y,  z,   x, -y,  z,   x,  y,  z,  -x,  y,  z,
@@ -62,7 +83,9 @@ Mesh tessellate_impl(const ShapeHandle &sh, double /*linear_deflection*/) {
         };
         return Mesh(0, std::move(positions), std::move(faces));
     }
-    return Mesh(0, {}, {});
+    throw std::runtime_error(
+        "tessellate: only Box is supported by the wasm stub kernel; "
+        "Cylinder / Sphere will be available once OCCT-wasm is wired in.");
 }
 
 #else
@@ -112,6 +135,23 @@ Mesh tessellate_impl(const ShapeHandle &sh, double linear_deflection) {
         }
     }
     return Mesh(0, std::move(positions), std::move(indices));
+}
+
+// ----------------------------------------------------------------------------
+// pyocc bridge (native only)
+// ----------------------------------------------------------------------------
+
+// Wrap an existing OCCT TopoDS_Shape — typically one created in pythonocc-core
+// or another nanobind-bound module — into an adacpp.cad ShapeHandle. The
+// pointer must point at a valid C++ TopoDS_Shape; we copy the shape (cheap,
+// it's a refcounted value type), so the source lifetime is irrelevant after
+// this call.
+ShapeHandle from_topods_pointer_impl(uintptr_t ptr) {
+    if (ptr == 0) {
+        throw std::runtime_error("from_topods_pointer: null pointer");
+    }
+    const TopoDS_Shape *shape = reinterpret_cast<const TopoDS_Shape *>(ptr);
+    return ShapeHandle(*shape);
 }
 
 #endif
@@ -167,6 +207,14 @@ void cad_module(nb::module_ &m) {
           "dx"_a, "dy"_a, "dz"_a,
           "Create a centered axis-aligned box ShapeHandle.");
 
+    m.def("make_cylinder", &make_cylinder_impl,
+          "radius"_a, "height"_a,
+          "Create a cylinder ShapeHandle along +Z, base on the XY plane.");
+
+    m.def("make_sphere", &make_sphere_impl,
+          "radius"_a,
+          "Create a sphere ShapeHandle centered at the origin.");
+
     m.def("tessellate", &tessellate_impl,
           "shape"_a, "linear_deflection"_a = -1.0,
           "Tessellate a shape into a triangle Mesh. "
@@ -175,4 +223,12 @@ void cad_module(nb::module_ &m) {
     m.def("tessellate_box", &tessellate_box_impl,
           "dx"_a, "dy"_a, "dz"_a,
           "Convenience: build a box and tessellate it in one call.");
+
+#ifndef __EMSCRIPTEN__
+    m.def("from_topods_pointer", &from_topods_pointer_impl,
+          "ptr"_a,
+          "Wrap an OCCT TopoDS_Shape addressed by a raw pointer (typically "
+          "produced by `int(pyocc_shape.this)`) into a ShapeHandle. "
+          "Native builds only — wasm has no OCCT to bridge to.");
+#endif
 }
