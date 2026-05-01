@@ -75,3 +75,22 @@ def test_tess_factory():
 
 def test_ifc_file_read(files_dir):
     adacpp.cadit.ifc.read_ifc_file(str(files_dir / "my_test.ifc"))
+
+
+def test_cad_tessellate_box():
+    mesh = adacpp.cad.tessellate_box(2.0, 3.0, 4.0)
+    positions = list(mesh.positions)
+    assert len(positions) % 3 == 0
+    assert len(mesh.indices) % 3 == 0
+    assert len(mesh.indices) >= 12 * 3  # at least 12 triangles for a 6-face box
+
+    # Centered axis-aligned box: AABB should be (±dx/2, ±dy/2, ±dz/2).
+    xs, ys, zs = positions[0::3], positions[1::3], positions[2::3]
+    assert min(xs) == -1.0 and max(xs) == 1.0
+    assert min(ys) == -1.5 and max(ys) == 1.5
+    assert min(zs) == -2.0 and max(zs) == 2.0
+
+
+def test_cad_mesh_is_visit_mesh():
+    """adacpp.cad.Mesh and adacpp.visit.Mesh must be the same class."""
+    assert adacpp.cad.Mesh is adacpp.visit.Mesh

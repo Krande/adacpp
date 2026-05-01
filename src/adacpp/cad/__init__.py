@@ -7,8 +7,11 @@ and the surface is identical between the native and wasm/pyodide builds.
 """
 
 from .._ada_cpp_ext_impl.cad import (
+    Color,
+    GroupReference,
     Mesh,
+    MeshType,
     tessellate_box,
 )
 
-__all__ = ["Mesh", "tessellate_box"]
+__all__ = ["Color", "GroupReference", "Mesh", "MeshType", "tessellate_box"]
