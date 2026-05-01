@@ -5,9 +5,14 @@
 #include "../geom/Mesh.h"
 #include "../geom/MeshType.h"
 
+#include <nanobind/stl/array.h>
+#include <array>
+#include <cstdint>
+#include <fstream>
 #include <stdexcept>
+#include <unistd.h>      // mkstemp, unlink, write, close
+#include <vector>
 
-#ifndef __EMSCRIPTEN__
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
 #include <BRep_Tool.hxx>
@@ -15,80 +20,46 @@
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
+#include <IFSelect_ReturnStatus.hxx>
+#include <Message_ProgressRange.hxx>
 #include <Poly_Triangulation.hxx>
+#include <RWGltf_CafWriter.hxx>
+#include <RWGltf_WriterTrsfFormat.hxx>
+#include <RWMesh_CoordinateSystem.hxx>
+#include <STEPControl_Reader.hxx>
+#include <TColStd_IndexedDataMapOfStringString.hxx>
+#include <TCollection_AsciiString.hxx>
+#include <TCollection_ExtendedString.hxx>
+#include <TDocStd_Document.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
 #include <TopoDS.hxx>
+#include <XCAFDoc_DocumentTool.hxx>
+#include <XCAFDoc_ShapeTool.hxx>
 #include <gp_Pnt.hxx>
-#include <cstdint>
-#endif
 
 namespace {
 
 // ----------------------------------------------------------------------------
-// Primitive factories
+// Primitive factories — single OCCT-backed code path on native + wasm
 // ----------------------------------------------------------------------------
 
 ShapeHandle make_box_impl(float dx, float dy, float dz) {
-#ifdef __EMSCRIPTEN__
-    return ShapeHandle::box(dx, dy, dz);
-#else
     const gp_Pnt corner(-dx * 0.5, -dy * 0.5, -dz * 0.5);
     return ShapeHandle(BRepPrimAPI_MakeBox(corner, dx, dy, dz).Shape());
-#endif
 }
 
 ShapeHandle make_cylinder_impl(float radius, float height) {
-#ifdef __EMSCRIPTEN__
-    return ShapeHandle::cylinder(radius, height);
-#else
     return ShapeHandle(BRepPrimAPI_MakeCylinder(radius, height).Shape());
-#endif
 }
 
 ShapeHandle make_sphere_impl(float radius) {
-#ifdef __EMSCRIPTEN__
-    return ShapeHandle::sphere(radius);
-#else
     return ShapeHandle(BRepPrimAPI_MakeSphere(radius).Shape());
-#endif
 }
 
 // ----------------------------------------------------------------------------
 // tessellate
 // ----------------------------------------------------------------------------
-
-#ifdef __EMSCRIPTEN__
-
-// Wasm stub: only Box has a hand-built mesh today. Cylinder and Sphere can be
-// constructed (so callers can build the same code path used on native), but
-// tessellation throws — there's no value in faking a mesh that doesn't match
-// the OCCT geometry, and a clear failure is better than silently wrong data.
-Mesh tessellate_impl(const ShapeHandle &sh, double /*linear_deflection*/) {
-    if (sh.kind() == ShapeHandle::Kind::Box) {
-        const float x = sh.param(0) * 0.5f;
-        const float y = sh.param(1) * 0.5f;
-        const float z = sh.param(2) * 0.5f;
-        std::vector<float> positions = {
-            -x, -y, -z,   x, -y, -z,   x,  y, -z,  -x,  y, -z,
-            -x, -y,  z,   x, -y,  z,   x,  y,  z,  -x,  y,  z,
-        };
-        std::vector<uint32_t> faces = {
-            0, 1, 2,  0, 2, 3,
-            4, 6, 5,  4, 7, 6,
-            0, 4, 5,  0, 5, 1,
-            3, 2, 6,  3, 6, 7,
-            0, 3, 7,  0, 7, 4,
-            1, 5, 6,  1, 6, 2,
-        };
-        return Mesh(0, std::move(positions), std::move(faces));
-    }
-    throw std::runtime_error(
-        "tessellate: only Box is supported by the wasm stub kernel; "
-        "Cylinder / Sphere will be available once OCCT-wasm is wired in.");
-}
-
-#else
 
 Mesh tessellate_impl(const ShapeHandle &sh, double linear_deflection) {
     const TopoDS_Shape &shape = sh.topods();
@@ -137,15 +108,23 @@ Mesh tessellate_impl(const ShapeHandle &sh, double linear_deflection) {
     return Mesh(0, std::move(positions), std::move(indices));
 }
 
+// Convenience: build a primitive box and tessellate it in one call. Same logic
+// as make_box() + tessellate(), kept as a single entry point for callers that
+// don't need the intermediate handle.
+Mesh tessellate_box_impl(float dx, float dy, float dz) {
+    return tessellate_impl(make_box_impl(dx, dy, dz), -1.0);
+}
+
 // ----------------------------------------------------------------------------
-// pyocc bridge (native only)
+// pyocc bridge — wrap an existing OCCT TopoDS_Shape (typically created in
+// pythonocc-core or another nanobind-bound module) into an adacpp.cad
+// ShapeHandle. Pointer must point at a valid C++ TopoDS_Shape; we copy the
+// shape (cheap, refcounted value type), so source lifetime is irrelevant
+// after this call. Available on both targets — only callers with access to
+// a TopoDS_Shape pointer can use it (pythonocc-core on native; potentially
+// other adacpp-wasm modules in the future).
 // ----------------------------------------------------------------------------
 
-// Wrap an existing OCCT TopoDS_Shape — typically one created in pythonocc-core
-// or another nanobind-bound module — into an adacpp.cad ShapeHandle. The
-// pointer must point at a valid C++ TopoDS_Shape; we copy the shape (cheap,
-// it's a refcounted value type), so the source lifetime is irrelevant after
-// this call.
 ShapeHandle from_topods_pointer_impl(uintptr_t ptr) {
     if (ptr == 0) {
         throw std::runtime_error("from_topods_pointer: null pointer");
@@ -154,20 +133,146 @@ ShapeHandle from_topods_pointer_impl(uintptr_t ptr) {
     return ShapeHandle(*shape);
 }
 
-#endif
+// ----------------------------------------------------------------------------
+// bbox: axis-aligned bounding box query
+// ----------------------------------------------------------------------------
 
-// Convenience: build a primitive box and tessellate it in one call. Same logic
-// as make_box() + tessellate(), kept as a single entry point for callers that
-// don't need the intermediate handle.
-Mesh tessellate_box_impl(float dx, float dy, float dz) {
-    return tessellate_impl(make_box_impl(dx, dy, dz), -1.0);
+// Returns {xmin, ymin, zmin, xmax, ymax, zmax} — same order as OCCT's
+// Bnd_Box::Get and as adapy.occ.utils.get_boundingbox, so this slots in as
+// a drop-in replacement for callers using either side.
+std::array<double, 6> bbox_impl(const ShapeHandle &sh) {
+    const TopoDS_Shape &shape = sh.topods();
+    if (shape.IsNull()) {
+        throw std::runtime_error("bbox: ShapeHandle is null");
+    }
+    // AddOptimal uses geometric extents (BSpline/B-rep aware) for a tight
+    // bbox; default Add inflates by shape tolerance (~1e-7) which would
+    // surprise callers querying a primitive's natural bbox.
+    //
+    // useTriangulation=False forces the analytic path — without this, OCCT
+    // returns the *mesh* bbox if a triangulation is already cached on the
+    // shape, which jitters ±1e-7 for box and ±0.1 for sphere/cylinder
+    // depending on tessellation deflection. Callers asking for `bbox(shape)`
+    // expect geometric extents, not mesh extents.
+    Bnd_Box bb;
+    BRepBndLib::AddOptimal(shape, bb,
+                           /*useTriangulation=*/Standard_False,
+                           /*useShapeTolerance=*/Standard_False);
+    if (bb.IsVoid()) {
+        throw std::runtime_error("bbox: empty bounding box (shape has no geometry)");
+    }
+    Standard_Real xmin, ymin, zmin, xmax, ymax, zmax;
+    bb.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+    return {xmin, ymin, zmin, xmax, ymax, zmax};
+}
+
+// ----------------------------------------------------------------------------
+// STEP read / glTF write — temp-file roundtrip
+// ----------------------------------------------------------------------------
+//
+// OCCT's STEP/glTF readers/writers operate on filenames, not memory streams.
+// To present a `bytes -> ShapeHandle` / `ShapeHandle -> bytes` API, we write
+// to a temp file under /tmp and let OCCT read/write through that. Under
+// pyodide /tmp is MEMFS (in-memory), so this is purely a memcpy detour with
+// no real disk I/O — same speed as a memory-stream API would give.
+
+ShapeHandle read_step_bytes_impl(nb::bytes data) {
+    char tmpname[] = "/tmp/adacpp_step_XXXXXX";
+    const int fd = mkstemp(tmpname);
+    if (fd < 0) {
+        throw std::runtime_error("read_step_bytes: mkstemp failed");
+    }
+    const auto written = ::write(fd, data.c_str(), data.size());
+    ::close(fd);
+    if (written < 0 || static_cast<std::size_t>(written) != data.size()) {
+        ::unlink(tmpname);
+        throw std::runtime_error("read_step_bytes: failed to materialize temp file");
+    }
+
+    STEPControl_Reader reader;
+    const IFSelect_ReturnStatus status = reader.ReadFile(tmpname);
+    ::unlink(tmpname);
+    if (status != IFSelect_RetDone) {
+        throw std::runtime_error("read_step_bytes: STEPControl_Reader could not parse the input");
+    }
+    reader.TransferRoots();
+    const TopoDS_Shape shape = reader.OneShape();
+    if (shape.IsNull()) {
+        throw std::runtime_error("read_step_bytes: no transferable shape (empty STEP?)");
+    }
+    return ShapeHandle(shape);
+}
+
+nb::bytes write_glb_bytes_impl(const ShapeHandle &sh, double linear_deflection) {
+    const TopoDS_Shape &shape = sh.topods();
+    if (shape.IsNull()) {
+        throw std::runtime_error("write_glb_bytes: ShapeHandle is null");
+    }
+    if (linear_deflection <= 0.0) linear_deflection = 0.1;
+
+    // RWGltf needs a triangulation per face; mesh in-place on the shape.
+    BRepMesh_IncrementalMesh(shape, linear_deflection,
+                              /*relative=*/Standard_False,
+                              /*angular=*/0.5,
+                              /*parallel=*/Standard_True);
+
+    // Wrap the shape in a CAF document — RWGltf_CafWriter consumes one.
+    Handle(TDocStd_Document) doc =
+        new TDocStd_Document(TCollection_ExtendedString("MDTV-XCAF"));
+    Handle(XCAFDoc_ShapeTool) shapeTool =
+        XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+    shapeTool->AddShape(shape);
+
+    char tmpname[] = "/tmp/adacpp_glb_XXXXXX";
+    const int fd = mkstemp(tmpname);
+    if (fd < 0) {
+        throw std::runtime_error("write_glb_bytes: mkstemp failed");
+    }
+    ::close(fd);  // RWGltf_CafWriter opens the file itself by name.
+
+    {
+        RWGltf_CafWriter writer(TCollection_AsciiString(tmpname),
+                                 /*isBinary=*/Standard_True);
+        // Match adapy's gltf_writer.to_gltf() configuration so the produced
+        // GLB renders identically in the adapy viewer:
+        //   - Z-up source coordinate system (CAD convention) — RWGltf
+        //     internally rotates to glTF's Y-up runtime convention so the
+        //     viewer doesn't see sideways/upside-down models.
+        //   - Compact node transforms: smaller JSON, what the viewer expects.
+        writer.ChangeCoordinateSystemConverter()
+            .SetInputCoordinateSystem(RWMesh_CoordinateSystem_Zup);
+        writer.SetTransformationFormat(RWGltf_WriterTrsfFormat_Compact);
+
+        TColStd_IndexedDataMapOfStringString fileInfo;
+        fileInfo.Add(TCollection_AsciiString("Authors"),
+                     TCollection_AsciiString("adacpp"));
+        const Message_ProgressRange progress;
+        if (!writer.Perform(doc, fileInfo, progress)) {
+            ::unlink(tmpname);
+            throw std::runtime_error("write_glb_bytes: RWGltf_CafWriter::Perform failed");
+        }
+    }
+
+    std::ifstream f(tmpname, std::ios::binary | std::ios::ate);
+    if (!f.is_open()) {
+        ::unlink(tmpname);
+        throw std::runtime_error("write_glb_bytes: failed to re-open temp file");
+    }
+    const auto size = static_cast<std::size_t>(f.tellg());
+    f.seekg(0, std::ios::beg);
+    std::vector<char> buffer(size);
+    if (size > 0) f.read(buffer.data(), size);
+    f.close();
+    ::unlink(tmpname);
+
+    return nb::bytes(buffer.data(), buffer.size());
 }
 
 } // namespace
 
 void cad_module(nb::module_ &m) {
     // Kernel-agnostic mesh / color / group types live in cad — they're the
-    // surface every backend (native OCCT, wasm stub, future CGAL) speaks.
+    // surface every backend (native OCCT, wasm OCCT, future CGAL) speaks.
     nb::enum_<MeshType>(m, "MeshType")
             .value("POINTS",         MeshType::POINTS)
             .value("LINES",          MeshType::LINES)
@@ -224,11 +329,22 @@ void cad_module(nb::module_ &m) {
           "dx"_a, "dy"_a, "dz"_a,
           "Convenience: build a box and tessellate it in one call.");
 
-#ifndef __EMSCRIPTEN__
+    m.def("bbox", &bbox_impl,
+          "shape"_a,
+          "Axis-aligned bounding box of a shape, returned as "
+          "(xmin, ymin, zmin, xmax, ymax, zmax).");
+
     m.def("from_topods_pointer", &from_topods_pointer_impl,
           "ptr"_a,
           "Wrap an OCCT TopoDS_Shape addressed by a raw pointer (typically "
-          "produced by `int(pyocc_shape.this)`) into a ShapeHandle. "
-          "Native builds only — wasm has no OCCT to bridge to.");
-#endif
+          "produced by `int(pyocc_shape.this)`) into a ShapeHandle.");
+
+    m.def("read_step_bytes", &read_step_bytes_impl,
+          "data"_a,
+          "Parse a STEP file from a bytes buffer into a ShapeHandle.");
+
+    m.def("write_glb_bytes", &write_glb_bytes_impl,
+          "shape"_a, "linear_deflection"_a = 0.1,
+          "Tessellate a ShapeHandle and write a binary glTF (.glb) into "
+          "a bytes buffer. linear_deflection<=0 falls back to 0.1.");
 }

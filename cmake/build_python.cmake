@@ -47,6 +47,32 @@ nanobind_add_module(_ada_cpp_ext_impl STABLE_ABI ${ADA_CPP_SOURCES} ${ADA_CPP_PY
 # Link libraries to the module
 target_link_libraries(_ada_cpp_ext_impl PRIVATE ${ADA_CPP_LINK_LIBS})
 
+# Wasm builds: statically link the OCCT toolkits cross-built by wasm_occt.cmake.
+# The OCCT IMPORTED targets carry their include dir as INTERFACE_INCLUDE_DIRECTORIES,
+# so adding them here also makes <BRepPrimAPI_MakeBox.hxx> & friends resolve.
+#
+# Why --whole-archive (not just --start-group): nanobind-config.cmake forces
+# `-Wl,--gc-sections` for Release/RelWithDebInfo builds. That post-link
+# section-GC strips OCCT object files that no nanobind-emitted code directly
+# references, including the static initializers that register OCCT types and
+# the vtables those types rely on. Result is "getWasmTableEntry(...) is not
+# a function" at module load — a vtable slot pointing at a discarded function.
+# --whole-archive forces every .o in each OCCT toolkit to be linked, defeating
+# both --gc-sections and any first-pass-undefined-symbol issue. Cost is wheel
+# size (a few MB more); benefit is the .so actually loading.
+#
+# CMake registers WHOLE_ARCHIVE for many platforms but not the emscripten
+# wasm32 target — define it ourselves.
+if (EMSCRIPTEN AND DEFINED WASM_OCCT_TARGETS)
+    set(CMAKE_C_LINK_GROUP_USING_RESCAN "LINKER:--start-group" "LINKER:--end-group")
+    set(CMAKE_C_LINK_GROUP_USING_RESCAN_SUPPORTED TRUE)
+    set(CMAKE_CXX_LINK_GROUP_USING_RESCAN "LINKER:--start-group" "LINKER:--end-group")
+    set(CMAKE_CXX_LINK_GROUP_USING_RESCAN_SUPPORTED TRUE)
+    target_link_libraries(_ada_cpp_ext_impl PRIVATE
+        "$<LINK_GROUP:RESCAN,${WASM_OCCT_TARGETS}>"
+    )
+endif ()
+
 if (EMSCRIPTEN)
     # Emscripten + cmake's MODULE target produces an ar archive by default. Pyodide
     # loads .so files that are actually relocatable wasm side modules; force that
@@ -62,6 +88,15 @@ if (EMSCRIPTEN)
             "-fexceptions"
             "-Wl,--export=PyInit__ada_cpp_ext_impl"
             "-Wl,--no-gc-sections"
+            # SIDE_MODULE=2 + nanobind's default `-Wl,--gc-sections` (added at
+            # Release build) end up dropping OCCT vtable entries whose only
+            # callers are intra-module — pyodide can't see those callers
+            # because side-module exports go through env imports it then
+            # stubs. EXPORT_ALL=1 keeps every symbol in the export table so
+            # pyodide's self-binding pass resolves intra-module references
+            # to real functions instead of stubs. Without this you get
+            # `getWasmTableEntry(...) is not a function` at module load.
+            "-sEXPORT_ALL=1"
     )
     # The matching compile flag is required so try/catch in our code (and in
     # nanobind's dispatch) actually emit unwind tables. -fexceptions (the older

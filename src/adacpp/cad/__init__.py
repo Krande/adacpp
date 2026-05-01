@@ -21,9 +21,16 @@ make_sphere    = _cad.make_sphere
 tessellate     = _cad.tessellate
 tessellate_box = _cad.tessellate_box
 
-# Native-only: bridge from a raw OCCT TopoDS_Shape pointer (eg from pythonocc-
-# core's `int(shape.this)`) into a cad ShapeHandle. Absent under wasm/pyodide.
-from_topods_pointer = getattr(_cad, "from_topods_pointer", None)
+bbox           = _cad.bbox
+
+read_step_bytes = _cad.read_step_bytes
+write_glb_bytes = _cad.write_glb_bytes
+
+# Bridge from a raw OCCT TopoDS_Shape pointer (e.g. pythonocc-core's
+# `int(shape.this)`) into a cad ShapeHandle. Available on both targets;
+# real callers only exist where another module produces TopoDS_Shape
+# pointers (i.e. native via pythonocc-core).
+from_topods_pointer = _cad.from_topods_pointer
 
 __all__ = [
     "Color",
@@ -36,5 +43,8 @@ __all__ = [
     "make_sphere",
     "tessellate",
     "tessellate_box",
+    "bbox",
+    "read_step_bytes",
+    "write_glb_bytes",
     "from_topods_pointer",
 ]

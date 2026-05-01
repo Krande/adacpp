@@ -2,8 +2,13 @@
 set(CMAKE_SYSTEM_NAME WebAssembly)
 set(CMAKE_SYSTEM_VERSION 1)
 
-set(CMAKE_C_COMPILER "emcc")
-set(CMAKE_CXX_COMPILER "em++")
+# Don't override CMAKE_C_COMPILER / CMAKE_CXX_COMPILER here — emcmake's
+# Emscripten.cmake toolchain (imported via -DCMAKE_TOOLCHAIN_FILE=) has
+# already set them to full paths. Overriding with the bare names "emcc" /
+# "em++" looks fine for the top-level project(ada-cpp) (compiler already
+# resolved when this file runs), but breaks any nested project() — e.g.
+# OCCT's FetchContent_MakeAvailable triggers project(OCCT) which re-runs
+# the compiler check and can't find "em++" without a full path.
 
 # Clear architecture-specific compiler flags that may come from conda environment
 # These flags (-march=, -mtune=) are not compatible with WebAssembly target

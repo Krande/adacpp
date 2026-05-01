@@ -98,6 +98,10 @@ set(ADA_CPP_LINK_LIBS)
 if (BUILD_WASM)
     message(STATUS "Building for WebAssembly using Emscripten")
     include(cmake/wasm_toolchain.cmake)
+    # Cross-compile a minimal OCCT to wasm via FetchContent. Sets WASM_OCCT_TARGETS
+    # for the nanobind module / executables to link against. First spike is
+    # FoundationClasses only; module set widens as features land.
+    include(cmake/wasm_occt.cmake)
 endif ()
 
 if (BUILD_PYTHON)
