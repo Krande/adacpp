@@ -6,6 +6,34 @@ execute_process(
 message(STATUS "NanoBind Cmake directory: " ${NB_DIR})
 list(APPEND CMAKE_PREFIX_PATH "${NB_DIR}")
 
+# Under the emscripten toolchain, find_package is restricted to CMAKE_FIND_ROOT_PATH.
+# nanobind lives in the host conda env, not the cross-compile sysroot, so allow find
+# to look outside the sysroot for the package config.
+if (EMSCRIPTEN)
+    set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)
+
+    # Pyodide Python modules are loaded dynamically by the runtime and never link
+    # libpython, so find_package(Python COMPONENTS Development) is unavailable.
+    # Provide the Python::Module / Python::SABIModule targets nanobind expects, plus
+    # Python_SOABI / Python_SOSABI variables that drive the extension suffix.
+    if (NOT TARGET Python::Module)
+        add_library(Python::Module INTERFACE IMPORTED)
+        target_include_directories(Python::Module INTERFACE "${Python_INCLUDE_DIR}")
+    endif ()
+    if (NOT TARGET Python::SABIModule)
+        add_library(Python::SABIModule INTERFACE IMPORTED)
+        target_include_directories(Python::SABIModule INTERFACE "${Python_INCLUDE_DIR}")
+    endif ()
+    set(Python_SOABI   "cpython-312-wasm32-emscripten")
+    set(Python_SOSABI  "abi3")
+
+    # The emscripten toolchain pins TARGET_SUPPORTS_SHARED_LIBS=FALSE globally, which
+    # silently demotes MODULE targets (what nanobind_add_module produces) to STATIC
+    # archives. Pyodide loads .so files that are wasm side modules, so flip the
+    # property back on before nanobind_add_module runs.
+    set_property(GLOBAL PROPERTY TARGET_SUPPORTS_SHARED_LIBS TRUE)
+endif ()
+
 # Import nanobind through CMake's find_package mechanism
 find_package(nanobind CONFIG REQUIRED)
 
@@ -18,6 +46,23 @@ nanobind_add_module(_ada_cpp_ext_impl STABLE_ABI ${ADA_CPP_SOURCES} ${ADA_CPP_PY
 
 # Link libraries to the module
 target_link_libraries(_ada_cpp_ext_impl PRIVATE ${ADA_CPP_LINK_LIBS})
+
+if (EMSCRIPTEN)
+    # Emscripten + cmake's MODULE target produces an ar archive by default. Pyodide
+    # loads .so files that are actually relocatable wasm side modules; force that
+    # output here. WASM_BIGINT is required by pyodide (BigInt-aware i64 marshalling).
+    # PyInit__ada_cpp_ext_impl must be explicitly retained — wasm-ld --gc-sections
+    # would otherwise drop it (it's only reached through the Python C API).
+    set_target_properties(_ada_cpp_ext_impl PROPERTIES
+            SUFFIX ".so"
+            PREFIX "")
+    target_link_options(_ada_cpp_ext_impl PRIVATE
+            "-sSIDE_MODULE=2"
+            "-sWASM_BIGINT"
+            "-Wl,--export=PyInit__ada_cpp_ext_impl"
+            "-Wl,--no-gc-sections"
+    )
+endif ()
 
 # Set Python site-packages directory (can be overridden via -DPYTHON_SITE_PACKAGES)
 if(NOT DEFINED PYTHON_SITE_PACKAGES)

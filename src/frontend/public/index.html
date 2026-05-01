@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>adacpp dev</title>
+    <style>
+      body { font-family: ui-monospace, monospace; max-width: 60ch; margin: 2rem auto; padding: 0 1rem; }
+      .ok  { color: #2a7; }
+      .bad { color: #c33; }
+      dt { font-weight: 600; }
+      dd { margin: 0 0 1rem 0; }
+    </style>
+  </head>
+  <body>
+    <h1>adacpp dev server</h1>
+
+    <dl>
+      <dt>crossOriginIsolated</dt>
+      <dd id="coi">…</dd>
+
+      <dt>SharedArrayBuffer</dt>
+      <dd id="sab">…</dd>
+
+      <dt>Origin</dt>
+      <dd id="origin">…</dd>
+    </dl>
+
+    <p>
+      This page exists to verify the dev server is up and the COOP/COEP headers
+      are set correctly. Once the wasm wheel build lands, this page will host
+      a Pyodide worker that loads <code>adacpp</code> and exercises it.
+    </p>
+
+    <script>
+      const set = (id, ok, text) => {
+        const el = document.getElementById(id);
+        el.className = ok ? "ok" : "bad";
+        el.textContent = text;
+      };
+
+      set("coi", self.crossOriginIsolated, String(self.crossOriginIsolated));
+      set("sab", typeof SharedArrayBuffer !== "undefined", typeof SharedArrayBuffer);
+      set("origin", true, location.origin);
+    </script>
+  </body>
+</html>
