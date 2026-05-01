@@ -60,7 +60,10 @@ clean = { cmd = "rm -rf build-wasm && mkdir -p build-wasm" }
 wbuild = { cmd = "emcmake cmake . -B build-wasm -G Ninja -DBUILD_WASM=ON -DBUILD_PYTHON=OFF -DBUILD_TESTS=OFF -DBUILD_STP2GLB=OFF && cmake --build build-wasm", depends-on = ["clean"] }
 xbuildenv-install = { cmd = "pyodide xbuildenv install 0.27.7", description = "Install the pyodide cross-build environment (Python 3.12.7 + emscripten 3.1.58)" }
 wbuild-pyodide = { cmd = "emcmake cmake --preset wasm-pyodide && cmake --build build/wasm-pyodide", description = "Build the adacpp nanobind module for pyodide" }
-serve = { cmd = "docker run --rm -p 8088:80 -v $PIXI_PROJECT_ROOT/src/frontend/public:/usr/share/nginx/html:ro -v $PIXI_PROJECT_ROOT/src/frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro nginx:alpine", description = "Serve src/frontend/public on http://localhost:8088 with COOP/COEP headers (requires docker)" }
+pack-wheel-pyodide = { cmd = "rm -rf build/wasm-pyodide/install dist && cmake --install build/wasm-pyodide --prefix build/wasm-pyodide/install && python tools/build_wheel.py build/wasm-pyodide/install/wheel dist", description = "Build a pyodide-tagged wheel from the wasm-pyodide build", depends-on = ["wbuild-pyodide"] }
+tools-install = { cmd = "cd tools && npm install --silent", description = "Install npm helpers (pyodide for the wheel sanity test) into tools/node_modules" }
+test-wheel-pyodide = { cmd = "node tools/test_wheel_pyodide.js", description = "Smoke-test the pyodide wheel via node-pyodide", depends-on = ["pack-wheel-pyodide", "tools-install"] }
+serve = { cmd = "docker run --rm -p 8088:80 -v $PIXI_PROJECT_ROOT/src/frontend/public:/usr/share/nginx/html:ro -v $PIXI_PROJECT_ROOT/src/frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro -v $PIXI_PROJECT_ROOT/dist:/usr/share/nginx/html/dist:ro nginx:alpine", description = "Serve src/frontend/public on http://localhost:8088 with COOP/COEP headers (requires docker)" }
 
 [feature.wasm.activation.env]
 PYODIDE_XBUILDENV = "$HOME/.cache/.pyodide-xbuildenv-0.34.3/0.27.7"

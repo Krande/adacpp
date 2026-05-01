@@ -4,43 +4,100 @@
     <meta charset="utf-8" />
     <title>adacpp dev</title>
     <style>
-      body { font-family: ui-monospace, monospace; max-width: 60ch; margin: 2rem auto; padding: 0 1rem; }
+      body { font-family: ui-monospace, monospace; max-width: 80ch; margin: 2rem auto; padding: 0 1rem; }
       .ok  { color: #2a7; }
       .bad { color: #c33; }
       dt { font-weight: 600; }
       dd { margin: 0 0 1rem 0; }
+      pre { background: #f4f4f4; padding: 0.5rem; overflow-x: auto; max-height: 20rem; }
+      button { padding: 0.5rem 1rem; }
     </style>
   </head>
   <body>
-    <h1>adacpp dev server</h1>
+    <h1>adacpp pyodide dev</h1>
 
     <dl>
       <dt>crossOriginIsolated</dt>
       <dd id="coi">…</dd>
-
       <dt>SharedArrayBuffer</dt>
       <dd id="sab">…</dd>
-
-      <dt>Origin</dt>
-      <dd id="origin">…</dd>
     </dl>
 
     <p>
-      This page exists to verify the dev server is up and the COOP/COEP headers
-      are set correctly. Once the wasm wheel build lands, this page will host
-      a Pyodide worker that loads <code>adacpp</code> and exercises it.
+      <button id="run" disabled>Boot pyodide and call <code>adacpp.cad.tessellate_box(2, 3, 4)</code></button>
     </p>
 
+    <pre id="log"></pre>
+
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.27.7/full/pyodide.js"></script>
     <script>
-      const set = (id, ok, text) => {
+      const setStatus = (id, ok, text) => {
         const el = document.getElementById(id);
         el.className = ok ? "ok" : "bad";
         el.textContent = text;
       };
+      const log = (msg) => {
+        const el = document.getElementById("log");
+        el.textContent += msg + "\n";
+        el.scrollTop = el.scrollHeight;
+      };
 
-      set("coi", self.crossOriginIsolated, String(self.crossOriginIsolated));
-      set("sab", typeof SharedArrayBuffer !== "undefined", typeof SharedArrayBuffer);
-      set("origin", true, location.origin);
+      setStatus("coi", self.crossOriginIsolated, String(self.crossOriginIsolated));
+      setStatus("sab", typeof SharedArrayBuffer !== "undefined", typeof SharedArrayBuffer);
+
+      // Find the wheel served from /dist/. We hit the directory listing nginx
+      // exposes, but if autoindex is off we fall back to a hardcoded name.
+      async function findWheel() {
+        try {
+          const res = await fetch("/dist/");
+          if (res.ok) {
+            const html = await res.text();
+            const match = html.match(/href="(ada_cpp[^"]+\.whl)"/);
+            if (match) return "/dist/" + match[1];
+          }
+        } catch (_) {}
+        // Fallback — assumes pack-wheel-pyodide produced the v0.3.0 wheel.
+        return "/dist/ada_cpp-0.3.0-cp312-cp312-emscripten_3_1_58_wasm32.whl";
+      }
+
+      document.getElementById("run").addEventListener("click", async () => {
+        const btn = document.getElementById("run");
+        btn.disabled = true;
+        try {
+          log("Booting pyodide 0.27.7…");
+          const pyodide = await loadPyodide({
+            indexURL: "https://cdn.jsdelivr.net/pyodide/v0.27.7/full/",
+          });
+          log("pyodide booted, python " + pyodide.runPython("import sys; sys.version"));
+
+          await pyodide.loadPackage(["micropip"]);
+          const micropip = pyodide.pyimport("micropip");
+
+          const wheelUrl = await findWheel();
+          log("Installing wheel: " + wheelUrl);
+          await micropip.install(window.location.origin + wheelUrl);
+          log("Wheel installed.");
+
+          const result = pyodide.runPython(`
+import adacpp.cad as cad
+mesh = cad.tessellate_box(2.0, 3.0, 4.0)
+{
+    "positions_len": len(mesh.positions),
+    "indices_len":   len(mesh.indices),
+    "first_positions": list(mesh.positions[:9]),
+    "first_indices":   list(mesh.indices[:9]),
+}
+`);
+          log("Result: " + JSON.stringify(result.toJs({ dict_converter: Object.fromEntries }), null, 2));
+        } catch (err) {
+          log("ERROR: " + (err && err.message ? err.message : err));
+          console.error(err);
+        } finally {
+          btn.disabled = false;
+        }
+      });
+
+      document.getElementById("run").disabled = false;
     </script>
   </body>
 </html>

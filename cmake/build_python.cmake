@@ -64,20 +64,29 @@ if (EMSCRIPTEN)
     )
 endif ()
 
-# Set Python site-packages directory (can be overridden via -DPYTHON_SITE_PACKAGES)
-if(NOT DEFINED PYTHON_SITE_PACKAGES)
-    execute_process(
-            COMMAND "${Python_EXECUTABLE}" -c "import sysconfig; print(sysconfig.get_path('purelib'))"
-            OUTPUT_STRIP_TRAILING_WHITESPACE OUTPUT_VARIABLE PYTHON_SITE_PACKAGES)
-endif()
+if (EMSCRIPTEN)
+    # Stage the wheel layout into ${CMAKE_INSTALL_PREFIX}/wheel/adacpp/. The
+    # build_wheel.py script picks it up from there and builds the .whl.
+    install(TARGETS _ada_cpp_ext_impl LIBRARY DESTINATION wheel/adacpp)
+    install(DIRECTORY ${CMAKE_SOURCE_DIR}/src/adacpp/
+            DESTINATION wheel/adacpp
+            FILES_MATCHING PATTERN "*.py")
+else ()
+    # Set Python site-packages directory (can be overridden via -DPYTHON_SITE_PACKAGES)
+    if(NOT DEFINED PYTHON_SITE_PACKAGES)
+        execute_process(
+                COMMAND "${Python_EXECUTABLE}" -c "import sysconfig; print(sysconfig.get_path('purelib'))"
+                OUTPUT_STRIP_TRAILING_WHITESPACE OUTPUT_VARIABLE PYTHON_SITE_PACKAGES)
+    endif()
 
-message(STATUS "Python site-packages: ${PYTHON_SITE_PACKAGES}")
+    message(STATUS "Python site-packages: ${PYTHON_SITE_PACKAGES}")
 
-# Install the module to site-packages/adacpp
-install(TARGETS _ada_cpp_ext_impl LIBRARY DESTINATION ${PYTHON_SITE_PACKAGES}/adacpp)
+    # Install the module to site-packages/adacpp
+    install(TARGETS _ada_cpp_ext_impl LIBRARY DESTINATION ${PYTHON_SITE_PACKAGES}/adacpp)
 
-# Install the Python package files
-install(DIRECTORY ${CMAKE_SOURCE_DIR}/src/adacpp/
-        DESTINATION ${PYTHON_SITE_PACKAGES}/adacpp
-        FILES_MATCHING PATTERN "*.py")
+    # Install the Python package files
+    install(DIRECTORY ${CMAKE_SOURCE_DIR}/src/adacpp/
+            DESTINATION ${PYTHON_SITE_PACKAGES}/adacpp
+            FILES_MATCHING PATTERN "*.py")
+endif ()
 

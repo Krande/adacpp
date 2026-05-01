@@ -1,0 +1,8 @@
+{
+  "name": "adacpp-tools",
+  "private": true,
+  "description": "Node helpers for adacpp's wasm/pyodide pipeline. Run `pixi run -e wasm tools-install` before `pixi run -e wasm test-wheel-pyodide`.",
+  "dependencies": {
+    "pyodide": "0.27.7"
+  }
+}
