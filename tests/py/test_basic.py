@@ -159,6 +159,34 @@ def test_cad_bbox_sphere():
     assert tuple(bb) == (-3.0, -3.0, -3.0, 3.0, 3.0, 3.0)
 
 
+def test_cad_extruded_curve_profile_is_open_shell():
+    # CURVE profile (is_area=False): sweeping a circle wire +Z yields the open
+    # lateral cylinder surface — no end caps. Outer circle r=0.5 in XY, depth 2.
+    circle = [[2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.5]]
+    shp = adacpp.cad.build_extruded_area_solid(
+        circle, [], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0], 2.0, False
+    )
+    bb = tuple(round(v, 6) for v in adacpp.cad.bbox(shp))
+    assert bb == (-0.5, -0.5, 0.0, 0.5, 0.5, 2.0)
+    # Open lateral surface: a single cylindrical face, no caps.
+    assert len(adacpp.cad.faces(shp)) == 1
+
+
+def test_cad_revolved_curve_profile():
+    # Revolve a circle wire (r=0.5, centered at x=2 in XY) a quarter turn about
+    # the world Z axis through the origin → a curved pipe-elbow surface.
+    circle = [[2.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.5]]
+    shp = adacpp.cad.build_revolved_area_solid(
+        circle, [], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 90.0, False
+    )
+    assert adacpp.cad.is_valid(shp)
+    bb = adacpp.cad.bbox(shp)
+    # Swept quarter-arc of a tube whose centerline radius is 2, tube radius 0.5.
+    assert round(bb[3], 6) == 2.5  # +x extent = outer centerline + tube radius
+    assert round(bb[4], 6) == 2.5  # +y extent after the 90° sweep
+
+
 def test_cad_obb_box():
     # Oriented bbox of a centered axis-aligned box: barycenter at origin,
     # half-sizes equal to the box half-extents (axes aligned to world).

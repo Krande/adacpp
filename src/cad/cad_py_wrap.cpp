@@ -40,6 +40,7 @@
 #include <BRepPrimAPI_MakeCone.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepTools.hxx>
 #include <GC_MakeArcOfCircle.hxx>
@@ -563,22 +564,56 @@ ShapeHandle build_planar_face_impl(
     return ShapeHandle(place_at(face, loc, axis, ref_dir));
 }
 
-// Native ExtrudedAreaSolid (beams + plates): port of adapy's
-// make_extruded_area_shape_from_geom + make_profile_from_geom. Build the outer
-// AREA face, cut inner voids, prism-extrude +Z by depth, then place via the
-// gp_Ax3 change-of-basis + translation (= transform_shape_to_pos).
-ShapeHandle build_extruded_area_solid_impl(
-        const std::vector<std::vector<double>> &outer,
-        const std::vector<std::vector<std::vector<double>>> &inners,
-        std::array<double, 3> loc, std::array<double, 3> axis, std::array<double, 3> ref_dir,
-        double depth) {
+// Build a swept profile from edge records. AREA → outer face minus inner void
+// faces (solid cross-section). CURVE → the outer wire alone: matches OCC's
+// make_profile_from_geom non-area path, where cutting a 1-D wire by a disjoint
+// inner wire leaves the outer wire unchanged (so sweeping it yields the open
+// lateral surface, e.g. a pipe-shell cylinder, not a filled tube).
+TopoDS_Shape swept_profile(const std::vector<std::vector<double>> &outer,
+                           const std::vector<std::vector<std::vector<double>>> &inners,
+                           bool is_area) {
+    if (!is_area) {
+        return wire_from_edges(outer);
+    }
     TopoDS_Shape profile = face_from_edges(outer);
     for (const auto &inner : inners) {
         profile = BRepAlgoAPI_Cut(profile, face_from_edges(inner)).Shape();
     }
+    return profile;
+}
 
+// Native ExtrudedAreaSolid (beams + plates + pipe-shell straights): port of
+// adapy's make_extruded_area_shape_from_geom + make_profile_from_geom. Build
+// the profile (AREA face or CURVE wire), prism-extrude +Z by depth, then place
+// via the gp_Ax3 change-of-basis + translation (= transform_shape_to_pos).
+ShapeHandle build_extruded_area_solid_impl(
+        const std::vector<std::vector<double>> &outer,
+        const std::vector<std::vector<std::vector<double>>> &inners,
+        std::array<double, 3> loc, std::array<double, 3> axis, std::array<double, 3> ref_dir,
+        double depth, bool is_area) {
+    TopoDS_Shape profile = swept_profile(outer, inners, is_area);
     TopoDS_Shape solid = BRepPrimAPI_MakePrism(profile, gp_Vec(0.0, 0.0, depth)).Shape();
     return ShapeHandle(place_at(solid, loc, axis, ref_dir));
+}
+
+// Native RevolvedAreaSolid (pipe-shell elbows): port of adapy's
+// make_revolved_area_shape_from_geom. Build the profile (AREA face or CURVE
+// wire), place it at the swept_area position, then revolve around the
+// world-space axis (axis_loc, axis_dir) by `angle_deg` degrees. No final
+// placement — the revolve already lands in world space.
+ShapeHandle build_revolved_area_solid_impl(
+        const std::vector<std::vector<double>> &outer,
+        const std::vector<std::vector<std::vector<double>>> &inners,
+        std::array<double, 3> loc, std::array<double, 3> axis, std::array<double, 3> ref_dir,
+        std::array<double, 3> axis_loc, std::array<double, 3> axis_dir,
+        double angle_deg, bool is_area) {
+    TopoDS_Shape profile = swept_profile(outer, inners, is_area);
+    profile = place_at(profile, loc, axis, ref_dir);
+    const gp_Ax1 rev_axis(gp_Pnt(axis_loc[0], axis_loc[1], axis_loc[2]),
+                          gp_Dir(axis_dir[0], axis_dir[1], axis_dir[2]));
+    const double angle_rad = angle_deg * 0.017453292519943295;
+    TopoDS_Shape shape = BRepPrimAPI_MakeRevol(profile, rev_axis, angle_rad).Shape();
+    return ShapeHandle(shape);
 }
 
 // Planar face → (origin, normal); std::nullopt (→ Python None) if non-planar.
@@ -766,10 +801,21 @@ void cad_module(nb::module_ &m) {
 
     m.def("build_extruded_area_solid", &build_extruded_area_solid_impl,
           "outer"_a, "inners"_a, "location"_a, "axis"_a, "ref_dir"_a, "depth"_a,
-          "Extruded area solid (beams/plates): an outer profile curve + inner "
-          "void curves (each a list of edge records: line=[0,p1,p2], "
-          "arc=[1,start,mid,end], circle=[2,centre,axis,r]), prism-extruded "
-          "by `depth` and placed at the Axis2Placement3D frame.");
+          "is_area"_a = true,
+          "Extruded area solid (beams/plates/pipe-shells): an outer profile "
+          "curve + inner void curves (each a list of edge records: "
+          "line=[0,p1,p2], arc=[1,start,mid,end], circle=[2,centre,axis,r]), "
+          "prism-extruded by `depth` and placed at the Axis2Placement3D frame. "
+          "is_area=False sweeps the outer wire alone (open lateral surface).");
+
+    m.def("build_revolved_area_solid", &build_revolved_area_solid_impl,
+          "outer"_a, "inners"_a, "location"_a, "axis"_a, "ref_dir"_a,
+          "axis_location"_a, "axis_direction"_a, "angle_deg"_a, "is_area"_a = true,
+          "Revolved area solid (pipe-shell elbows): build the profile (same "
+          "edge-record encoding as build_extruded_area_solid), place it at the "
+          "Axis2Placement3D frame, then revolve around the world axis "
+          "(axis_location, axis_direction) by angle_deg degrees. is_area=False "
+          "revolves the outer wire alone.");
 
     m.def("build_planar_face", &build_planar_face_impl,
           "outer"_a, "inners"_a, "location"_a, "axis"_a, "ref_dir"_a,
