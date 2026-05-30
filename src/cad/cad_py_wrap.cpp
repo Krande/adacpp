@@ -493,6 +493,36 @@ TopoDS_Shape place_at(TopoDS_Shape shape, const std::array<double, 3> &loc,
     return BRepBuilderAPI_Transform(shape, tr, true).Shape();
 }
 
+// Face-based surface model: a set of polygon faces fused into one shell.
+// Port of adapy's make_shell_from_face_based_surface_geom. Each polygon is a
+// closed loop of 3D points.
+ShapeHandle build_face_based_surface_model_impl(
+        const std::vector<std::vector<std::array<double, 3>>> &polygons) {
+    TopoDS_Shape result;
+    bool first = true;
+    for (const auto &poly : polygons) {
+        if (poly.size() < 3) continue;
+        BRepBuilderAPI_MakeWire wm;
+        for (std::size_t i = 0; i < poly.size(); ++i) {
+            const auto &a = poly[i];
+            const auto &b = poly[(i + 1) % poly.size()];
+            wm.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(a[0], a[1], a[2]), gp_Pnt(b[0], b[1], b[2])).Edge());
+        }
+        wm.Build();
+        const TopoDS_Shape face = BRepBuilderAPI_MakeFace(wm.Wire()).Shape();
+        if (first) {
+            result = face;
+            first = false;
+        } else {
+            result = BRepAlgoAPI_Fuse(face, result).Shape();
+        }
+    }
+    if (first) {
+        throw std::runtime_error("build_face_based_surface_model: no faces");
+    }
+    return ShapeHandle(result);
+}
+
 // Curve-bounded planar face (shell representation of plates/beams): outer
 // profile face minus inner voids, placed. Port of adapy's
 // make_shell_from_curve_bounded_plane_geom.
@@ -714,4 +744,9 @@ void cad_module(nb::module_ &m) {
           "Curve-bounded planar face (shell representation): outer profile face "
           "minus inner void faces, placed at the Axis2Placement3D frame. Same "
           "edge-record encoding as build_extruded_area_solid.");
+
+    m.def("build_face_based_surface_model", &build_face_based_surface_model_impl,
+          "polygons"_a,
+          "Fuse a list of polygon faces (each a closed loop of 3D points) into "
+          "one shell.");
 }
