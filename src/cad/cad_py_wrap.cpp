@@ -439,6 +439,35 @@ TopoDS_Shape face_from_edges(const std::vector<std::vector<double>> &edges) {
     return BRepBuilderAPI_MakeFace(wire_from_edges(edges)).Shape();
 }
 
+// Place a shape built in the XY frame at an Axis2Placement3D — the gp_Ax3
+// change-of-basis + translation (= adapy's transform_shape_to_pos).
+TopoDS_Shape place_at(TopoDS_Shape shape, const std::array<double, 3> &loc,
+                      const std::array<double, 3> &axis, const std::array<double, 3> &ref_dir) {
+    gp_Trsf rot;
+    const gp_Ax3 ax_global(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+    const gp_Ax3 ax_local(gp_Pnt(0, 0, 0), gp_Dir(axis[0], axis[1], axis[2]),
+                          gp_Dir(ref_dir[0], ref_dir[1], ref_dir[2]));
+    rot.SetTransformation(ax_local, ax_global);
+    shape = BRepBuilderAPI_Transform(shape, rot, true).Shape();
+    gp_Trsf tr;
+    tr.SetTranslation(gp_Vec(loc[0], loc[1], loc[2]));
+    return BRepBuilderAPI_Transform(shape, tr, true).Shape();
+}
+
+// Curve-bounded planar face (shell representation of plates/beams): outer
+// profile face minus inner voids, placed. Port of adapy's
+// make_shell_from_curve_bounded_plane_geom.
+ShapeHandle build_planar_face_impl(
+        const std::vector<std::vector<double>> &outer,
+        const std::vector<std::vector<std::vector<double>>> &inners,
+        std::array<double, 3> loc, std::array<double, 3> axis, std::array<double, 3> ref_dir) {
+    TopoDS_Shape face = face_from_edges(outer);
+    for (const auto &inner : inners) {
+        face = BRepAlgoAPI_Cut(face, face_from_edges(inner)).Shape();
+    }
+    return ShapeHandle(place_at(face, loc, axis, ref_dir));
+}
+
 // Native ExtrudedAreaSolid (beams + plates): port of adapy's
 // make_extruded_area_shape_from_geom + make_profile_from_geom. Build the outer
 // AREA face, cut inner voids, prism-extrude +Z by depth, then place via the
@@ -454,17 +483,7 @@ ShapeHandle build_extruded_area_solid_impl(
     }
 
     TopoDS_Shape solid = BRepPrimAPI_MakePrism(profile, gp_Vec(0.0, 0.0, depth)).Shape();
-
-    gp_Trsf rot;
-    const gp_Ax3 ax_global(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
-    const gp_Ax3 ax_local(gp_Pnt(0, 0, 0), gp_Dir(axis[0], axis[1], axis[2]),
-                          gp_Dir(ref_dir[0], ref_dir[1], ref_dir[2]));
-    rot.SetTransformation(ax_local, ax_global);
-    solid = BRepBuilderAPI_Transform(solid, rot, true).Shape();
-
-    gp_Trsf tr;
-    tr.SetTranslation(gp_Vec(loc[0], loc[1], loc[2]));
-    return ShapeHandle(BRepBuilderAPI_Transform(solid, tr, true).Shape());
+    return ShapeHandle(place_at(solid, loc, axis, ref_dir));
 }
 
 // Planar face → (origin, normal); std::nullopt (→ Python None) if non-planar.
@@ -631,4 +650,10 @@ void cad_module(nb::module_ &m) {
           "void curves (each a list of edge records: line=[0,p1,p2], "
           "arc=[1,start,mid,end], circle=[2,centre,axis,r]), prism-extruded "
           "by `depth` and placed at the Axis2Placement3D frame.");
+
+    m.def("build_planar_face", &build_planar_face_impl,
+          "outer"_a, "inners"_a, "location"_a, "axis"_a, "ref_dir"_a,
+          "Curve-bounded planar face (shell representation): outer profile face "
+          "minus inner void faces, placed at the Axis2Placement3D frame. Same "
+          "edge-record encoding as build_extruded_area_solid.");
 }
