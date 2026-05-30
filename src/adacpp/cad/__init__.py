@@ -28,6 +28,7 @@ build_box      = _cad.build_box
 build_cylinder = _cad.build_cylinder
 build_sphere   = _cad.build_sphere
 build_cone     = _cad.build_cone
+build_extruded_area_solid = _cad.build_extruded_area_solid
 
 # Shape-algebra verbs (mirror adapy's CadBackend surface).
 boolean        = _cad.boolean
@@ -35,6 +36,7 @@ transform      = _cad.transform
 distance       = _cad.distance
 serialize      = _cad.serialize
 is_valid       = _cad.is_valid
+volume         = _cad.volume
 faces          = _cad.faces
 vertex_points  = _cad.vertex_points
 face_plane     = _cad.face_plane
@@ -64,11 +66,13 @@ __all__ = [
     "build_cylinder",
     "build_sphere",
     "build_cone",
+    "build_extruded_area_solid",
     "boolean",
     "transform",
     "distance",
     "serialize",
     "is_valid",
+    "volume",
     "faces",
     "vertex_points",
     "face_plane",

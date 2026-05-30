@@ -268,3 +268,31 @@ def test_cad_face_plane():
     assert round(sum(c * c for c in normal), 6) == 1.0
     # a solid (non-face) shape returns None
     assert adacpp.cad.face_plane(box) is None
+
+
+def test_cad_volume():
+    # make_box(2,3,4) is centered; volume = 24
+    assert round(adacpp.cad.volume(adacpp.cad.make_box(2.0, 3.0, 4.0)), 6) == 24.0
+
+
+def test_cad_build_extruded_area_solid():
+    # A unit square in XY (4 line edges), extruded +Z by 2 → 1×1×2 box.
+    square = [
+        [0.0, 0, 0, 0, 1, 0, 0],
+        [0.0, 1, 0, 0, 1, 1, 0],
+        [0.0, 1, 1, 0, 0, 1, 0],
+        [0.0, 0, 1, 0, 0, 0, 0],
+    ]
+    solid = adacpp.cad.build_extruded_area_solid(square, [], [0, 0, 0], [0, 0, 1], [1, 0, 0], 2.0)
+    assert tuple(round(v, 6) for v in adacpp.cad.bbox(solid)) == (0.0, 0.0, 0.0, 1.0, 1.0, 2.0)
+    assert round(adacpp.cad.volume(solid), 6) == 2.0
+
+    # Same outer with a 0.5×0.5 inner void at the centre → volume 2 - 0.25*2 = 1.5.
+    inner = [
+        [0.0, 0.25, 0.25, 0, 0.75, 0.25, 0],
+        [0.0, 0.75, 0.25, 0, 0.75, 0.75, 0],
+        [0.0, 0.75, 0.75, 0, 0.25, 0.75, 0],
+        [0.0, 0.25, 0.75, 0, 0.25, 0.25, 0],
+    ]
+    hollow = adacpp.cad.build_extruded_area_solid(square, [inner], [0, 0, 0], [0, 0, 1], [1, 0, 0], 2.0)
+    assert round(adacpp.cad.volume(hollow), 6) == 1.5

@@ -9,6 +9,7 @@
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/pair.h>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <optional>
@@ -26,15 +27,22 @@
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
+#include <BRepGProp.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCone.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepTools.hxx>
+#include <GC_MakeArcOfCircle.hxx>
+#include <GProp_GProps.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <Message_ProgressRange.hxx>
@@ -57,10 +65,13 @@
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 #include <gp_Ax2.hxx>
+#include <gp_Ax3.hxx>
+#include <gp_Circ.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
+#include <gp_Vec.hxx>
 
 namespace {
 
@@ -338,6 +349,12 @@ bool is_valid_impl(const ShapeHandle &sh) {
     return BRepCheck_Analyzer(sh.topods(), Standard_True).IsValid();
 }
 
+double volume_impl(const ShapeHandle &sh) {
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(sh.topods(), props);
+    return props.Mass();
+}
+
 // Whole list of face sub-shapes — boundary crosses once, not per face.
 std::vector<ShapeHandle> faces_impl(const ShapeHandle &sh) {
     std::vector<ShapeHandle> out;
@@ -391,6 +408,63 @@ ShapeHandle build_cone_impl(std::array<double, 3> loc, std::array<double, 3> axi
                             double bottom_radius, double height) {
     const gp_Ax2 ax2(gp_Pnt(loc[0], loc[1], loc[2]), gp_Dir(axis[0], axis[1], axis[2]));
     return ShapeHandle(BRepPrimAPI_MakeCone(ax2, bottom_radius, 0.0, height).Shape());
+}
+
+// A profile curve is a list of "edge records" (each a flat list of doubles),
+// the first element a kind tag (mirrors ada.geom curve segments):
+//   line   = [0, x1,y1,z1, x2,y2,z2]
+//   arc    = [1, sx,sy,sz, mx,my,mz, ex,ey,ez]   (start, mid, end)
+//   circle = [2, cx,cy,cz, ax,ay,az, r]          (Axis2Placement + radius)
+TopoDS_Wire wire_from_edges(const std::vector<std::vector<double>> &edges) {
+    BRepBuilderAPI_MakeWire wm;
+    for (const auto &e : edges) {
+        const int kind = static_cast<int>(std::lround(e[0]));
+        if (kind == 0) {  // line
+            wm.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(e[1], e[2], e[3]), gp_Pnt(e[4], e[5], e[6])).Edge());
+        } else if (kind == 1) {  // 3-point arc
+            GC_MakeArcOfCircle arc(gp_Pnt(e[1], e[2], e[3]), gp_Pnt(e[4], e[5], e[6]), gp_Pnt(e[7], e[8], e[9]));
+            wm.Add(BRepBuilderAPI_MakeEdge(arc.Value()).Edge());
+        } else if (kind == 2) {  // full circle
+            const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]));
+            wm.Add(BRepBuilderAPI_MakeEdge(gp_Circ(ax, e[7])).Edge());
+        } else {
+            throw std::runtime_error("wire_from_edges: unknown edge kind");
+        }
+    }
+    wm.Build();
+    return wm.Wire();
+}
+
+TopoDS_Shape face_from_edges(const std::vector<std::vector<double>> &edges) {
+    return BRepBuilderAPI_MakeFace(wire_from_edges(edges)).Shape();
+}
+
+// Native ExtrudedAreaSolid (beams + plates): port of adapy's
+// make_extruded_area_shape_from_geom + make_profile_from_geom. Build the outer
+// AREA face, cut inner voids, prism-extrude +Z by depth, then place via the
+// gp_Ax3 change-of-basis + translation (= transform_shape_to_pos).
+ShapeHandle build_extruded_area_solid_impl(
+        const std::vector<std::vector<double>> &outer,
+        const std::vector<std::vector<std::vector<double>>> &inners,
+        std::array<double, 3> loc, std::array<double, 3> axis, std::array<double, 3> ref_dir,
+        double depth) {
+    TopoDS_Shape profile = face_from_edges(outer);
+    for (const auto &inner : inners) {
+        profile = BRepAlgoAPI_Cut(profile, face_from_edges(inner)).Shape();
+    }
+
+    TopoDS_Shape solid = BRepPrimAPI_MakePrism(profile, gp_Vec(0.0, 0.0, depth)).Shape();
+
+    gp_Trsf rot;
+    const gp_Ax3 ax_global(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+    const gp_Ax3 ax_local(gp_Pnt(0, 0, 0), gp_Dir(axis[0], axis[1], axis[2]),
+                          gp_Dir(ref_dir[0], ref_dir[1], ref_dir[2]));
+    rot.SetTransformation(ax_local, ax_global);
+    solid = BRepBuilderAPI_Transform(solid, rot, true).Shape();
+
+    gp_Trsf tr;
+    tr.SetTranslation(gp_Vec(loc[0], loc[1], loc[2]));
+    return ShapeHandle(BRepBuilderAPI_Transform(solid, tr, true).Shape());
 }
 
 // Planar face → (origin, normal); std::nullopt (→ Python None) if non-planar.
@@ -515,6 +589,10 @@ void cad_module(nb::module_ &m) {
           "shape"_a,
           "Topological + geometric validity (BRepCheck_Analyzer).");
 
+    m.def("volume", &volume_impl,
+          "shape"_a,
+          "Solid volume (BRepGProp::VolumeProperties).");
+
     m.def("faces", &faces_impl,
           "shape"_a,
           "List of face sub-shapes as ShapeHandles.");
@@ -546,4 +624,11 @@ void cad_module(nb::module_ &m) {
     m.def("build_cone", &build_cone_impl,
           "location"_a, "axis"_a, "bottom_radius"_a, "height"_a,
           "Right circular cone (apex radius 0) with base at `location`.");
+
+    m.def("build_extruded_area_solid", &build_extruded_area_solid_impl,
+          "outer"_a, "inners"_a, "location"_a, "axis"_a, "ref_dir"_a, "depth"_a,
+          "Extruded area solid (beams/plates): an outer profile curve + inner "
+          "void curves (each a list of edge records: line=[0,p1,p2], "
+          "arc=[1,start,mid,end], circle=[2,centre,axis,r]), prism-extruded "
+          "by `depth` and placed at the Axis2Placement3D frame.");
 }
