@@ -8,9 +8,14 @@
 #include <nanobind/stl/array.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/pair.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/tuple.h>
+#include <nanobind/stl/vector.h>
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <tuple>
 #include <fstream>
 #include <optional>
 #include <sstream>
@@ -24,6 +29,7 @@
 #include <Bnd_OBB.hxx>
 #include <BRepBndLib.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
@@ -41,12 +47,16 @@
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCone.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRepPrimAPI_MakeHalfSpace.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepTools.hxx>
+#include <BRepTools_WireExplorer.hxx>
 #include <GC_MakeArcOfCircle.hxx>
+#include <GCPnts_UniformDeflection.hxx>
 #include <GProp_GProps.hxx>
+#include <GeomAbs_CurveType.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <Message_ProgressRange.hxx>
@@ -63,9 +73,13 @@
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
+#include <TopTools_MapOfOrientedShape.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Vertex.hxx>
+#include <TopoDS_Wire.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 #include <gp_Ax2.hxx>
@@ -652,6 +666,186 @@ ShapeHandle build_fixed_reference_swept_area_solid_impl(
     return ShapeHandle(BRepBuilderAPI_Transform(solid, tr, true).Shape());
 }
 
+// ----------------------------------------------------------------------------
+// cut_surfaces — extract polyline boundaries of CSG cut faces (native port of
+// adapy's ada.occ.cut_surfaces_occ). Self-contained in adacpp's own OCCT; does
+// not touch pythonocc. Returns the same plain-data contract:
+//   [(surface_type, (nx,ny,nz),
+//     [(edge_type, [(x,y,z)...])...],   # outer edges
+//     [(x,y,z)...],                     # outer polyline
+//     [[(x,y,z)...]...])]               # inner polylines
+// ----------------------------------------------------------------------------
+
+using Pt3 = std::array<double, 3>;
+using EdgeData = std::tuple<std::string, std::vector<Pt3>>;
+using SurfData = std::tuple<std::string, Pt3, std::vector<EdgeData>,
+                            std::vector<Pt3>, std::vector<std::vector<Pt3>>>;
+
+std::string cs_surface_type_name(const TopoDS_Face &face) {
+    BRepAdaptor_Surface surf(face, Standard_True);
+    switch (surf.GetType()) {
+        case GeomAbs_Plane:    return "Plane";
+        case GeomAbs_Cylinder: return "Cylinder";
+        case GeomAbs_Cone:     return "Cone";
+        case GeomAbs_Sphere:   return "Sphere";
+        default:               return "Other";
+    }
+}
+
+Pt3 cs_face_normal(const TopoDS_Face &face) {
+    BRepAdaptor_Surface surf(face, Standard_True);
+    Pt3 d;
+    if (surf.GetType() == GeomAbs_Plane) {
+        const gp_Dir n = surf.Plane().Axis().Direction();
+        d = {n.X(), n.Y(), n.Z()};
+    } else {
+        const double um = 0.5 * (surf.FirstUParameter() + surf.LastUParameter());
+        const double vm = 0.5 * (surf.FirstVParameter() + surf.LastVParameter());
+        gp_Pnt p; gp_Vec du, dv;
+        surf.D1(um, vm, p, du, dv);
+        gp_Vec n = du.Crossed(dv);
+        if (n.Magnitude() < 1e-12) return {0.0, 0.0, 1.0};
+        n.Normalize();
+        d = {n.X(), n.Y(), n.Z()};
+    }
+    if (face.Orientation() == TopAbs_REVERSED) { d[0] = -d[0]; d[1] = -d[1]; d[2] = -d[2]; }
+    return d;
+}
+
+std::string cs_curve_type_name(const BRepAdaptor_Curve &c) {
+    switch (c.GetType()) {
+        case GeomAbs_Line:         return "Line";
+        case GeomAbs_Circle:       return "Circle";
+        case GeomAbs_Ellipse:      return "Ellipse";
+        case GeomAbs_Hyperbola:    return "Hyperbola";
+        case GeomAbs_Parabola:     return "Parabola";
+        case GeomAbs_BezierCurve:  return "BezierCurve";
+        case GeomAbs_BSplineCurve: return "BSplineCurve";
+        case GeomAbs_OffsetCurve:  return "OffsetCurve";
+        default:                   return "Other";
+    }
+}
+
+std::vector<Pt3> cs_edge_to_points(const TopoDS_Edge &edge, double deflection) {
+    BRepAdaptor_Curve c(edge);
+    std::vector<Pt3> pts;
+    if (c.GetType() != GeomAbs_Line) {
+        GCPnts_UniformDeflection sampler(c, deflection);
+        if (sampler.IsDone() && sampler.NbPoints() >= 2) {
+            for (Standard_Integer i = 1; i <= sampler.NbPoints(); ++i) {
+                const gp_Pnt p = sampler.Value(i);
+                pts.push_back({p.X(), p.Y(), p.Z()});
+            }
+            return pts;
+        }
+    }
+    const gp_Pnt p0 = c.Value(c.FirstParameter());
+    const gp_Pnt p1 = c.Value(c.LastParameter());
+    pts.push_back({p0.X(), p0.Y(), p0.Z()});
+    pts.push_back({p1.X(), p1.Y(), p1.Z()});
+    return pts;
+}
+
+double cs_point_dist(const Pt3 &a, const Pt3 &b) {
+    const double dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+std::vector<EdgeData> cs_wire_to_edges(const TopoDS_Wire &wire, double deflection, double tol) {
+    std::vector<EdgeData> edges;
+    for (BRepTools_WireExplorer ex(wire); ex.More(); ex.Next()) {
+        const TopoDS_Edge edge = ex.Current();
+        const std::string etype = cs_curve_type_name(BRepAdaptor_Curve(edge));
+        std::vector<Pt3> pts = cs_edge_to_points(edge, deflection);
+        if (ex.Orientation() == TopAbs_REVERSED) std::reverse(pts.begin(), pts.end());
+        if (!edges.empty() && !pts.empty()) {
+            const auto &prev = std::get<1>(edges.back());
+            if (cs_point_dist(prev.back(), pts.front()) <= tol) pts.front() = prev.back();
+        }
+        if (pts.size() >= 2) edges.emplace_back(etype, std::move(pts));
+    }
+    return edges;
+}
+
+std::vector<Pt3> cs_edges_to_polyline(const std::vector<EdgeData> &edges, double tol) {
+    std::vector<Pt3> poly;
+    for (const auto &e : edges) {
+        const auto &pts = std::get<1>(e);
+        if (poly.empty()) {
+            poly.insert(poly.end(), pts.begin(), pts.end());
+        } else if (cs_point_dist(poly.back(), pts.front()) <= tol) {
+            poly.insert(poly.end(), pts.begin() + 1, pts.end());
+        } else {
+            poly.insert(poly.end(), pts.begin(), pts.end());
+        }
+    }
+    if (poly.size() >= 2 && cs_point_dist(poly.front(), poly.back()) <= tol) poly.pop_back();
+    return poly;
+}
+
+ShapeHandle make_halfspace_impl(std::array<double, 3> origin, std::array<double, 3> normal, bool flip) {
+    const gp_Pln pln(gp_Pnt(origin[0], origin[1], origin[2]),
+                     gp_Dir(normal[0], normal[1], normal[2]));
+    const TopoDS_Face face = BRepBuilderAPI_MakeFace(pln).Face();
+    const double off = flip ? -1.0 : 1.0;
+    const gp_Pnt ref(origin[0] + normal[0] * off,
+                     origin[1] + normal[1] * off,
+                     origin[2] + normal[2] * off);
+    return ShapeHandle(BRepPrimAPI_MakeHalfSpace(face, ref).Solid());
+}
+
+std::vector<SurfData> cut_surfaces_impl(const ShapeHandle &solid_sh,
+                                        const std::vector<ShapeHandle> &cutters,
+                                        double deflection, double tol) {
+    TopoDS_Shape current = solid_sh.topods();
+
+    // Faces descending from the original solid (oriented identity, matching
+    // adapy's set semantics). Cut faces are those NOT in this set.
+    TopTools_MapOfOrientedShape descendants;
+    for (TopExp_Explorer ex(current, TopAbs_FACE); ex.More(); ex.Next())
+        descendants.Add(ex.Current());
+
+    for (const ShapeHandle &ch : cutters) {
+        BRepAlgoAPI_Cut algo(current, ch.topods());
+        algo.Build();
+        if (!algo.IsDone()) throw std::runtime_error("cut_surfaces: boolean cut failed");
+        TopTools_MapOfOrientedShape next;
+        for (TopTools_MapOfOrientedShape::Iterator dit(descendants); dit.More(); dit.Next()) {
+            const TopoDS_Shape &f = dit.Value();
+            const TopTools_ListOfShape &mod = algo.Modified(f);
+            if (!mod.IsEmpty()) {
+                for (TopTools_ListOfShape::Iterator mit(mod); mit.More(); mit.Next())
+                    next.Add(mit.Value());
+            } else if (!algo.IsDeleted(f)) {
+                next.Add(f);
+            }
+        }
+        descendants = next;
+        current = algo.Shape();
+    }
+
+    std::vector<SurfData> out;
+    for (TopExp_Explorer ex(current, TopAbs_FACE); ex.More(); ex.Next()) {
+        const TopoDS_Face rf = TopoDS::Face(ex.Current());
+        if (descendants.Contains(rf)) continue;
+
+        const TopoDS_Wire outer_wire = BRepTools::OuterWire(rf);
+        std::vector<EdgeData> outer_edges = cs_wire_to_edges(outer_wire, deflection, tol);
+        std::vector<Pt3> outer = cs_edges_to_polyline(outer_edges, tol);
+        if (outer.size() < 3) continue;
+
+        std::vector<std::vector<Pt3>> inners;
+        for (TopExp_Explorer we(rf, TopAbs_WIRE); we.More(); we.Next()) {
+            const TopoDS_Wire w = TopoDS::Wire(we.Current());
+            if (w.IsSame(outer_wire)) continue;
+            inners.push_back(cs_edges_to_polyline(cs_wire_to_edges(w, deflection, tol), tol));
+        }
+        out.emplace_back(cs_surface_type_name(rf), cs_face_normal(rf),
+                         std::move(outer_edges), std::move(outer), std::move(inners));
+    }
+    return out;
+}
+
 // Planar face → (origin, normal); std::nullopt (→ Python None) if non-planar.
 std::optional<std::pair<std::array<double, 3>, std::array<double, 3>>>
 face_plane_impl(const ShapeHandle &face_sh) {
@@ -860,6 +1054,19 @@ void cad_module(nb::module_ &m) {
           "edge-record encoding as build_extruded_area_solid) with "
           "MakePipeShell + round-corner transitions, make a solid, and "
           "translate to `location`.");
+
+    m.def("make_halfspace", &make_halfspace_impl,
+          "origin"_a, "normal"_a, "flip"_a,
+          "Infinite half-space solid bounded by the plane (origin, normal); "
+          "`flip` selects which side is solid. Used as a CSG cutter.");
+
+    m.def("cut_surfaces", &cut_surfaces_impl,
+          "solid"_a, "cutters"_a, "deflection"_a, "tol"_a,
+          "Cut `solid` by each cutter in turn (BRepAlgoAPI_Cut with boolean "
+          "history) and return, for every result face originating from a "
+          "cutter, plain data: (surface_type, (nx,ny,nz), outer_edges, "
+          "outer_polyline, inner_polylines). Curved edges are discretized to "
+          "`deflection`; points within `tol` are de-duplicated.");
 
     m.def("build_planar_face", &build_planar_face_impl,
           "outer"_a, "inners"_a, "location"_a, "axis"_a, "ref_dir"_a,

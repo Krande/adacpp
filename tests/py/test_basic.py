@@ -234,6 +234,24 @@ def test_cad_fixed_reference_swept_area_solid():
     assert _signed_mesh_volume(adacpp.cad.tessellate(shp, -1.0)) > 0.0
 
 
+def test_cad_make_halfspace_cuts_a_box():
+    # A half-space at z=0 (solid below) cut from a centered 2³ box removes the
+    # top half, leaving a planar cut face on z=0.
+    box = adacpp.cad.make_box(2.0, 2.0, 2.0)
+    hs = adacpp.cad.make_halfspace([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], False)
+    surfs = adacpp.cad.cut_surfaces(box, [hs], 1e-3, 1e-4)
+    assert len(surfs) >= 1
+    # Each surface tuple: (type, normal, outer_edges, outer_polyline, inners).
+    planar = [s for s in surfs if s[0] == "Plane"]
+    assert planar, "expected at least one planar cut face"
+    surface_type, normal, outer_edges, outer_polyline, inners = planar[0]
+    # The cut face lies on z=0.
+    assert all(abs(p[2]) < 1e-6 for p in outer_polyline)
+    assert len(outer_polyline) >= 3
+    # Edges are classified (a box cut → straight Line edges).
+    assert all(e[0] == "Line" for e in outer_edges)
+
+
 def test_cad_obb_box():
     # Oriented bbox of a centered axis-aligned box: barycenter at origin,
     # half-sizes equal to the box half-extents (axes aligned to world).
