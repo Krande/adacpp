@@ -15,12 +15,15 @@ rattler-build = "*"
 
 [feature.common.dependencies]
 python = "==3.12"
-occt = { version = "==7.9.0", build = "*novtk*" }
-ifcopenshell = ">=0.8.3"
+occt = { version = "==7.9.3", build = "*novtk*" }
+# 0.8.5 is the first ifcopenshell built against occt 7.9.3 (0.8.3.post1 pins
+# occt 7.9.0). Keep in lockstep with adapy's OCCT for the shared-ABI bridge.
+ifcopenshell = ">=0.8.5"
 nanobind = "==2.12.0"
 cmake = "==3.30.3"
 numpy = "*"
-cgal-cpp = "==6.0.1"
+# 6.1.1 required transitively by ifcopenshell 0.8.5 (occt 7.9.3); matches adapy.
+cgal-cpp = "==6.1.1"
 cli11 = "*"
 tinygltf = "==2.8.21" # This must be installed in target dir also if you want to compile
 gmsh = "*"
