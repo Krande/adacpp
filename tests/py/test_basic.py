@@ -187,6 +187,53 @@ def test_cad_revolved_curve_profile():
     assert round(bb[4], 6) == 2.5  # +y extent after the 90° sweep
 
 
+def _signed_mesh_volume(mesh):
+    # Signed volume via the divergence theorem; positive iff triangles are
+    # consistently wound outward.
+    pos = list(mesh.positions)
+    idx = list(mesh.indices)
+    vol = 0.0
+    for t in range(0, len(idx), 3):
+        a, b, c = idx[t], idx[t + 1], idx[t + 2]
+        ax, ay, az = pos[3 * a], pos[3 * a + 1], pos[3 * a + 2]
+        bx, by, bz = pos[3 * b], pos[3 * b + 1], pos[3 * b + 2]
+        cx, cy, cz = pos[3 * c], pos[3 * c + 1], pos[3 * c + 2]
+        vol += (
+            ax * (by * cz - bz * cy)
+            - ay * (bx * cz - bz * cx)
+            + az * (bx * cy - by * cx)
+        )
+    return vol / 6.0
+
+
+def test_cad_tessellation_winding_is_outward():
+    # A closed solid must tessellate with outward-facing triangles, i.e. a
+    # positive signed mesh volume. Reversed faces (common in solids) need their
+    # winding flipped — this guards that fix. A centered box has reversed faces.
+    box = adacpp.cad.make_box(2.0, 2.0, 2.0)
+    mesh = adacpp.cad.tessellate(box, -1.0)
+    assert _signed_mesh_volume(mesh) > 0.0
+
+
+def test_cad_fixed_reference_swept_area_solid():
+    # Sweep a square profile (in the XY plane at the directrix start) along a
+    # straight directrix up +Z by 1.0 → a unit square prism of height 1.
+    h = 0.2
+    directrix = [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]]  # line (0,0,0)->(0,0,1)
+    profile = [
+        [0.0, 0.0, 0.0, 0.0, h, 0.0, 0.0],   # (0,0,0)->(h,0,0)
+        [0.0, h, 0.0, 0.0, h, h, 0.0],       # (h,0,0)->(h,h,0)
+        [0.0, h, h, 0.0, 0.0, h, 0.0],       # (h,h,0)->(0,h,0)
+        [0.0, 0.0, h, 0.0, 0.0, 0.0, 0.0],   # (0,h,0)->(0,0,0)
+    ]
+    shp = adacpp.cad.build_fixed_reference_swept_area_solid(directrix, profile, [0.0, 0.0, 0.0])
+    assert adacpp.cad.is_valid(shp)
+    # Square h×h swept length 1 → volume h*h.
+    assert round(adacpp.cad.volume(shp), 6) == round(h * h, 6)
+    # Solid tessellates outward (positive signed volume).
+    assert _signed_mesh_volume(adacpp.cad.tessellate(shp, -1.0)) > 0.0
+
+
 def test_cad_obb_box():
     # Oriented bbox of a centered axis-aligned box: barycenter at origin,
     # half-sizes equal to the box half-extents (axes aligned to world).

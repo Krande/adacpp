@@ -32,8 +32,10 @@
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepBuilderAPI_TransitionMode.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
+#include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <BRepGProp.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
@@ -134,9 +136,17 @@ Mesh tessellate_impl(const ShapeHandle &sh, double linear_deflection) {
             positions.push_back(static_cast<float>(p.Y()));
             positions.push_back(static_cast<float>(p.Z()));
         }
+        // Honor face orientation: OCCT stores each face's triangle nodes wound
+        // for the FORWARD surface. A TopAbs_REVERSED face (common in solids,
+        // where the surface normal opposes the outward solid normal) needs its
+        // winding flipped so the emitted triangles face outward. Without this,
+        // reversed faces tessellate with inward normals — e.g. swept/pipe
+        // solids come out with a net-negative mesh volume.
+        const bool reversed = (face.Orientation() == TopAbs_REVERSED);
         for (Standard_Integer i = 1; i <= tri->NbTriangles(); ++i) {
             Standard_Integer n1, n2, n3;
             tri->Triangle(i).Get(n1, n2, n3);
+            if (reversed) std::swap(n2, n3);
             indices.push_back(base + static_cast<uint32_t>(n1 - 1));
             indices.push_back(base + static_cast<uint32_t>(n2 - 1));
             indices.push_back(base + static_cast<uint32_t>(n3 - 1));
@@ -616,6 +626,32 @@ ShapeHandle build_revolved_area_solid_impl(
     return ShapeHandle(shape);
 }
 
+// Native FixedReferenceSweptAreaSolid (PrimSweep / pipe bends): port of adapy's
+// make_fixed_reference_swept_area_shape_from_geom. Sweep the profile *wire*
+// (the swept_area outer curve, already positioned in 3D at the directrix
+// start) along the directrix spine with BRepOffsetAPI_MakePipeShell, using the
+// round-corner transition for clean bends, then make a solid and translate to
+// the position location. Inner voids are not swept (matches OCC, which only
+// extracts the outer wire from the profile face).
+ShapeHandle build_fixed_reference_swept_area_solid_impl(
+        const std::vector<std::vector<double>> &directrix,
+        const std::vector<std::vector<double>> &profile_outer,
+        std::array<double, 3> loc) {
+    const TopoDS_Wire spine = wire_from_edges(directrix);
+    const TopoDS_Wire profile_wire = wire_from_edges(profile_outer);
+
+    BRepOffsetAPI_MakePipeShell mps(spine);
+    mps.SetTransitionMode(BRepBuilderAPI_RoundCorner);
+    mps.Add(profile_wire, Standard_True, Standard_False);  // with contact, no correction
+    mps.Build();
+    mps.MakeSolid();
+    TopoDS_Shape solid = mps.Shape();
+
+    gp_Trsf tr;
+    tr.SetTranslation(gp_Vec(loc[0], loc[1], loc[2]));
+    return ShapeHandle(BRepBuilderAPI_Transform(solid, tr, true).Shape());
+}
+
 // Planar face → (origin, normal); std::nullopt (→ Python None) if non-planar.
 std::optional<std::pair<std::array<double, 3>, std::array<double, 3>>>
 face_plane_impl(const ShapeHandle &face_sh) {
@@ -816,6 +852,14 @@ void cad_module(nb::module_ &m) {
           "Axis2Placement3D frame, then revolve around the world axis "
           "(axis_location, axis_direction) by angle_deg degrees. is_area=False "
           "revolves the outer wire alone.");
+
+    m.def("build_fixed_reference_swept_area_solid", &build_fixed_reference_swept_area_solid_impl,
+          "directrix"_a, "profile_outer"_a, "location"_a,
+          "Fixed-reference swept area solid (PrimSweep / pipe bends): sweep the "
+          "profile outer wire along the directrix spine (both in the same "
+          "edge-record encoding as build_extruded_area_solid) with "
+          "MakePipeShell + round-corner transitions, make a solid, and "
+          "translate to `location`.");
 
     m.def("build_planar_face", &build_planar_face_impl,
           "outer"_a, "inners"_a, "location"_a, "axis"_a, "ref_dir"_a,

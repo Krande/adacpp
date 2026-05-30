@@ -31,6 +31,7 @@ build_sphere   = _cad.build_sphere
 build_cone     = _cad.build_cone
 build_extruded_area_solid = _cad.build_extruded_area_solid
 build_revolved_area_solid = _cad.build_revolved_area_solid
+build_fixed_reference_swept_area_solid = _cad.build_fixed_reference_swept_area_solid
 build_planar_face = _cad.build_planar_face
 build_face_based_surface_model = _cad.build_face_based_surface_model
 make_wire      = _cad.make_wire
@@ -77,6 +78,7 @@ __all__ = [
     "build_cone",
     "build_extruded_area_solid",
     "build_revolved_area_solid",
+    "build_fixed_reference_swept_area_solid",
     "build_planar_face",
     "build_face_based_surface_model",
     "make_wire",
