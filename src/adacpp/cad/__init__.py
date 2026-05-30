@@ -30,6 +30,7 @@ build_sphere   = _cad.build_sphere
 build_cone     = _cad.build_cone
 build_extruded_area_solid = _cad.build_extruded_area_solid
 build_planar_face = _cad.build_planar_face
+make_wire      = _cad.make_wire
 
 # Shape-algebra verbs (mirror adapy's CadBackend surface).
 boolean        = _cad.boolean
@@ -39,8 +40,11 @@ serialize      = _cad.serialize
 is_valid       = _cad.is_valid
 volume         = _cad.volume
 faces          = _cad.faces
+solids         = _cad.solids
+edges          = _cad.edges
 vertex_points  = _cad.vertex_points
 face_plane     = _cad.face_plane
+to_topods_pointer = _cad.to_topods_pointer
 
 read_step_bytes = _cad.read_step_bytes
 write_glb_bytes = _cad.write_glb_bytes
@@ -69,6 +73,7 @@ __all__ = [
     "build_cone",
     "build_extruded_area_solid",
     "build_planar_face",
+    "make_wire",
     "boolean",
     "transform",
     "distance",
@@ -76,8 +81,11 @@ __all__ = [
     "is_valid",
     "volume",
     "faces",
+    "solids",
+    "edges",
     "vertex_points",
     "face_plane",
+    "to_topods_pointer",
     "read_step_bytes",
     "write_glb_bytes",
     "from_topods_pointer",

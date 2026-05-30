@@ -355,13 +355,37 @@ double volume_impl(const ShapeHandle &sh) {
     return props.Mass();
 }
 
-// Whole list of face sub-shapes — boundary crosses once, not per face.
+// Sub-shape lists — boundary crosses once, not per element.
 std::vector<ShapeHandle> faces_impl(const ShapeHandle &sh) {
     std::vector<ShapeHandle> out;
     for (TopExp_Explorer exp(sh.topods(), TopAbs_FACE); exp.More(); exp.Next()) {
         out.emplace_back(exp.Current());
     }
     return out;
+}
+
+std::vector<ShapeHandle> solids_impl(const ShapeHandle &sh) {
+    std::vector<ShapeHandle> out;
+    for (TopExp_Explorer exp(sh.topods(), TopAbs_SOLID); exp.More(); exp.Next()) {
+        out.emplace_back(exp.Current());
+    }
+    return out;
+}
+
+std::vector<ShapeHandle> edges_impl(const ShapeHandle &sh) {
+    std::vector<ShapeHandle> out;
+    for (TopExp_Explorer exp(sh.topods(), TopAbs_EDGE); exp.More(); exp.Next()) {
+        out.emplace_back(exp.Current());
+    }
+    return out;
+}
+
+// Reverse bridge: expose the address of the wrapped OCCT TopoDS_Shape so an
+// ABI-compatible OCCT consumer (e.g. gmsh's importShapesNativePointer, same
+// OCCT 7.9.x) can read it — mirrors pythonocc's int(shape.this). The pointer
+// is valid only while this ShapeHandle is alive.
+uintptr_t to_topods_pointer_impl(const ShapeHandle &sh) {
+    return reinterpret_cast<uintptr_t>(&sh.topods());
 }
 
 // Every (unique) vertex coordinate as one list — the per-vertex loop stays in
@@ -402,6 +426,21 @@ ShapeHandle build_cylinder_impl(std::array<double, 3> loc, std::array<double, 3>
 
 ShapeHandle build_sphere_impl(std::array<double, 3> center, double radius) {
     return ShapeHandle(BRepPrimAPI_MakeSphere(gp_Pnt(center[0], center[1], center[2]), radius).Shape());
+}
+
+// Polyline wire through a list of 3D points (consecutive straight edges) —
+// e.g. a beam's centre-line for line/edge FEM meshing.
+ShapeHandle make_wire_impl(const std::vector<std::array<double, 3>> &pts) {
+    if (pts.size() < 2) {
+        throw std::runtime_error("make_wire: need at least 2 points");
+    }
+    BRepBuilderAPI_MakeWire wm;
+    for (std::size_t i = 0; i + 1 < pts.size(); ++i) {
+        wm.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(pts[i][0], pts[i][1], pts[i][2]),
+                                       gp_Pnt(pts[i + 1][0], pts[i + 1][1], pts[i + 1][2])).Edge());
+    }
+    wm.Build();
+    return ShapeHandle(wm.Wire());
 }
 
 ShapeHandle build_cone_impl(std::array<double, 3> loc, std::array<double, 3> axis,
@@ -616,6 +655,20 @@ void cad_module(nb::module_ &m) {
           "shape"_a,
           "List of face sub-shapes as ShapeHandles.");
 
+    m.def("solids", &solids_impl,
+          "shape"_a,
+          "List of solid sub-shapes as ShapeHandles.");
+
+    m.def("edges", &edges_impl,
+          "shape"_a,
+          "List of edge sub-shapes as ShapeHandles.");
+
+    m.def("to_topods_pointer", &to_topods_pointer_impl,
+          "shape"_a,
+          "Address of the wrapped OCCT TopoDS_Shape (for ABI-compatible OCCT "
+          "consumers like gmsh; mirrors pythonocc's int(shape.this)). Valid "
+          "only while the ShapeHandle is alive.");
+
     m.def("vertex_points", &vertex_points_impl,
           "shape"_a,
           "List of unique vertex coordinates as (x, y, z) tuples.");
@@ -639,6 +692,11 @@ void cad_module(nb::module_ &m) {
     m.def("build_sphere", &build_sphere_impl,
           "center"_a, "radius"_a,
           "Sphere centred at `center`.");
+
+    m.def("make_wire", &make_wire_impl,
+          "points"_a,
+          "Polyline wire through a list of 3D points (consecutive straight "
+          "edges).");
 
     m.def("build_cone", &build_cone_impl,
           "location"_a, "axis"_a, "bottom_radius"_a, "height"_a,
