@@ -23,6 +23,12 @@ tessellate_box = _cad.tessellate_box
 
 bbox           = _cad.bbox
 
+# Placement-aware primitive builders (ada.geom.solids parity).
+build_box      = _cad.build_box
+build_cylinder = _cad.build_cylinder
+build_sphere   = _cad.build_sphere
+build_cone     = _cad.build_cone
+
 # Shape-algebra verbs (mirror adapy's CadBackend surface).
 boolean        = _cad.boolean
 transform      = _cad.transform
@@ -54,6 +60,10 @@ __all__ = [
     "tessellate",
     "tessellate_box",
     "bbox",
+    "build_box",
+    "build_cylinder",
+    "build_sphere",
+    "build_cone",
     "boolean",
     "transform",
     "distance",

@@ -31,6 +31,7 @@
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakeCone.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepTools.hxx>
@@ -55,6 +56,7 @@
 #include <TopoDS_Vertex.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
+#include <gp_Ax2.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
@@ -359,6 +361,38 @@ std::vector<std::array<double, 3>> vertex_points_impl(const ShapeHandle &sh) {
     return out;
 }
 
+// ----------------------------------------------------------------------------
+// Placement-aware primitive builders — direct ports of adapy's
+// ada.occ.geom.solids.make_*_from_geom (same OCCT calls → identical shapes),
+// so AdacppBackend.build() can construct ada.geom primitives natively without
+// any pythonocc dependency. location/axis/ref_dir come from the geometry's
+// Axis2Placement3D.
+// ----------------------------------------------------------------------------
+
+ShapeHandle build_box_impl(std::array<double, 3> loc, std::array<double, 3> axis,
+                           std::array<double, 3> ref_dir, double dx, double dy, double dz) {
+    const gp_Ax2 ax2(gp_Pnt(loc[0], loc[1], loc[2]),
+                     gp_Dir(axis[0], axis[1], axis[2]),
+                     gp_Dir(ref_dir[0], ref_dir[1], ref_dir[2]));
+    return ShapeHandle(BRepPrimAPI_MakeBox(ax2, dx, dy, dz).Shape());
+}
+
+ShapeHandle build_cylinder_impl(std::array<double, 3> loc, std::array<double, 3> axis,
+                                double radius, double height) {
+    const gp_Ax2 ax2(gp_Pnt(loc[0], loc[1], loc[2]), gp_Dir(axis[0], axis[1], axis[2]));
+    return ShapeHandle(BRepPrimAPI_MakeCylinder(ax2, radius, height).Shape());
+}
+
+ShapeHandle build_sphere_impl(std::array<double, 3> center, double radius) {
+    return ShapeHandle(BRepPrimAPI_MakeSphere(gp_Pnt(center[0], center[1], center[2]), radius).Shape());
+}
+
+ShapeHandle build_cone_impl(std::array<double, 3> loc, std::array<double, 3> axis,
+                            double bottom_radius, double height) {
+    const gp_Ax2 ax2(gp_Pnt(loc[0], loc[1], loc[2]), gp_Dir(axis[0], axis[1], axis[2]));
+    return ShapeHandle(BRepPrimAPI_MakeCone(ax2, bottom_radius, 0.0, height).Shape());
+}
+
 // Planar face → (origin, normal); std::nullopt (→ Python None) if non-planar.
 std::optional<std::pair<std::array<double, 3>, std::array<double, 3>>>
 face_plane_impl(const ShapeHandle &face_sh) {
@@ -493,4 +527,23 @@ void cad_module(nb::module_ &m) {
           "face"_a,
           "Planar face's (origin, normal) as ((x,y,z),(x,y,z)), or None if "
           "the face is not planar.");
+
+    // --- placement-aware primitive builders (ada.geom.solids parity) ---
+
+    m.def("build_box", &build_box_impl,
+          "location"_a, "axis"_a, "ref_dir"_a, "dx"_a, "dy"_a, "dz"_a,
+          "Box with a corner at `location`, edges along the Axis2Placement3D "
+          "frame (axis=Z, ref_dir=X).");
+
+    m.def("build_cylinder", &build_cylinder_impl,
+          "location"_a, "axis"_a, "radius"_a, "height"_a,
+          "Cylinder with base centre at `location`, along `axis`.");
+
+    m.def("build_sphere", &build_sphere_impl,
+          "center"_a, "radius"_a,
+          "Sphere centred at `center`.");
+
+    m.def("build_cone", &build_cone_impl,
+          "location"_a, "axis"_a, "bottom_radius"_a, "height"_a,
+          "Right circular cone (apex radius 0) with base at `location`.");
 }
