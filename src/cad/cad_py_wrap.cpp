@@ -21,6 +21,7 @@
 #include <vector>
 
 #include <Bnd_Box.hxx>
+#include <Bnd_OBB.hxx>
 #include <BRepBndLib.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -199,6 +200,31 @@ std::array<double, 6> bbox_impl(const ShapeHandle &sh) {
     Standard_Real xmin, ymin, zmin, xmax, ymax, zmax;
     bb.Get(xmin, ymin, zmin, xmax, ymax, zmax);
     return {xmin, ymin, zmin, xmax, ymax, zmax};
+}
+
+// obb: oriented bounding box query
+// ----------------------------------------------------------------------------
+
+// Mirrors OCC.Extend.ShapeFactory.get_oriented_boundingbox (optimal OBB via
+// triangulation). Returns the world-space barycenter and the three OBB
+// half-sizes; the orientation axes are not exposed (callers reconstruct an
+// axis-aligned span from centre +/- half-size, matching the adapy walls path).
+std::pair<std::array<double, 3>, std::array<double, 3>> obb_impl(const ShapeHandle &sh) {
+    const TopoDS_Shape &shape = sh.topods();
+    if (shape.IsNull()) {
+        throw std::runtime_error("obb: ShapeHandle is null");
+    }
+    Bnd_OBB obb;
+    BRepBndLib::AddOBB(shape, obb,
+                       /*useTriangulation=*/Standard_True,
+                       /*isOptimal=*/Standard_True,
+                       /*useShapeTolerance=*/Standard_False);
+    if (obb.IsVoid()) {
+        throw std::runtime_error("obb: empty bounding box (shape has no geometry)");
+    }
+    const gp_Pnt c = obb.Center();
+    return {{c.X(), c.Y(), c.Z()},
+            {obb.XHSize(), obb.YHSize(), obb.ZHSize()}};
 }
 
 // ----------------------------------------------------------------------------
@@ -638,6 +664,12 @@ void cad_module(nb::module_ &m) {
           "shape"_a,
           "Axis-aligned bounding box of a shape, returned as "
           "(xmin, ymin, zmin, xmax, ymax, zmax).");
+
+    m.def("obb", &obb_impl,
+          "shape"_a,
+          "Oriented bounding box of a shape, returned as "
+          "((cx, cy, cz), (hx, hy, hz)) — world-space barycenter and OBB "
+          "half-sizes.");
 
     m.def("from_topods_pointer", &from_topods_pointer_impl,
           "ptr"_a,

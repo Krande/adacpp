@@ -22,6 +22,7 @@ tessellate     = _cad.tessellate
 tessellate_box = _cad.tessellate_box
 
 bbox           = _cad.bbox
+obb            = _cad.obb
 
 # Placement-aware primitive builders (ada.geom.solids parity).
 build_box      = _cad.build_box
@@ -68,6 +69,7 @@ __all__ = [
     "tessellate",
     "tessellate_box",
     "bbox",
+    "obb",
     "build_box",
     "build_cylinder",
     "build_sphere",

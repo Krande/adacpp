@@ -159,6 +159,15 @@ def test_cad_bbox_sphere():
     assert tuple(bb) == (-3.0, -3.0, -3.0, 3.0, 3.0, 3.0)
 
 
+def test_cad_obb_box():
+    # Oriented bbox of a centered axis-aligned box: barycenter at origin,
+    # half-sizes equal to the box half-extents (axes aligned to world).
+    box = adacpp.cad.make_box(2.0, 3.0, 4.0)
+    center, half = adacpp.cad.obb(box)
+    assert tuple(round(v, 6) for v in center) == (0.0, 0.0, 0.0)
+    assert tuple(sorted(round(v, 6) for v in half)) == (1.0, 1.5, 2.0)
+
+
 def test_cad_write_glb_bytes_box():
     """Box → glTF binary: header + non-empty body."""
     box = adacpp.cad.make_box(2.0, 3.0, 4.0)
