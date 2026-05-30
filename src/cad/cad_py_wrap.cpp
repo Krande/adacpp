@@ -6,20 +6,35 @@
 #include "../geom/MeshType.h"
 
 #include <nanobind/stl/array.h>
+#include <nanobind/stl/optional.h>
+#include <nanobind/stl/pair.h>
 #include <array>
 #include <cstdint>
 #include <fstream>
+#include <optional>
+#include <sstream>
 #include <stdexcept>
+#include <string>
 #include <unistd.h>      // mkstemp, unlink, write, close
+#include <utility>
 #include <vector>
 
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <BRepAlgoAPI_Common.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
+#include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
+#include <BRepTools.hxx>
+#include <GeomAbs_SurfaceType.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <Message_ProgressRange.hxx>
 #include <Poly_Triangulation.hxx>
@@ -31,12 +46,19 @@
 #include <TCollection_AsciiString.hxx>
 #include <TCollection_ExtendedString.hxx>
 #include <TDocStd_Document.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Face.hxx>
+#include <TopoDS_Vertex.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
+#include <gp_Dir.hxx>
+#include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
 
 namespace {
 
@@ -268,6 +290,93 @@ nb::bytes write_glb_bytes_impl(const ShapeHandle &sh, double linear_deflection) 
     return nb::bytes(buffer.data(), buffer.size());
 }
 
+// ----------------------------------------------------------------------------
+// Shape-algebra verbs — mirror adapy's OccBackend (ada/cad/__init__.py) so an
+// adacpp/pythonocc backend swap is behaviour-identical. op strings match
+// ada.geom.booleans.BoolOpEnum values ("UNION"/"INTERSECTION"/"DIFFERENCE").
+// ----------------------------------------------------------------------------
+
+ShapeHandle boolean_impl(const std::string &op, const ShapeHandle &a, const ShapeHandle &b) {
+    const TopoDS_Shape &sa = a.topods();
+    const TopoDS_Shape &sb = b.topods();
+    if (op == "DIFFERENCE")   return ShapeHandle(BRepAlgoAPI_Cut(sa, sb).Shape());
+    if (op == "UNION")        return ShapeHandle(BRepAlgoAPI_Fuse(sa, sb).Shape());
+    if (op == "INTERSECTION") return ShapeHandle(BRepAlgoAPI_Common(sa, sb).Shape());
+    throw std::runtime_error("boolean: unknown op '" + op + "'");
+}
+
+// m = the top 3 rows of a 4x4 affine matrix, row-major (12 doubles). The
+// implicit bottom row is [0,0,0,1] — same convention as gp_Trsf::SetValues and
+// adapy's OccBackend.transform. Lossless for rigid + uniform-scale transforms.
+ShapeHandle transform_impl(const ShapeHandle &sh, const std::array<double, 12> &m, bool copy) {
+    gp_Trsf trsf;
+    trsf.SetValues(m[0], m[1], m[2], m[3],
+                   m[4], m[5], m[6], m[7],
+                   m[8], m[9], m[10], m[11]);
+    return ShapeHandle(BRepBuilderAPI_Transform(sh.topods(), trsf, copy).Shape());
+}
+
+double distance_impl(const ShapeHandle &a, const ShapeHandle &b) {
+    BRepExtrema_DistShapeShape dss(a.topods(), b.topods());
+    if (!dss.IsDone()) {
+        throw std::runtime_error("distance: BRepExtrema_DistShapeShape failed");
+    }
+    return dss.Value();
+}
+
+std::string serialize_impl(const ShapeHandle &sh) {
+    TopoDS_Shape shape = sh.topods();
+    BRepTools::Clean(shape);  // drop cached triangulation → geometry-only string
+    std::ostringstream oss;
+    BRepTools::Write(shape, oss);
+    return oss.str();
+}
+
+bool is_valid_impl(const ShapeHandle &sh) {
+    return BRepCheck_Analyzer(sh.topods(), Standard_True).IsValid();
+}
+
+// Whole list of face sub-shapes — boundary crosses once, not per face.
+std::vector<ShapeHandle> faces_impl(const ShapeHandle &sh) {
+    std::vector<ShapeHandle> out;
+    for (TopExp_Explorer exp(sh.topods(), TopAbs_FACE); exp.More(); exp.Next()) {
+        out.emplace_back(exp.Current());
+    }
+    return out;
+}
+
+// Every (unique) vertex coordinate as one list — the per-vertex loop stays in
+// the backend. MapShapes deduplicates shared vertices (matches pythonocc's
+// TopologyExplorer.vertices()).
+std::vector<std::array<double, 3>> vertex_points_impl(const ShapeHandle &sh) {
+    std::vector<std::array<double, 3>> out;
+    TopTools_IndexedMapOfShape vmap;
+    TopExp::MapShapes(sh.topods(), TopAbs_VERTEX, vmap);
+    for (Standard_Integer i = 1; i <= vmap.Extent(); ++i) {
+        const gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(vmap(i)));
+        out.push_back({p.X(), p.Y(), p.Z()});
+    }
+    return out;
+}
+
+// Planar face → (origin, normal); std::nullopt (→ Python None) if non-planar.
+std::optional<std::pair<std::array<double, 3>, std::array<double, 3>>>
+face_plane_impl(const ShapeHandle &face_sh) {
+    const TopoDS_Shape &s = face_sh.topods();
+    if (s.IsNull() || s.ShapeType() != TopAbs_FACE) {
+        return std::nullopt;
+    }
+    BRepAdaptor_Surface surf(TopoDS::Face(s), Standard_True);
+    if (surf.GetType() != GeomAbs_Plane) {
+        return std::nullopt;
+    }
+    const gp_Pln pln = surf.Plane();
+    const gp_Pnt loc = pln.Location();
+    const gp_Dir nrm = pln.Axis().Direction();
+    return std::make_pair(std::array<double, 3>{loc.X(), loc.Y(), loc.Z()},
+                          std::array<double, 3>{nrm.X(), nrm.Y(), nrm.Z()});
+}
+
 } // namespace
 
 void cad_module(nb::module_ &m) {
@@ -347,4 +456,41 @@ void cad_module(nb::module_ &m) {
           "shape"_a, "linear_deflection"_a = 0.1,
           "Tessellate a ShapeHandle and write a binary glTF (.glb) into "
           "a bytes buffer. linear_deflection<=0 falls back to 0.1.");
+
+    // --- shape-algebra verbs (mirror adapy's CadBackend) ---
+
+    m.def("boolean", &boolean_impl,
+          "op"_a, "a"_a, "b"_a,
+          "CSG of two shapes. op is one of 'UNION', 'INTERSECTION', "
+          "'DIFFERENCE' (a - b).");
+
+    m.def("transform", &transform_impl,
+          "shape"_a, "matrix"_a, "copy"_a = true,
+          "Apply a 4x4 affine transform (top 3 rows, 12 row-major doubles) to "
+          "a shape. copy mirrors BRepBuilderAPI_Transform's copy flag.");
+
+    m.def("distance", &distance_impl,
+          "a"_a, "b"_a,
+          "Minimal distance between two shapes.");
+
+    m.def("serialize", &serialize_impl,
+          "shape"_a,
+          "Serialize a shape to a BREP string (triangulation cleaned first).");
+
+    m.def("is_valid", &is_valid_impl,
+          "shape"_a,
+          "Topological + geometric validity (BRepCheck_Analyzer).");
+
+    m.def("faces", &faces_impl,
+          "shape"_a,
+          "List of face sub-shapes as ShapeHandles.");
+
+    m.def("vertex_points", &vertex_points_impl,
+          "shape"_a,
+          "List of unique vertex coordinates as (x, y, z) tuples.");
+
+    m.def("face_plane", &face_plane_impl,
+          "face"_a,
+          "Planar face's (origin, normal) as ((x,y,z),(x,y,z)), or None if "
+          "the face is not planar.");
 }

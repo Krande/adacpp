@@ -1,6 +1,7 @@
 import random
 
 import adacpp
+import pytest
 
 
 def create_box_grid(grid_size):
@@ -212,3 +213,58 @@ def test_cad_from_topods_pointer():
     assert min(xs) == 0.0 and max(xs) == 1.0
     assert min(ys) == 0.0 and max(ys) == 2.0
     assert min(zs) == 0.0 and max(zs) == 3.0
+
+
+# --- shape-algebra verbs (mirror adapy's CadBackend) ---
+
+
+def test_cad_transform_translates_box():
+    box = adacpp.cad.make_box(2.0, 2.0, 2.0)  # centered: [-1, 1]^3
+    # top 3 rows of a translation-by-(1,1,1) 4x4, row-major
+    moved = adacpp.cad.transform(box, [1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 1], True)
+    assert tuple(round(v, 6) for v in adacpp.cad.bbox(moved)) == (0.0, 0.0, 0.0, 2.0, 2.0, 2.0)
+
+
+def test_cad_boolean_ops():
+    a = adacpp.cad.make_box(2.0, 2.0, 2.0)  # [-1, 1]^3
+    b = adacpp.cad.transform(adacpp.cad.make_box(2.0, 2.0, 2.0), [1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 1], True)
+    assert tuple(round(v, 6) for v in adacpp.cad.bbox(adacpp.cad.boolean("UNION", a, b))) == (-1, -1, -1, 2, 2, 2)
+    assert tuple(round(v, 6) for v in adacpp.cad.bbox(adacpp.cad.boolean("INTERSECTION", a, b))) == (0, 0, 0, 1, 1, 1)
+    # difference is non-empty and bounded by a
+    assert adacpp.cad.is_valid(adacpp.cad.boolean("DIFFERENCE", a, b))
+    with pytest.raises(Exception):
+        adacpp.cad.boolean("NOPE", a, b)
+
+
+def test_cad_distance():
+    a = adacpp.cad.make_box(2.0, 2.0, 2.0)  # ends at x=1
+    b = adacpp.cad.transform(adacpp.cad.make_box(2.0, 2.0, 2.0), [1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0], True)  # x in [4,6]
+    assert round(adacpp.cad.distance(a, b), 6) == 3.0
+
+
+def test_cad_is_valid_and_serialize():
+    box = adacpp.cad.make_box(1.0, 1.0, 1.0)
+    assert adacpp.cad.is_valid(box) is True
+    s = adacpp.cad.serialize(box)
+    assert isinstance(s, str) and "CASCADE Topology" in s[:40] and len(s) > 100
+
+
+def test_cad_faces_and_vertex_points():
+    box = adacpp.cad.make_box(1.0, 1.0, 1.0)
+    faces = adacpp.cad.faces(box)
+    assert len(faces) == 6
+    assert all(type(f).__name__ == "ShapeHandle" for f in faces)
+    pts = adacpp.cad.vertex_points(box)
+    assert len(pts) == 8  # unique vertices
+    assert all(len(p) == 3 for p in pts)
+
+
+def test_cad_face_plane():
+    box = adacpp.cad.make_box(2.0, 2.0, 2.0)
+    faces = adacpp.cad.faces(box)
+    origin, normal = adacpp.cad.face_plane(faces[0])
+    assert len(origin) == 3 and len(normal) == 3
+    # a box face normal is axis-aligned (unit on one component)
+    assert round(sum(c * c for c in normal), 6) == 1.0
+    # a solid (non-face) shape returns None
+    assert adacpp.cad.face_plane(box) is None

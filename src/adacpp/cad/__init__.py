@@ -23,6 +23,16 @@ tessellate_box = _cad.tessellate_box
 
 bbox           = _cad.bbox
 
+# Shape-algebra verbs (mirror adapy's CadBackend surface).
+boolean        = _cad.boolean
+transform      = _cad.transform
+distance       = _cad.distance
+serialize      = _cad.serialize
+is_valid       = _cad.is_valid
+faces          = _cad.faces
+vertex_points  = _cad.vertex_points
+face_plane     = _cad.face_plane
+
 read_step_bytes = _cad.read_step_bytes
 write_glb_bytes = _cad.write_glb_bytes
 
@@ -44,6 +54,14 @@ __all__ = [
     "tessellate",
     "tessellate_box",
     "bbox",
+    "boolean",
+    "transform",
+    "distance",
+    "serialize",
+    "is_valid",
+    "faces",
+    "vertex_points",
+    "face_plane",
     "read_step_bytes",
     "write_glb_bytes",
     "from_topods_pointer",
