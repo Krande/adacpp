@@ -554,6 +554,24 @@ std::vector<ShapeHandle> wires_impl(const ShapeHandle &sh) {
     return out;
 }
 
+// Ordered boundary vertices. For a FACE, walk its outer wire; for a WIRE, walk
+// it directly. BRepTools_WireExplorer yields them in connection order (unlike
+// vertex_points, which is unordered) — needed to rebuild a face as a polygon.
+std::vector<std::array<double, 3>> wire_points_impl(const ShapeHandle &sh) {
+    const TopoDS_Shape &s = sh.topods();
+    TopoDS_Wire wire;
+    if (s.ShapeType() == TopAbs_FACE)
+        wire = BRepTools::OuterWire(TopoDS::Face(s));
+    else
+        wire = TopoDS::Wire(s);
+    std::vector<std::array<double, 3>> out;
+    for (BRepTools_WireExplorer exp(wire); exp.More(); exp.Next()) {
+        const gp_Pnt p = BRep_Tool::Pnt(exp.CurrentVertex());
+        out.push_back({p.X(), p.Y(), p.Z()});
+    }
+    return out;
+}
+
 // ----------------------------------------------------------------------------
 // Placement-aware primitive builders — direct ports of adapy's
 // ada.occ.geom.solids.make_*_from_geom (same OCCT calls → identical shapes),
@@ -1208,4 +1226,7 @@ void cad_module(nb::module_ &m) {
 
     m.def("shells", &shells_impl, "shape"_a, "List of shell sub-shapes.");
     m.def("wires", &wires_impl, "shape"_a, "List of wire sub-shapes.");
+    m.def("wire_points", &wire_points_impl, "shape"_a,
+          "Ordered boundary vertices of a face's outer wire (or a wire), in "
+          "connection order — for rebuilding a face as a polygon.");
 }

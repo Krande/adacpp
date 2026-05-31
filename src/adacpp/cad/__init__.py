@@ -61,6 +61,7 @@ point_in_solid = _cad.point_in_solid
 center_of_mass = _cad.center_of_mass
 shells         = _cad.shells
 wires          = _cad.wires
+wire_points    = _cad.wire_points
 
 read_step_bytes = _cad.read_step_bytes
 write_glb_bytes = _cad.write_glb_bytes
@@ -115,6 +116,7 @@ __all__ = [
     "center_of_mass",
     "shells",
     "wires",
+    "wire_points",
     "read_step_bytes",
     "write_glb_bytes",
     "from_topods_pointer",
