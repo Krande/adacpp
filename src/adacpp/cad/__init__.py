@@ -62,6 +62,7 @@ center_of_mass = _cad.center_of_mass
 shells         = _cad.shells
 wires          = _cad.wires
 wire_points    = _cad.wire_points
+unify_coplanar_faces = _cad.unify_coplanar_faces
 
 read_step_bytes = _cad.read_step_bytes
 write_glb_bytes = _cad.write_glb_bytes
@@ -117,6 +118,7 @@ __all__ = [
     "shells",
     "wires",
     "wire_points",
+    "unify_coplanar_faces",
     "read_step_bytes",
     "write_glb_bytes",
     "from_topods_pointer",

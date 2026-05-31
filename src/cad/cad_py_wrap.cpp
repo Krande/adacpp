@@ -69,6 +69,7 @@
 #include <RWGltf_CafWriter.hxx>
 #include <RWGltf_WriterTrsfFormat.hxx>
 #include <RWMesh_CoordinateSystem.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <STEPControl_Reader.hxx>
 #include <TColStd_IndexedDataMapOfStringString.hxx>
 #include <TCollection_AsciiString.hxx>
@@ -557,6 +558,15 @@ std::vector<ShapeHandle> wires_impl(const ShapeHandle &sh) {
 // Ordered boundary vertices. For a FACE, walk its outer wire; for a WIRE, walk
 // it directly. BRepTools_WireExplorer yields them in connection order (unlike
 // vertex_points, which is unordered) — needed to rebuild a face as a polygon.
+// Merge adjacent same-surface (coplanar) faces into single faces. On real
+// geometry a cell wall is often split into several coplanar faces; unifying
+// makes it one face so shared-face matching between adjacent cells is robust.
+ShapeHandle unify_coplanar_faces_impl(const ShapeHandle &sh) {
+    ShapeUpgrade_UnifySameDomain unify(sh.topods(), Standard_True, Standard_True, Standard_False);
+    unify.Build();
+    return ShapeHandle(unify.Shape());
+}
+
 std::vector<std::array<double, 3>> wire_points_impl(const ShapeHandle &sh) {
     const TopoDS_Shape &s = sh.topods();
     TopoDS_Wire wire;
@@ -1229,4 +1239,7 @@ void cad_module(nb::module_ &m) {
     m.def("wire_points", &wire_points_impl, "shape"_a,
           "Ordered boundary vertices of a face's outer wire (or a wire), in "
           "connection order — for rebuilding a face as a polygon.");
+    m.def("unify_coplanar_faces", &unify_coplanar_faces_impl, "shape"_a,
+          "Merge adjacent same-surface (coplanar) faces into single faces "
+          "(ShapeUpgrade_UnifySameDomain).");
 }
