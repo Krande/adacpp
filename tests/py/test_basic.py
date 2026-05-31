@@ -403,3 +403,41 @@ def test_cad_build_extruded_area_solid():
     ]
     hollow = adacpp.cad.build_extruded_area_solid(square, [inner], [0, 0, 0], [0, 0, 1], [1, 0, 0], 2.0)
     assert round(adacpp.cad.volume(hollow), 6) == 1.5
+
+
+def _unit_box_faces(x0):
+    # Unit box at x0..x0+1 in x, 0..1 in y/z; return its 6 faces.
+    h = adacpp.cad.build_box((x0, 0, 0), (0, 0, 1), (1, 0, 0), 1.0, 1.0, 1.0)
+    return list(adacpp.cad.faces(h))
+
+
+def test_cad_make_volumes_from_faces_two_abutting_boxes():
+    # Two unit cubes sharing the x=1 plane -> 2 cells, 10 free (envelope) faces.
+    soup = _unit_box_faces(0) + _unit_box_faces(1)
+    cells = adacpp.cad.make_volumes_from_faces(soup, 1e-6)
+    assert len(cells) == 2
+    assert sorted(round(adacpp.cad.volume(c), 6) for c in cells) == [1.0, 1.0]
+    assert len(adacpp.cad.free_faces(cells)) == 10
+    coms = sorted(tuple(round(v, 4) for v in adacpp.cad.center_of_mass(c)) for c in cells)
+    assert coms == [(0.5, 0.5, 0.5), (1.5, 0.5, 0.5)]
+
+
+def test_cad_point_in_solid():
+    cells = sorted(
+        adacpp.cad.make_volumes_from_faces(_unit_box_faces(0) + _unit_box_faces(1), 1e-6),
+        key=lambda c: adacpp.cad.center_of_mass(c)[0],
+    )
+    a, b = cells
+    assert adacpp.cad.point_in_solid(a, [0.5, 0.5, 0.5], 1e-6) == 0  # IN
+    assert adacpp.cad.point_in_solid(a, [1.5, 0.5, 0.5], 1e-6) == 1  # OUT
+    assert adacpp.cad.point_in_solid(b, [1.5, 0.5, 0.5], 1e-6) == 0  # IN
+    assert adacpp.cad.point_in_solid(a, [3.0, 3.0, 3.0], 1e-6) == 1  # OUT
+
+
+def test_cad_non_manifold_merge_keeps_shared_face():
+    a = adacpp.cad.build_box((0, 0, 0), (0, 0, 1), (1, 0, 0), 1.0, 1.0, 1.0)
+    b = adacpp.cad.build_box((1, 0, 0), (0, 0, 1), (1, 0, 0), 1.0, 1.0, 1.0)
+    comp = adacpp.cad.non_manifold_merge([a, b], 1e-6, True)
+    sols = list(adacpp.cad.solids(comp))
+    assert len(sols) == 2
+    assert len(adacpp.cad.free_faces(sols)) == 10

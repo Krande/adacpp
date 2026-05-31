@@ -31,6 +31,10 @@
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BOPAlgo_Builder.hxx>
+#include <BOPAlgo_GlueEnum.hxx>
+#include <BOPAlgo_MakerVolume.hxx>
+#include <BRep_Builder.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
@@ -40,6 +44,7 @@
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepBuilderAPI_TransitionMode.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <BRepGProp.hxx>
@@ -69,13 +74,16 @@
 #include <TCollection_AsciiString.hxx>
 #include <TCollection_ExtendedString.hxx>
 #include <TDocStd_Document.hxx>
+#include <TopAbs_State.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopTools_MapOfOrientedShape.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Vertex.hxx>
@@ -450,6 +458,99 @@ std::vector<std::array<double, 3>> vertex_points_impl(const ShapeHandle &sh) {
         const gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(vmap(i)));
         out.push_back({p.X(), p.Y(), p.Z()});
     }
+    return out;
+}
+
+// ----------------------------------------------------------------------------
+// Topology-kernel ops — the non-manifold core: build solids from a face soup,
+// non-manifold merge keeping shared internal faces, free-face (envelope)
+// extraction, point-in-solid classification, centre of mass. Native OCCT
+// (BOPAlgo / BRepClass3d / BRepGProp), no pythonocc — mirrors adapy's
+// OccBackend so both backends agree.
+// ----------------------------------------------------------------------------
+
+std::vector<ShapeHandle> make_volumes_from_faces_impl(const std::vector<ShapeHandle> &faces, double tolerance) {
+    BOPAlgo_MakerVolume mv;
+    TopTools_ListOfShape args;
+    for (const auto &f : faces) args.Append(f.topods());
+    mv.SetArguments(args);
+    mv.SetIntersect(Standard_True);  // imprint the faces against each other first
+    if (tolerance > 0.0) mv.SetFuzzyValue(tolerance);
+    mv.Perform();
+    if (mv.HasErrors()) throw std::runtime_error("make_volumes_from_faces: BOPAlgo_MakerVolume reported errors");
+    std::vector<ShapeHandle> out;
+    for (TopExp_Explorer exp(mv.Shape(), TopAbs_SOLID); exp.More(); exp.Next())
+        out.emplace_back(exp.Current());
+    return out;
+}
+
+ShapeHandle non_manifold_merge_impl(const std::vector<ShapeHandle> &shapes, double tolerance, bool glue) {
+    BOPAlgo_Builder builder;
+    TopTools_ListOfShape args;
+    for (const auto &s : shapes) args.Append(s.topods());
+    builder.SetArguments(args);
+    if (glue) builder.SetGlue(BOPAlgo_GlueShift);  // coincident faces collapse to one shared face
+    if (tolerance > 0.0) builder.SetFuzzyValue(tolerance);
+    builder.Perform();
+    if (builder.HasErrors()) throw std::runtime_error("non_manifold_merge: BOPAlgo_Builder reported errors");
+    return ShapeHandle(builder.Shape());
+}
+
+// Faces owned by exactly one solid — the outer envelope. Map FACE→SOLID
+// ancestors over a compound of the cells and keep the single-owner faces.
+std::vector<ShapeHandle> free_faces_impl(const std::vector<ShapeHandle> &solids) {
+    BRep_Builder bld;
+    TopoDS_Compound comp;
+    bld.MakeCompound(comp);
+    for (const auto &s : solids) bld.Add(comp, s.topods());
+    TopTools_IndexedDataMapOfShapeListOfShape amap;
+    TopExp::MapShapesAndAncestors(comp, TopAbs_FACE, TopAbs_SOLID, amap);
+    std::vector<ShapeHandle> out;
+    for (Standard_Integer i = 1; i <= amap.Extent(); ++i) {
+        if (amap.FindFromIndex(i).Extent() == 1)
+            out.emplace_back(amap.FindKey(i));
+    }
+    return out;
+}
+
+// Point-in-solid classification. Returns OCCT TopAbs_State as an int:
+// IN=0, OUT=1, ON=2, UNKNOWN=3 (adapy's AdacppBackend maps it to Containment).
+int point_in_solid_impl(const ShapeHandle &solid, const std::array<double, 3> &pt, double tolerance) {
+    BRepClass3d_SolidClassifier clf(solid.topods());
+    clf.Perform(gp_Pnt(pt[0], pt[1], pt[2]), tolerance);
+    switch (clf.State()) {
+        case TopAbs_IN:  return 0;
+        case TopAbs_OUT: return 1;
+        case TopAbs_ON:  return 2;
+        default:         return 3;
+    }
+}
+
+std::array<double, 3> center_of_mass_impl(const ShapeHandle &sh) {
+    const TopoDS_Shape &s = sh.topods();
+    GProp_GProps props;
+    const TopAbs_ShapeEnum st = s.ShapeType();
+    if (st == TopAbs_SOLID || st == TopAbs_COMPSOLID || st == TopAbs_COMPOUND)
+        BRepGProp::VolumeProperties(s, props);
+    else if (st == TopAbs_SHELL || st == TopAbs_FACE)
+        BRepGProp::SurfaceProperties(s, props);
+    else
+        BRepGProp::LinearProperties(s, props);
+    const gp_Pnt c = props.CentreOfMass();
+    return {c.X(), c.Y(), c.Z()};
+}
+
+std::vector<ShapeHandle> shells_impl(const ShapeHandle &sh) {
+    std::vector<ShapeHandle> out;
+    for (TopExp_Explorer exp(sh.topods(), TopAbs_SHELL); exp.More(); exp.Next())
+        out.emplace_back(exp.Current());
+    return out;
+}
+
+std::vector<ShapeHandle> wires_impl(const ShapeHandle &sh) {
+    std::vector<ShapeHandle> out;
+    for (TopExp_Explorer exp(sh.topods(), TopAbs_WIRE); exp.More(); exp.Next())
+        out.emplace_back(exp.Current());
     return out;
 }
 
@@ -1078,4 +1179,33 @@ void cad_module(nb::module_ &m) {
           "polygons"_a,
           "Fuse a list of polygon faces (each a closed loop of 3D points) into "
           "one shell.");
+
+    // --- topology-kernel ops ---
+    m.def("make_volumes_from_faces", &make_volumes_from_faces_impl,
+          "faces"_a, "tolerance"_a = 1e-6,
+          "Partition space into solids from a face soup (BOPAlgo_MakerVolume). "
+          "Interior faces come out shared between the two cells they separate.");
+
+    m.def("non_manifold_merge", &non_manifold_merge_impl,
+          "shapes"_a, "tolerance"_a = 1e-6, "glue"_a = true,
+          "Non-manifold fuse (BOPAlgo_Builder) keeping coincident faces shared "
+          "between adjacent solids rather than dissolving the partition.");
+
+    m.def("free_faces", &free_faces_impl,
+          "solids"_a,
+          "Faces owned by exactly one solid — the outer envelope (FACE→SOLID "
+          "ancestor map over a compound of the cells).");
+
+    m.def("point_in_solid", &point_in_solid_impl,
+          "solid"_a, "point"_a, "tolerance"_a = 1e-6,
+          "Classify a point against a solid (BRepClass3d_SolidClassifier). "
+          "Returns TopAbs_State as int: IN=0, OUT=1, ON=2, UNKNOWN=3.");
+
+    m.def("center_of_mass", &center_of_mass_impl,
+          "shape"_a,
+          "Centre of mass (x,y,z) — volume props for solids, surface props for "
+          "shells/faces, linear props otherwise (BRepGProp).");
+
+    m.def("shells", &shells_impl, "shape"_a, "List of shell sub-shapes.");
+    m.def("wires", &wires_impl, "shape"_a, "List of wire sub-shapes.");
 }

@@ -52,6 +52,16 @@ vertex_points  = _cad.vertex_points
 face_plane     = _cad.face_plane
 to_topods_pointer = _cad.to_topods_pointer
 
+# Topology-kernel ops (non-manifold core: cells from a face soup, non-manifold
+# merge, free-face extraction, point-in-solid, centre of mass).
+make_volumes_from_faces = _cad.make_volumes_from_faces
+non_manifold_merge = _cad.non_manifold_merge
+free_faces     = _cad.free_faces
+point_in_solid = _cad.point_in_solid
+center_of_mass = _cad.center_of_mass
+shells         = _cad.shells
+wires          = _cad.wires
+
 read_step_bytes = _cad.read_step_bytes
 write_glb_bytes = _cad.write_glb_bytes
 
@@ -98,6 +108,13 @@ __all__ = [
     "vertex_points",
     "face_plane",
     "to_topods_pointer",
+    "make_volumes_from_faces",
+    "non_manifold_merge",
+    "free_faces",
+    "point_in_solid",
+    "center_of_mass",
+    "shells",
+    "wires",
     "read_step_bytes",
     "write_glb_bytes",
     "from_topods_pointer",
