@@ -21,3 +21,18 @@ list(APPEND
 # to link dynamically.
 find_library(ROCKSDB_STATIC_LIB NAMES librocksdb.a rocksdb REQUIRED)
 list(APPEND ADA_CPP_LINK_LIBS ${ROCKSDB_STATIC_LIB} snappy lz4 zstd)
+
+# The conda-forge ifcopenshell is built with -DWITH_ROCKSDB=ON, which defines
+# IFOPSH_WITH_ROCKSDB while compiling libIfcParse.a. That macro gates members
+# of class IfcParse::IfcFile (the rocksdb-backed storage), so it changes the
+# class layout: sizeof(IfcFile) is 896 bytes when built with the macro vs 688
+# without it. ifcopenshell normally propagates the macro to consumers via the
+# IFCOPENSHELL_RocksDB INTERFACE target, but we bare-link IfcParse/IfcGeom by
+# name and so never inherit it. Without the macro our translation units see the
+# 688-byte layout while the linked .a uses the 896-byte one — the IfcFile ctor
+# writes 208 bytes past our stack allocation and at shifted member offsets,
+# corrupting the object (e.g. the file-path std::string is intact entering the
+# ctor but empty by the time initialize() reaches FileReader, which then
+# fopen("")s and segfaults). Define it here to match the .a's layout. rocksdb
+# headers are on the conda -isystem include path, so the #include resolves.
+add_compile_definitions(IFOPSH_WITH_ROCKSDB)
