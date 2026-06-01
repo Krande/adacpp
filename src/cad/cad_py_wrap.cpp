@@ -32,6 +32,7 @@
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BOPAlgo_Builder.hxx>
+#include <BOPAlgo_CellsBuilder.hxx>
 #include <BOPAlgo_GlueEnum.hxx>
 #include <BOPAlgo_MakerVolume.hxx>
 #include <BRep_Builder.hxx>
@@ -495,6 +496,45 @@ ShapeHandle non_manifold_merge_impl(const std::vector<ShapeHandle> &shapes, doub
     builder.Perform();
     if (builder.HasErrors()) throw std::runtime_error("non_manifold_merge: BOPAlgo_Builder reported errors");
     return ShapeHandle(builder.Shape());
+}
+
+// Faithful port of topologic's Topology::Merge over solids: general-fuse the
+// solids with BOPAlgo_CellsBuilder, take each operand's region into the result
+// (AddToResult) and MakeContainers() to assemble the non-manifold CellComplex —
+// each input solid survives as a cell and every interface becomes one shared
+// face. Mirrors adapy's OccBackend.merge_cells (unlike make_volumes_from_faces,
+// which rebuilds minimal volumes from a face soup and loses operand identity).
+std::vector<ShapeHandle> merge_cells_impl(const std::vector<ShapeHandle> &solids, double tolerance) {
+    if (solids.empty()) return {};
+    BOPAlgo_CellsBuilder cb;
+    TopTools_ListOfShape args;
+    for (const auto &s : solids) args.Append(s.topods());
+    cb.SetArguments(args);
+    if (tolerance > 0.0) cb.SetFuzzyValue(tolerance);
+    cb.Perform();
+    if (cb.HasErrors()) throw std::runtime_error("merge_cells: BOPAlgo_CellsBuilder reported errors");
+    for (const auto &s : solids) {
+        TopTools_ListOfShape take;
+        take.Append(s.topods());
+        TopTools_ListOfShape avoid;
+        cb.AddToResult(take, avoid);
+    }
+    cb.MakeContainers();
+    std::vector<ShapeHandle> out;
+    for (TopExp_Explorer exp(cb.Shape(), TopAbs_SOLID); exp.More(); exp.Next())
+        out.emplace_back(exp.Current());
+    return out;
+}
+
+// Orientation-independent topological identity. A face shared by two cells of a
+// non-manifold complex is the SAME underlying TShape referenced twice (with
+// opposite orientation), so it hashes equal here while distinct faces differ —
+// CellsBuilder/MakerVolume never instance one TShape at multiple placements, so
+// the TShape pointer is a stable per-face key. Mirrors adapy OccBackend.face_id;
+// lets the cell-graph extractor detect shared faces by true topological identity
+// instead of geometry.
+int64_t face_id_impl(const ShapeHandle &h) {
+    return static_cast<int64_t>(reinterpret_cast<uintptr_t>(h.topods().TShape().get()));
 }
 
 // Faces owned by exactly one solid — the outer envelope. Map FACE→SOLID
@@ -1218,6 +1258,19 @@ void cad_module(nb::module_ &m) {
           "shapes"_a, "tolerance"_a = 1e-6, "glue"_a = true,
           "Non-manifold fuse (BOPAlgo_Builder) keeping coincident faces shared "
           "between adjacent solids rather than dissolving the partition.");
+
+    m.def("merge_cells", &merge_cells_impl,
+          "solids"_a, "tolerance"_a = 0.0,
+          "Faithful port of topologic Topology::Merge over solids "
+          "(BOPAlgo_CellsBuilder + per-operand AddToResult + MakeContainers): "
+          "each input solid survives as a cell and every interface becomes one "
+          "shared non-manifold face.");
+
+    m.def("face_id", &face_id_impl,
+          "face"_a,
+          "Orientation-independent topological identity of a face (TShape "
+          "pointer). Two cells referencing the same shared non-manifold face "
+          "return the same id; distinct faces differ.");
 
     m.def("free_faces", &free_faces_impl,
           "solids"_a,
