@@ -32,6 +32,11 @@ requirements:
     - python
     - occt
     - ifcopenshell
+    # rocksdb is embedded statically in libIfcParse; we link RocksDB::rocksdb
+    # (the static lib) directly, so it must be present at build time. It is only
+    # a transitive run dep of ifcopenshell, hence the explicit host entry — see
+    # cmake/deps_ifc.cmake.
+    - rocksdb
     - cgal-cpp
     - nanobind
     - cli11
