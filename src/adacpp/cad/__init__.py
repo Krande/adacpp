@@ -71,6 +71,7 @@ unify_coplanar_faces = _cad.unify_coplanar_faces
 
 read_step_bytes = _cad.read_step_bytes
 write_glb_bytes = _cad.write_glb_bytes
+write_step = _cad.write_step
 
 # Bridge from a raw OCCT TopoDS_Shape pointer (e.g. pythonocc-core's
 # `int(shape.this)`) into a cad ShapeHandle. Available on both targets;
@@ -131,5 +132,6 @@ __all__ = [
     "unify_coplanar_faces",
     "read_step_bytes",
     "write_glb_bytes",
+    "write_step",
     "from_topods_pointer",
 ]

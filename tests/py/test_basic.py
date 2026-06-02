@@ -222,6 +222,20 @@ def test_cad_section_with_plane():
     assert len(adacpp.cad.faces(sec)) == 1
 
 
+def test_cad_write_step(tmp_path):
+    # Write two named, colored boxes to STEP via the OCAF/XCAF document model.
+    b1 = adacpp.cad.build_box([0, 0, 0], [0, 0, 1], [1, 0, 0], 1, 1, 1)
+    b2 = adacpp.cad.build_box([2, 0, 0], [0, 0, 1], [1, 0, 0], 1, 2, 3)
+    out = tmp_path / "two_boxes.stp"
+    adacpp.cad.write_step(
+        [b1, b2], ["BoxA", "BoxB"], [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], str(out), "m", "AP214"
+    )
+    assert out.exists() and out.stat().st_size > 0
+    text = out.read_text()
+    assert "ISO-10303" in text
+    assert "BoxA" in text and "BoxB" in text
+
+
 def test_cad_revolved_curve_profile():
     # Revolve a circle wire (r=0.5, centered at x=2 in XY) a quarter turn about
     # the world Z axis through the origin → a curved pipe-elbow surface.

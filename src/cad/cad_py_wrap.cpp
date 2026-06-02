@@ -4,6 +4,7 @@
 #include "../geom/GroupReference.h"
 #include "../geom/Mesh.h"
 #include "../geom/MeshType.h"
+#include "../cadit/occt/step_writer.h"
 
 #include <nanobind/stl/array.h>
 #include <nanobind/stl/optional.h>
@@ -883,6 +884,25 @@ ShapeHandle section_with_plane_impl(
     return ShapeHandle(BRepAlgoAPI_Common(shape.topods(), face).Shape());
 }
 
+// Write shapes (with per-shape name + color) to a STEP file via the OCAF/XCAF
+// document model (adacpp's bundled OCCT). Backs adapy's StepWriter under the
+// adacpp CAD backend, so STEP export needs no pythonocc.
+void write_step_impl(const std::vector<ShapeHandle> &shapes,
+                     const std::vector<std::string> &names,
+                     const std::vector<std::array<double, 3>> &colors,
+                     const std::string &filename,
+                     const std::string &unit, const std::string &schema) {
+    std::vector<TopoDS_Shape> tshapes;
+    tshapes.reserve(shapes.size());
+    for (const auto &s : shapes) tshapes.push_back(s.topods());
+    std::vector<Color> cs;
+    cs.reserve(colors.size());
+    for (const auto &c : colors) {
+        cs.emplace_back(static_cast<float>(c[0]), static_cast<float>(c[1]), static_cast<float>(c[2]), 1.0f);
+    }
+    write_shapes_to_step(filename, tshapes, names, cs, unit, schema, "Assembly");
+}
+
 // Native RevolvedAreaSolid (pipe-shell elbows): port of adapy's
 // make_revolved_area_shape_from_geom. Build the profile (AREA face or CURVE
 // wire), place it at the swept_area position, then revolve around the
@@ -1317,6 +1337,11 @@ void cad_module(nb::module_ &m) {
           "shape"_a, "origin"_a, "normal"_a, "size"_a = 1000.0,
           "Boolean-intersect `shape` with a finite (2*size square) planar face "
           "at (origin, normal); returns the cross-section.");
+
+    m.def("write_step", &write_step_impl,
+          "shapes"_a, "names"_a, "colors"_a, "filename"_a, "unit"_a = "m", "schema"_a = "AP214",
+          "Write shapes (with per-shape name + RGB color) to a STEP file with "
+          "OCAF names/colors via adacpp's bundled OCCT (no pythonocc needed).");
 
     m.def("build_revolved_area_solid", &build_revolved_area_solid_impl,
           "outer"_a, "inners"_a, "location"_a, "axis"_a, "ref_dir"_a,

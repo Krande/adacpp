@@ -54,7 +54,12 @@ public:
         set_name(shape_label, name);
     }
 
-    void export_step(const std::filesystem::path &step_file) const
+    void add_shape_handle(const TopoDS_Shape &shape, const std::string &name, const Color &rgb_color) {
+        add_shape(shape, name, rgb_color);
+    }
+
+    void export_step(const std::filesystem::path &step_file,
+                     const std::string &unit = "m", const std::string &schema = "AP214") const
     {
         // Create the directory if it doesn't exist and check that step_file.parent_path() is not ""
 
@@ -69,8 +74,8 @@ public:
         writer.SetColorMode(Standard_True);
         writer.SetNameMode(Standard_True);
 
-        Interface_Static::SetCVal("write.step.unit", "m");
-        Interface_Static::SetCVal("write.step.schema", "AP214");
+        Interface_Static::SetCVal("write.step.unit", unit.c_str());
+        Interface_Static::SetCVal("write.step.schema", schema.c_str());
 
         writer.Transfer(doc_, STEPControl_AsIs);
         IFSelect_ReturnStatus status = writer.Write(step_file.string().c_str());
@@ -102,6 +107,22 @@ void write_boxes_to_step(const std::string &filename, const std::vector<std::vec
         writer.add_shape(box, "box_" + std::to_string(i), color);
     }
     writer.export_step(filename);
+}
+
+// Write arbitrary shapes (each with a name + color) to a STEP file with OCAF
+// names/colors. Backs adapy's StepWriter under the adacpp CAD backend.
+void write_shapes_to_step(const std::string &filename, const std::vector<TopoDS_Shape> &shapes,
+                          const std::vector<std::string> &names, const std::vector<Color> &colors,
+                          const std::string &unit, const std::string &schema,
+                          const std::string &top_level_name) {
+    AdaCPPStepWriter writer(top_level_name);
+    for (std::size_t i = 0; i < shapes.size(); ++i) {
+        if (shapes[i].IsNull()) continue;
+        const std::string name = i < names.size() ? names[i] : ("shape_" + std::to_string(i));
+        const Color color = i < colors.size() ? colors[i] : Color();
+        writer.add_shape_handle(shapes[i], name, color);
+    }
+    writer.export_step(filename, unit, schema);
 }
 
 // take in a single box dimension and origin and write to step file using the STEPControl_Writer class
