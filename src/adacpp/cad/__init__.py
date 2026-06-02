@@ -79,6 +79,7 @@ wire_points = _cad.wire_points
 unify_coplanar_faces = _cad.unify_coplanar_faces
 
 read_step_bytes = _cad.read_step_bytes
+read_step_shapes = _cad.read_step_shapes
 write_glb_bytes = _cad.write_glb_bytes
 write_step = _cad.write_step
 
@@ -149,6 +150,7 @@ __all__ = [
     "wire_points",
     "unify_coplanar_faces",
     "read_step_bytes",
+    "read_step_shapes",
     "write_glb_bytes",
     "write_step",
     "from_topods_pointer",

@@ -118,6 +118,12 @@
 #include <TopoDS_Wire.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
+#include <XCAFDoc_ColorTool.hxx>
+#include <XCAFDoc_ColorType.hxx>
+#include <STEPCAFControl_Reader.hxx>
+#include <TDataStd_Name.hxx>
+#include <TDF_LabelSequence.hxx>
+#include <Quantity_Color.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Circ.hxx>
@@ -155,6 +161,14 @@ struct AdvancedFaceData {
     std::vector<std::vector<double>> weights;              // [n_u][n_v], empty → non-rational
     bool u_closed = false, v_closed = false;
     std::vector<std::vector<PcurveData>> bounds;           // [wire][edge]
+};
+
+// One shape extracted from a STEP OCAF document, with its label name + color.
+struct StepShapeData {
+    ShapeHandle shape;
+    std::string name;
+    std::array<double, 3> color{0.5, 0.5, 0.5};
+    bool has_color = false;
 };
 
 // ----------------------------------------------------------------------------
@@ -373,6 +387,87 @@ ShapeHandle read_step_bytes_impl(nb::bytes data) {
         throw std::runtime_error("read_step_bytes: no transferable shape (empty STEP?)");
     }
     return ShapeHandle(shape);
+}
+
+// Recursively collect simple shapes from an OCAF label tree, applying assembly
+// component locations and reading each label's name + color. Port of adapy's
+// read_step_file_with_names_colors traversal (assembly → components → simple
+// shapes + their sub-shapes).
+void collect_step_shapes(const Handle(XCAFDoc_ShapeTool) &st, const Handle(XCAFDoc_ColorTool) &ct,
+                         const TDF_Label &lab, const TopLoc_Location &loc,
+                         std::vector<StepShapeData> &out) {
+    auto read_one = [&](const TDF_Label &shape_lab, const TopoDS_Shape &raw) {
+        const TopoDS_Shape shape =
+                loc.IsIdentity() ? raw : BRepBuilderAPI_Transform(raw, loc.Transformation()).Shape();
+        std::string name;
+        Handle(TDataStd_Name) nm;
+        if (shape_lab.FindAttribute(TDataStd_Name::GetID(), nm)) {
+            name = TCollection_AsciiString(nm->Get()).ToCString();
+        }
+        std::array<double, 3> color{0.5, 0.5, 0.5};
+        bool has_color = false;
+        Quantity_Color c;
+        if (ct->GetColor(shape_lab, XCAFDoc_ColorGen, c) || ct->GetColor(shape_lab, XCAFDoc_ColorSurf, c) ||
+            ct->GetColor(shape_lab, XCAFDoc_ColorCurv, c) || ct->GetColor(raw, XCAFDoc_ColorGen, c) ||
+            ct->GetColor(raw, XCAFDoc_ColorSurf, c) || ct->GetColor(raw, XCAFDoc_ColorCurv, c)) {
+            color = {c.Red(), c.Green(), c.Blue()};
+            has_color = true;
+        }
+        out.push_back(StepShapeData{ShapeHandle(shape), name, color, has_color});
+    };
+
+    if (st->IsAssembly(lab)) {
+        TDF_LabelSequence comps;
+        st->GetComponents(lab, comps);
+        for (int i = 1; i <= comps.Length(); ++i) {
+            TDF_Label comp = comps.Value(i);
+            if (st->IsReference(comp)) {
+                TDF_Label ref;
+                st->GetReferredShape(comp, ref);
+                collect_step_shapes(st, ct, ref, loc * st->GetLocation(comp), out);
+            }
+        }
+    } else if (st->IsSimpleShape(lab)) {
+        read_one(lab, st->GetShape(lab));
+        TDF_LabelSequence subs;
+        st->GetSubShapes(lab, subs);
+        for (int i = 1; i <= subs.Length(); ++i) {
+            const TDF_Label sub = subs.Value(i);
+            read_one(sub, st->GetShape(sub));
+        }
+    }
+}
+
+// Read a STEP file (from bytes) via OCAF, returning each shape with its name +
+// color. Port of StepStore + read_step_file_with_names_colors for the adacpp
+// doc backend (STEP import with no pythonocc).
+std::vector<StepShapeData> read_step_shapes_impl(nb::bytes data) {
+    const std::filesystem::path tmp = make_temp_path("adacpp_step_read", ".stp");
+    {
+        std::ofstream f(tmp.string(), std::ios::binary);
+        f.write(data.c_str(), static_cast<std::streamsize>(data.size()));
+    }
+    STEPCAFControl_Reader reader;
+    reader.SetColorMode(Standard_True);
+    reader.SetNameMode(Standard_True);
+    if (reader.ReadFile(tmp.string().c_str()) != IFSelect_RetDone) {
+        std::filesystem::remove(tmp);
+        throw std::runtime_error("read_step_shapes: STEPCAFControl_Reader could not parse the input");
+    }
+    Handle(TDocStd_Document) doc = new TDocStd_Document(TCollection_ExtendedString("MDTV-XCAF"));
+    const bool ok = reader.Transfer(doc);
+    std::filesystem::remove(tmp);
+    if (!ok) throw std::runtime_error("read_step_shapes: transfer to OCAF document failed");
+
+    Handle(XCAFDoc_ShapeTool) st = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+    Handle(XCAFDoc_ColorTool) ct = XCAFDoc_DocumentTool::ColorTool(doc->Main());
+    TDF_LabelSequence free_shapes;
+    st->GetFreeShapes(free_shapes);
+    std::vector<StepShapeData> out;
+    for (int i = 1; i <= free_shapes.Length(); ++i) {
+        collect_step_shapes(st, ct, free_shapes.Value(i), TopLoc_Location(), out);
+    }
+    return out;
 }
 
 nb::bytes write_glb_bytes_impl(const ShapeHandle &sh, double linear_deflection) {
@@ -1625,6 +1720,12 @@ void cad_module(nb::module_ &m) {
             .def_ro("v_closed",         &AdvancedFaceData::v_closed)
             .def_ro("bounds",           &AdvancedFaceData::bounds);
 
+    nb::class_<StepShapeData>(m, "StepShapeData")
+            .def_ro("shape",     &StepShapeData::shape)
+            .def_ro("name",      &StepShapeData::name)
+            .def_ro("color",     &StepShapeData::color)
+            .def_ro("has_color", &StepShapeData::has_color);
+
     // Opaque handle: no readable attributes / methods. Callers obtain instances
     // via factory functions (make_box, ...) and pass them to consumers
     // (tessellate, ...). The C++-level shape data is unreachable from Python.
@@ -1670,6 +1771,10 @@ void cad_module(nb::module_ &m) {
     m.def("read_step_bytes", &read_step_bytes_impl,
           "data"_a,
           "Parse a STEP file from a bytes buffer into a ShapeHandle.");
+
+    m.def("read_step_shapes", &read_step_shapes_impl, "data"_a,
+          "Read a STEP file (bytes) via OCAF into a list of StepShapeData (shape + "
+          "label name + color). Backs adapy's StepStore under the adacpp doc backend.");
 
     m.def("write_glb_bytes", &write_glb_bytes_impl,
           "shape"_a, "linear_deflection"_a = 0.1,

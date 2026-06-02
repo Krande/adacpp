@@ -383,6 +383,21 @@ def test_cad_face_to_advanced_face_roundtrip():
     assert round(adacpp.cad.area(face2), 6) == round(area0, 6)
 
 
+def test_cad_read_step_shapes_roundtrip(tmp_path):
+    # Write two named/colored boxes, read them back via the OCAF reader.
+    b1 = adacpp.cad.build_box([0, 0, 0], [0, 0, 1], [1, 0, 0], 1, 1, 1)
+    b2 = adacpp.cad.build_box([2, 0, 0], [0, 0, 1], [1, 0, 0], 1, 2, 3)
+    out = tmp_path / "two.stp"
+    adacpp.cad.write_step([b1, b2], ["BoxA", "BoxB"], [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], str(out), "m", "AP214")
+
+    data = adacpp.cad.read_step_shapes(out.read_bytes())
+    named = {d.name: tuple(round(c, 3) for c in d.color) for d in data if d.name and d.has_color}
+    assert named.get("BoxA") == (1.0, 0.0, 0.0)
+    assert named.get("BoxB") == (0.0, 1.0, 0.0)
+    # every returned entry carries a usable shape handle
+    assert all(adacpp.cad.shape_type(d.shape) in ("solid", "compound", "shell", "face") for d in data)
+
+
 def test_cad_revolved_curve_profile():
     # Revolve a circle wire (r=0.5, centered at x=2 in XY) a quarter turn about
     # the world Z axis through the origin → a curved pipe-elbow surface.
