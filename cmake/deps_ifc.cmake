@@ -15,12 +15,17 @@ list(APPEND
 # So we must NOT link the dynamic librocksdb.so: that would put a second
 # rocksdb instance in the process alongside the one embedded in IfcParse.a,
 # causing ODR conflicts and heap corruption (segfault on IfcFile ctor/dtor).
-# Link the static librocksdb.a instead so the final extension module holds a
-# single, consistent rocksdb. snappy / lz4 / zstd are rocksdb's own
-# compression deps that surface once we pull it in statically; they are safe
-# to link dynamically.
-find_library(ROCKSDB_STATIC_LIB NAMES librocksdb.a rocksdb REQUIRED)
-list(APPEND ADA_CPP_LINK_LIBS ${ROCKSDB_STATIC_LIB} snappy lz4 zstd)
+# Link the static rocksdb instead so the final extension module holds a
+# single, consistent rocksdb.
+#
+# Use rocksdb's own CMake package rather than a hard-coded find_library: the
+# RocksDB::rocksdb target is the STATIC library on every platform (the .a/.lib
+# names differ — e.g. Windows has no librocksdb.a and `rocksdb` resolves to the
+# shared import lib, which is why find_library failed there), and it already
+# carries rocksdb's compression deps (snappy / lz4 / zstd / zlib / gflags) as
+# interface link libraries, so we don't have to enumerate them by hand.
+find_package(RocksDB CONFIG REQUIRED)
+list(APPEND ADA_CPP_LINK_LIBS RocksDB::rocksdb)
 
 # The conda-forge ifcopenshell is built with -DWITH_ROCKSDB=ON, which defines
 # IFOPSH_WITH_ROCKSDB while compiling libIfcParse.a. That macro gates members
