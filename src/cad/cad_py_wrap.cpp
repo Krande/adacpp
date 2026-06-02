@@ -13,15 +13,17 @@
 #include <nanobind/stl/vector.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <tuple>
+#include <filesystem>
 #include <fstream>
 #include <optional>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <unistd.h>      // mkstemp, unlink, write, close
 #include <utility>
 #include <vector>
 
@@ -268,26 +270,48 @@ std::pair<std::array<double, 3>, std::array<double, 3>> obb_impl(const ShapeHand
 //
 // OCCT's STEP/glTF readers/writers operate on filenames, not memory streams.
 // To present a `bytes -> ShapeHandle` / `ShapeHandle -> bytes` API, we write
-// to a temp file under /tmp and let OCCT read/write through that. Under
-// pyodide /tmp is MEMFS (in-memory), so this is purely a memcpy detour with
-// no real disk I/O — same speed as a memory-stream API would give.
+// to a temp file in the system temp dir and let OCCT read/write through that.
+// Under pyodide that dir is MEMFS (in-memory), so this is purely a memcpy
+// detour with no real disk I/O — same speed as a memory-stream API would give.
+
+// Allocate a unique, not-yet-existing path in the system temp directory.
+// Cross-platform replacement for POSIX mkstemp (no <unistd.h> on Windows).
+std::filesystem::path make_temp_path(const char *prefix, const char *suffix) {
+    static std::atomic<unsigned long long> counter{0};
+    std::random_device rd;
+    const std::filesystem::path dir = std::filesystem::temp_directory_path();
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        std::ostringstream name;
+        name << prefix << '_' << rd() << '_' << counter.fetch_add(1) << suffix;
+        std::filesystem::path candidate = dir / name.str();
+        std::error_code ec;
+        if (!std::filesystem::exists(candidate, ec)) {
+            return candidate;
+        }
+    }
+    throw std::runtime_error("make_temp_path: could not allocate a unique temp file");
+}
 
 ShapeHandle read_step_bytes_impl(nb::bytes data) {
-    char tmpname[] = "/tmp/adacpp_step_XXXXXX";
-    const int fd = mkstemp(tmpname);
-    if (fd < 0) {
-        throw std::runtime_error("read_step_bytes: mkstemp failed");
-    }
-    const auto written = ::write(fd, data.c_str(), data.size());
-    ::close(fd);
-    if (written < 0 || static_cast<std::size_t>(written) != data.size()) {
-        ::unlink(tmpname);
-        throw std::runtime_error("read_step_bytes: failed to materialize temp file");
+    const std::filesystem::path tmp = make_temp_path("adacpp_step", ".stp");
+    const std::string tmpname = tmp.string();
+    {
+        std::ofstream out(tmpname, std::ios::binary);
+        if (!out) {
+            throw std::runtime_error("read_step_bytes: failed to create temp file");
+        }
+        out.write(data.c_str(), static_cast<std::streamsize>(data.size()));
+        if (!out) {
+            std::error_code ec;
+            std::filesystem::remove(tmp, ec);
+            throw std::runtime_error("read_step_bytes: failed to materialize temp file");
+        }
     }
 
     STEPControl_Reader reader;
-    const IFSelect_ReturnStatus status = reader.ReadFile(tmpname);
-    ::unlink(tmpname);
+    const IFSelect_ReturnStatus status = reader.ReadFile(tmpname.c_str());
+    std::error_code ec;
+    std::filesystem::remove(tmp, ec);
     if (status != IFSelect_RetDone) {
         throw std::runtime_error("read_step_bytes: STEPControl_Reader could not parse the input");
     }
@@ -319,15 +343,11 @@ nb::bytes write_glb_bytes_impl(const ShapeHandle &sh, double linear_deflection) 
         XCAFDoc_DocumentTool::ShapeTool(doc->Main());
     shapeTool->AddShape(shape);
 
-    char tmpname[] = "/tmp/adacpp_glb_XXXXXX";
-    const int fd = mkstemp(tmpname);
-    if (fd < 0) {
-        throw std::runtime_error("write_glb_bytes: mkstemp failed");
-    }
-    ::close(fd);  // RWGltf_CafWriter opens the file itself by name.
+    const std::filesystem::path tmp = make_temp_path("adacpp_glb", ".glb");
+    const std::string tmpname = tmp.string();  // RWGltf_CafWriter opens by name.
 
     {
-        RWGltf_CafWriter writer(TCollection_AsciiString(tmpname),
+        RWGltf_CafWriter writer(TCollection_AsciiString(tmpname.c_str()),
                                  /*isBinary=*/Standard_True);
         // Match adapy's gltf_writer.to_gltf() configuration so the produced
         // GLB renders identically in the adapy viewer:
@@ -344,14 +364,16 @@ nb::bytes write_glb_bytes_impl(const ShapeHandle &sh, double linear_deflection) 
                      TCollection_AsciiString("adacpp"));
         const Message_ProgressRange progress;
         if (!writer.Perform(doc, fileInfo, progress)) {
-            ::unlink(tmpname);
+            std::error_code ec;
+            std::filesystem::remove(tmp, ec);
             throw std::runtime_error("write_glb_bytes: RWGltf_CafWriter::Perform failed");
         }
     }
 
     std::ifstream f(tmpname, std::ios::binary | std::ios::ate);
     if (!f.is_open()) {
-        ::unlink(tmpname);
+        std::error_code ec;
+        std::filesystem::remove(tmp, ec);
         throw std::runtime_error("write_glb_bytes: failed to re-open temp file");
     }
     const auto size = static_cast<std::size_t>(f.tellg());
@@ -359,7 +381,8 @@ nb::bytes write_glb_bytes_impl(const ShapeHandle &sh, double linear_deflection) 
     std::vector<char> buffer(size);
     if (size > 0) f.read(buffer.data(), size);
     f.close();
-    ::unlink(tmpname);
+    std::error_code ec;
+    std::filesystem::remove(tmp, ec);
 
     return nb::bytes(buffer.data(), buffer.size());
 }
