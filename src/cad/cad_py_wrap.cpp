@@ -54,9 +54,14 @@
 #include <BRepOffsetAPI_ThruSections.hxx>
 #include <BRepGProp.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
+#include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
 #include <Geom_Surface.hxx>
 #include <GeomLProp_SLProps.hxx>
+#include <gp_Elips.hxx>
+#include <TColgp_Array1OfPnt.hxx>
+#include <BRepOffsetAPI_MakeFilling.hxx>
+#include <GeomAbs_Shape.hxx>
 #include <Standard_Type.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TColgp_Array2OfPnt.hxx>
@@ -762,21 +767,79 @@ ShapeHandle build_cone_impl(std::array<double, 3> loc, std::array<double, 3> axi
 //   line   = [0, x1,y1,z1, x2,y2,z2]
 //   arc    = [1, sx,sy,sz, mx,my,mz, ex,ey,ez]   (start, mid, end)
 //   circle = [2, cx,cy,cz, ax,ay,az, r]          (Axis2Placement + radius)
+// Build a single TopoDS_Edge from a self-describing flat edge record. The first
+// element is a kind tag; the remaining layout depends on the kind. Mirrors
+// adapy's make_edge_from_edge (the 3D curve zoo: line/arc/circle/bspline/
+// ellipse, full + parametrically-trimmed). Port target so EdgeLoop/OrientedEdge
+// boundaries build on adacpp without pythonocc.
+//   0 line            : [0, x1,y1,z1, x2,y2,z2]
+//   1 arc (3-point)   : [1, sx,sy,sz, mx,my,mz, ex,ey,ez]
+//   2 circle (full)   : [2, cx,cy,cz, ax,ay,az, r]
+//   5 circle (trimmed): [5, cx,cy,cz, ax,ay,az, r, t_start, t_end]
+//   4 ellipse         : [4, cx,cy,cz, ax,ay,az, rdx,rdy,rdz, semi1, semi2,
+//                        trim, sx,sy,sz, ex,ey,ez]   (trim=0 → full; pts ignored)
+//   3 bspline         : [3, degree, rational, trim, t_start, t_end, n_poles,
+//                        <3*n_poles coords>, n_knots, <knots>, <mults>,
+//                        <n_poles weights if rational>]
+TopoDS_Edge edge_from_record(const std::vector<double> &e) {
+    const int kind = static_cast<int>(std::lround(e[0]));
+    if (kind == 0) {
+        return BRepBuilderAPI_MakeEdge(gp_Pnt(e[1], e[2], e[3]), gp_Pnt(e[4], e[5], e[6])).Edge();
+    }
+    if (kind == 1) {
+        GC_MakeArcOfCircle arc(gp_Pnt(e[1], e[2], e[3]), gp_Pnt(e[4], e[5], e[6]), gp_Pnt(e[7], e[8], e[9]));
+        return BRepBuilderAPI_MakeEdge(arc.Value()).Edge();
+    }
+    if (kind == 2) {
+        const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]));
+        return BRepBuilderAPI_MakeEdge(gp_Circ(ax, e[7])).Edge();
+    }
+    if (kind == 5) {
+        const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]));
+        return BRepBuilderAPI_MakeEdge(gp_Circ(ax, e[7]), e[8], e[9]).Edge();
+    }
+    if (kind == 4) {
+        const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]), gp_Dir(e[7], e[8], e[9]));
+        const gp_Elips el(ax, e[10], e[11]);
+        const bool trim = std::lround(e[12]) != 0;
+        if (!trim) return BRepBuilderAPI_MakeEdge(el).Edge();
+        return BRepBuilderAPI_MakeEdge(el, gp_Pnt(e[13], e[14], e[15]), gp_Pnt(e[16], e[17], e[18])).Edge();
+    }
+    if (kind == 3) {
+        const int degree = static_cast<int>(std::lround(e[1]));
+        const bool rational = std::lround(e[2]) != 0;
+        const bool trim = std::lround(e[3]) != 0;
+        const double t_start = e[4], t_end = e[5];
+        std::size_t i = 6;
+        const int n_poles = static_cast<int>(std::lround(e[i++]));
+        TColgp_Array1OfPnt poles(1, n_poles);
+        for (int p = 1; p <= n_poles; ++p) {
+            poles.SetValue(p, gp_Pnt(e[i], e[i + 1], e[i + 2]));
+            i += 3;
+        }
+        const int n_knots = static_cast<int>(std::lround(e[i++]));
+        TColStd_Array1OfReal knots(1, n_knots);
+        for (int k = 1; k <= n_knots; ++k) knots.SetValue(k, e[i++]);
+        TColStd_Array1OfInteger mults(1, n_knots);
+        for (int k = 1; k <= n_knots; ++k) mults.SetValue(k, static_cast<int>(std::lround(e[i++])));
+        Handle(Geom_BSplineCurve) curve;
+        if (rational) {
+            TColStd_Array1OfReal weights(1, n_poles);
+            for (int p = 1; p <= n_poles; ++p) weights.SetValue(p, e[i++]);
+            curve = new Geom_BSplineCurve(poles, weights, knots, mults, degree, Standard_False);
+        } else {
+            curve = new Geom_BSplineCurve(poles, knots, mults, degree, Standard_False);
+        }
+        if (trim) return BRepBuilderAPI_MakeEdge(curve, t_start, t_end).Edge();
+        return BRepBuilderAPI_MakeEdge(curve).Edge();
+    }
+    throw std::runtime_error("edge_from_record: unknown edge kind " + std::to_string(kind));
+}
+
 TopoDS_Wire wire_from_edges(const std::vector<std::vector<double>> &edges) {
     BRepBuilderAPI_MakeWire wm;
     for (const auto &e : edges) {
-        const int kind = static_cast<int>(std::lround(e[0]));
-        if (kind == 0) {  // line
-            wm.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(e[1], e[2], e[3]), gp_Pnt(e[4], e[5], e[6])).Edge());
-        } else if (kind == 1) {  // 3-point arc
-            GC_MakeArcOfCircle arc(gp_Pnt(e[1], e[2], e[3]), gp_Pnt(e[4], e[5], e[6]), gp_Pnt(e[7], e[8], e[9]));
-            wm.Add(BRepBuilderAPI_MakeEdge(arc.Value()).Edge());
-        } else if (kind == 2) {  // full circle
-            const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]));
-            wm.Add(BRepBuilderAPI_MakeEdge(gp_Circ(ax, e[7])).Edge());
-        } else {
-            throw std::runtime_error("wire_from_edges: unknown edge kind");
-        }
+        wm.Add(edge_from_record(e));
     }
     wm.Build();
     return wm.Wire();
@@ -784,6 +847,24 @@ TopoDS_Wire wire_from_edges(const std::vector<std::vector<double>> &edges) {
 
 TopoDS_Shape face_from_edges(const std::vector<std::vector<double>> &edges) {
     return BRepBuilderAPI_MakeFace(wire_from_edges(edges)).Shape();
+}
+
+// Build a wire (open or closed) from a list of edge records. Backs adapy's
+// make_wire_from_edge_loop for the active backend.
+ShapeHandle build_wire_impl(const std::vector<std::vector<double>> &edges) {
+    return ShapeHandle(wire_from_edges(edges));
+}
+
+// Wire-filled face (WireFilledFace): interpolate a smooth surface through the
+// boundary edges with BRepOffsetAPI_MakeFilling. Port of adapy's
+// make_face_from_wire_filled (the SAT exppc-unrecoverable-surface fallback).
+ShapeHandle build_filled_face_impl(const std::vector<std::vector<double>> &edges) {
+    if (edges.size() < 3) throw std::runtime_error("build_filled_face: need >= 3 boundary edges");
+    BRepOffsetAPI_MakeFilling filler;
+    for (const auto &e : edges) filler.Add(edge_from_record(e), GeomAbs_C0);
+    filler.Build();
+    if (!filler.IsDone()) throw std::runtime_error("build_filled_face: MakeFilling failed");
+    return ShapeHandle(filler.Shape());
 }
 
 // Place a shape built in the XY frame at an Axis2Placement3D — the gp_Ax3
@@ -1521,6 +1602,14 @@ void cad_module(nb::module_ &m) {
           "face"_a, "thickness"_a,
           "Prism-extrude a face by `thickness` along its surface normal (PlateCurved "
           "thickness). Returns the bare face on thickness 0 / undefined normal / failure.");
+
+    m.def("build_wire", &build_wire_impl, "edges"_a,
+          "Build a wire from edge records (line/arc/circle/ellipse/bspline, full or "
+          "parametrically trimmed). See edge_from_record for the record layout.");
+
+    m.def("build_filled_face", &build_filled_face_impl, "edges"_a,
+          "Wire-filled face (WireFilledFace): interpolate a smooth surface through "
+          ">=3 boundary edges via BRepOffsetAPI_MakeFilling.");
 
     m.def("build_planar_face", &build_planar_face_impl,
           "outer"_a, "inners"_a, "location"_a, "axis"_a, "ref_dir"_a,

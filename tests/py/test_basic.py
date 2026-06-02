@@ -291,6 +291,34 @@ def test_cad_extrude_face_along_normal():
     assert adacpp.cad.shape_type(adacpp.cad.extrude_face_along_normal(bs, 0.0)) == "face"
 
 
+def test_cad_build_wire_curve_zoo():
+    # Wire from line + 3-point arc + lines (closed path).
+    edges = [
+        [0, 0, 0, 0, 1, 0, 0],
+        [1, 1, 0, 0, 1.5, 0.5, 0, 1, 1, 0],
+        [0, 1, 1, 0, 0, 1, 0],
+        [0, 0, 1, 0, 0, 0, 0],
+    ]
+    w = adacpp.cad.build_wire(edges)
+    assert adacpp.cad.shape_type(w) == "wire"
+
+    # Degree-2 B-spline curve edge (3 poles, clamped knots) + a closing line.
+    bs_edge = [3, 2, 0, 0, 0.0, 0.0, 3, 0, 0, 0, 1, 1, 0, 2, 0, 0, 2, 0.0, 1.0, 3, 3]
+    w2 = adacpp.cad.build_wire([bs_edge, [0, 2, 0, 0, 0, 0, 0]])
+    assert adacpp.cad.shape_type(w2) == "wire"
+    assert len(adacpp.cad.edges(w2)) == 2
+
+
+def test_cad_build_filled_face():
+    # MakeFilling interpolates a smooth (B-spline) surface through a 4-edge
+    # square boundary → one valid face.
+    sq = [[0, 0, 0, 0, 1, 0, 0], [0, 1, 0, 0, 1, 1, 0], [0, 1, 1, 0, 0, 1, 0], [0, 0, 1, 0, 0, 0, 0]]
+    ff = adacpp.cad.build_filled_face(sq)
+    assert adacpp.cad.shape_type(ff) == "face"
+    assert len(adacpp.cad.faces(ff)) == 1
+    assert adacpp.cad.face_surface_type(ff) == "bspline"
+
+
 def test_cad_revolved_curve_profile():
     # Revolve a circle wire (r=0.5, centered at x=2 in XY) a quarter turn about
     # the world Z axis through the origin → a curved pipe-elbow surface.
