@@ -39,6 +39,7 @@ make_halfspace = _cad.make_halfspace
 cut_surfaces = _cad.cut_surfaces
 build_planar_face = _cad.build_planar_face
 build_bspline_surface_face = _cad.build_bspline_surface_face
+extrude_face_along_normal = _cad.extrude_face_along_normal
 build_face_based_surface_model = _cad.build_face_based_surface_model
 make_wire = _cad.make_wire
 
@@ -110,6 +111,7 @@ __all__ = [
     "cut_surfaces",
     "build_planar_face",
     "build_bspline_surface_face",
+    "extrude_face_along_normal",
     "build_face_based_surface_model",
     "make_wire",
     "boolean",

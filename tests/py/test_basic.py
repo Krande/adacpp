@@ -276,6 +276,21 @@ def test_cad_introspection_helpers():
     assert adacpp.cad.face_surface_type(bs) == "bspline"
 
 
+def test_cad_extrude_face_along_normal():
+    # Extrude a B-spline dome face by 0.1 along its normal → a thin solid.
+    bs = adacpp.cad.build_bspline_surface_face(
+        2, 2,
+        [[[0, 0, 0], [0, 1, 0], [0, 2, 0]], [[1, 0, 0.5], [1, 1, 1.0], [1, 2, 0.5]], [[2, 0, 0], [2, 1, 0], [2, 2, 0]]],
+        [0.0, 1.0], [0.0, 1.0], [3, 3], [3, 3], [], 1e-6,
+    )
+    solid = adacpp.cad.extrude_face_along_normal(bs, 0.1)
+    assert adacpp.cad.shape_type(solid) == "solid"
+    assert adacpp.cad.is_valid(solid)
+    assert adacpp.cad.volume(solid) > 0.0
+    # thickness 0 short-circuits to the bare face.
+    assert adacpp.cad.shape_type(adacpp.cad.extrude_face_along_normal(bs, 0.0)) == "face"
+
+
 def test_cad_revolved_curve_profile():
     # Revolve a circle wire (r=0.5, centered at x=2 in XY) a quarter turn about
     # the world Z axis through the origin → a curved pipe-elbow surface.

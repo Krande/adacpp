@@ -56,6 +56,7 @@
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <Geom_BSplineSurface.hxx>
 #include <Geom_Surface.hxx>
+#include <GeomLProp_SLProps.hxx>
 #include <Standard_Type.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TColgp_Array2OfPnt.hxx>
@@ -890,6 +891,28 @@ ShapeHandle build_bspline_surface_face_impl(
     return ShapeHandle(face);
 }
 
+// Prism-extrude a face by `thickness` along its surface normal at the
+// parametric centre. Port of adapy's extrude_face_along_normal — gives a curved
+// plate (PlateCurved) its thickness. Falls back to the bare face on thickness 0,
+// undefined normal, or prism failure (matches adapy's render-something policy).
+ShapeHandle extrude_face_along_normal_impl(const ShapeHandle &sh, double thickness) {
+    const TopoDS_Shape &shape = sh.topods();
+    if (thickness == 0.0) return ShapeHandle(shape);
+    TopExp_Explorer exp(shape, TopAbs_FACE);
+    if (!exp.More()) return ShapeHandle(shape);
+    const TopoDS_Face sub_face = TopoDS::Face(exp.Current());
+    Handle(Geom_Surface) surf = BRep_Tool::Surface(sub_face);
+    Standard_Real umin = 0.0, umax = 1.0, vmin = 0.0, vmax = 1.0;
+    BRepTools::UVBounds(sub_face, umin, umax, vmin, vmax);
+    GeomLProp_SLProps props(surf, (umin + umax) / 2.0, (vmin + vmax) / 2.0, 1, 1e-7);
+    if (!props.IsNormalDefined()) return ShapeHandle(shape);
+    const gp_Dir n = props.Normal();
+    const gp_Vec vec(n.X() * thickness, n.Y() * thickness, n.Z() * thickness);
+    BRepPrimAPI_MakePrism prism(shape, vec);
+    if (!prism.IsDone()) return ShapeHandle(shape);
+    return ShapeHandle(prism.Shape());
+}
+
 // Build a swept profile from edge records. AREA → outer face minus inner void
 // faces (solid cross-section). CURVE → the outer wire alone: matches OCC's
 // make_profile_from_geom non-area path, where cutting a 1-D wire by a disjoint
@@ -1493,6 +1516,11 @@ void cad_module(nb::module_ &m) {
           "Trimmed face over a B-spline surface (knots; rational if weights given). "
           "control_points row-major [num_u][num_v]; weights empty => non-rational. "
           "Natural-UV MakeFace (PlateCurved / loft-derived surfaces).");
+
+    m.def("extrude_face_along_normal", &extrude_face_along_normal_impl,
+          "face"_a, "thickness"_a,
+          "Prism-extrude a face by `thickness` along its surface normal (PlateCurved "
+          "thickness). Returns the bare face on thickness 0 / undefined normal / failure.");
 
     m.def("build_planar_face", &build_planar_face_impl,
           "outer"_a, "inners"_a, "location"_a, "axis"_a, "ref_dir"_a,
