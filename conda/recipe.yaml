@@ -30,13 +30,18 @@ requirements:
       then: make
   host:
     - python
-    - occt
-    - ifcopenshell
+    # Pin occt/ifcopenshell to the same versions pixi resolves (see pixi.toml):
+    # libIfcParse.a references a specific rocksdb ABI, so the whole occt /
+    # ifcopenshell / rocksdb trio must match what ifcopenshell was built against.
+    - occt ==7.9.3
+    - ifcopenshell >=0.8.5
     # rocksdb is embedded statically in libIfcParse; we link RocksDB::rocksdb
     # (the static lib) directly, so it must be present at build time. It is only
     # a transitive run dep of ifcopenshell, hence the explicit host entry — see
-    # cmake/deps_ifc.cmake.
-    - rocksdb
+    # cmake/deps_ifc.cmake. Pin to ifcopenshell 0.8.5's rocksdb range: an
+    # unconstrained entry resolves to rocksdb 11.x, whose ABI mismatches the
+    # libIfcParse.a build and corrupts IfcFile at runtime ("Unable to parse").
+    - rocksdb >=10.6.2,<10.7.0a0
     # RocksDBConfig.cmake calls find_dependency(ZLIB), which needs zlib.h. The
     # build env only pulls in libzlib (runtime); zlib carries the dev headers
     # the find_package resolution requires. (snappy/lz4-c/zstd/gflags — rocksdb's

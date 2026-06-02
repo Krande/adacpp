@@ -303,7 +303,8 @@ def test_cad_from_topods_pointer():
     # whose underlying pointer is the .get_ptr() — but we already have a Python
     # path that goes the other way. Easier: feed write_box_to_step a temporary
     # path so we know that path lights up the OCCT side, then build via pyocc.
-    from OCC.Core.BRepPrimAPI import BRepPrimAPI_MakeBox
+    pyocc = pytest.importorskip("OCC.Core.BRepPrimAPI")
+    BRepPrimAPI_MakeBox = pyocc.BRepPrimAPI_MakeBox
     from OCC.Core.gp import gp_Pnt
 
     pyocc_shape = BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 1.0, 2.0, 3.0).Shape()
