@@ -254,6 +254,28 @@ def test_cad_build_bspline_surface_face():
     assert bb == (0.0, 0.0, 0.0, 2.0, 2.0, 0.375)
 
 
+def test_cad_introspection_helpers():
+    # area / shape_type / face_surface_type — backend-neutral replacements for
+    # GProp + TopAbs + BRep_Tool::Surface introspection.
+    box = adacpp.cad.build_box([0, 0, 0], [0, 0, 1], [1, 0, 0], 2, 3, 4)
+    assert adacpp.cad.shape_type(box) == "solid"
+    assert round(adacpp.cad.area(box), 5) == 52.0  # 2*(2*3 + 3*4 + 2*4)
+    assert round(adacpp.cad.volume(box), 5) == 24.0
+    box_face = adacpp.cad.faces(box)[0]
+    assert adacpp.cad.shape_type(box_face) == "face"
+    assert adacpp.cad.face_surface_type(box_face) == "plane"
+
+    cyl = adacpp.cad.build_cylinder([0, 0, 0], [0, 0, 1], 1.0, 2.0)
+    assert {adacpp.cad.face_surface_type(f) for f in adacpp.cad.faces(cyl)} == {"cylinder", "plane"}
+
+    bs = adacpp.cad.build_bspline_surface_face(
+        2, 2,
+        [[[0, 0, 0], [0, 1, 0], [0, 2, 0]], [[1, 0, 0.5], [1, 1, 1.0], [1, 2, 0.5]], [[2, 0, 0], [2, 1, 0], [2, 2, 0]]],
+        [0.0, 1.0], [0.0, 1.0], [3, 3], [3, 3], [], 1e-6,
+    )
+    assert adacpp.cad.face_surface_type(bs) == "bspline"
+
+
 def test_cad_revolved_curve_profile():
     # Revolve a circle wire (r=0.5, centered at x=2 in XY) a quarter turn about
     # the world Z axis through the origin → a curved pipe-elbow surface.

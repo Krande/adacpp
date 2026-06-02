@@ -55,6 +55,9 @@
 #include <BRepGProp.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <Geom_BSplineSurface.hxx>
+#include <Geom_Surface.hxx>
+#include <Standard_Type.hxx>
+#include <TopAbs_ShapeEnum.hxx>
 #include <TColgp_Array2OfPnt.hxx>
 #include <TColStd_Array1OfReal.hxx>
 #include <TColStd_Array1OfInteger.hxx>
@@ -444,6 +447,60 @@ double volume_impl(const ShapeHandle &sh) {
     GProp_GProps props;
     BRepGProp::VolumeProperties(sh.topods(), props);
     return props.Mass();
+}
+
+// Total surface area (GProp). Backend-neutral replacement for tests that
+// reach for BRepGProp::SurfaceProperties + GProp_GProps::Mass directly.
+double area_impl(const ShapeHandle &sh) {
+    GProp_GProps props;
+    BRepGProp::SurfaceProperties(sh.topods(), props);
+    return props.Mass();
+}
+
+// Topological kind of the shape ("solid"/"shell"/"face"/"wire"/"edge"/
+// "vertex"/"compound"/"compsolid"). Lets tests classify a built shape without
+// isinstance(TopoDS_Solid/Face/Compound) against pythonocc types.
+std::string shape_type_impl(const ShapeHandle &sh) {
+    switch (sh.topods().ShapeType()) {
+        case TopAbs_COMPOUND:  return "compound";
+        case TopAbs_COMPSOLID: return "compsolid";
+        case TopAbs_SOLID:     return "solid";
+        case TopAbs_SHELL:     return "shell";
+        case TopAbs_FACE:      return "face";
+        case TopAbs_WIRE:      return "wire";
+        case TopAbs_EDGE:      return "edge";
+        case TopAbs_VERTEX:    return "vertex";
+        default:               return "shape";
+    }
+}
+
+// Underlying geometric surface kind of a face ("plane"/"cylinder"/"cone"/
+// "sphere"/"torus"/"bspline"/"bezier"/...). If `sh` is not a face the first
+// face found is used. Replaces BRep_Tool::Surface(face)->DynamicType()->Name()
+// / IsKind(Geom_BSplineSurface) introspection in tests.
+std::string face_surface_type_impl(const ShapeHandle &sh) {
+    const TopoDS_Shape &s = sh.topods();
+    TopoDS_Face face;
+    if (s.ShapeType() == TopAbs_FACE) {
+        face = TopoDS::Face(s);
+    } else {
+        TopExp_Explorer exp(s, TopAbs_FACE);
+        if (!exp.More()) throw std::runtime_error("face_surface_type: shape has no face");
+        face = TopoDS::Face(exp.Current());
+    }
+    Handle(Geom_Surface) surf = BRep_Tool::Surface(face);
+    if (surf.IsNull()) return "unknown";
+    const std::string name = surf->DynamicType()->Name();
+    if (name == "Geom_Plane")              return "plane";
+    if (name == "Geom_CylindricalSurface") return "cylinder";
+    if (name == "Geom_ConicalSurface")     return "cone";
+    if (name == "Geom_SphericalSurface")   return "sphere";
+    if (name == "Geom_ToroidalSurface")    return "torus";
+    if (name == "Geom_BSplineSurface")     return "bspline";
+    if (name == "Geom_BezierSurface")      return "bezier";
+    if (name == "Geom_SurfaceOfLinearExtrusion") return "linear_extrusion";
+    if (name == "Geom_SurfaceOfRevolution")      return "revolution";
+    return name;  // fall back to the raw OCCT class name
 }
 
 // Sub-shape lists — boundary crosses once, not per element.
@@ -1307,6 +1364,12 @@ void cad_module(nb::module_ &m) {
     m.def("is_valid", &is_valid_impl,
           "shape"_a,
           "Topological + geometric validity (BRepCheck_Analyzer).");
+
+    m.def("area", &area_impl, "shape"_a, "Total surface area (GProp).");
+    m.def("shape_type", &shape_type_impl, "shape"_a,
+          "Topological kind: solid/shell/face/wire/edge/vertex/compound/compsolid.");
+    m.def("face_surface_type", &face_surface_type_impl, "shape"_a,
+          "Geometric surface kind of a face: plane/cylinder/cone/sphere/torus/bspline/...");
 
     m.def("volume", &volume_impl,
           "shape"_a,

@@ -49,6 +49,9 @@ distance = _cad.distance
 serialize = _cad.serialize
 is_valid = _cad.is_valid
 volume = _cad.volume
+area = _cad.area
+shape_type = _cad.shape_type
+face_surface_type = _cad.face_surface_type
 faces = _cad.faces
 solids = _cad.solids
 edges = _cad.edges
@@ -115,6 +118,9 @@ __all__ = [
     "serialize",
     "is_valid",
     "volume",
+    "area",
+    "shape_type",
+    "face_surface_type",
     "faces",
     "solids",
     "edges",
