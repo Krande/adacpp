@@ -319,6 +319,31 @@ def test_cad_build_filled_face():
     assert adacpp.cad.face_surface_type(ff) == "bspline"
 
 
+def test_cad_build_advanced_face_bspline_with_pcurves():
+    # Bilinear (degree-1) B-spline surface = unit-square plane in z=0, trimmed by
+    # a UV-square boundary made of 4 kind-6 pcurve (2D line) edges → unit face.
+    cps = [[[0, 0, 0], [0, 1, 0]], [[1, 0, 0], [1, 1, 0]]]  # cp[u][v] = (u, v, 0)
+    uk = vk = [0.0, 1.0]
+    um = vm = [2, 2]
+
+    def pcurve_line(u0, v0, u1, v1):
+        # kind 6: [6, degree, rational, closed, n_poles, <2*n uv>, n_knots, knots, mults]
+        return [6, 1, 0, 0, 2, u0, v0, u1, v1, 2, 0.0, 1.0, 2, 2]
+
+    loop = [
+        pcurve_line(0, 0, 1, 0),
+        pcurve_line(1, 0, 1, 1),
+        pcurve_line(1, 1, 0, 1),
+        pcurve_line(0, 1, 0, 0),
+    ]
+    face = adacpp.cad.build_advanced_face_bspline(1, 1, cps, uk, vk, um, vm, [], [loop])
+    assert adacpp.cad.shape_type(face) == "face"
+    assert adacpp.cad.face_surface_type(face) == "bspline"
+    assert round(adacpp.cad.area(face), 6) == 1.0
+    bb = tuple(round(v, 4) for v in adacpp.cad.bbox(face))
+    assert bb == (0.0, 0.0, 0.0, 1.0, 1.0, 0.0)
+
+
 def test_cad_revolved_curve_profile():
     # Revolve a circle wire (r=0.5, centered at x=2 in XY) a quarter turn about
     # the world Z axis through the origin → a curved pipe-elbow surface.

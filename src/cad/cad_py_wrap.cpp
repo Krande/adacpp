@@ -57,9 +57,14 @@
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
 #include <Geom_Surface.hxx>
+#include <Geom2d_BSplineCurve.hxx>
+#include <Geom2d_Curve.hxx>
 #include <GeomLProp_SLProps.hxx>
 #include <gp_Elips.hxx>
+#include <gp_Pnt2d.hxx>
 #include <TColgp_Array1OfPnt.hxx>
+#include <TColgp_Array1OfPnt2d.hxx>
+#include <BRepLib.hxx>
 #include <BRepOffsetAPI_MakeFilling.hxx>
 #include <GeomAbs_Shape.hxx>
 #include <Standard_Type.hxx>
@@ -931,14 +936,17 @@ ShapeHandle build_planar_face_impl(
 // MakeFace — the common PlateCurved / loft-derived case where the surface's knot
 // range already spans the plate, so no explicit boundary trimming is needed.
 // control_points is row-major [num_u][num_v]; weights empty => non-rational.
-ShapeHandle build_bspline_surface_face_impl(
+// Construct a Geom_BSplineSurface from the adapy BSplineSurfaceWithKnots data
+// (rational when weights non-empty). Shared by the natural-UV face builder and
+// the bounds-trimmed AdvancedFace builder.
+Handle(Geom_BSplineSurface) make_bspline_surface(
         int u_degree, int v_degree,
         const std::vector<std::vector<std::array<double, 3>>> &control_points,
         const std::vector<double> &u_knots, const std::vector<double> &v_knots,
         const std::vector<int> &u_mults, const std::vector<int> &v_mults,
-        const std::vector<std::vector<double>> &weights, double tol) {
+        const std::vector<std::vector<double>> &weights) {
     const int num_u = static_cast<int>(control_points.size());
-    if (num_u == 0) throw std::runtime_error("build_bspline_surface_face: empty control point grid");
+    if (num_u == 0) throw std::runtime_error("make_bspline_surface: empty control point grid");
     const int num_v = static_cast<int>(control_points[0].size());
 
     TColgp_Array2OfPnt poles(1, num_u, 1, num_v);
@@ -957,18 +965,93 @@ ShapeHandle build_bspline_surface_face_impl(
     TColStd_Array1OfInteger mults_v(1, static_cast<int>(v_mults.size()));
     for (std::size_t i = 0; i < v_mults.size(); ++i) mults_v.SetValue(static_cast<int>(i) + 1, v_mults[i]);
 
-    Handle(Geom_BSplineSurface) surf;
     if (!weights.empty()) {
         TColStd_Array2OfReal w(1, num_u, 1, num_v);
         for (int u = 0; u < num_u; ++u)
             for (int v = 0; v < num_v; ++v) w.SetValue(u + 1, v + 1, weights[u][v]);
-        surf = new Geom_BSplineSurface(poles, w, knots_u, knots_v, mults_u, mults_v, u_degree, v_degree,
-                                       Standard_False, Standard_False);
-    } else {
-        surf = new Geom_BSplineSurface(poles, knots_u, knots_v, mults_u, mults_v, u_degree, v_degree,
+        return new Geom_BSplineSurface(poles, w, knots_u, knots_v, mults_u, mults_v, u_degree, v_degree,
                                        Standard_False, Standard_False);
     }
-    const TopoDS_Face face = BRepBuilderAPI_MakeFace(surf, tol).Face();
+    return new Geom_BSplineSurface(poles, knots_u, knots_v, mults_u, mults_v, u_degree, v_degree,
+                                   Standard_False, Standard_False);
+}
+
+// Build a face edge from a 2D pcurve record (kind 6) laid on `surf`:
+//   [6, degree, rational, closed, n_poles, <2*n_poles uv>, n_knots, <knots>,
+//    <mults>, <n_poles weights if rational>]
+// The 3D parametrization is derived by OCCT from surface(pcurve(t)), so 2D/3D
+// stay consistent — the SAT-pcurve path adapy's make_face_from_geom prefers.
+TopoDS_Edge edge_from_pcurve(const std::vector<double> &e, const Handle(Geom_Surface) &surf) {
+    const int degree = static_cast<int>(std::lround(e[1]));
+    const bool rational = std::lround(e[2]) != 0;
+    const bool closed = std::lround(e[3]) != 0;
+    std::size_t i = 4;
+    const int n = static_cast<int>(std::lround(e[i++]));
+    TColgp_Array1OfPnt2d poles(1, n);
+    for (int p = 1; p <= n; ++p) {
+        poles.SetValue(p, gp_Pnt2d(e[i], e[i + 1]));
+        i += 2;
+    }
+    const int nk = static_cast<int>(std::lround(e[i++]));
+    TColStd_Array1OfReal knots(1, nk);
+    for (int k = 1; k <= nk; ++k) knots.SetValue(k, e[i++]);
+    TColStd_Array1OfInteger mults(1, nk);
+    for (int k = 1; k <= nk; ++k) mults.SetValue(k, static_cast<int>(std::lround(e[i++])));
+    Handle(Geom2d_BSplineCurve) c2d;
+    if (rational) {
+        TColStd_Array1OfReal w(1, n);
+        for (int p = 1; p <= n; ++p) w.SetValue(p, e[i++]);
+        c2d = new Geom2d_BSplineCurve(poles, w, knots, mults, degree, closed);
+    } else {
+        c2d = new Geom2d_BSplineCurve(poles, knots, mults, degree, closed);
+    }
+    return BRepBuilderAPI_MakeEdge(c2d, surf, c2d->FirstParameter(), c2d->LastParameter()).Edge();
+}
+
+ShapeHandle build_bspline_surface_face_impl(
+        int u_degree, int v_degree,
+        const std::vector<std::vector<std::array<double, 3>>> &control_points,
+        const std::vector<double> &u_knots, const std::vector<double> &v_knots,
+        const std::vector<int> &u_mults, const std::vector<int> &v_mults,
+        const std::vector<std::vector<double>> &weights, double tol) {
+    Handle(Geom_BSplineSurface) surf =
+            make_bspline_surface(u_degree, v_degree, control_points, u_knots, v_knots, u_mults, v_mults, weights);
+    return ShapeHandle(BRepBuilderAPI_MakeFace(surf, tol).Face());
+}
+
+// Full bounds-trimmed AdvancedFace over a B-spline surface. Port of adapy's
+// make_face_from_geom (SAT-pcurve path): build each boundary wire from its
+// edges — a kind-6 record builds the edge from its 2D pcurve laid on the
+// surface (3D derived as surface(pcurve(t))), any other kind builds a 3D edge —
+// trim the surface to the outer wire, add inner wires as holes, then materialise
+// 3D curves (BRepLib::BuildCurves3d). bounds[0] is the outer boundary.
+ShapeHandle build_advanced_face_bspline_impl(
+        int u_degree, int v_degree,
+        const std::vector<std::vector<std::array<double, 3>>> &control_points,
+        const std::vector<double> &u_knots, const std::vector<double> &v_knots,
+        const std::vector<int> &u_mults, const std::vector<int> &v_mults,
+        const std::vector<std::vector<double>> &weights,
+        const std::vector<std::vector<std::vector<double>>> &bounds) {
+    if (bounds.empty()) throw std::runtime_error("build_advanced_face: no bounds");
+    Handle(Geom_BSplineSurface) surf =
+            make_bspline_surface(u_degree, v_degree, control_points, u_knots, v_knots, u_mults, v_mults, weights);
+
+    auto wire_of = [&](const std::vector<std::vector<double>> &edges) -> TopoDS_Wire {
+        BRepBuilderAPI_MakeWire wm;
+        for (const auto &rec : edges) {
+            const int kind = static_cast<int>(std::lround(rec[0]));
+            wm.Add(kind == 6 ? edge_from_pcurve(rec, surf) : edge_from_record(rec));
+        }
+        wm.Build();
+        if (!wm.IsDone()) throw std::runtime_error("build_advanced_face: wire build failed");
+        return wm.Wire();
+    };
+
+    BRepBuilderAPI_MakeFace fm(surf, wire_of(bounds[0]));
+    for (std::size_t b = 1; b < bounds.size(); ++b) fm.Add(wire_of(bounds[b]));
+    if (!fm.IsDone()) throw std::runtime_error("build_advanced_face: MakeFace failed");
+    TopoDS_Face face = fm.Face();
+    BRepLib::BuildCurves3d(face);  // pcurve-built edges have no 3D curve yet
     return ShapeHandle(face);
 }
 
@@ -1597,6 +1680,13 @@ void cad_module(nb::module_ &m) {
           "Trimmed face over a B-spline surface (knots; rational if weights given). "
           "control_points row-major [num_u][num_v]; weights empty => non-rational. "
           "Natural-UV MakeFace (PlateCurved / loft-derived surfaces).");
+
+    m.def("build_advanced_face_bspline", &build_advanced_face_bspline_impl,
+          "u_degree"_a, "v_degree"_a, "control_points"_a, "u_knots"_a, "v_knots"_a,
+          "u_mults"_a, "v_mults"_a, "weights"_a, "bounds"_a,
+          "Bounds-trimmed AdvancedFace over a B-spline surface. bounds[0] is the outer "
+          "boundary, the rest are holes; each edge is a 3D edge record or a kind-6 2D "
+          "pcurve record laid on the surface. Ports make_face_from_geom (SAT-pcurve path).");
 
     m.def("extrude_face_along_normal", &extrude_face_along_normal_impl,
           "face"_a, "thickness"_a,
