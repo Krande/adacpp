@@ -1,7 +1,8 @@
 import random
 
-import adacpp
 import pytest
+
+import adacpp
 
 
 def create_box_grid(grid_size):
@@ -126,7 +127,7 @@ def test_cad_make_cylinder():
     cyl = adacpp.cad.make_cylinder(2.0, 5.0)
     mesh = adacpp.cad.tessellate(cyl)
     positions = list(mesh.positions)
-    xs, ys, zs = positions[0::3], positions[1::3], positions[2::3]
+    xs, _, zs = positions[0::3], positions[1::3], positions[2::3]
     # Cylinder along +Z, radius 2, base at z=0, top at z=5.
     assert min(zs) == 0.0 and max(zs) == 5.0
     # XY radius is approximately 2 (tessellation chord-deflects slightly inward).
@@ -182,8 +183,7 @@ def test_cad_revolved_curve_profile():
     # the world Z axis through the origin → a curved pipe-elbow surface.
     circle = [[2.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.5]]
     shp = adacpp.cad.build_revolved_area_solid(
-        circle, [], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 90.0, False
+        circle, [], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 90.0, False
     )
     assert adacpp.cad.is_valid(shp)
     bb = adacpp.cad.bbox(shp)
@@ -203,11 +203,7 @@ def _signed_mesh_volume(mesh):
         ax, ay, az = pos[3 * a], pos[3 * a + 1], pos[3 * a + 2]
         bx, by, bz = pos[3 * b], pos[3 * b + 1], pos[3 * b + 2]
         cx, cy, cz = pos[3 * c], pos[3 * c + 1], pos[3 * c + 2]
-        vol += (
-            ax * (by * cz - bz * cy)
-            - ay * (bx * cz - bz * cx)
-            + az * (bx * cy - by * cx)
-        )
+        vol += ax * (by * cz - bz * cy) - ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx)
     return vol / 6.0
 
 
@@ -226,10 +222,10 @@ def test_cad_fixed_reference_swept_area_solid():
     h = 0.2
     directrix = [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]]  # line (0,0,0)->(0,0,1)
     profile = [
-        [0.0, 0.0, 0.0, 0.0, h, 0.0, 0.0],   # (0,0,0)->(h,0,0)
-        [0.0, h, 0.0, 0.0, h, h, 0.0],       # (h,0,0)->(h,h,0)
-        [0.0, h, h, 0.0, 0.0, h, 0.0],       # (h,h,0)->(0,h,0)
-        [0.0, 0.0, h, 0.0, 0.0, 0.0, 0.0],   # (0,h,0)->(0,0,0)
+        [0.0, 0.0, 0.0, 0.0, h, 0.0, 0.0],  # (0,0,0)->(h,0,0)
+        [0.0, h, 0.0, 0.0, h, h, 0.0],  # (h,0,0)->(h,h,0)
+        [0.0, h, h, 0.0, 0.0, h, 0.0],  # (h,h,0)->(0,h,0)
+        [0.0, 0.0, h, 0.0, 0.0, 0.0, 0.0],  # (0,h,0)->(0,0,0)
     ]
     shp = adacpp.cad.build_fixed_reference_swept_area_solid(directrix, profile, [0.0, 0.0, 0.0])
     assert adacpp.cad.is_valid(shp)
@@ -345,7 +341,9 @@ def test_cad_boolean_ops():
 
 def test_cad_distance():
     a = adacpp.cad.make_box(2.0, 2.0, 2.0)  # ends at x=1
-    b = adacpp.cad.transform(adacpp.cad.make_box(2.0, 2.0, 2.0), [1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0], True)  # x in [4,6]
+    b = adacpp.cad.transform(
+        adacpp.cad.make_box(2.0, 2.0, 2.0), [1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0], True
+    )  # x in [4,6]
     assert round(adacpp.cad.distance(a, b), 6) == 3.0
 
 
