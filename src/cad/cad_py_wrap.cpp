@@ -121,6 +121,7 @@
 #include <XCAFDoc_ColorTool.hxx>
 #include <XCAFDoc_ColorType.hxx>
 #include <STEPCAFControl_Reader.hxx>
+#include <Interface_Static.hxx>
 #include <TDataStd_Name.hxx>
 #include <TDF_LabelSequence.hxx>
 #include <Quantity_Color.hxx>
@@ -441,7 +442,7 @@ void collect_step_shapes(const Handle(XCAFDoc_ShapeTool) &st, const Handle(XCAFD
 // Read a STEP file (from bytes) via OCAF, returning each shape with its name +
 // color. Port of StepStore + read_step_file_with_names_colors for the adacpp
 // doc backend (STEP import with no pythonocc).
-std::vector<StepShapeData> read_step_shapes_impl(nb::bytes data) {
+std::vector<StepShapeData> read_step_shapes_impl(nb::bytes data, const std::string &unit) {
     const std::filesystem::path tmp = make_temp_path("adacpp_step_read", ".stp");
     {
         std::ofstream f(tmp.string(), std::ios::binary);
@@ -450,6 +451,11 @@ std::vector<StepShapeData> read_step_shapes_impl(nb::bytes data) {
     STEPCAFControl_Reader reader;
     reader.SetColorMode(Standard_True);
     reader.SetNameMode(Standard_True);
+    // Convert the STEP file's native length unit to `unit` on read — mirrors
+    // StepStore's "xstep.cascade.unit" so e.g. a 10 m plate reads as 10.0 not
+    // 10000. Set AFTER constructing the reader (its ctor resets the static),
+    // before ReadFile — same order as StepStore.create_step_reader.
+    Interface_Static::SetCVal("xstep.cascade.unit", unit.c_str());
     if (reader.ReadFile(tmp.string().c_str()) != IFSelect_RetDone) {
         std::filesystem::remove(tmp);
         throw std::runtime_error("read_step_shapes: STEPCAFControl_Reader could not parse the input");
@@ -1772,9 +1778,10 @@ void cad_module(nb::module_ &m) {
           "data"_a,
           "Parse a STEP file from a bytes buffer into a ShapeHandle.");
 
-    m.def("read_step_shapes", &read_step_shapes_impl, "data"_a,
+    m.def("read_step_shapes", &read_step_shapes_impl, "data"_a, "unit"_a = "M",
           "Read a STEP file (bytes) via OCAF into a list of StepShapeData (shape + "
-          "label name + color). Backs adapy's StepStore under the adacpp doc backend.");
+          "label name + color), converting the file's length unit to `unit` (default M). "
+          "Backs adapy's StepStore under the adacpp doc backend.");
 
     m.def("write_glb_bytes", &write_glb_bytes_impl,
           "shape"_a, "linear_deflection"_a = 0.1,
