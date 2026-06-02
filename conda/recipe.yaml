@@ -37,6 +37,11 @@ requirements:
     # a transitive run dep of ifcopenshell, hence the explicit host entry — see
     # cmake/deps_ifc.cmake.
     - rocksdb
+    # RocksDBConfig.cmake calls find_dependency(ZLIB), which needs zlib.h. The
+    # build env only pulls in libzlib (runtime); zlib carries the dev headers
+    # the find_package resolution requires. (snappy/lz4-c/zstd/gflags — rocksdb's
+    # other find_dependency targets — are already present transitively.)
+    - zlib
     - cgal-cpp
     - nanobind
     - cli11
