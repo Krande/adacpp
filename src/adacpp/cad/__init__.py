@@ -30,6 +30,7 @@ build_cylinder = _cad.build_cylinder
 build_sphere = _cad.build_sphere
 build_cone = _cad.build_cone
 build_extruded_area_solid = _cad.build_extruded_area_solid
+build_extruded_area_solid_tapered = _cad.build_extruded_area_solid_tapered
 build_revolved_area_solid = _cad.build_revolved_area_solid
 build_fixed_reference_swept_area_solid = _cad.build_fixed_reference_swept_area_solid
 make_halfspace = _cad.make_halfspace
@@ -93,6 +94,7 @@ __all__ = [
     "build_sphere",
     "build_cone",
     "build_extruded_area_solid",
+    "build_extruded_area_solid_tapered",
     "build_revolved_area_solid",
     "build_fixed_reference_swept_area_solid",
     "make_halfspace",

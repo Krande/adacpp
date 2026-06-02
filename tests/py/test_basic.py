@@ -178,6 +178,24 @@ def test_cad_extruded_curve_profile_is_open_shell():
     assert len(adacpp.cad.faces(shp)) == 1
 
 
+def test_cad_extruded_area_solid_tapered():
+    # Loft (ThruSections) between a 2x2 square base and a 1x1 square top over
+    # height 2 → a frustum. Volume = h/3 * (A1 + A2 + sqrt(A1*A2))
+    #          = 2/3 * (4 + 1 + 2) = 4.666667.
+    def rect(half):
+        pts = [(-half, -half, 0.0), (half, -half, 0.0), (half, half, 0.0), (-half, half, 0.0)]
+        return [[0.0, *pts[i], *pts[(i + 1) % 4]] for i in range(4)]
+
+    shp = adacpp.cad.build_extruded_area_solid_tapered(
+        rect(1.0), rect(0.5), [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0], 2.0
+    )
+    assert adacpp.cad.is_valid(shp)
+    assert len(adacpp.cad.solids(shp)) == 1
+    assert round(adacpp.cad.volume(shp), 6) == round(2.0 / 3.0 * 7.0, 6)
+    bb = tuple(round(v, 6) for v in adacpp.cad.bbox(shp))
+    assert bb == (-1.0, -1.0, 0.0, 1.0, 1.0, 2.0)
+
+
 def test_cad_revolved_curve_profile():
     # Revolve a circle wire (r=0.5, centered at x=2 in XY) a quarter turn about
     # the world Z axis through the origin → a curved pipe-elbow surface.

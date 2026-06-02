@@ -50,6 +50,7 @@
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
+#include <BRepOffsetAPI_ThruSections.hxx>
 #include <BRepGProp.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
@@ -812,6 +813,32 @@ ShapeHandle build_extruded_area_solid_impl(
     return ShapeHandle(place_at(solid, loc, axis, ref_dir));
 }
 
+// Native ExtrudedAreaSolidTapered (tapered beams): port of adapy's
+// make_extruded_area_shape_tapered_from_geom. Loft (BRepOffsetAPI_ThruSections)
+// between the start profile wire (in the XY frame) and the end profile wire
+// translated +Z by depth, then place via the gp_Ax3 change-of-basis. Only the
+// outer wires are lofted — matches OCC, which takes wires()[0] of each profile
+// face (inner voids are not carried through the taper).
+ShapeHandle build_extruded_area_solid_tapered_impl(
+        const std::vector<std::vector<double>> &outer_start,
+        const std::vector<std::vector<double>> &outer_end,
+        std::array<double, 3> loc, std::array<double, 3> axis, std::array<double, 3> ref_dir,
+        double depth) {
+    const TopoDS_Wire wire1 = wire_from_edges(outer_start);
+    TopoDS_Wire wire2 = wire_from_edges(outer_end);
+    // End profile sits at depth along +Z (identity rotation + Z translation).
+    wire2 = TopoDS::Wire(place_at(wire2, {0.0, 0.0, depth}, {0.0, 0.0, 1.0}, {1.0, 0.0, 0.0}));
+
+    BRepOffsetAPI_ThruSections ts(Standard_True);  // is_solid
+    ts.AddWire(wire1);
+    ts.AddWire(wire2);
+    ts.Build();
+    if (!ts.IsDone()) {
+        throw std::runtime_error("build_extruded_area_solid_tapered: ThruSections failed");
+    }
+    return ShapeHandle(place_at(ts.Shape(), loc, axis, ref_dir));
+}
+
 // Native RevolvedAreaSolid (pipe-shell elbows): port of adapy's
 // make_revolved_area_shape_from_geom. Build the profile (AREA face or CURVE
 // wire), place it at the swept_area position, then revolve around the
@@ -1229,6 +1256,13 @@ void cad_module(nb::module_ &m) {
           "line=[0,p1,p2], arc=[1,start,mid,end], circle=[2,centre,axis,r]), "
           "prism-extruded by `depth` and placed at the Axis2Placement3D frame. "
           "is_area=False sweeps the outer wire alone (open lateral surface).");
+
+    m.def("build_extruded_area_solid_tapered", &build_extruded_area_solid_tapered_impl,
+          "outer_start"_a, "outer_end"_a, "location"_a, "axis"_a, "ref_dir"_a, "depth"_a,
+          "Tapered extruded area solid (tapered beams): loft (ThruSections) between "
+          "the start outer profile and the end outer profile (placed +Z by `depth`), "
+          "then placed at the Axis2Placement3D frame. Edge records as in "
+          "build_extruded_area_solid; only the outer wires are lofted.");
 
     m.def("build_revolved_area_solid", &build_revolved_area_solid_impl,
           "outer"_a, "inners"_a, "location"_a, "axis"_a, "ref_dir"_a,
