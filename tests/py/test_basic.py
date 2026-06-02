@@ -196,6 +196,32 @@ def test_cad_extruded_area_solid_tapered():
     assert bb == (-1.0, -1.0, 0.0, 1.0, 1.0, 2.0)
 
 
+def test_cad_loft_profiles_two_squares_is_box():
+    # Loft two equal squares 1 apart in Z → a unit box: 6 faces, volume 1.
+    def rect(half, z):
+        return [[-half, -half, z], [half, -half, z], [half, half, z], [-half, half, z]]
+
+    box = adacpp.cad.loft_profiles([rect(0.5, 0.0), rect(0.5, 1.0)], True, True)
+    assert adacpp.cad.is_valid(box)
+    assert len(adacpp.cad.faces(box)) == 6
+    assert round(adacpp.cad.volume(box), 6) == 1.0
+
+
+def test_cad_loft_profiles_rejects_single():
+    with pytest.raises(Exception):
+        adacpp.cad.loft_profiles([[[0, 0, 0], [1, 0, 0], [1, 1, 0]]], True, True)
+
+
+def test_cad_section_with_plane():
+    # Mid-span Z section of a tall box → a single planar cross-section face.
+    def rect(half, z):
+        return [[-half, -half, z], [half, -half, z], [half, half, z], [-half, half, z]]
+
+    box = adacpp.cad.loft_profiles([rect(1.0, 0.0), rect(1.0, 4.0)], True, True)
+    sec = adacpp.cad.section_with_plane(box, [0.0, 0.0, 2.0], [0.0, 0.0, 1.0], 1000.0)
+    assert len(adacpp.cad.faces(sec)) == 1
+
+
 def test_cad_revolved_curve_profile():
     # Revolve a circle wire (r=0.5, centered at x=2 in XY) a quarter turn about
     # the world Z axis through the origin → a curved pipe-elbow surface.

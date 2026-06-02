@@ -31,6 +31,8 @@ build_sphere = _cad.build_sphere
 build_cone = _cad.build_cone
 build_extruded_area_solid = _cad.build_extruded_area_solid
 build_extruded_area_solid_tapered = _cad.build_extruded_area_solid_tapered
+loft_profiles = _cad.loft_profiles
+section_with_plane = _cad.section_with_plane
 build_revolved_area_solid = _cad.build_revolved_area_solid
 build_fixed_reference_swept_area_solid = _cad.build_fixed_reference_swept_area_solid
 make_halfspace = _cad.make_halfspace
@@ -95,6 +97,8 @@ __all__ = [
     "build_cone",
     "build_extruded_area_solid",
     "build_extruded_area_solid_tapered",
+    "loft_profiles",
+    "section_with_plane",
     "build_revolved_area_solid",
     "build_fixed_reference_swept_area_solid",
     "make_halfspace",

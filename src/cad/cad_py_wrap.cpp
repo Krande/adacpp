@@ -839,6 +839,50 @@ ShapeHandle build_extruded_area_solid_tapered_impl(
     return ShapeHandle(place_at(ts.Shape(), loc, axis, ref_dir));
 }
 
+// Generic loft: thread a ruled (or smooth) solid/shell through a sequence of
+// closed polygon section profiles with BRepOffsetAPI_ThruSections. Port of
+// adapy's ada.api.loft.loft_profiles. Each profile is a list of 3D points;
+// the polygon is closed implicitly (last→first edge added).
+ShapeHandle loft_profiles_impl(
+        const std::vector<std::vector<std::array<double, 3>>> &profiles,
+        bool ruled, bool solid) {
+    if (profiles.size() < 2) {
+        throw std::runtime_error("loft_profiles: need at least 2 profiles");
+    }
+    BRepOffsetAPI_ThruSections ts(solid, ruled);
+    for (const auto &poly : profiles) {
+        if (poly.size() < 2) {
+            throw std::runtime_error("loft_profiles: a profile needs at least 2 points");
+        }
+        BRepBuilderAPI_MakeWire wm;
+        for (std::size_t i = 0; i < poly.size(); ++i) {
+            const auto &a = poly[i];
+            const auto &b = poly[(i + 1) % poly.size()];
+            wm.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(a[0], a[1], a[2]), gp_Pnt(b[0], b[1], b[2])).Edge());
+        }
+        wm.Build();
+        ts.AddWire(wm.Wire());
+    }
+    ts.Build();
+    if (!ts.IsDone()) {
+        throw std::runtime_error("loft_profiles: ThruSections failed");
+    }
+    return ShapeHandle(ts.Shape());
+}
+
+// Boolean-intersect a shape with a finite planar face (cross-section). Port of
+// adapy's ada.api.loft.intersect_with_plane: build a `2*size` square face on
+// the plane (origin, normal) and common it with the shape. `size` must exceed
+// the shape's lateral extent so the result is the full cross-section.
+ShapeHandle section_with_plane_impl(
+        const ShapeHandle &shape, std::array<double, 3> origin,
+        std::array<double, 3> normal, double size) {
+    const gp_Pln pln(gp_Pnt(origin[0], origin[1], origin[2]),
+                     gp_Dir(normal[0], normal[1], normal[2]));
+    const TopoDS_Shape face = BRepBuilderAPI_MakeFace(pln, -size, size, -size, size).Face();
+    return ShapeHandle(BRepAlgoAPI_Common(shape.topods(), face).Shape());
+}
+
 // Native RevolvedAreaSolid (pipe-shell elbows): port of adapy's
 // make_revolved_area_shape_from_geom. Build the profile (AREA face or CURVE
 // wire), place it at the swept_area position, then revolve around the
@@ -1263,6 +1307,16 @@ void cad_module(nb::module_ &m) {
           "the start outer profile and the end outer profile (placed +Z by `depth`), "
           "then placed at the Axis2Placement3D frame. Edge records as in "
           "build_extruded_area_solid; only the outer wires are lofted.");
+
+    m.def("loft_profiles", &loft_profiles_impl,
+          "profiles"_a, "ruled"_a = true, "solid"_a = true,
+          "Loft a ruled (or smooth) solid/shell through >=2 closed polygon "
+          "section profiles (each a list of 3D points) via ThruSections.");
+
+    m.def("section_with_plane", &section_with_plane_impl,
+          "shape"_a, "origin"_a, "normal"_a, "size"_a = 1000.0,
+          "Boolean-intersect `shape` with a finite (2*size square) planar face "
+          "at (origin, normal); returns the cross-section.");
 
     m.def("build_revolved_area_solid", &build_revolved_area_solid_impl,
           "outer"_a, "inners"_a, "location"_a, "axis"_a, "ref_dir"_a,
