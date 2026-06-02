@@ -236,6 +236,24 @@ def test_cad_write_step(tmp_path):
     assert "BoxA" in text and "BoxB" in text
 
 
+def test_cad_build_bspline_surface_face():
+    # Degree-2 dome: 3x3 control net with the centre row lifted in Z. Clamped
+    # knots [0,1] mult [3,3] each direction. Expect one valid trimmed face whose
+    # actual surface peaks at z=0.375 (well below the z=1 centre control point).
+    cps = [
+        [[0, 0, 0], [0, 1, 0], [0, 2, 0]],
+        [[1, 0, 0.5], [1, 1, 1.0], [1, 2, 0.5]],
+        [[2, 0, 0], [2, 1, 0], [2, 2, 0]],
+    ]
+    face = adacpp.cad.build_bspline_surface_face(
+        2, 2, cps, [0.0, 1.0], [0.0, 1.0], [3, 3], [3, 3], [], 1e-6
+    )
+    assert adacpp.cad.is_valid(face)
+    assert len(adacpp.cad.faces(face)) == 1
+    bb = tuple(round(v, 4) for v in adacpp.cad.bbox(face))
+    assert bb == (0.0, 0.0, 0.0, 2.0, 2.0, 0.375)
+
+
 def test_cad_revolved_curve_profile():
     # Revolve a circle wire (r=0.5, centered at x=2 in XY) a quarter turn about
     # the world Z axis through the origin → a curved pipe-elbow surface.

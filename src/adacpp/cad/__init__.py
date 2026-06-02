@@ -38,6 +38,7 @@ build_fixed_reference_swept_area_solid = _cad.build_fixed_reference_swept_area_s
 make_halfspace = _cad.make_halfspace
 cut_surfaces = _cad.cut_surfaces
 build_planar_face = _cad.build_planar_face
+build_bspline_surface_face = _cad.build_bspline_surface_face
 build_face_based_surface_model = _cad.build_face_based_surface_model
 make_wire = _cad.make_wire
 
@@ -105,6 +106,7 @@ __all__ = [
     "make_halfspace",
     "cut_surfaces",
     "build_planar_face",
+    "build_bspline_surface_face",
     "build_face_based_surface_model",
     "make_wire",
     "boolean",

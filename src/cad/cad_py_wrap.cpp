@@ -54,6 +54,11 @@
 #include <BRepOffsetAPI_ThruSections.hxx>
 #include <BRepGProp.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
+#include <Geom_BSplineSurface.hxx>
+#include <TColgp_Array2OfPnt.hxx>
+#include <TColStd_Array1OfReal.hxx>
+#include <TColStd_Array1OfInteger.hxx>
+#include <TColStd_Array2OfReal.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCone.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
@@ -782,6 +787,52 @@ ShapeHandle build_planar_face_impl(
     return ShapeHandle(place_at(face, loc, axis, ref_dir));
 }
 
+// Build a trimmed face over a B-spline surface (with knots; rational if weights
+// supplied). Port of adapy's make_bspline_surface_with_knots + a natural-UV
+// MakeFace — the common PlateCurved / loft-derived case where the surface's knot
+// range already spans the plate, so no explicit boundary trimming is needed.
+// control_points is row-major [num_u][num_v]; weights empty => non-rational.
+ShapeHandle build_bspline_surface_face_impl(
+        int u_degree, int v_degree,
+        const std::vector<std::vector<std::array<double, 3>>> &control_points,
+        const std::vector<double> &u_knots, const std::vector<double> &v_knots,
+        const std::vector<int> &u_mults, const std::vector<int> &v_mults,
+        const std::vector<std::vector<double>> &weights, double tol) {
+    const int num_u = static_cast<int>(control_points.size());
+    if (num_u == 0) throw std::runtime_error("build_bspline_surface_face: empty control point grid");
+    const int num_v = static_cast<int>(control_points[0].size());
+
+    TColgp_Array2OfPnt poles(1, num_u, 1, num_v);
+    for (int u = 0; u < num_u; ++u) {
+        for (int v = 0; v < num_v; ++v) {
+            const auto &p = control_points[u][v];
+            poles.SetValue(u + 1, v + 1, gp_Pnt(p[0], p[1], p[2]));
+        }
+    }
+    TColStd_Array1OfReal knots_u(1, static_cast<int>(u_knots.size()));
+    for (std::size_t i = 0; i < u_knots.size(); ++i) knots_u.SetValue(static_cast<int>(i) + 1, u_knots[i]);
+    TColStd_Array1OfReal knots_v(1, static_cast<int>(v_knots.size()));
+    for (std::size_t i = 0; i < v_knots.size(); ++i) knots_v.SetValue(static_cast<int>(i) + 1, v_knots[i]);
+    TColStd_Array1OfInteger mults_u(1, static_cast<int>(u_mults.size()));
+    for (std::size_t i = 0; i < u_mults.size(); ++i) mults_u.SetValue(static_cast<int>(i) + 1, u_mults[i]);
+    TColStd_Array1OfInteger mults_v(1, static_cast<int>(v_mults.size()));
+    for (std::size_t i = 0; i < v_mults.size(); ++i) mults_v.SetValue(static_cast<int>(i) + 1, v_mults[i]);
+
+    Handle(Geom_BSplineSurface) surf;
+    if (!weights.empty()) {
+        TColStd_Array2OfReal w(1, num_u, 1, num_v);
+        for (int u = 0; u < num_u; ++u)
+            for (int v = 0; v < num_v; ++v) w.SetValue(u + 1, v + 1, weights[u][v]);
+        surf = new Geom_BSplineSurface(poles, w, knots_u, knots_v, mults_u, mults_v, u_degree, v_degree,
+                                       Standard_False, Standard_False);
+    } else {
+        surf = new Geom_BSplineSurface(poles, knots_u, knots_v, mults_u, mults_v, u_degree, v_degree,
+                                       Standard_False, Standard_False);
+    }
+    const TopoDS_Face face = BRepBuilderAPI_MakeFace(surf, tol).Face();
+    return ShapeHandle(face);
+}
+
 // Build a swept profile from edge records. AREA → outer face minus inner void
 // faces (solid cross-section). CURVE → the outer wire alone: matches OCC's
 // make_profile_from_geom non-area path, where cutting a 1-D wire by a disjoint
@@ -1372,6 +1423,13 @@ void cad_module(nb::module_ &m) {
           "cutter, plain data: (surface_type, (nx,ny,nz), outer_edges, "
           "outer_polyline, inner_polylines). Curved edges are discretized to "
           "`deflection`; points within `tol` are de-duplicated.");
+
+    m.def("build_bspline_surface_face", &build_bspline_surface_face_impl,
+          "u_degree"_a, "v_degree"_a, "control_points"_a, "u_knots"_a, "v_knots"_a,
+          "u_mults"_a, "v_mults"_a, "weights"_a, "tol"_a = 1e-6,
+          "Trimmed face over a B-spline surface (knots; rational if weights given). "
+          "control_points row-major [num_u][num_v]; weights empty => non-rational. "
+          "Natural-UV MakeFace (PlateCurved / loft-derived surfaces).");
 
     m.def("build_planar_face", &build_planar_face_impl,
           "outer"_a, "inners"_a, "location"_a, "axis"_a, "ref_dir"_a,
