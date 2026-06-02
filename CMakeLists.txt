@@ -23,23 +23,33 @@ else()
 endif ()
 
 # Create a list called ADA_CPP_SOURCES of all cpp files inside the src dir
-set(ADA_CPP_SOURCES
-        src/cadit/ifc/ifcop.cpp
-        src/cadit/occt/step_to_glb.cpp
-        src/cadit/occt/step_writer.cpp
-        src/cadit/occt/colors.cpp
-        src/cadit/tinygltf/tinygltf.cpp
-        src/cadit/tinygltf/tiny_helpers.cpp
-        src/helpers/helpers.cpp
-        src/geom/Color.cpp
-        src/geom/Models.cpp
-        src/geom/geometries.cpp
-        src/fem/simple_mesh.cpp
-        src/visit/ShapeTesselator.cpp
-        src/visit/tess_helpers.cpp
-        src/visit/manual/solids/boxes.cpp
-        src/visit/TessellateFactory.cpp
-)
+if (BUILD_WASM)
+    # Wasm builds don't yet have OCCT/CGAL/gmsh/IfcOpenShell available, so the source
+    # list is restricted to the kernel-agnostic cad surface plus the wasm-safe pieces
+    # of geom/. As OCCT-wasm comes online, more files will move out of the #else.
+    set(ADA_CPP_SOURCES
+            src/geom/Color.cpp
+            src/geom/Models.cpp
+    )
+else ()
+    set(ADA_CPP_SOURCES
+            src/cadit/ifc/ifcop.cpp
+            src/cadit/occt/step_to_glb.cpp
+            src/cadit/occt/step_writer.cpp
+            src/cadit/occt/colors.cpp
+            src/cadit/tinygltf/tinygltf.cpp
+            src/cadit/tinygltf/tiny_helpers.cpp
+            src/helpers/helpers.cpp
+            src/geom/Color.cpp
+            src/geom/Models.cpp
+            src/geom/geometries.cpp
+            src/fem/simple_mesh.cpp
+            src/visit/ShapeTesselator.cpp
+            src/visit/tess_helpers.cpp
+            src/visit/manual/solids/boxes.cpp
+            src/visit/TessellateFactory.cpp
+    )
+endif ()
 set(ADA_CPP_HEADERS
         src/cadit/ifc/ifcop.h
         src/cadit/occt/step_to_glb.h
@@ -55,15 +65,23 @@ set(ADA_CPP_HEADERS
         src/visit/TessellateFactory.h
 )
 
-set(ADA_CPP_PY_SOURCES
-        src/adacpp_py_wrap.cpp
-        src/cadit/ifc/ifc_py_wrap.cpp
-        src/cadit/occt/occt_py_wrap.cpp
-        src/cadit/tinygltf/tiny_py_wrap.cpp
-        src/geom/geom_py_wrap.cpp
-        src/fem/fem_py_wrap.cpp
-        src/visit/visit_py_wrap.cpp
-)
+if (BUILD_WASM)
+    set(ADA_CPP_PY_SOURCES
+            src/adacpp_py_wrap.cpp
+            src/cad/cad_py_wrap.cpp
+    )
+else ()
+    set(ADA_CPP_PY_SOURCES
+            src/adacpp_py_wrap.cpp
+            src/cad/cad_py_wrap.cpp
+            src/cadit/ifc/ifc_py_wrap.cpp
+            src/cadit/occt/occt_py_wrap.cpp
+            src/cadit/tinygltf/tiny_py_wrap.cpp
+            src/geom/geom_py_wrap.cpp
+            src/fem/fem_py_wrap.cpp
+            src/visit/visit_py_wrap.cpp
+    )
+endif ()
 set(ADA_CPP_PY_HEADERS
         src/cadit/ifc/ifc_py_wrap.h
         src/cadit/occt/occt_py_wrap.h
@@ -80,12 +98,33 @@ set(ADA_CPP_LINK_LIBS)
 if (BUILD_WASM)
     message(STATUS "Building for WebAssembly using Emscripten")
     include(cmake/wasm_toolchain.cmake)
-else ()
-    include(cmake/pre_checks.cmake)
+    # Cross-compile a minimal OCCT to wasm via FetchContent. Sets WASM_OCCT_TARGETS
+    # for the nanobind module / executables to link against. First spike is
+    # FoundationClasses only; module set widens as features land.
+    include(cmake/wasm_occt.cmake)
+endif ()
 
-    find_package(Python REQUIRED COMPONENTS Interpreter Development.Module
-            OPTIONAL_COMPONENTS Development.SABIModule
-    )
+if (BUILD_PYTHON)
+    if (BUILD_WASM)
+        # Cross-compile against pyodide's Python headers; pyodide modules don't link
+        # libpython (it's loaded dynamically by the pyodide runtime), so Development.Module
+        # is unavailable. We point CMake at the xbuildenv Python include dir manually
+        # via the preset and only request the Interpreter component (host python, for
+        # running nanobind's helper scripts at configure time).
+        find_package(Python 3.12 REQUIRED COMPONENTS Interpreter)
+        if (NOT DEFINED Python_INCLUDE_DIR OR Python_INCLUDE_DIR STREQUAL "")
+            message(FATAL_ERROR "Python_INCLUDE_DIR must be set to the pyodide xbuildenv Python.h location for WASM+PYTHON builds.")
+        endif ()
+        set(Python_INCLUDE_DIRS "${Python_INCLUDE_DIR}")
+    else ()
+        find_package(Python REQUIRED COMPONENTS Interpreter Development.Module
+                OPTIONAL_COMPONENTS Development.SABIModule
+        )
+    endif ()
+endif ()
+
+if (NOT BUILD_WASM)
+    include(cmake/pre_checks.cmake)
     # Add dependencies
     include(cmake/deps_cgal.cmake)
     include(cmake/deps_occ.cmake)

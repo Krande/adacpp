@@ -1,13 +1,21 @@
 #include "binding_core.h"
+#include "cad/cad_py_wrap.h"
+
+#ifndef __EMSCRIPTEN__
 #include "cadit/occt/occt_py_wrap.h"
 #include "cadit/ifc/ifc_py_wrap.h"
 #include "cadit/tinygltf/tiny_py_wrap.h"
 #include "fem/fem_py_wrap.h"
 #include "geom/geom_py_wrap.h"
 #include "visit/visit_py_wrap.h"
+#endif
 
 // Define the modules that will be exposed in python
 NB_MODULE(_ada_cpp_ext_impl, m) {
+    auto cad_sub_module = m.def_submodule("cad", "Backend-agnostic CAD operations");
+        cad_module(cad_sub_module);
+
+#ifndef __EMSCRIPTEN__
     auto cadit_module = m.def_submodule("cadit", "CAD Interoperability toolkit");
         step_writer_module(cadit_module);
         tiny_gltf_module(cadit_module);
@@ -24,4 +32,5 @@ NB_MODULE(_ada_cpp_ext_impl, m) {
         gmsh_module(fem_module);
     auto geom_module = m.def_submodule("geom", "Geometry module");
         shape_module(geom_module);
+#endif
 }

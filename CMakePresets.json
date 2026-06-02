@@ -142,6 +142,24 @@
       }
     },
     {
+      "name": "wasm-pyodide",
+      "generator": "Ninja",
+      "hidden": false,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_WASM": "ON",
+        "BUILD_PYTHON": "ON",
+        "BUILD_STP2GLB": "OFF",
+        "BUILD_STP2GLB_TESTING": "OFF",
+        "BUILD_DEBUG_TESTING": "OFF",
+        "WASM_PYODIDE": "ON",
+        "PYODIDE_XBUILDENV": "$penv{PYODIDE_XBUILDENV}",
+        "Python_INCLUDE_DIR": "$penv{PYODIDE_XBUILDENV}/xbuildenv/pyodide-root/cpython/installs/python-3.12.7/include/python3.12",
+        "Python_EXECUTABLE": "$penv{CONDA_PREFIX}/bin/python"
+      }
+    },
+    {
       "name": "pixi-test-linux",
       "generator": "Ninja",
       "hidden": false,
