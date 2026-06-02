@@ -59,6 +59,9 @@
 #include <Geom_Surface.hxx>
 #include <Geom2d_BSplineCurve.hxx>
 #include <Geom2d_Curve.hxx>
+#include <Geom2d_TrimmedCurve.hxx>
+#include <Geom2dConvert.hxx>
+#include <Standard_Failure.hxx>
 #include <GeomLProp_SLProps.hxx>
 #include <gp_Elips.hxx>
 #include <gp_Pnt2d.hxx>
@@ -125,6 +128,34 @@
 #include <gp_Vec.hxx>
 
 namespace {
+
+// ----------------------------------------------------------------------------
+// Result structs for face_to_advanced_face (the OCC face → AdvancedFace
+// decomposer). Plain data, bound read-only to Python; adapy reassembles them
+// into ada.geom AdvancedFace / BSplineSurfaceWithKnots / Pcurve2dBSpline.
+// ----------------------------------------------------------------------------
+
+struct PcurveData {
+    bool has_pcurve = false;                              // false → no UV curve recoverable
+    int degree = 0;
+    std::vector<std::array<double, 2>> control_points;    // 2D UV poles
+    std::vector<double> knots;
+    std::vector<int> multiplicities;
+    std::vector<double> weights;                          // empty → non-rational
+    bool closed = false;
+    std::array<double, 3> start{};                        // 3D edge endpoints
+    std::array<double, 3> end{};
+};
+
+struct AdvancedFaceData {
+    int u_degree = 0, v_degree = 0;
+    std::vector<std::vector<std::array<double, 3>>> poles;  // [n_u][n_v]
+    std::vector<double> u_knots, v_knots;
+    std::vector<int> u_multiplicities, v_multiplicities;
+    std::vector<std::vector<double>> weights;              // [n_u][n_v], empty → non-rational
+    bool u_closed = false, v_closed = false;
+    std::vector<std::vector<PcurveData>> bounds;           // [wire][edge]
+};
 
 // ----------------------------------------------------------------------------
 // Primitive factories — single OCCT-backed code path on native + wasm
@@ -1055,6 +1086,99 @@ ShapeHandle build_advanced_face_bspline_impl(
     return ShapeHandle(face);
 }
 
+// Extract the 2D UV pcurve of an edge on a face (BRep_Tool::CurveOnSurface →
+// trim → Geom2dConvert::CurveToBSplineCurve), plus the edge's 3D endpoints.
+// Port of adapy's _extract_pcurve + _edge_endpoints. has_pcurve=false when OCC
+// reports no curve-on-surface or the BSpline conversion fails.
+PcurveData extract_pcurve(const TopoDS_Edge &edge, const TopoDS_Face &face) {
+    PcurveData pc;
+    const gp_Pnt pf = BRep_Tool::Pnt(TopExp::FirstVertex(edge, Standard_True));
+    const gp_Pnt pl = BRep_Tool::Pnt(TopExp::LastVertex(edge, Standard_True));
+    pc.start = {pf.X(), pf.Y(), pf.Z()};
+    pc.end = {pl.X(), pl.Y(), pl.Z()};
+
+    Standard_Real f = 0.0, l = 0.0;
+    Handle(Geom2d_Curve) c2d = BRep_Tool::CurveOnSurface(edge, face, f, l);
+    if (c2d.IsNull()) return pc;
+    Handle(Geom2d_Curve) trimmed = (l > f) ? Handle(Geom2d_Curve)(new Geom2d_TrimmedCurve(c2d, f, l)) : c2d;
+    Handle(Geom2d_BSplineCurve) bsp;
+    try {
+        bsp = Geom2dConvert::CurveToBSplineCurve(trimmed);
+    } catch (const Standard_Failure &) {
+        return pc;
+    }
+    if (bsp.IsNull()) return pc;
+
+    pc.degree = bsp->Degree();
+    for (int i = 1; i <= bsp->NbPoles(); ++i) {
+        const gp_Pnt2d p = bsp->Pole(i);
+        pc.control_points.push_back({p.X(), p.Y()});
+    }
+    for (int i = 1; i <= bsp->NbKnots(); ++i) {
+        pc.knots.push_back(bsp->Knot(i));
+        pc.multiplicities.push_back(bsp->Multiplicity(i));
+    }
+    if (bsp->IsRational()) {
+        for (int i = 1; i <= bsp->NbPoles(); ++i) pc.weights.push_back(bsp->Weight(i));
+    }
+    pc.closed = bsp->IsClosed();
+    pc.has_pcurve = true;
+    return pc;
+}
+
+// Decompose a B-spline face into surface params + per-wire ordered edge pcurves.
+// Reverse of build_advanced_face_bspline; port of adapy's occ_face_to_ada_face
+// (+ get_bsplinesurface_with_knots / get_wires_from_face). Lets the SAT/STEP
+// face→AdvancedFace round-trip run on adacpp with no pythonocc.
+AdvancedFaceData face_to_advanced_face_impl(const ShapeHandle &sh) {
+    const TopoDS_Shape &s = sh.topods();
+    TopoDS_Face face;
+    if (s.ShapeType() == TopAbs_FACE) {
+        face = TopoDS::Face(s);
+    } else {
+        TopExp_Explorer exp(s, TopAbs_FACE);
+        if (!exp.More()) throw std::runtime_error("face_to_advanced_face: shape has no face");
+        face = TopoDS::Face(exp.Current());
+    }
+    Handle(Geom_BSplineSurface) bs = Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(face));
+    if (bs.IsNull()) throw std::runtime_error("face_to_advanced_face: face surface is not a B-spline");
+
+    AdvancedFaceData out;
+    out.u_degree = bs->UDegree();
+    out.v_degree = bs->VDegree();
+    const int nu = bs->NbUPoles(), nv = bs->NbVPoles();
+    out.poles.assign(nu, std::vector<std::array<double, 3>>(nv));
+    const bool rational = bs->IsURational() || bs->IsVRational();
+    if (rational) out.weights.assign(nu, std::vector<double>(nv, 1.0));
+    for (int u = 1; u <= nu; ++u) {
+        for (int v = 1; v <= nv; ++v) {
+            const gp_Pnt p = bs->Pole(u, v);
+            out.poles[u - 1][v - 1] = {p.X(), p.Y(), p.Z()};
+            if (rational) out.weights[u - 1][v - 1] = bs->Weight(u, v);
+        }
+    }
+    for (int i = 1; i <= bs->NbUKnots(); ++i) {
+        out.u_knots.push_back(bs->UKnot(i));
+        out.u_multiplicities.push_back(bs->UMultiplicity(i));
+    }
+    for (int i = 1; i <= bs->NbVKnots(); ++i) {
+        out.v_knots.push_back(bs->VKnot(i));
+        out.v_multiplicities.push_back(bs->VMultiplicity(i));
+    }
+    out.u_closed = bs->IsUClosed();
+    out.v_closed = bs->IsVClosed();
+
+    for (TopExp_Explorer we(face, TopAbs_WIRE); we.More(); we.Next()) {
+        const TopoDS_Wire wire = TopoDS::Wire(we.Current());
+        std::vector<PcurveData> bound;
+        for (BRepTools_WireExplorer ee(wire, face); ee.More(); ee.Next()) {
+            bound.push_back(extract_pcurve(ee.Current(), face));
+        }
+        if (!bound.empty()) out.bounds.push_back(std::move(bound));
+    }
+    return out;
+}
+
 // Prism-extrude a face by `thickness` along its surface normal at the
 // parametric centre. Port of adapy's extrude_face_along_normal — gives a curved
 // plate (PlateCurved) its thickness. Falls back to the bare face on thickness 0,
@@ -1477,6 +1601,30 @@ void cad_module(nb::module_ &m) {
             .def_ro("color",     &Mesh::color)
             .def_ro("groups",    &Mesh::group_reference);
 
+    nb::class_<PcurveData>(m, "PcurveData")
+            .def_ro("has_pcurve",      &PcurveData::has_pcurve)
+            .def_ro("degree",          &PcurveData::degree)
+            .def_ro("control_points",  &PcurveData::control_points)
+            .def_ro("knots",           &PcurveData::knots)
+            .def_ro("multiplicities",  &PcurveData::multiplicities)
+            .def_ro("weights",         &PcurveData::weights)
+            .def_ro("closed",          &PcurveData::closed)
+            .def_ro("start",           &PcurveData::start)
+            .def_ro("end",             &PcurveData::end);
+
+    nb::class_<AdvancedFaceData>(m, "AdvancedFaceData")
+            .def_ro("u_degree",         &AdvancedFaceData::u_degree)
+            .def_ro("v_degree",         &AdvancedFaceData::v_degree)
+            .def_ro("poles",            &AdvancedFaceData::poles)
+            .def_ro("u_knots",          &AdvancedFaceData::u_knots)
+            .def_ro("v_knots",          &AdvancedFaceData::v_knots)
+            .def_ro("u_multiplicities", &AdvancedFaceData::u_multiplicities)
+            .def_ro("v_multiplicities", &AdvancedFaceData::v_multiplicities)
+            .def_ro("weights",          &AdvancedFaceData::weights)
+            .def_ro("u_closed",         &AdvancedFaceData::u_closed)
+            .def_ro("v_closed",         &AdvancedFaceData::v_closed)
+            .def_ro("bounds",           &AdvancedFaceData::bounds);
+
     // Opaque handle: no readable attributes / methods. Callers obtain instances
     // via factory functions (make_box, ...) and pass them to consumers
     // (tessellate, ...). The C++-level shape data is unreachable from Python.
@@ -1687,6 +1835,11 @@ void cad_module(nb::module_ &m) {
           "Bounds-trimmed AdvancedFace over a B-spline surface. bounds[0] is the outer "
           "boundary, the rest are holes; each edge is a 3D edge record or a kind-6 2D "
           "pcurve record laid on the surface. Ports make_face_from_geom (SAT-pcurve path).");
+
+    m.def("face_to_advanced_face", &face_to_advanced_face_impl, "face"_a,
+          "Decompose a B-spline face into AdvancedFaceData (surface poles/knots + per-wire "
+          "ordered edge pcurves). Reverse of build_advanced_face_bspline; ports "
+          "occ_face_to_ada_face so the SAT/STEP face round-trip runs on adacpp.");
 
     m.def("extrude_face_along_normal", &extrude_face_along_normal_impl,
           "face"_a, "thickness"_a,

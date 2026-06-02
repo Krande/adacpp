@@ -344,6 +344,45 @@ def test_cad_build_advanced_face_bspline_with_pcurves():
     assert bb == (0.0, 0.0, 0.0, 1.0, 1.0, 0.0)
 
 
+def test_cad_face_to_advanced_face_roundtrip():
+    # Build a trimmed B-spline face, decompose it, rebuild from the decomposed
+    # surface + pcurves, and check the area survives the round-trip.
+    cps = [[[0, 0, 0], [0, 1, 0]], [[1, 0, 0], [1, 1, 0]]]
+    uk = vk = [0.0, 1.0]
+    um = vm = [2, 2]
+
+    def pcurve_line(u0, v0, u1, v1):
+        return [6, 1, 0, 0, 2, u0, v0, u1, v1, 2, 0.0, 1.0, 2, 2]
+
+    loop = [pcurve_line(0, 0, 1, 0), pcurve_line(1, 0, 1, 1), pcurve_line(1, 1, 0, 1), pcurve_line(0, 1, 0, 0)]
+    face = adacpp.cad.build_advanced_face_bspline(1, 1, cps, uk, vk, um, vm, [], [loop])
+    area0 = adacpp.cad.area(face)
+
+    data = adacpp.cad.face_to_advanced_face(face)
+    assert data.u_degree == 1 and data.v_degree == 1
+    assert len(data.poles) == 2 and len(data.poles[0]) == 2
+    assert len(data.bounds) == 1
+    edges = data.bounds[0]
+    assert len(edges) == 4
+    assert all(e.has_pcurve for e in edges)
+    assert all(e.degree >= 1 and len(e.control_points) >= 2 for e in edges)
+
+    # Rebuild from the decomposed data and compare area.
+    bounds2 = []
+    for e in edges:
+        rec = [6, e.degree, 1 if e.weights else 0, 1 if e.closed else 0, len(e.control_points)]
+        for cp in e.control_points:
+            rec += [cp[0], cp[1]]
+        rec += [len(e.knots), *e.knots, *[float(m) for m in e.multiplicities]]
+        rec += [float(w) for w in e.weights]
+        bounds2.append(rec)
+    face2 = adacpp.cad.build_advanced_face_bspline(
+        data.u_degree, data.v_degree, data.poles, data.u_knots, data.v_knots,
+        data.u_multiplicities, data.v_multiplicities, data.weights, [bounds2],
+    )
+    assert round(adacpp.cad.area(face2), 6) == round(area0, 6)
+
+
 def test_cad_revolved_curve_profile():
     # Revolve a circle wire (r=0.5, centered at x=2 in XY) a quarter turn about
     # the world Z axis through the origin → a curved pipe-elbow surface.
