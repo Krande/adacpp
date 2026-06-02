@@ -2,6 +2,13 @@
 
 
 
+## v0.4.0 (2026-06-02)
+
+### Feature
+
+* feat: cad handler (#20) ([`e32f97d`](https://github.com/Krande/adacpp/commit/e32f97dd2434ff39775a3024bf84e270d4c4fc81))
+
+
 ## v0.3.0 (2026-04-30)
 
 ### Chore
