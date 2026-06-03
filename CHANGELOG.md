@@ -2,6 +2,15 @@
 
 
 
+## v0.4.1 (2026-06-03)
+
+### Fix
+
+* fix: cad backend parity (#21)
+
+Co-authored-by: Claude Opus 4.8 (1M context) &lt;noreply@anthropic.com&gt; ([`b2c63dc`](https://github.com/Krande/adacpp/commit/b2c63dc2e411fdfb449d1fc100d98e4eaca68645))
+
+
 ## v0.4.0 (2026-06-02)
 
 ### Feature
