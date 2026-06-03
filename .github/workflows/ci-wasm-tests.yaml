@@ -11,6 +11,10 @@ concurrency:
   group: ci-wasm-tests-${{ github.ref_name }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  packages: read
+
 env:
   CROOT_DIR: /home/runner/work/build
   ARTIFACTS_DIR: /home/runner/work/artifacts
@@ -38,6 +42,26 @@ jobs:
           pixi-version: v0.68.0
           environments: conda
           cache: true
+
+      - name: Use prebuilt OCCT-wasm base (if available)
+        # Point cmake at the reusable OCCT base via WASM_OCCT_PREBUILT_DIR so
+        # the BUILD_WASM=ON configure (wbuild) skips the ~30-min OCCT compile.
+        # Falls back to building OCCT from source when the base isn't published.
+        run: |
+          echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+          repo=$(printf '%s' "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          base="ghcr.io/${repo}-occt-wasm-base:latest"
+          if docker pull "$base" >/dev/null 2>&1; then
+            dir="$RUNNER_TEMP/occt-wasm"
+            mkdir -p "$dir"
+            cid=$(docker create "$base")
+            docker cp "$cid:/opt/occt-wasm/." "$dir/"
+            docker rm "$cid" >/dev/null
+            echo "WASM_OCCT_PREBUILT_DIR=$dir" >> "$GITHUB_ENV"
+            echo "Using prebuilt OCCT-wasm base: $base"
+          else
+            echo "No prebuilt OCCT-wasm base ($base) — building OCCT from source."
+          fi
 
       - name: install package
         run: |
