@@ -1,0 +1,20 @@
+# syntax=docker/dockerfile:1.7
+#
+# Minimal base image carrying the prebuilt pyodide wasm wheel under /out/.
+#
+# The wheel is cross-compiled on the CI runner (`pixi run -e wasm
+# pack-wheel-pyodide`) and staged into ./out/ by the publish-wasm-base
+# workflow *before* this image is built — this Dockerfile only packages the
+# result, so the build here is a sub-second file copy, not the ~30-min
+# OCCT→wasm compile.
+#
+# /out/ layout (consumed by downstream image builds, e.g. adapy's viewer via
+# `COPY --from=<this image> /out/`):
+#   ada_cpp-<ver>-cp312-cp312-emscripten_3_1_58_wasm32.whl
+#   manifest.json   {"adacpp": "<wheel filename>"}
+#   adacpp.sha      the resolved adacpp commit
+#
+# busybox (not scratch) so `docker create` + `docker cp` work for consumers
+# that extract /out/ without a running command.
+FROM busybox:stable-musl
+COPY out/ /out/
