@@ -1,0 +1,107 @@
+name: Publish wasm base image
+
+# On a version tag, cross-compile the pyodide wasm wheel (OCCT→wasm via
+# emscripten) and publish it as a ghcr base image:
+#
+#   ghcr.io/<owner>/adacpp-wasm-base:1.2.3  (+ :1.2, :latest, :sha-<short>)
+#
+# The image carries the wheel + manifest under /out/, so downstream image
+# builds (e.g. adapy's viewer) can `COPY --from=ghcr.io/.../adacpp-wasm-base`
+# instead of recompiling OCCT→wasm. Auth is the built-in GITHUB_TOKEN — no
+# external secrets. We only publish on tag.
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+concurrency:
+  group: publish-wasm-base-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -l {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: prefix-dev/setup-pixi@v0.9.3
+        with:
+          pixi-version: v0.68.0
+          environments: wasm
+          cache: true
+
+      - name: Install pyodide cross-build env
+        run: pixi run -e wasm xbuildenv-install
+
+      - name: Use prebuilt OCCT-wasm base (if available)
+        # Pull the reusable OCCT base and point cmake at it via
+        # WASM_OCCT_PREBUILT_DIR so wbuild-pyodide skips the ~30-min OCCT
+        # compile. Falls back to building OCCT from source when the base
+        # image isn't published yet (first run / missing access).
+        run: |
+          echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+          repo=$(printf '%s' "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          base="ghcr.io/${repo}-occt-wasm-base:latest"
+          if docker pull "$base" >/dev/null 2>&1; then
+            dir="$RUNNER_TEMP/occt-wasm"
+            mkdir -p "$dir"
+            cid=$(docker create "$base")
+            docker cp "$cid:/opt/occt-wasm/." "$dir/"
+            docker rm "$cid" >/dev/null
+            echo "WASM_OCCT_PREBUILT_DIR=$dir" >> "$GITHUB_ENV"
+            echo "Using prebuilt OCCT-wasm base: $base"
+          else
+            echo "No prebuilt OCCT-wasm base ($base) — building OCCT from source."
+          fi
+
+      - name: Cross-compile the pyodide wheel
+        # depends-on chain: wbuild-pyodide → install → tools/build_wheel.py →
+        # dist/ada_cpp-*.whl. With WASM_OCCT_PREBUILT_DIR set the OCCT compile is
+        # skipped (links the prebuilt base); otherwise OCCT builds inline (~30 min).
+        run: pixi run -e wasm pack-wheel-pyodide
+
+      - name: Stage /out (wheel + manifest + sha)
+        run: |
+          mkdir -p out
+          cp dist/ada_cpp-*.whl out/
+          cd out
+          wheel=$(ls ada_cpp-*.whl)
+          printf '{"adacpp":"%s"}\n' "$wheel" > manifest.json
+          printf '%s\n' "${GITHUB_SHA}" > adacpp.sha
+          echo "Staged $wheel"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags + labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}-wasm-base
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+
+      - name: Build and push base image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./deploy/Dockerfile.wasm-base
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

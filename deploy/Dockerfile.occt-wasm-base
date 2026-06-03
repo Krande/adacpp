@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1.7
+#
+# Reusable OCCT-wasm base image: the cross-compiled OpenCASCADE toolkits
+# (static archives + headers) under /opt/occt-wasm/. This is the expensive
+# (~30-min) but stable build input for the adacpp pyodide wheel.
+#
+# The toolkits are cross-compiled on the CI runner (`pixi run -e wasm
+# build-occt-wasm`) and staged into ./occt-wasm/ by the publish-occt-wasm-base
+# workflow *before* this image is built — this Dockerfile only packages the
+# result, so the build here is a sub-second file copy.
+#
+# Consumers (ci-wasm-tests, the wheel publish) docker-cp /opt/occt-wasm/ onto
+# the runner and point cmake at it via WASM_OCCT_PREBUILT_DIR, which makes
+# cmake/wasm_occt.cmake skip the ExternalProject build and link the prebuilt
+# archives instead.
+#
+# /opt/occt-wasm/ layout: include/opencascade/*.hxx, lib/lib*.a
+#
+# ABI-locked: these archives are only valid for the exact emscripten / pyodide
+# xbuildenv version they were built with. The image is tagged with the OCCT git
+# tag + emscripten version so a mismatch is visible at a glance.
+#
+# busybox (not scratch) so `docker create` + `docker cp` work for consumers
+# without a running command.
+FROM busybox:stable-musl
+COPY occt-wasm/ /opt/occt-wasm/
