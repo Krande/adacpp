@@ -2,6 +2,21 @@
 
 
 
+## v0.4.2 (2026-06-03)
+
+### Chore
+
+* chore: publish pyodide wasm base image to ghcr on tag (#22)
+
+Co-authored-by: Claude Opus 4.8 (1M context) &lt;noreply@anthropic.com&gt; ([`49bce65`](https://github.com/Krande/adacpp/commit/49bce65aeb642e53977fed6ba32f711ad4077165))
+
+### Fix
+
+* fix: bump setup-pixi to v0.9.6 across CI workflows (#23)
+
+Co-authored-by: Claude Opus 4.8 (1M context) &lt;noreply@anthropic.com&gt; ([`7262ad4`](https://github.com/Krande/adacpp/commit/7262ad4c0fb394bb0985512a9d58ec6d0b43427f))
+
+
 ## v0.4.1 (2026-06-03)
 
 ### Fix
