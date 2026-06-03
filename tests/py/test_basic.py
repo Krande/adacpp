@@ -178,6 +178,226 @@ def test_cad_extruded_curve_profile_is_open_shell():
     assert len(adacpp.cad.faces(shp)) == 1
 
 
+def test_cad_extruded_area_solid_tapered():
+    # Loft (ThruSections) between a 2x2 square base and a 1x1 square top over
+    # height 2 → a frustum. Volume = h/3 * (A1 + A2 + sqrt(A1*A2))
+    #          = 2/3 * (4 + 1 + 2) = 4.666667.
+    def rect(half):
+        pts = [(-half, -half, 0.0), (half, -half, 0.0), (half, half, 0.0), (-half, half, 0.0)]
+        return [[0.0, *pts[i], *pts[(i + 1) % 4]] for i in range(4)]
+
+    shp = adacpp.cad.build_extruded_area_solid_tapered(
+        rect(1.0), rect(0.5), [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0], 2.0
+    )
+    assert adacpp.cad.is_valid(shp)
+    assert len(adacpp.cad.solids(shp)) == 1
+    assert round(adacpp.cad.volume(shp), 6) == round(2.0 / 3.0 * 7.0, 6)
+    bb = tuple(round(v, 6) for v in adacpp.cad.bbox(shp))
+    assert bb == (-1.0, -1.0, 0.0, 1.0, 1.0, 2.0)
+
+
+def test_cad_loft_profiles_two_squares_is_box():
+    # Loft two equal squares 1 apart in Z → a unit box: 6 faces, volume 1.
+    def rect(half, z):
+        return [[-half, -half, z], [half, -half, z], [half, half, z], [-half, half, z]]
+
+    box = adacpp.cad.loft_profiles([rect(0.5, 0.0), rect(0.5, 1.0)], True, True)
+    assert adacpp.cad.is_valid(box)
+    assert len(adacpp.cad.faces(box)) == 6
+    assert round(adacpp.cad.volume(box), 6) == 1.0
+
+
+def test_cad_loft_profiles_rejects_single():
+    with pytest.raises(Exception):
+        adacpp.cad.loft_profiles([[[0, 0, 0], [1, 0, 0], [1, 1, 0]]], True, True)
+
+
+def test_cad_section_with_plane():
+    # Mid-span Z section of a tall box → a single planar cross-section face.
+    def rect(half, z):
+        return [[-half, -half, z], [half, -half, z], [half, half, z], [-half, half, z]]
+
+    box = adacpp.cad.loft_profiles([rect(1.0, 0.0), rect(1.0, 4.0)], True, True)
+    sec = adacpp.cad.section_with_plane(box, [0.0, 0.0, 2.0], [0.0, 0.0, 1.0], 1000.0)
+    assert len(adacpp.cad.faces(sec)) == 1
+
+
+def test_cad_write_step(tmp_path):
+    # Write two named, colored boxes to STEP via the OCAF/XCAF document model.
+    b1 = adacpp.cad.build_box([0, 0, 0], [0, 0, 1], [1, 0, 0], 1, 1, 1)
+    b2 = adacpp.cad.build_box([2, 0, 0], [0, 0, 1], [1, 0, 0], 1, 2, 3)
+    out = tmp_path / "two_boxes.stp"
+    adacpp.cad.write_step(
+        [b1, b2], ["BoxA", "BoxB"], [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], str(out), "m", "AP214"
+    )
+    assert out.exists() and out.stat().st_size > 0
+    text = out.read_text()
+    assert "ISO-10303" in text
+    assert "BoxA" in text and "BoxB" in text
+
+
+def test_cad_build_bspline_surface_face():
+    # Degree-2 dome: 3x3 control net with the centre row lifted in Z. Clamped
+    # knots [0,1] mult [3,3] each direction. Expect one valid trimmed face whose
+    # actual surface peaks at z=0.375 (well below the z=1 centre control point).
+    cps = [
+        [[0, 0, 0], [0, 1, 0], [0, 2, 0]],
+        [[1, 0, 0.5], [1, 1, 1.0], [1, 2, 0.5]],
+        [[2, 0, 0], [2, 1, 0], [2, 2, 0]],
+    ]
+    face = adacpp.cad.build_bspline_surface_face(
+        2, 2, cps, [0.0, 1.0], [0.0, 1.0], [3, 3], [3, 3], [], 1e-6
+    )
+    assert adacpp.cad.is_valid(face)
+    assert len(adacpp.cad.faces(face)) == 1
+    bb = tuple(round(v, 4) for v in adacpp.cad.bbox(face))
+    assert bb == (0.0, 0.0, 0.0, 2.0, 2.0, 0.375)
+
+
+def test_cad_introspection_helpers():
+    # area / shape_type / face_surface_type — backend-neutral replacements for
+    # GProp + TopAbs + BRep_Tool::Surface introspection.
+    box = adacpp.cad.build_box([0, 0, 0], [0, 0, 1], [1, 0, 0], 2, 3, 4)
+    assert adacpp.cad.shape_type(box) == "solid"
+    assert round(adacpp.cad.area(box), 5) == 52.0  # 2*(2*3 + 3*4 + 2*4)
+    assert round(adacpp.cad.volume(box), 5) == 24.0
+    box_face = adacpp.cad.faces(box)[0]
+    assert adacpp.cad.shape_type(box_face) == "face"
+    assert adacpp.cad.face_surface_type(box_face) == "plane"
+
+    cyl = adacpp.cad.build_cylinder([0, 0, 0], [0, 0, 1], 1.0, 2.0)
+    assert {adacpp.cad.face_surface_type(f) for f in adacpp.cad.faces(cyl)} == {"cylinder", "plane"}
+
+    bs = adacpp.cad.build_bspline_surface_face(
+        2, 2,
+        [[[0, 0, 0], [0, 1, 0], [0, 2, 0]], [[1, 0, 0.5], [1, 1, 1.0], [1, 2, 0.5]], [[2, 0, 0], [2, 1, 0], [2, 2, 0]]],
+        [0.0, 1.0], [0.0, 1.0], [3, 3], [3, 3], [], 1e-6,
+    )
+    assert adacpp.cad.face_surface_type(bs) == "bspline"
+
+
+def test_cad_extrude_face_along_normal():
+    # Extrude a B-spline dome face by 0.1 along its normal → a thin solid.
+    bs = adacpp.cad.build_bspline_surface_face(
+        2, 2,
+        [[[0, 0, 0], [0, 1, 0], [0, 2, 0]], [[1, 0, 0.5], [1, 1, 1.0], [1, 2, 0.5]], [[2, 0, 0], [2, 1, 0], [2, 2, 0]]],
+        [0.0, 1.0], [0.0, 1.0], [3, 3], [3, 3], [], 1e-6,
+    )
+    solid = adacpp.cad.extrude_face_along_normal(bs, 0.1)
+    assert adacpp.cad.shape_type(solid) == "solid"
+    assert adacpp.cad.is_valid(solid)
+    assert adacpp.cad.volume(solid) > 0.0
+    # thickness 0 short-circuits to the bare face.
+    assert adacpp.cad.shape_type(adacpp.cad.extrude_face_along_normal(bs, 0.0)) == "face"
+
+
+def test_cad_build_wire_curve_zoo():
+    # Wire from line + 3-point arc + lines (closed path).
+    edges = [
+        [0, 0, 0, 0, 1, 0, 0],
+        [1, 1, 0, 0, 1.5, 0.5, 0, 1, 1, 0],
+        [0, 1, 1, 0, 0, 1, 0],
+        [0, 0, 1, 0, 0, 0, 0],
+    ]
+    w = adacpp.cad.build_wire(edges)
+    assert adacpp.cad.shape_type(w) == "wire"
+
+    # Degree-2 B-spline curve edge (3 poles, clamped knots) + a closing line.
+    bs_edge = [3, 2, 0, 0, 0.0, 0.0, 3, 0, 0, 0, 1, 1, 0, 2, 0, 0, 2, 0.0, 1.0, 3, 3]
+    w2 = adacpp.cad.build_wire([bs_edge, [0, 2, 0, 0, 0, 0, 0]])
+    assert adacpp.cad.shape_type(w2) == "wire"
+    assert len(adacpp.cad.edges(w2)) == 2
+
+
+def test_cad_build_filled_face():
+    # MakeFilling interpolates a smooth (B-spline) surface through a 4-edge
+    # square boundary → one valid face.
+    sq = [[0, 0, 0, 0, 1, 0, 0], [0, 1, 0, 0, 1, 1, 0], [0, 1, 1, 0, 0, 1, 0], [0, 0, 1, 0, 0, 0, 0]]
+    ff = adacpp.cad.build_filled_face(sq)
+    assert adacpp.cad.shape_type(ff) == "face"
+    assert len(adacpp.cad.faces(ff)) == 1
+    assert adacpp.cad.face_surface_type(ff) == "bspline"
+
+
+def test_cad_build_advanced_face_bspline_with_pcurves():
+    # Bilinear (degree-1) B-spline surface = unit-square plane in z=0, trimmed by
+    # a UV-square boundary made of 4 kind-6 pcurve (2D line) edges → unit face.
+    cps = [[[0, 0, 0], [0, 1, 0]], [[1, 0, 0], [1, 1, 0]]]  # cp[u][v] = (u, v, 0)
+    uk = vk = [0.0, 1.0]
+    um = vm = [2, 2]
+
+    def pcurve_line(u0, v0, u1, v1):
+        # kind 6: [6, degree, rational, closed, n_poles, <2*n uv>, n_knots, knots, mults]
+        return [6, 1, 0, 0, 2, u0, v0, u1, v1, 2, 0.0, 1.0, 2, 2]
+
+    loop = [
+        pcurve_line(0, 0, 1, 0),
+        pcurve_line(1, 0, 1, 1),
+        pcurve_line(1, 1, 0, 1),
+        pcurve_line(0, 1, 0, 0),
+    ]
+    face = adacpp.cad.build_advanced_face_bspline(1, 1, cps, uk, vk, um, vm, [], [loop])
+    assert adacpp.cad.shape_type(face) == "face"
+    assert adacpp.cad.face_surface_type(face) == "bspline"
+    assert round(adacpp.cad.area(face), 6) == 1.0
+    bb = tuple(round(v, 4) for v in adacpp.cad.bbox(face))
+    assert bb == (0.0, 0.0, 0.0, 1.0, 1.0, 0.0)
+
+
+def test_cad_face_to_advanced_face_roundtrip():
+    # Build a trimmed B-spline face, decompose it, rebuild from the decomposed
+    # surface + pcurves, and check the area survives the round-trip.
+    cps = [[[0, 0, 0], [0, 1, 0]], [[1, 0, 0], [1, 1, 0]]]
+    uk = vk = [0.0, 1.0]
+    um = vm = [2, 2]
+
+    def pcurve_line(u0, v0, u1, v1):
+        return [6, 1, 0, 0, 2, u0, v0, u1, v1, 2, 0.0, 1.0, 2, 2]
+
+    loop = [pcurve_line(0, 0, 1, 0), pcurve_line(1, 0, 1, 1), pcurve_line(1, 1, 0, 1), pcurve_line(0, 1, 0, 0)]
+    face = adacpp.cad.build_advanced_face_bspline(1, 1, cps, uk, vk, um, vm, [], [loop])
+    area0 = adacpp.cad.area(face)
+
+    data = adacpp.cad.face_to_advanced_face(face)
+    assert data.u_degree == 1 and data.v_degree == 1
+    assert len(data.poles) == 2 and len(data.poles[0]) == 2
+    assert len(data.bounds) == 1
+    edges = data.bounds[0]
+    assert len(edges) == 4
+    assert all(e.has_pcurve for e in edges)
+    assert all(e.degree >= 1 and len(e.control_points) >= 2 for e in edges)
+
+    # Rebuild from the decomposed data and compare area.
+    bounds2 = []
+    for e in edges:
+        rec = [6, e.degree, 1 if e.weights else 0, 1 if e.closed else 0, len(e.control_points)]
+        for cp in e.control_points:
+            rec += [cp[0], cp[1]]
+        rec += [len(e.knots), *e.knots, *[float(m) for m in e.multiplicities]]
+        rec += [float(w) for w in e.weights]
+        bounds2.append(rec)
+    face2 = adacpp.cad.build_advanced_face_bspline(
+        data.u_degree, data.v_degree, data.poles, data.u_knots, data.v_knots,
+        data.u_multiplicities, data.v_multiplicities, data.weights, [bounds2],
+    )
+    assert round(adacpp.cad.area(face2), 6) == round(area0, 6)
+
+
+def test_cad_read_step_shapes_roundtrip(tmp_path):
+    # Write two named/colored boxes, read them back via the OCAF reader.
+    b1 = adacpp.cad.build_box([0, 0, 0], [0, 0, 1], [1, 0, 0], 1, 1, 1)
+    b2 = adacpp.cad.build_box([2, 0, 0], [0, 0, 1], [1, 0, 0], 1, 2, 3)
+    out = tmp_path / "two.stp"
+    adacpp.cad.write_step([b1, b2], ["BoxA", "BoxB"], [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], str(out), "m", "AP214")
+
+    data = adacpp.cad.read_step_shapes(out.read_bytes())
+    named = {d.name: tuple(round(c, 3) for c in d.color) for d in data if d.name and d.has_color}
+    assert named.get("BoxA") == (1.0, 0.0, 0.0)
+    assert named.get("BoxB") == (0.0, 1.0, 0.0)
+    # every returned entry carries a usable shape handle
+    assert all(adacpp.cad.shape_type(d.shape) in ("solid", "compound", "shell", "face") for d in data)
+
+
 def test_cad_revolved_curve_profile():
     # Revolve a circle wire (r=0.5, centered at x=2 in XY) a quarter turn about
     # the world Z axis through the origin → a curved pipe-elbow surface.

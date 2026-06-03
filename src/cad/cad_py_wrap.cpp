@@ -4,6 +4,7 @@
 #include "../geom/GroupReference.h"
 #include "../geom/Mesh.h"
 #include "../geom/MeshType.h"
+#include "../cadit/occt/step_writer.h"
 
 #include <nanobind/stl/array.h>
 #include <nanobind/stl/optional.h>
@@ -50,8 +51,31 @@
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
+#include <BRepOffsetAPI_ThruSections.hxx>
 #include <BRepGProp.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
+#include <Geom_BSplineCurve.hxx>
+#include <Geom_BSplineSurface.hxx>
+#include <Geom_Surface.hxx>
+#include <Geom2d_BSplineCurve.hxx>
+#include <Geom2d_Curve.hxx>
+#include <Geom2d_TrimmedCurve.hxx>
+#include <Geom2dConvert.hxx>
+#include <Standard_Failure.hxx>
+#include <GeomLProp_SLProps.hxx>
+#include <gp_Elips.hxx>
+#include <gp_Pnt2d.hxx>
+#include <TColgp_Array1OfPnt.hxx>
+#include <TColgp_Array1OfPnt2d.hxx>
+#include <BRepLib.hxx>
+#include <BRepOffsetAPI_MakeFilling.hxx>
+#include <GeomAbs_Shape.hxx>
+#include <Standard_Type.hxx>
+#include <TopAbs_ShapeEnum.hxx>
+#include <TColgp_Array2OfPnt.hxx>
+#include <TColStd_Array1OfReal.hxx>
+#include <TColStd_Array1OfInteger.hxx>
+#include <TColStd_Array2OfReal.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCone.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
@@ -94,6 +118,13 @@
 #include <TopoDS_Wire.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
+#include <XCAFDoc_ColorTool.hxx>
+#include <XCAFDoc_ColorType.hxx>
+#include <STEPCAFControl_Reader.hxx>
+#include <Interface_Static.hxx>
+#include <TDataStd_Name.hxx>
+#include <TDF_LabelSequence.hxx>
+#include <Quantity_Color.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Circ.hxx>
@@ -104,6 +135,42 @@
 #include <gp_Vec.hxx>
 
 namespace {
+
+// ----------------------------------------------------------------------------
+// Result structs for face_to_advanced_face (the OCC face → AdvancedFace
+// decomposer). Plain data, bound read-only to Python; adapy reassembles them
+// into ada.geom AdvancedFace / BSplineSurfaceWithKnots / Pcurve2dBSpline.
+// ----------------------------------------------------------------------------
+
+struct PcurveData {
+    bool has_pcurve = false;                              // false → no UV curve recoverable
+    int degree = 0;
+    std::vector<std::array<double, 2>> control_points;    // 2D UV poles
+    std::vector<double> knots;
+    std::vector<int> multiplicities;
+    std::vector<double> weights;                          // empty → non-rational
+    bool closed = false;
+    std::array<double, 3> start{};                        // 3D edge endpoints
+    std::array<double, 3> end{};
+};
+
+struct AdvancedFaceData {
+    int u_degree = 0, v_degree = 0;
+    std::vector<std::vector<std::array<double, 3>>> poles;  // [n_u][n_v]
+    std::vector<double> u_knots, v_knots;
+    std::vector<int> u_multiplicities, v_multiplicities;
+    std::vector<std::vector<double>> weights;              // [n_u][n_v], empty → non-rational
+    bool u_closed = false, v_closed = false;
+    std::vector<std::vector<PcurveData>> bounds;           // [wire][edge]
+};
+
+// One shape extracted from a STEP OCAF document, with its label name + color.
+struct StepShapeData {
+    ShapeHandle shape;
+    std::string name;
+    std::array<double, 3> color{0.5, 0.5, 0.5};
+    bool has_color = false;
+};
 
 // ----------------------------------------------------------------------------
 // Primitive factories — single OCCT-backed code path on native + wasm
@@ -323,6 +390,92 @@ ShapeHandle read_step_bytes_impl(nb::bytes data) {
     return ShapeHandle(shape);
 }
 
+// Recursively collect simple shapes from an OCAF label tree, applying assembly
+// component locations and reading each label's name + color. Port of adapy's
+// read_step_file_with_names_colors traversal (assembly → components → simple
+// shapes + their sub-shapes).
+void collect_step_shapes(const Handle(XCAFDoc_ShapeTool) &st, const Handle(XCAFDoc_ColorTool) &ct,
+                         const TDF_Label &lab, const TopLoc_Location &loc,
+                         std::vector<StepShapeData> &out) {
+    auto read_one = [&](const TDF_Label &shape_lab, const TopoDS_Shape &raw) {
+        const TopoDS_Shape shape =
+                loc.IsIdentity() ? raw : BRepBuilderAPI_Transform(raw, loc.Transformation()).Shape();
+        std::string name;
+        Handle(TDataStd_Name) nm;
+        if (shape_lab.FindAttribute(TDataStd_Name::GetID(), nm)) {
+            name = TCollection_AsciiString(nm->Get()).ToCString();
+        }
+        std::array<double, 3> color{0.5, 0.5, 0.5};
+        bool has_color = false;
+        Quantity_Color c;
+        if (ct->GetColor(shape_lab, XCAFDoc_ColorGen, c) || ct->GetColor(shape_lab, XCAFDoc_ColorSurf, c) ||
+            ct->GetColor(shape_lab, XCAFDoc_ColorCurv, c) || ct->GetColor(raw, XCAFDoc_ColorGen, c) ||
+            ct->GetColor(raw, XCAFDoc_ColorSurf, c) || ct->GetColor(raw, XCAFDoc_ColorCurv, c)) {
+            color = {c.Red(), c.Green(), c.Blue()};
+            has_color = true;
+        }
+        out.push_back(StepShapeData{ShapeHandle(shape), name, color, has_color});
+    };
+
+    if (st->IsAssembly(lab)) {
+        TDF_LabelSequence comps;
+        st->GetComponents(lab, comps);
+        for (int i = 1; i <= comps.Length(); ++i) {
+            TDF_Label comp = comps.Value(i);
+            if (st->IsReference(comp)) {
+                TDF_Label ref;
+                st->GetReferredShape(comp, ref);
+                collect_step_shapes(st, ct, ref, loc * st->GetLocation(comp), out);
+            }
+        }
+    } else if (st->IsSimpleShape(lab)) {
+        read_one(lab, st->GetShape(lab));
+        TDF_LabelSequence subs;
+        st->GetSubShapes(lab, subs);
+        for (int i = 1; i <= subs.Length(); ++i) {
+            const TDF_Label sub = subs.Value(i);
+            read_one(sub, st->GetShape(sub));
+        }
+    }
+}
+
+// Read a STEP file (from bytes) via OCAF, returning each shape with its name +
+// color. Port of StepStore + read_step_file_with_names_colors for the adacpp
+// doc backend (STEP import with no pythonocc).
+std::vector<StepShapeData> read_step_shapes_impl(nb::bytes data, const std::string &unit) {
+    const std::filesystem::path tmp = make_temp_path("adacpp_step_read", ".stp");
+    {
+        std::ofstream f(tmp.string(), std::ios::binary);
+        f.write(data.c_str(), static_cast<std::streamsize>(data.size()));
+    }
+    STEPCAFControl_Reader reader;
+    reader.SetColorMode(Standard_True);
+    reader.SetNameMode(Standard_True);
+    // Convert the STEP file's native length unit to `unit` on read — mirrors
+    // StepStore's "xstep.cascade.unit" so e.g. a 10 m plate reads as 10.0 not
+    // 10000. Set AFTER constructing the reader (its ctor resets the static),
+    // before ReadFile — same order as StepStore.create_step_reader.
+    Interface_Static::SetCVal("xstep.cascade.unit", unit.c_str());
+    if (reader.ReadFile(tmp.string().c_str()) != IFSelect_RetDone) {
+        std::filesystem::remove(tmp);
+        throw std::runtime_error("read_step_shapes: STEPCAFControl_Reader could not parse the input");
+    }
+    Handle(TDocStd_Document) doc = new TDocStd_Document(TCollection_ExtendedString("MDTV-XCAF"));
+    const bool ok = reader.Transfer(doc);
+    std::filesystem::remove(tmp);
+    if (!ok) throw std::runtime_error("read_step_shapes: transfer to OCAF document failed");
+
+    Handle(XCAFDoc_ShapeTool) st = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+    Handle(XCAFDoc_ColorTool) ct = XCAFDoc_DocumentTool::ColorTool(doc->Main());
+    TDF_LabelSequence free_shapes;
+    st->GetFreeShapes(free_shapes);
+    std::vector<StepShapeData> out;
+    for (int i = 1; i <= free_shapes.Length(); ++i) {
+        collect_step_shapes(st, ct, free_shapes.Value(i), TopLoc_Location(), out);
+    }
+    return out;
+}
+
 nb::bytes write_glb_bytes_impl(const ShapeHandle &sh, double linear_deflection) {
     const TopoDS_Shape &shape = sh.topods();
     if (shape.IsNull()) {
@@ -437,6 +590,60 @@ double volume_impl(const ShapeHandle &sh) {
     GProp_GProps props;
     BRepGProp::VolumeProperties(sh.topods(), props);
     return props.Mass();
+}
+
+// Total surface area (GProp). Backend-neutral replacement for tests that
+// reach for BRepGProp::SurfaceProperties + GProp_GProps::Mass directly.
+double area_impl(const ShapeHandle &sh) {
+    GProp_GProps props;
+    BRepGProp::SurfaceProperties(sh.topods(), props);
+    return props.Mass();
+}
+
+// Topological kind of the shape ("solid"/"shell"/"face"/"wire"/"edge"/
+// "vertex"/"compound"/"compsolid"). Lets tests classify a built shape without
+// isinstance(TopoDS_Solid/Face/Compound) against pythonocc types.
+std::string shape_type_impl(const ShapeHandle &sh) {
+    switch (sh.topods().ShapeType()) {
+        case TopAbs_COMPOUND:  return "compound";
+        case TopAbs_COMPSOLID: return "compsolid";
+        case TopAbs_SOLID:     return "solid";
+        case TopAbs_SHELL:     return "shell";
+        case TopAbs_FACE:      return "face";
+        case TopAbs_WIRE:      return "wire";
+        case TopAbs_EDGE:      return "edge";
+        case TopAbs_VERTEX:    return "vertex";
+        default:               return "shape";
+    }
+}
+
+// Underlying geometric surface kind of a face ("plane"/"cylinder"/"cone"/
+// "sphere"/"torus"/"bspline"/"bezier"/...). If `sh` is not a face the first
+// face found is used. Replaces BRep_Tool::Surface(face)->DynamicType()->Name()
+// / IsKind(Geom_BSplineSurface) introspection in tests.
+std::string face_surface_type_impl(const ShapeHandle &sh) {
+    const TopoDS_Shape &s = sh.topods();
+    TopoDS_Face face;
+    if (s.ShapeType() == TopAbs_FACE) {
+        face = TopoDS::Face(s);
+    } else {
+        TopExp_Explorer exp(s, TopAbs_FACE);
+        if (!exp.More()) throw std::runtime_error("face_surface_type: shape has no face");
+        face = TopoDS::Face(exp.Current());
+    }
+    Handle(Geom_Surface) surf = BRep_Tool::Surface(face);
+    if (surf.IsNull()) return "unknown";
+    const std::string name = surf->DynamicType()->Name();
+    if (name == "Geom_Plane")              return "plane";
+    if (name == "Geom_CylindricalSurface") return "cylinder";
+    if (name == "Geom_ConicalSurface")     return "cone";
+    if (name == "Geom_SphericalSurface")   return "sphere";
+    if (name == "Geom_ToroidalSurface")    return "torus";
+    if (name == "Geom_BSplineSurface")     return "bspline";
+    if (name == "Geom_BezierSurface")      return "bezier";
+    if (name == "Geom_SurfaceOfLinearExtrusion") return "linear_extrusion";
+    if (name == "Geom_SurfaceOfRevolution")      return "revolution";
+    return name;  // fall back to the raw OCCT class name
 }
 
 // Sub-shape lists — boundary crosses once, not per element.
@@ -697,21 +904,79 @@ ShapeHandle build_cone_impl(std::array<double, 3> loc, std::array<double, 3> axi
 //   line   = [0, x1,y1,z1, x2,y2,z2]
 //   arc    = [1, sx,sy,sz, mx,my,mz, ex,ey,ez]   (start, mid, end)
 //   circle = [2, cx,cy,cz, ax,ay,az, r]          (Axis2Placement + radius)
+// Build a single TopoDS_Edge from a self-describing flat edge record. The first
+// element is a kind tag; the remaining layout depends on the kind. Mirrors
+// adapy's make_edge_from_edge (the 3D curve zoo: line/arc/circle/bspline/
+// ellipse, full + parametrically-trimmed). Port target so EdgeLoop/OrientedEdge
+// boundaries build on adacpp without pythonocc.
+//   0 line            : [0, x1,y1,z1, x2,y2,z2]
+//   1 arc (3-point)   : [1, sx,sy,sz, mx,my,mz, ex,ey,ez]
+//   2 circle (full)   : [2, cx,cy,cz, ax,ay,az, r]
+//   5 circle (trimmed): [5, cx,cy,cz, ax,ay,az, r, t_start, t_end]
+//   4 ellipse         : [4, cx,cy,cz, ax,ay,az, rdx,rdy,rdz, semi1, semi2,
+//                        trim, sx,sy,sz, ex,ey,ez]   (trim=0 → full; pts ignored)
+//   3 bspline         : [3, degree, rational, trim, t_start, t_end, n_poles,
+//                        <3*n_poles coords>, n_knots, <knots>, <mults>,
+//                        <n_poles weights if rational>]
+TopoDS_Edge edge_from_record(const std::vector<double> &e) {
+    const int kind = static_cast<int>(std::lround(e[0]));
+    if (kind == 0) {
+        return BRepBuilderAPI_MakeEdge(gp_Pnt(e[1], e[2], e[3]), gp_Pnt(e[4], e[5], e[6])).Edge();
+    }
+    if (kind == 1) {
+        GC_MakeArcOfCircle arc(gp_Pnt(e[1], e[2], e[3]), gp_Pnt(e[4], e[5], e[6]), gp_Pnt(e[7], e[8], e[9]));
+        return BRepBuilderAPI_MakeEdge(arc.Value()).Edge();
+    }
+    if (kind == 2) {
+        const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]));
+        return BRepBuilderAPI_MakeEdge(gp_Circ(ax, e[7])).Edge();
+    }
+    if (kind == 5) {
+        const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]));
+        return BRepBuilderAPI_MakeEdge(gp_Circ(ax, e[7]), e[8], e[9]).Edge();
+    }
+    if (kind == 4) {
+        const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]), gp_Dir(e[7], e[8], e[9]));
+        const gp_Elips el(ax, e[10], e[11]);
+        const bool trim = std::lround(e[12]) != 0;
+        if (!trim) return BRepBuilderAPI_MakeEdge(el).Edge();
+        return BRepBuilderAPI_MakeEdge(el, gp_Pnt(e[13], e[14], e[15]), gp_Pnt(e[16], e[17], e[18])).Edge();
+    }
+    if (kind == 3) {
+        const int degree = static_cast<int>(std::lround(e[1]));
+        const bool rational = std::lround(e[2]) != 0;
+        const bool trim = std::lround(e[3]) != 0;
+        const double t_start = e[4], t_end = e[5];
+        std::size_t i = 6;
+        const int n_poles = static_cast<int>(std::lround(e[i++]));
+        TColgp_Array1OfPnt poles(1, n_poles);
+        for (int p = 1; p <= n_poles; ++p) {
+            poles.SetValue(p, gp_Pnt(e[i], e[i + 1], e[i + 2]));
+            i += 3;
+        }
+        const int n_knots = static_cast<int>(std::lround(e[i++]));
+        TColStd_Array1OfReal knots(1, n_knots);
+        for (int k = 1; k <= n_knots; ++k) knots.SetValue(k, e[i++]);
+        TColStd_Array1OfInteger mults(1, n_knots);
+        for (int k = 1; k <= n_knots; ++k) mults.SetValue(k, static_cast<int>(std::lround(e[i++])));
+        Handle(Geom_BSplineCurve) curve;
+        if (rational) {
+            TColStd_Array1OfReal weights(1, n_poles);
+            for (int p = 1; p <= n_poles; ++p) weights.SetValue(p, e[i++]);
+            curve = new Geom_BSplineCurve(poles, weights, knots, mults, degree, Standard_False);
+        } else {
+            curve = new Geom_BSplineCurve(poles, knots, mults, degree, Standard_False);
+        }
+        if (trim) return BRepBuilderAPI_MakeEdge(curve, t_start, t_end).Edge();
+        return BRepBuilderAPI_MakeEdge(curve).Edge();
+    }
+    throw std::runtime_error("edge_from_record: unknown edge kind " + std::to_string(kind));
+}
+
 TopoDS_Wire wire_from_edges(const std::vector<std::vector<double>> &edges) {
     BRepBuilderAPI_MakeWire wm;
     for (const auto &e : edges) {
-        const int kind = static_cast<int>(std::lround(e[0]));
-        if (kind == 0) {  // line
-            wm.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(e[1], e[2], e[3]), gp_Pnt(e[4], e[5], e[6])).Edge());
-        } else if (kind == 1) {  // 3-point arc
-            GC_MakeArcOfCircle arc(gp_Pnt(e[1], e[2], e[3]), gp_Pnt(e[4], e[5], e[6]), gp_Pnt(e[7], e[8], e[9]));
-            wm.Add(BRepBuilderAPI_MakeEdge(arc.Value()).Edge());
-        } else if (kind == 2) {  // full circle
-            const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]));
-            wm.Add(BRepBuilderAPI_MakeEdge(gp_Circ(ax, e[7])).Edge());
-        } else {
-            throw std::runtime_error("wire_from_edges: unknown edge kind");
-        }
+        wm.Add(edge_from_record(e));
     }
     wm.Build();
     return wm.Wire();
@@ -719,6 +984,24 @@ TopoDS_Wire wire_from_edges(const std::vector<std::vector<double>> &edges) {
 
 TopoDS_Shape face_from_edges(const std::vector<std::vector<double>> &edges) {
     return BRepBuilderAPI_MakeFace(wire_from_edges(edges)).Shape();
+}
+
+// Build a wire (open or closed) from a list of edge records. Backs adapy's
+// make_wire_from_edge_loop for the active backend.
+ShapeHandle build_wire_impl(const std::vector<std::vector<double>> &edges) {
+    return ShapeHandle(wire_from_edges(edges));
+}
+
+// Wire-filled face (WireFilledFace): interpolate a smooth surface through the
+// boundary edges with BRepOffsetAPI_MakeFilling. Port of adapy's
+// make_face_from_wire_filled (the SAT exppc-unrecoverable-surface fallback).
+ShapeHandle build_filled_face_impl(const std::vector<std::vector<double>> &edges) {
+    if (edges.size() < 3) throw std::runtime_error("build_filled_face: need >= 3 boundary edges");
+    BRepOffsetAPI_MakeFilling filler;
+    for (const auto &e : edges) filler.Add(edge_from_record(e), GeomAbs_C0);
+    filler.Build();
+    if (!filler.IsDone()) throw std::runtime_error("build_filled_face: MakeFilling failed");
+    return ShapeHandle(filler.Shape());
 }
 
 // Place a shape built in the XY frame at an Axis2Placement3D — the gp_Ax3
@@ -780,6 +1063,245 @@ ShapeHandle build_planar_face_impl(
     return ShapeHandle(place_at(face, loc, axis, ref_dir));
 }
 
+// Build a trimmed face over a B-spline surface (with knots; rational if weights
+// supplied). Port of adapy's make_bspline_surface_with_knots + a natural-UV
+// MakeFace — the common PlateCurved / loft-derived case where the surface's knot
+// range already spans the plate, so no explicit boundary trimming is needed.
+// control_points is row-major [num_u][num_v]; weights empty => non-rational.
+// Construct a Geom_BSplineSurface from the adapy BSplineSurfaceWithKnots data
+// (rational when weights non-empty). Shared by the natural-UV face builder and
+// the bounds-trimmed AdvancedFace builder.
+Handle(Geom_BSplineSurface) make_bspline_surface(
+        int u_degree, int v_degree,
+        const std::vector<std::vector<std::array<double, 3>>> &control_points,
+        const std::vector<double> &u_knots, const std::vector<double> &v_knots,
+        const std::vector<int> &u_mults, const std::vector<int> &v_mults,
+        const std::vector<std::vector<double>> &weights) {
+    const int num_u = static_cast<int>(control_points.size());
+    if (num_u == 0) throw std::runtime_error("make_bspline_surface: empty control point grid");
+    const int num_v = static_cast<int>(control_points[0].size());
+
+    TColgp_Array2OfPnt poles(1, num_u, 1, num_v);
+    for (int u = 0; u < num_u; ++u) {
+        for (int v = 0; v < num_v; ++v) {
+            const auto &p = control_points[u][v];
+            poles.SetValue(u + 1, v + 1, gp_Pnt(p[0], p[1], p[2]));
+        }
+    }
+    TColStd_Array1OfReal knots_u(1, static_cast<int>(u_knots.size()));
+    for (std::size_t i = 0; i < u_knots.size(); ++i) knots_u.SetValue(static_cast<int>(i) + 1, u_knots[i]);
+    TColStd_Array1OfReal knots_v(1, static_cast<int>(v_knots.size()));
+    for (std::size_t i = 0; i < v_knots.size(); ++i) knots_v.SetValue(static_cast<int>(i) + 1, v_knots[i]);
+    TColStd_Array1OfInteger mults_u(1, static_cast<int>(u_mults.size()));
+    for (std::size_t i = 0; i < u_mults.size(); ++i) mults_u.SetValue(static_cast<int>(i) + 1, u_mults[i]);
+    TColStd_Array1OfInteger mults_v(1, static_cast<int>(v_mults.size()));
+    for (std::size_t i = 0; i < v_mults.size(); ++i) mults_v.SetValue(static_cast<int>(i) + 1, v_mults[i]);
+
+    if (!weights.empty()) {
+        TColStd_Array2OfReal w(1, num_u, 1, num_v);
+        for (int u = 0; u < num_u; ++u)
+            for (int v = 0; v < num_v; ++v) w.SetValue(u + 1, v + 1, weights[u][v]);
+        return new Geom_BSplineSurface(poles, w, knots_u, knots_v, mults_u, mults_v, u_degree, v_degree,
+                                       Standard_False, Standard_False);
+    }
+    return new Geom_BSplineSurface(poles, knots_u, knots_v, mults_u, mults_v, u_degree, v_degree,
+                                   Standard_False, Standard_False);
+}
+
+// Build a face edge from a 2D pcurve record (kind 6) laid on `surf`:
+//   [6, degree, rational, closed, n_poles, <2*n_poles uv>, n_knots, <knots>,
+//    <mults>, <n_poles weights if rational>]
+// The 3D parametrization is derived by OCCT from surface(pcurve(t)), so 2D/3D
+// stay consistent — the SAT-pcurve path adapy's make_face_from_geom prefers.
+TopoDS_Edge edge_from_pcurve(const std::vector<double> &e, const Handle(Geom_Surface) &surf) {
+    const int degree = static_cast<int>(std::lround(e[1]));
+    const bool rational = std::lround(e[2]) != 0;
+    const bool closed = std::lround(e[3]) != 0;
+    std::size_t i = 4;
+    const int n = static_cast<int>(std::lround(e[i++]));
+    TColgp_Array1OfPnt2d poles(1, n);
+    for (int p = 1; p <= n; ++p) {
+        poles.SetValue(p, gp_Pnt2d(e[i], e[i + 1]));
+        i += 2;
+    }
+    const int nk = static_cast<int>(std::lround(e[i++]));
+    TColStd_Array1OfReal knots(1, nk);
+    for (int k = 1; k <= nk; ++k) knots.SetValue(k, e[i++]);
+    TColStd_Array1OfInteger mults(1, nk);
+    for (int k = 1; k <= nk; ++k) mults.SetValue(k, static_cast<int>(std::lround(e[i++])));
+    Handle(Geom2d_BSplineCurve) c2d;
+    if (rational) {
+        TColStd_Array1OfReal w(1, n);
+        for (int p = 1; p <= n; ++p) w.SetValue(p, e[i++]);
+        c2d = new Geom2d_BSplineCurve(poles, w, knots, mults, degree, closed);
+    } else {
+        c2d = new Geom2d_BSplineCurve(poles, knots, mults, degree, closed);
+    }
+    return BRepBuilderAPI_MakeEdge(c2d, surf, c2d->FirstParameter(), c2d->LastParameter()).Edge();
+}
+
+ShapeHandle build_bspline_surface_face_impl(
+        int u_degree, int v_degree,
+        const std::vector<std::vector<std::array<double, 3>>> &control_points,
+        const std::vector<double> &u_knots, const std::vector<double> &v_knots,
+        const std::vector<int> &u_mults, const std::vector<int> &v_mults,
+        const std::vector<std::vector<double>> &weights, double tol) {
+    Handle(Geom_BSplineSurface) surf =
+            make_bspline_surface(u_degree, v_degree, control_points, u_knots, v_knots, u_mults, v_mults, weights);
+    return ShapeHandle(BRepBuilderAPI_MakeFace(surf, tol).Face());
+}
+
+// Full bounds-trimmed AdvancedFace over a B-spline surface. Port of adapy's
+// make_face_from_geom (SAT-pcurve path): build each boundary wire from its
+// edges — a kind-6 record builds the edge from its 2D pcurve laid on the
+// surface (3D derived as surface(pcurve(t))), any other kind builds a 3D edge —
+// trim the surface to the outer wire, add inner wires as holes, then materialise
+// 3D curves (BRepLib::BuildCurves3d). bounds[0] is the outer boundary.
+ShapeHandle build_advanced_face_bspline_impl(
+        int u_degree, int v_degree,
+        const std::vector<std::vector<std::array<double, 3>>> &control_points,
+        const std::vector<double> &u_knots, const std::vector<double> &v_knots,
+        const std::vector<int> &u_mults, const std::vector<int> &v_mults,
+        const std::vector<std::vector<double>> &weights,
+        const std::vector<std::vector<std::vector<double>>> &bounds) {
+    if (bounds.empty()) throw std::runtime_error("build_advanced_face: no bounds");
+    Handle(Geom_BSplineSurface) surf =
+            make_bspline_surface(u_degree, v_degree, control_points, u_knots, v_knots, u_mults, v_mults, weights);
+
+    auto wire_of = [&](const std::vector<std::vector<double>> &edges) -> TopoDS_Wire {
+        BRepBuilderAPI_MakeWire wm;
+        for (const auto &rec : edges) {
+            const int kind = static_cast<int>(std::lround(rec[0]));
+            wm.Add(kind == 6 ? edge_from_pcurve(rec, surf) : edge_from_record(rec));
+        }
+        wm.Build();
+        if (!wm.IsDone()) throw std::runtime_error("build_advanced_face: wire build failed");
+        return wm.Wire();
+    };
+
+    BRepBuilderAPI_MakeFace fm(surf, wire_of(bounds[0]));
+    for (std::size_t b = 1; b < bounds.size(); ++b) fm.Add(wire_of(bounds[b]));
+    if (!fm.IsDone()) throw std::runtime_error("build_advanced_face: MakeFace failed");
+    TopoDS_Face face = fm.Face();
+    BRepLib::BuildCurves3d(face);  // pcurve-built edges have no 3D curve yet
+    return ShapeHandle(face);
+}
+
+// Extract the 2D UV pcurve of an edge on a face (BRep_Tool::CurveOnSurface →
+// trim → Geom2dConvert::CurveToBSplineCurve), plus the edge's 3D endpoints.
+// Port of adapy's _extract_pcurve + _edge_endpoints. has_pcurve=false when OCC
+// reports no curve-on-surface or the BSpline conversion fails.
+PcurveData extract_pcurve(const TopoDS_Edge &edge, const TopoDS_Face &face) {
+    PcurveData pc;
+    const gp_Pnt pf = BRep_Tool::Pnt(TopExp::FirstVertex(edge, Standard_True));
+    const gp_Pnt pl = BRep_Tool::Pnt(TopExp::LastVertex(edge, Standard_True));
+    pc.start = {pf.X(), pf.Y(), pf.Z()};
+    pc.end = {pl.X(), pl.Y(), pl.Z()};
+
+    Standard_Real f = 0.0, l = 0.0;
+    Handle(Geom2d_Curve) c2d = BRep_Tool::CurveOnSurface(edge, face, f, l);
+    if (c2d.IsNull()) return pc;
+    Handle(Geom2d_Curve) trimmed = (l > f) ? Handle(Geom2d_Curve)(new Geom2d_TrimmedCurve(c2d, f, l)) : c2d;
+    Handle(Geom2d_BSplineCurve) bsp;
+    try {
+        bsp = Geom2dConvert::CurveToBSplineCurve(trimmed);
+    } catch (const Standard_Failure &) {
+        return pc;
+    }
+    if (bsp.IsNull()) return pc;
+
+    pc.degree = bsp->Degree();
+    for (int i = 1; i <= bsp->NbPoles(); ++i) {
+        const gp_Pnt2d p = bsp->Pole(i);
+        pc.control_points.push_back({p.X(), p.Y()});
+    }
+    for (int i = 1; i <= bsp->NbKnots(); ++i) {
+        pc.knots.push_back(bsp->Knot(i));
+        pc.multiplicities.push_back(bsp->Multiplicity(i));
+    }
+    if (bsp->IsRational()) {
+        for (int i = 1; i <= bsp->NbPoles(); ++i) pc.weights.push_back(bsp->Weight(i));
+    }
+    pc.closed = bsp->IsClosed();
+    pc.has_pcurve = true;
+    return pc;
+}
+
+// Decompose a B-spline face into surface params + per-wire ordered edge pcurves.
+// Reverse of build_advanced_face_bspline; port of adapy's occ_face_to_ada_face
+// (+ get_bsplinesurface_with_knots / get_wires_from_face). Lets the SAT/STEP
+// face→AdvancedFace round-trip run on adacpp with no pythonocc.
+AdvancedFaceData face_to_advanced_face_impl(const ShapeHandle &sh) {
+    const TopoDS_Shape &s = sh.topods();
+    TopoDS_Face face;
+    if (s.ShapeType() == TopAbs_FACE) {
+        face = TopoDS::Face(s);
+    } else {
+        TopExp_Explorer exp(s, TopAbs_FACE);
+        if (!exp.More()) throw std::runtime_error("face_to_advanced_face: shape has no face");
+        face = TopoDS::Face(exp.Current());
+    }
+    Handle(Geom_BSplineSurface) bs = Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(face));
+    if (bs.IsNull()) throw std::runtime_error("face_to_advanced_face: face surface is not a B-spline");
+
+    AdvancedFaceData out;
+    out.u_degree = bs->UDegree();
+    out.v_degree = bs->VDegree();
+    const int nu = bs->NbUPoles(), nv = bs->NbVPoles();
+    out.poles.assign(nu, std::vector<std::array<double, 3>>(nv));
+    const bool rational = bs->IsURational() || bs->IsVRational();
+    if (rational) out.weights.assign(nu, std::vector<double>(nv, 1.0));
+    for (int u = 1; u <= nu; ++u) {
+        for (int v = 1; v <= nv; ++v) {
+            const gp_Pnt p = bs->Pole(u, v);
+            out.poles[u - 1][v - 1] = {p.X(), p.Y(), p.Z()};
+            if (rational) out.weights[u - 1][v - 1] = bs->Weight(u, v);
+        }
+    }
+    for (int i = 1; i <= bs->NbUKnots(); ++i) {
+        out.u_knots.push_back(bs->UKnot(i));
+        out.u_multiplicities.push_back(bs->UMultiplicity(i));
+    }
+    for (int i = 1; i <= bs->NbVKnots(); ++i) {
+        out.v_knots.push_back(bs->VKnot(i));
+        out.v_multiplicities.push_back(bs->VMultiplicity(i));
+    }
+    out.u_closed = bs->IsUClosed();
+    out.v_closed = bs->IsVClosed();
+
+    for (TopExp_Explorer we(face, TopAbs_WIRE); we.More(); we.Next()) {
+        const TopoDS_Wire wire = TopoDS::Wire(we.Current());
+        std::vector<PcurveData> bound;
+        for (BRepTools_WireExplorer ee(wire, face); ee.More(); ee.Next()) {
+            bound.push_back(extract_pcurve(ee.Current(), face));
+        }
+        if (!bound.empty()) out.bounds.push_back(std::move(bound));
+    }
+    return out;
+}
+
+// Prism-extrude a face by `thickness` along its surface normal at the
+// parametric centre. Port of adapy's extrude_face_along_normal — gives a curved
+// plate (PlateCurved) its thickness. Falls back to the bare face on thickness 0,
+// undefined normal, or prism failure (matches adapy's render-something policy).
+ShapeHandle extrude_face_along_normal_impl(const ShapeHandle &sh, double thickness) {
+    const TopoDS_Shape &shape = sh.topods();
+    if (thickness == 0.0) return ShapeHandle(shape);
+    TopExp_Explorer exp(shape, TopAbs_FACE);
+    if (!exp.More()) return ShapeHandle(shape);
+    const TopoDS_Face sub_face = TopoDS::Face(exp.Current());
+    Handle(Geom_Surface) surf = BRep_Tool::Surface(sub_face);
+    Standard_Real umin = 0.0, umax = 1.0, vmin = 0.0, vmax = 1.0;
+    BRepTools::UVBounds(sub_face, umin, umax, vmin, vmax);
+    GeomLProp_SLProps props(surf, (umin + umax) / 2.0, (vmin + vmax) / 2.0, 1, 1e-7);
+    if (!props.IsNormalDefined()) return ShapeHandle(shape);
+    const gp_Dir n = props.Normal();
+    const gp_Vec vec(n.X() * thickness, n.Y() * thickness, n.Z() * thickness);
+    BRepPrimAPI_MakePrism prism(shape, vec);
+    if (!prism.IsDone()) return ShapeHandle(shape);
+    return ShapeHandle(prism.Shape());
+}
+
 // Build a swept profile from edge records. AREA → outer face minus inner void
 // faces (solid cross-section). CURVE → the outer wire alone: matches OCC's
 // make_profile_from_geom non-area path, where cutting a 1-D wire by a disjoint
@@ -810,6 +1332,95 @@ ShapeHandle build_extruded_area_solid_impl(
     TopoDS_Shape profile = swept_profile(outer, inners, is_area);
     TopoDS_Shape solid = BRepPrimAPI_MakePrism(profile, gp_Vec(0.0, 0.0, depth)).Shape();
     return ShapeHandle(place_at(solid, loc, axis, ref_dir));
+}
+
+// Native ExtrudedAreaSolidTapered (tapered beams): port of adapy's
+// make_extruded_area_shape_tapered_from_geom. Loft (BRepOffsetAPI_ThruSections)
+// between the start profile wire (in the XY frame) and the end profile wire
+// translated +Z by depth, then place via the gp_Ax3 change-of-basis. Only the
+// outer wires are lofted — matches OCC, which takes wires()[0] of each profile
+// face (inner voids are not carried through the taper).
+ShapeHandle build_extruded_area_solid_tapered_impl(
+        const std::vector<std::vector<double>> &outer_start,
+        const std::vector<std::vector<double>> &outer_end,
+        std::array<double, 3> loc, std::array<double, 3> axis, std::array<double, 3> ref_dir,
+        double depth) {
+    const TopoDS_Wire wire1 = wire_from_edges(outer_start);
+    TopoDS_Wire wire2 = wire_from_edges(outer_end);
+    // End profile sits at depth along +Z (identity rotation + Z translation).
+    wire2 = TopoDS::Wire(place_at(wire2, {0.0, 0.0, depth}, {0.0, 0.0, 1.0}, {1.0, 0.0, 0.0}));
+
+    BRepOffsetAPI_ThruSections ts(Standard_True);  // is_solid
+    ts.AddWire(wire1);
+    ts.AddWire(wire2);
+    ts.Build();
+    if (!ts.IsDone()) {
+        throw std::runtime_error("build_extruded_area_solid_tapered: ThruSections failed");
+    }
+    return ShapeHandle(place_at(ts.Shape(), loc, axis, ref_dir));
+}
+
+// Generic loft: thread a ruled (or smooth) solid/shell through a sequence of
+// closed polygon section profiles with BRepOffsetAPI_ThruSections. Port of
+// adapy's ada.api.loft.loft_profiles. Each profile is a list of 3D points;
+// the polygon is closed implicitly (last→first edge added).
+ShapeHandle loft_profiles_impl(
+        const std::vector<std::vector<std::array<double, 3>>> &profiles,
+        bool ruled, bool solid) {
+    if (profiles.size() < 2) {
+        throw std::runtime_error("loft_profiles: need at least 2 profiles");
+    }
+    BRepOffsetAPI_ThruSections ts(solid, ruled);
+    for (const auto &poly : profiles) {
+        if (poly.size() < 2) {
+            throw std::runtime_error("loft_profiles: a profile needs at least 2 points");
+        }
+        BRepBuilderAPI_MakeWire wm;
+        for (std::size_t i = 0; i < poly.size(); ++i) {
+            const auto &a = poly[i];
+            const auto &b = poly[(i + 1) % poly.size()];
+            wm.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(a[0], a[1], a[2]), gp_Pnt(b[0], b[1], b[2])).Edge());
+        }
+        wm.Build();
+        ts.AddWire(wm.Wire());
+    }
+    ts.Build();
+    if (!ts.IsDone()) {
+        throw std::runtime_error("loft_profiles: ThruSections failed");
+    }
+    return ShapeHandle(ts.Shape());
+}
+
+// Boolean-intersect a shape with a finite planar face (cross-section). Port of
+// adapy's ada.api.loft.intersect_with_plane: build a `2*size` square face on
+// the plane (origin, normal) and common it with the shape. `size` must exceed
+// the shape's lateral extent so the result is the full cross-section.
+ShapeHandle section_with_plane_impl(
+        const ShapeHandle &shape, std::array<double, 3> origin,
+        std::array<double, 3> normal, double size) {
+    const gp_Pln pln(gp_Pnt(origin[0], origin[1], origin[2]),
+                     gp_Dir(normal[0], normal[1], normal[2]));
+    const TopoDS_Shape face = BRepBuilderAPI_MakeFace(pln, -size, size, -size, size).Face();
+    return ShapeHandle(BRepAlgoAPI_Common(shape.topods(), face).Shape());
+}
+
+// Write shapes (with per-shape name + color) to a STEP file via the OCAF/XCAF
+// document model (adacpp's bundled OCCT). Backs adapy's StepWriter under the
+// adacpp CAD backend, so STEP export needs no pythonocc.
+void write_step_impl(const std::vector<ShapeHandle> &shapes,
+                     const std::vector<std::string> &names,
+                     const std::vector<std::array<double, 3>> &colors,
+                     const std::string &filename,
+                     const std::string &unit, const std::string &schema) {
+    std::vector<TopoDS_Shape> tshapes;
+    tshapes.reserve(shapes.size());
+    for (const auto &s : shapes) tshapes.push_back(s.topods());
+    std::vector<Color> cs;
+    cs.reserve(colors.size());
+    for (const auto &c : colors) {
+        cs.emplace_back(static_cast<float>(c[0]), static_cast<float>(c[1]), static_cast<float>(c[2]), 1.0f);
+    }
+    write_shapes_to_step(filename, tshapes, names, cs, unit, schema, "Assembly");
 }
 
 // Native RevolvedAreaSolid (pipe-shell elbows): port of adapy's
@@ -1091,6 +1702,36 @@ void cad_module(nb::module_ &m) {
             .def_ro("color",     &Mesh::color)
             .def_ro("groups",    &Mesh::group_reference);
 
+    nb::class_<PcurveData>(m, "PcurveData")
+            .def_ro("has_pcurve",      &PcurveData::has_pcurve)
+            .def_ro("degree",          &PcurveData::degree)
+            .def_ro("control_points",  &PcurveData::control_points)
+            .def_ro("knots",           &PcurveData::knots)
+            .def_ro("multiplicities",  &PcurveData::multiplicities)
+            .def_ro("weights",         &PcurveData::weights)
+            .def_ro("closed",          &PcurveData::closed)
+            .def_ro("start",           &PcurveData::start)
+            .def_ro("end",             &PcurveData::end);
+
+    nb::class_<AdvancedFaceData>(m, "AdvancedFaceData")
+            .def_ro("u_degree",         &AdvancedFaceData::u_degree)
+            .def_ro("v_degree",         &AdvancedFaceData::v_degree)
+            .def_ro("poles",            &AdvancedFaceData::poles)
+            .def_ro("u_knots",          &AdvancedFaceData::u_knots)
+            .def_ro("v_knots",          &AdvancedFaceData::v_knots)
+            .def_ro("u_multiplicities", &AdvancedFaceData::u_multiplicities)
+            .def_ro("v_multiplicities", &AdvancedFaceData::v_multiplicities)
+            .def_ro("weights",          &AdvancedFaceData::weights)
+            .def_ro("u_closed",         &AdvancedFaceData::u_closed)
+            .def_ro("v_closed",         &AdvancedFaceData::v_closed)
+            .def_ro("bounds",           &AdvancedFaceData::bounds);
+
+    nb::class_<StepShapeData>(m, "StepShapeData")
+            .def_ro("shape",     &StepShapeData::shape)
+            .def_ro("name",      &StepShapeData::name)
+            .def_ro("color",     &StepShapeData::color)
+            .def_ro("has_color", &StepShapeData::has_color);
+
     // Opaque handle: no readable attributes / methods. Callers obtain instances
     // via factory functions (make_box, ...) and pass them to consumers
     // (tessellate, ...). The C++-level shape data is unreachable from Python.
@@ -1137,6 +1778,11 @@ void cad_module(nb::module_ &m) {
           "data"_a,
           "Parse a STEP file from a bytes buffer into a ShapeHandle.");
 
+    m.def("read_step_shapes", &read_step_shapes_impl, "data"_a, "unit"_a = "M",
+          "Read a STEP file (bytes) via OCAF into a list of StepShapeData (shape + "
+          "label name + color), converting the file's length unit to `unit` (default M). "
+          "Backs adapy's StepStore under the adacpp doc backend.");
+
     m.def("write_glb_bytes", &write_glb_bytes_impl,
           "shape"_a, "linear_deflection"_a = 0.1,
           "Tessellate a ShapeHandle and write a binary glTF (.glb) into "
@@ -1165,6 +1811,12 @@ void cad_module(nb::module_ &m) {
     m.def("is_valid", &is_valid_impl,
           "shape"_a,
           "Topological + geometric validity (BRepCheck_Analyzer).");
+
+    m.def("area", &area_impl, "shape"_a, "Total surface area (GProp).");
+    m.def("shape_type", &shape_type_impl, "shape"_a,
+          "Topological kind: solid/shell/face/wire/edge/vertex/compound/compsolid.");
+    m.def("face_surface_type", &face_surface_type_impl, "shape"_a,
+          "Geometric surface kind of a face: plane/cylinder/cone/sphere/torus/bspline/...");
 
     m.def("volume", &volume_impl,
           "shape"_a,
@@ -1230,6 +1882,28 @@ void cad_module(nb::module_ &m) {
           "prism-extruded by `depth` and placed at the Axis2Placement3D frame. "
           "is_area=False sweeps the outer wire alone (open lateral surface).");
 
+    m.def("build_extruded_area_solid_tapered", &build_extruded_area_solid_tapered_impl,
+          "outer_start"_a, "outer_end"_a, "location"_a, "axis"_a, "ref_dir"_a, "depth"_a,
+          "Tapered extruded area solid (tapered beams): loft (ThruSections) between "
+          "the start outer profile and the end outer profile (placed +Z by `depth`), "
+          "then placed at the Axis2Placement3D frame. Edge records as in "
+          "build_extruded_area_solid; only the outer wires are lofted.");
+
+    m.def("loft_profiles", &loft_profiles_impl,
+          "profiles"_a, "ruled"_a = true, "solid"_a = true,
+          "Loft a ruled (or smooth) solid/shell through >=2 closed polygon "
+          "section profiles (each a list of 3D points) via ThruSections.");
+
+    m.def("section_with_plane", &section_with_plane_impl,
+          "shape"_a, "origin"_a, "normal"_a, "size"_a = 1000.0,
+          "Boolean-intersect `shape` with a finite (2*size square) planar face "
+          "at (origin, normal); returns the cross-section.");
+
+    m.def("write_step", &write_step_impl,
+          "shapes"_a, "names"_a, "colors"_a, "filename"_a, "unit"_a = "m", "schema"_a = "AP214",
+          "Write shapes (with per-shape name + RGB color) to a STEP file with "
+          "OCAF names/colors via adacpp's bundled OCCT (no pythonocc needed).");
+
     m.def("build_revolved_area_solid", &build_revolved_area_solid_impl,
           "outer"_a, "inners"_a, "location"_a, "axis"_a, "ref_dir"_a,
           "axis_location"_a, "axis_direction"_a, "angle_deg"_a, "is_area"_a = true,
@@ -1259,6 +1933,38 @@ void cad_module(nb::module_ &m) {
           "cutter, plain data: (surface_type, (nx,ny,nz), outer_edges, "
           "outer_polyline, inner_polylines). Curved edges are discretized to "
           "`deflection`; points within `tol` are de-duplicated.");
+
+    m.def("build_bspline_surface_face", &build_bspline_surface_face_impl,
+          "u_degree"_a, "v_degree"_a, "control_points"_a, "u_knots"_a, "v_knots"_a,
+          "u_mults"_a, "v_mults"_a, "weights"_a, "tol"_a = 1e-6,
+          "Trimmed face over a B-spline surface (knots; rational if weights given). "
+          "control_points row-major [num_u][num_v]; weights empty => non-rational. "
+          "Natural-UV MakeFace (PlateCurved / loft-derived surfaces).");
+
+    m.def("build_advanced_face_bspline", &build_advanced_face_bspline_impl,
+          "u_degree"_a, "v_degree"_a, "control_points"_a, "u_knots"_a, "v_knots"_a,
+          "u_mults"_a, "v_mults"_a, "weights"_a, "bounds"_a,
+          "Bounds-trimmed AdvancedFace over a B-spline surface. bounds[0] is the outer "
+          "boundary, the rest are holes; each edge is a 3D edge record or a kind-6 2D "
+          "pcurve record laid on the surface. Ports make_face_from_geom (SAT-pcurve path).");
+
+    m.def("face_to_advanced_face", &face_to_advanced_face_impl, "face"_a,
+          "Decompose a B-spline face into AdvancedFaceData (surface poles/knots + per-wire "
+          "ordered edge pcurves). Reverse of build_advanced_face_bspline; ports "
+          "occ_face_to_ada_face so the SAT/STEP face round-trip runs on adacpp.");
+
+    m.def("extrude_face_along_normal", &extrude_face_along_normal_impl,
+          "face"_a, "thickness"_a,
+          "Prism-extrude a face by `thickness` along its surface normal (PlateCurved "
+          "thickness). Returns the bare face on thickness 0 / undefined normal / failure.");
+
+    m.def("build_wire", &build_wire_impl, "edges"_a,
+          "Build a wire from edge records (line/arc/circle/ellipse/bspline, full or "
+          "parametrically trimmed). See edge_from_record for the record layout.");
+
+    m.def("build_filled_face", &build_filled_face_impl, "edges"_a,
+          "Wire-filled face (WireFilledFace): interpolate a smooth surface through "
+          ">=3 boundary edges via BRepOffsetAPI_MakeFilling.");
 
     m.def("build_planar_face", &build_planar_face_impl,
           "outer"_a, "inners"_a, "location"_a, "axis"_a, "ref_dir"_a,

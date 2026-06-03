@@ -30,11 +30,20 @@ build_cylinder = _cad.build_cylinder
 build_sphere = _cad.build_sphere
 build_cone = _cad.build_cone
 build_extruded_area_solid = _cad.build_extruded_area_solid
+build_extruded_area_solid_tapered = _cad.build_extruded_area_solid_tapered
+loft_profiles = _cad.loft_profiles
+section_with_plane = _cad.section_with_plane
 build_revolved_area_solid = _cad.build_revolved_area_solid
 build_fixed_reference_swept_area_solid = _cad.build_fixed_reference_swept_area_solid
 make_halfspace = _cad.make_halfspace
 cut_surfaces = _cad.cut_surfaces
 build_planar_face = _cad.build_planar_face
+build_wire = _cad.build_wire
+build_filled_face = _cad.build_filled_face
+build_bspline_surface_face = _cad.build_bspline_surface_face
+build_advanced_face_bspline = _cad.build_advanced_face_bspline
+face_to_advanced_face = _cad.face_to_advanced_face
+extrude_face_along_normal = _cad.extrude_face_along_normal
 build_face_based_surface_model = _cad.build_face_based_surface_model
 make_wire = _cad.make_wire
 
@@ -45,6 +54,9 @@ distance = _cad.distance
 serialize = _cad.serialize
 is_valid = _cad.is_valid
 volume = _cad.volume
+area = _cad.area
+shape_type = _cad.shape_type
+face_surface_type = _cad.face_surface_type
 faces = _cad.faces
 solids = _cad.solids
 edges = _cad.edges
@@ -67,7 +79,9 @@ wire_points = _cad.wire_points
 unify_coplanar_faces = _cad.unify_coplanar_faces
 
 read_step_bytes = _cad.read_step_bytes
+read_step_shapes = _cad.read_step_shapes
 write_glb_bytes = _cad.write_glb_bytes
+write_step = _cad.write_step
 
 # Bridge from a raw OCCT TopoDS_Shape pointer (e.g. pythonocc-core's
 # `int(shape.this)`) into a cad ShapeHandle. Available on both targets;
@@ -93,11 +107,20 @@ __all__ = [
     "build_sphere",
     "build_cone",
     "build_extruded_area_solid",
+    "build_extruded_area_solid_tapered",
+    "loft_profiles",
+    "section_with_plane",
     "build_revolved_area_solid",
     "build_fixed_reference_swept_area_solid",
     "make_halfspace",
     "cut_surfaces",
     "build_planar_face",
+    "build_wire",
+    "build_filled_face",
+    "build_bspline_surface_face",
+    "build_advanced_face_bspline",
+    "face_to_advanced_face",
+    "extrude_face_along_normal",
     "build_face_based_surface_model",
     "make_wire",
     "boolean",
@@ -106,6 +129,9 @@ __all__ = [
     "serialize",
     "is_valid",
     "volume",
+    "area",
+    "shape_type",
+    "face_surface_type",
     "faces",
     "solids",
     "edges",
@@ -124,6 +150,8 @@ __all__ = [
     "wire_points",
     "unify_coplanar_faces",
     "read_step_bytes",
+    "read_step_shapes",
     "write_glb_bytes",
+    "write_step",
     "from_topods_pointer",
 ]
