@@ -124,14 +124,29 @@ def test_cad_tessellate_batch():
     singles = [adacpp.cad.tessellate(b, 0.1) for b in boxes]
     batch = adacpp.cad.tessellate_batch(boxes, 0.1)
 
+    import numpy as np
+
     assert len(batch.groups) == len(boxes)
     assert len(batch.indices) == sum(len(s.indices) for s in singles)
+    pos = np.asarray(batch.positions)
+    idx = np.asarray(batch.indices)
     cursor = 0
+    vcursor = 0
     for i, (g, s) in enumerate(zip(batch.groups, singles)):
         assert g.node_id == i
+        # index range
         assert g.start == cursor
         assert g.length == len(s.indices)
+        # vertex range: slicing positions by the group must match the single mesh,
+        # and the group's local indices (rebased by vstart) must match too.
+        assert g.vstart == vcursor
+        assert g.vlength == len(s.positions) // 3
+        seg_pos = pos[g.vstart * 3 : (g.vstart + g.vlength) * 3]
+        assert np.array_equal(seg_pos, np.asarray(s.positions))
+        seg_idx = idx[g.start : g.start + g.length] - g.vstart
+        assert np.array_equal(seg_idx, np.asarray(s.indices))
         cursor += g.length
+        vcursor += g.vlength
 
 
 def test_cad_shape_handle_is_opaque():

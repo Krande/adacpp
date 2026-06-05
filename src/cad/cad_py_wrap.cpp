@@ -287,12 +287,15 @@ Mesh tessellate_batch_impl(const std::vector<ShapeHandle> &shapes, double linear
     groups.reserve(shapes.size());
     for (size_t i = 0; i < shapes.size(); ++i) {
         const uint32_t start = static_cast<uint32_t>(indices.size());
+        const uint32_t vstart = static_cast<uint32_t>(positions.size() / 3);
         const TopoDS_Shape &shape = shapes[i].topods();
         if (!shape.IsNull()) {
             append_shape_triangles(shape, linear_deflection, positions, indices);
         }
         const uint32_t length = static_cast<uint32_t>(indices.size()) - start;
-        groups.emplace_back(static_cast<int>(i), static_cast<int>(start), static_cast<int>(length));
+        const uint32_t vlength = static_cast<uint32_t>(positions.size() / 3) - vstart;
+        groups.emplace_back(static_cast<int>(i), static_cast<int>(start), static_cast<int>(length),
+                            static_cast<int>(vstart), static_cast<int>(vlength));
     }
     Mesh mesh(0, std::move(positions), std::move(indices));
     mesh.group_reference = std::move(groups);
@@ -1744,7 +1747,9 @@ void cad_module(nb::module_ &m) {
     nb::class_<GroupReference>(m, "GroupReference")
             .def_ro("node_id", &GroupReference::node_id)
             .def_ro("start",   &GroupReference::start)
-            .def_ro("length",  &GroupReference::length);
+            .def_ro("length",  &GroupReference::length)
+            .def_ro("vstart",  &GroupReference::vstart)
+            .def_ro("vlength", &GroupReference::vlength);
 
     // Expose the bulk buffers as zero-copy, read-only NumPy views instead of
     // copying each std::vector into a Python list on every access (the old
