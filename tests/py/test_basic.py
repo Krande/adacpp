@@ -116,6 +116,24 @@ def test_cad_make_box_and_tessellate():
     assert len(mesh.indices) >= 12 * 3
 
 
+def test_cad_tessellate_batch():
+    # Batch tessellation returns ONE combined mesh with a GroupReference per
+    # input shape; the combined buffer must equal the concatenation of the
+    # individual meshes, demarcated by the group ranges.
+    boxes = [adacpp.cad.make_box(1.0, 1.0, 1.0) for _ in range(4)]
+    singles = [adacpp.cad.tessellate(b, 0.1) for b in boxes]
+    batch = adacpp.cad.tessellate_batch(boxes, 0.1)
+
+    assert len(batch.groups) == len(boxes)
+    assert len(batch.indices) == sum(len(s.indices) for s in singles)
+    cursor = 0
+    for i, (g, s) in enumerate(zip(batch.groups, singles)):
+        assert g.node_id == i
+        assert g.start == cursor
+        assert g.length == len(s.indices)
+        cursor += g.length
+
+
 def test_cad_shape_handle_is_opaque():
     """ShapeHandle must not leak its kernel internals to Python."""
     box = adacpp.cad.make_box(1.0, 1.0, 1.0)
@@ -227,9 +245,7 @@ def test_cad_write_step(tmp_path):
     b1 = adacpp.cad.build_box([0, 0, 0], [0, 0, 1], [1, 0, 0], 1, 1, 1)
     b2 = adacpp.cad.build_box([2, 0, 0], [0, 0, 1], [1, 0, 0], 1, 2, 3)
     out = tmp_path / "two_boxes.stp"
-    adacpp.cad.write_step(
-        [b1, b2], ["BoxA", "BoxB"], [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], str(out), "m", "AP214"
-    )
+    adacpp.cad.write_step([b1, b2], ["BoxA", "BoxB"], [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], str(out), "m", "AP214")
     assert out.exists() and out.stat().st_size > 0
     text = out.read_text()
     assert "ISO-10303" in text
@@ -245,9 +261,7 @@ def test_cad_build_bspline_surface_face():
         [[1, 0, 0.5], [1, 1, 1.0], [1, 2, 0.5]],
         [[2, 0, 0], [2, 1, 0], [2, 2, 0]],
     ]
-    face = adacpp.cad.build_bspline_surface_face(
-        2, 2, cps, [0.0, 1.0], [0.0, 1.0], [3, 3], [3, 3], [], 1e-6
-    )
+    face = adacpp.cad.build_bspline_surface_face(2, 2, cps, [0.0, 1.0], [0.0, 1.0], [3, 3], [3, 3], [], 1e-6)
     assert adacpp.cad.is_valid(face)
     assert len(adacpp.cad.faces(face)) == 1
     bb = tuple(round(v, 4) for v in adacpp.cad.bbox(face))
@@ -269,9 +283,15 @@ def test_cad_introspection_helpers():
     assert {adacpp.cad.face_surface_type(f) for f in adacpp.cad.faces(cyl)} == {"cylinder", "plane"}
 
     bs = adacpp.cad.build_bspline_surface_face(
-        2, 2,
+        2,
+        2,
         [[[0, 0, 0], [0, 1, 0], [0, 2, 0]], [[1, 0, 0.5], [1, 1, 1.0], [1, 2, 0.5]], [[2, 0, 0], [2, 1, 0], [2, 2, 0]]],
-        [0.0, 1.0], [0.0, 1.0], [3, 3], [3, 3], [], 1e-6,
+        [0.0, 1.0],
+        [0.0, 1.0],
+        [3, 3],
+        [3, 3],
+        [],
+        1e-6,
     )
     assert adacpp.cad.face_surface_type(bs) == "bspline"
 
@@ -279,9 +299,15 @@ def test_cad_introspection_helpers():
 def test_cad_extrude_face_along_normal():
     # Extrude a B-spline dome face by 0.1 along its normal → a thin solid.
     bs = adacpp.cad.build_bspline_surface_face(
-        2, 2,
+        2,
+        2,
         [[[0, 0, 0], [0, 1, 0], [0, 2, 0]], [[1, 0, 0.5], [1, 1, 1.0], [1, 2, 0.5]], [[2, 0, 0], [2, 1, 0], [2, 2, 0]]],
-        [0.0, 1.0], [0.0, 1.0], [3, 3], [3, 3], [], 1e-6,
+        [0.0, 1.0],
+        [0.0, 1.0],
+        [3, 3],
+        [3, 3],
+        [],
+        1e-6,
     )
     solid = adacpp.cad.extrude_face_along_normal(bs, 0.1)
     assert adacpp.cad.shape_type(solid) == "solid"
@@ -377,8 +403,15 @@ def test_cad_face_to_advanced_face_roundtrip():
         rec += [float(w) for w in e.weights]
         bounds2.append(rec)
     face2 = adacpp.cad.build_advanced_face_bspline(
-        data.u_degree, data.v_degree, data.poles, data.u_knots, data.v_knots,
-        data.u_multiplicities, data.v_multiplicities, data.weights, [bounds2],
+        data.u_degree,
+        data.v_degree,
+        data.poles,
+        data.u_knots,
+        data.v_knots,
+        data.u_multiplicities,
+        data.v_multiplicities,
+        data.weights,
+        [bounds2],
     )
     assert round(adacpp.cad.area(face2), 6) == round(area0, 6)
 

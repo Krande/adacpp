@@ -19,6 +19,7 @@ make_cylinder = _cad.make_cylinder
 make_sphere = _cad.make_sphere
 
 tessellate = _cad.tessellate
+tessellate_batch = _cad.tessellate_batch
 tessellate_box = _cad.tessellate_box
 
 bbox = _cad.bbox
@@ -99,6 +100,7 @@ __all__ = [
     "make_cylinder",
     "make_sphere",
     "tessellate",
+    "tessellate_batch",
     "tessellate_box",
     "bbox",
     "obb",
