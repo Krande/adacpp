@@ -46,7 +46,20 @@ def test_ada_integration(beams_model):
     writer_pointer = int(writer.this)
     ada_cpp_writer = STEPCAFControl_Writer.from_ptr(writer_pointer)
     result = step_writer_to_string(ada_cpp_writer)
-    assert len(result) == 227399
+
+    # Structural checks rather than an exact byte count: the latter is brittle to
+    # OCCT version changes and to any process-global Interface_Static drift left
+    # by an earlier test (e.g. write.surfacecurve.mode), which made this assert
+    # order-dependent. Verify instead that the bridge produced a valid, complete
+    # STEP carrying all five beams.
+    assert result.startswith("ISO-10303-21;")
+    assert result.rstrip().endswith("END-ISO-10303-21;")
+    assert "FILE_SCHEMA" in result
+    for i in range(5):
+        assert f"bm{i}" in result
+    # A 5-beam AP214 STEP is on the order of ~200 KB; guard against truncated or
+    # empty output without pinning an exact length.
+    assert len(result) > 100_000
 
 
 @pytest.mark.skipif(not has_ada, reason="ada is not installed")

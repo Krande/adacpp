@@ -2,6 +2,8 @@
 #include <memory>
 #include <filesystem>
 
+#include "static_param_guard.h"
+
 #include <BRep_Builder.hxx>
 #include <Interface_Static.hxx>
 #include <STEPCAFControl_Writer.hxx>
@@ -74,6 +76,10 @@ public:
         writer.SetColorMode(Standard_True);
         writer.SetNameMode(Standard_True);
 
+        // Interface_Static is process-global; restore these on scope exit so a
+        // STEP write doesn't leak its unit/schema into later OCC operations.
+        const InterfaceStaticCValGuard unit_guard("write.step.unit");
+        const InterfaceStaticCValGuard schema_guard("write.step.schema");
         Interface_Static::SetCVal("write.step.unit", unit.c_str());
         Interface_Static::SetCVal("write.step.schema", schema.c_str());
 

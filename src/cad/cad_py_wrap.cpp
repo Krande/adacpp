@@ -4,6 +4,7 @@
 #include "../geom/GroupReference.h"
 #include "../geom/Mesh.h"
 #include "../geom/MeshType.h"
+#include "../cadit/occt/static_param_guard.h"
 #include "../cadit/occt/step_writer.h"
 
 #include <nanobind/ndarray.h>
@@ -461,6 +462,9 @@ void collect_step_shapes(const Handle(XCAFDoc_ShapeTool) &st, const Handle(XCAFD
 // color. Port of StepStore + read_step_file_with_names_colors for the adacpp
 // doc backend (STEP import with no pythonocc).
 std::vector<StepShapeData> read_step_shapes_impl(nb::bytes data, const std::string &unit) {
+    // Restore the caller's value on exit — "xstep.cascade.unit" is a process-
+    // global Interface_Static parameter; leaving it set leaks into later reads.
+    const InterfaceStaticCValGuard cascade_unit_guard("xstep.cascade.unit");
     const std::filesystem::path tmp = make_temp_path("adacpp_step_read", ".stp");
     {
         std::ofstream f(tmp.string(), std::ios::binary);
