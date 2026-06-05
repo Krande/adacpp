@@ -4,8 +4,10 @@
 #include "../geom/GroupReference.h"
 #include "../geom/Mesh.h"
 #include "../geom/MeshType.h"
+#include "../cadit/occt/static_param_guard.h"
 #include "../cadit/occt/step_writer.h"
 
+#include <nanobind/ndarray.h>
 #include <nanobind/stl/array.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/pair.h>
@@ -193,12 +195,11 @@ ShapeHandle make_sphere_impl(float radius) {
 // tessellate
 // ----------------------------------------------------------------------------
 
-Mesh tessellate_impl(const ShapeHandle &sh, double linear_deflection) {
-    const TopoDS_Shape &shape = sh.topods();
-    if (shape.IsNull()) {
-        throw std::runtime_error("tessellate: ShapeHandle is null");
-    }
-
+// Mesh a single shape and APPEND its triangles into the shared buffers,
+// offsetting triangle indices by the current vertex base. Shared by the single
+// tessellate (one shape) and the batch path (many shapes into one mesh).
+static void append_shape_triangles(const TopoDS_Shape &shape, double linear_deflection,
+                                   std::vector<float> &positions, std::vector<uint32_t> &indices) {
     // Auto deflection: a fraction of the bbox diagonal keeps tessellation tight
     // on small shapes without exploding triangle counts on large ones.
     if (linear_deflection <= 0.0) {
@@ -213,8 +214,22 @@ Mesh tessellate_impl(const ShapeHandle &sh, double linear_deflection) {
     }
     BRepMesh_IncrementalMesh(shape, linear_deflection);
 
-    std::vector<float> positions;
-    std::vector<uint32_t> indices;
+    // Pre-count this shape's nodes/triangles and grow the shared buffers once.
+    // Appending without reserve reallocates repeatedly as the mesh grows — the
+    // dominant allocation cost. The triangulation was already computed above, so
+    // this extra face pass is cheap.
+    size_t n_nodes = 0, n_tris = 0;
+    for (TopExp_Explorer exp(shape, TopAbs_FACE); exp.More(); exp.Next()) {
+        TopLoc_Location loc;
+        const Handle(Poly_Triangulation) tri =
+                BRep_Tool::Triangulation(TopoDS::Face(exp.Current()), loc);
+        if (tri.IsNull()) continue;
+        n_nodes += static_cast<size_t>(tri->NbNodes());
+        n_tris += static_cast<size_t>(tri->NbTriangles());
+    }
+    positions.reserve(positions.size() + n_nodes * 3);
+    indices.reserve(indices.size() + n_tris * 3);
+
     for (TopExp_Explorer exp(shape, TopAbs_FACE); exp.More(); exp.Next()) {
         const TopoDS_Face face = TopoDS::Face(exp.Current());
         TopLoc_Location loc;
@@ -245,7 +260,46 @@ Mesh tessellate_impl(const ShapeHandle &sh, double linear_deflection) {
             indices.push_back(base + static_cast<uint32_t>(n3 - 1));
         }
     }
+}
+
+Mesh tessellate_impl(const ShapeHandle &sh, double linear_deflection) {
+    const TopoDS_Shape &shape = sh.topods();
+    if (shape.IsNull()) {
+        throw std::runtime_error("tessellate: ShapeHandle is null");
+    }
+    std::vector<float> positions;
+    std::vector<uint32_t> indices;
+    append_shape_triangles(shape, linear_deflection, positions, indices);
     return Mesh(0, std::move(positions), std::move(indices));
+}
+
+// Batch: tessellate many shapes into ONE combined mesh in a single Python->C++
+// call, demarcated by a GroupReference per input shape (node_id = shape index,
+// start/length = the triangle-index range in the shared buffer). This amortizes
+// the per-call boundary + Python-loop + object-wrapping cost across all shapes,
+// and yields a single zero-copy NumPy buffer ready for one GLB scene. Null
+// shapes are recorded as empty (zero-length) groups so the result stays aligned
+// with the input list by index.
+Mesh tessellate_batch_impl(const std::vector<ShapeHandle> &shapes, double linear_deflection) {
+    std::vector<float> positions;
+    std::vector<uint32_t> indices;
+    std::vector<GroupReference> groups;
+    groups.reserve(shapes.size());
+    for (size_t i = 0; i < shapes.size(); ++i) {
+        const uint32_t start = static_cast<uint32_t>(indices.size());
+        const uint32_t vstart = static_cast<uint32_t>(positions.size() / 3);
+        const TopoDS_Shape &shape = shapes[i].topods();
+        if (!shape.IsNull()) {
+            append_shape_triangles(shape, linear_deflection, positions, indices);
+        }
+        const uint32_t length = static_cast<uint32_t>(indices.size()) - start;
+        const uint32_t vlength = static_cast<uint32_t>(positions.size() / 3) - vstart;
+        groups.emplace_back(static_cast<int>(i), static_cast<int>(start), static_cast<int>(length),
+                            static_cast<int>(vstart), static_cast<int>(vlength));
+    }
+    Mesh mesh(0, std::move(positions), std::move(indices));
+    mesh.group_reference = std::move(groups);
+    return mesh;
 }
 
 // Convenience: build a primitive box and tessellate it in one call. Same logic
@@ -443,6 +497,9 @@ void collect_step_shapes(const Handle(XCAFDoc_ShapeTool) &st, const Handle(XCAFD
 // color. Port of StepStore + read_step_file_with_names_colors for the adacpp
 // doc backend (STEP import with no pythonocc).
 std::vector<StepShapeData> read_step_shapes_impl(nb::bytes data, const std::string &unit) {
+    // Restore the caller's value on exit — "xstep.cascade.unit" is a process-
+    // global Interface_Static parameter; leaving it set leaks into later reads.
+    const InterfaceStaticCValGuard cascade_unit_guard("xstep.cascade.unit");
     const std::filesystem::path tmp = make_temp_path("adacpp_step_read", ".stp");
     {
         std::ofstream f(tmp.string(), std::ios::binary);
@@ -1690,14 +1747,36 @@ void cad_module(nb::module_ &m) {
     nb::class_<GroupReference>(m, "GroupReference")
             .def_ro("node_id", &GroupReference::node_id)
             .def_ro("start",   &GroupReference::start)
-            .def_ro("length",  &GroupReference::length);
+            .def_ro("length",  &GroupReference::length)
+            .def_ro("vstart",  &GroupReference::vstart)
+            .def_ro("vlength", &GroupReference::vlength);
 
+    // Expose the bulk buffers as zero-copy, read-only NumPy views instead of
+    // copying each std::vector into a Python list on every access (the old
+    // def_ro behaviour via nanobind/stl/vector.h). For a mesh with thousands of
+    // triangles this turns an O(n) per-access PyObject allocation into a cheap
+    // array view. ``nb::find(self)`` is the owning Python Mesh, passed as the
+    // ndarray owner so the underlying vector stays alive while the view exists.
+    // Empty vectors are returned as length-0 arrays (data() may be null, which
+    // is valid for a zero-element shape).
     nb::class_<Mesh>(m, "Mesh")
             .def_ro("id",        &Mesh::id)
-            .def_ro("positions", &Mesh::positions)
-            .def_ro("indices",   &Mesh::indices)
-            .def_ro("normals",   &Mesh::normals)
-            .def_ro("edges",     &Mesh::edges)
+            .def_prop_ro("positions", [](Mesh &self) {
+                return nb::ndarray<nb::numpy, const float, nb::ndim<1>>(
+                        self.positions.data(), {self.positions.size()}, nb::find(self));
+            })
+            .def_prop_ro("indices", [](Mesh &self) {
+                return nb::ndarray<nb::numpy, const uint32_t, nb::ndim<1>>(
+                        self.indices.data(), {self.indices.size()}, nb::find(self));
+            })
+            .def_prop_ro("normals", [](Mesh &self) {
+                return nb::ndarray<nb::numpy, const float, nb::ndim<1>>(
+                        self.normals.data(), {self.normals.size()}, nb::find(self));
+            })
+            .def_prop_ro("edges", [](Mesh &self) {
+                return nb::ndarray<nb::numpy, const uint32_t, nb::ndim<1>>(
+                        self.edges.data(), {self.edges.size()}, nb::find(self));
+            })
             .def_ro("mesh_type", &Mesh::mesh_type)
             .def_ro("color",     &Mesh::color)
             .def_ro("groups",    &Mesh::group_reference);
@@ -1753,6 +1832,13 @@ void cad_module(nb::module_ &m) {
           "shape"_a, "linear_deflection"_a = -1.0,
           "Tessellate a shape into a triangle Mesh. "
           "linear_deflection<=0 selects a heuristic based on the shape's bbox.");
+
+    m.def("tessellate_batch", &tessellate_batch_impl,
+          "shapes"_a, "linear_deflection"_a = -1.0,
+          "Tessellate many shapes into ONE combined Mesh in a single call, with a "
+          "GroupReference per input shape (node_id=index, start/length=triangle-index "
+          "range). Amortizes the per-call boundary cost and returns one zero-copy "
+          "buffer. linear_deflection<=0 selects a per-shape bbox heuristic.");
 
     m.def("tessellate_box", &tessellate_box_impl,
           "dx"_a, "dy"_a, "dz"_a,

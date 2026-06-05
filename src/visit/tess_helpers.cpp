@@ -54,7 +54,8 @@ Mesh concatenate_meshes(const std::vector<std::shared_ptr<Mesh>> &meshes) {
     size_t sum_positions = 0;
 
     for (const auto &s: meshes) {
-        groups.emplace_back(s->id, indices_offset, s->indices.size());
+        groups.emplace_back(s->id, static_cast<int>(indices_offset), static_cast<int>(s->indices.size()),
+                            static_cast<int>(position_offset / 3), static_cast<int>(s->positions.size() / 3));
 
         // Copy positions
         std::copy(s->positions.begin(), s->positions.end(), position_list.begin() + position_offset);

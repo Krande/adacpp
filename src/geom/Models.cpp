@@ -42,5 +42,6 @@ OccShape::OccShape(TopoDS_Shape shape,
           name(std::move(name)) {}
 #endif
 
-GroupReference::GroupReference(const int node_id, const int start, const int length)
-        : node_id(node_id), start(start), length(length) {}
+GroupReference::GroupReference(const int node_id, const int start, const int length, const int vstart,
+                               const int vlength)
+        : node_id(node_id), start(start), length(length), vstart(vstart), vlength(vlength) {}
