@@ -2,6 +2,15 @@
 
 
 
+## v0.5.0 (2026-06-05)
+
+### Feature
+
+* feat: zero-copy NumPy mesh buffers + batch tessellation (#24)
+
+Co-authored-by: Claude Opus 4.8 &lt;noreply@anthropic.com&gt; ([`9027eb0`](https://github.com/Krande/adacpp/commit/9027eb0cc6b223a609d6942e5d9b8024e60baefe))
+
+
 ## v0.4.2 (2026-06-03)
 
 ### Chore
