@@ -6,6 +6,7 @@
 #include "../geom/MeshType.h"
 #include "../cadit/occt/step_writer.h"
 
+#include <nanobind/ndarray.h>
 #include <nanobind/stl/array.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/pair.h>
@@ -215,6 +216,23 @@ Mesh tessellate_impl(const ShapeHandle &sh, double linear_deflection) {
 
     std::vector<float> positions;
     std::vector<uint32_t> indices;
+    // Pre-count nodes/triangles so the buffers are sized once. Appending without
+    // reserve reallocates repeatedly (and copies) as the mesh grows — the
+    // dominant allocation cost on large shapes. The triangulation was already
+    // computed by BRepMesh above, so this extra face pass is cheap.
+    {
+        size_t n_nodes = 0, n_tris = 0;
+        for (TopExp_Explorer exp(shape, TopAbs_FACE); exp.More(); exp.Next()) {
+            TopLoc_Location loc;
+            const Handle(Poly_Triangulation) tri =
+                    BRep_Tool::Triangulation(TopoDS::Face(exp.Current()), loc);
+            if (tri.IsNull()) continue;
+            n_nodes += static_cast<size_t>(tri->NbNodes());
+            n_tris += static_cast<size_t>(tri->NbTriangles());
+        }
+        positions.reserve(n_nodes * 3);
+        indices.reserve(n_tris * 3);
+    }
     for (TopExp_Explorer exp(shape, TopAbs_FACE); exp.More(); exp.Next()) {
         const TopoDS_Face face = TopoDS::Face(exp.Current());
         TopLoc_Location loc;
@@ -1692,12 +1710,32 @@ void cad_module(nb::module_ &m) {
             .def_ro("start",   &GroupReference::start)
             .def_ro("length",  &GroupReference::length);
 
+    // Expose the bulk buffers as zero-copy, read-only NumPy views instead of
+    // copying each std::vector into a Python list on every access (the old
+    // def_ro behaviour via nanobind/stl/vector.h). For a mesh with thousands of
+    // triangles this turns an O(n) per-access PyObject allocation into a cheap
+    // array view. ``nb::find(self)`` is the owning Python Mesh, passed as the
+    // ndarray owner so the underlying vector stays alive while the view exists.
+    // Empty vectors are returned as length-0 arrays (data() may be null, which
+    // is valid for a zero-element shape).
     nb::class_<Mesh>(m, "Mesh")
             .def_ro("id",        &Mesh::id)
-            .def_ro("positions", &Mesh::positions)
-            .def_ro("indices",   &Mesh::indices)
-            .def_ro("normals",   &Mesh::normals)
-            .def_ro("edges",     &Mesh::edges)
+            .def_prop_ro("positions", [](Mesh &self) {
+                return nb::ndarray<nb::numpy, const float, nb::ndim<1>>(
+                        self.positions.data(), {self.positions.size()}, nb::find(self));
+            })
+            .def_prop_ro("indices", [](Mesh &self) {
+                return nb::ndarray<nb::numpy, const uint32_t, nb::ndim<1>>(
+                        self.indices.data(), {self.indices.size()}, nb::find(self));
+            })
+            .def_prop_ro("normals", [](Mesh &self) {
+                return nb::ndarray<nb::numpy, const float, nb::ndim<1>>(
+                        self.normals.data(), {self.normals.size()}, nb::find(self));
+            })
+            .def_prop_ro("edges", [](Mesh &self) {
+                return nb::ndarray<nb::numpy, const uint32_t, nb::ndim<1>>(
+                        self.edges.data(), {self.edges.size()}, nb::find(self));
+            })
             .def_ro("mesh_type", &Mesh::mesh_type)
             .def_ro("color",     &Mesh::color)
             .def_ro("groups",    &Mesh::group_reference);
