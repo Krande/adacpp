@@ -2,6 +2,15 @@
 
 
 
+## v0.6.0 (2026-06-07)
+
+### Feature
+
+* feat: sew_faces + ShapeFix p-curve tessellation retry (#25)
+
+Co-authored-by: Claude Opus 4.8 (1M context) &lt;noreply@anthropic.com&gt; ([`642d5f2`](https://github.com/Krande/adacpp/commit/642d5f2f2d7d7223cd75495d908a5f0d1b6dc03f))
+
+
 ## v0.5.0 (2026-06-05)
 
 ### Feature
