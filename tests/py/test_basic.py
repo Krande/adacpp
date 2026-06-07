@@ -283,6 +283,27 @@ def test_cad_build_bspline_surface_face():
     assert bb == (0.0, 0.0, 0.0, 2.0, 2.0, 0.375)
 
 
+def _quad_edges(pts):
+    # Closed polygon as line edge records [0, p1, p2] for build_planar_face.
+    return [[0.0, *pts[i], *pts[(i + 1) % len(pts)]] for i in range(len(pts))]
+
+
+def test_cad_sew_faces_open_shell():
+    # Two quads sharing an edge sew into a single connected shell (one handle, two
+    # faces) — the open-shell case (IfcShellBasedSurfaceModel) where
+    # make_volumes_from_faces would yield nothing because nothing bounds a volume.
+    f1 = adacpp.cad.build_planar_face(
+        _quad_edges([(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]), [], [0, 0, 0], [0, 0, 1], [1, 0, 0]
+    )
+    f2 = adacpp.cad.build_planar_face(
+        _quad_edges([(1, 0, 0), (2, 0, 0), (2, 1, 0), (1, 1, 0)]), [], [0, 0, 0], [0, 0, 1], [1, 0, 0]
+    )
+    faces = adacpp.cad.faces(f1) + adacpp.cad.faces(f2)
+    shell = adacpp.cad.sew_faces(faces)
+    assert adacpp.cad.shape_type(shell) == "shell"
+    assert len(adacpp.cad.faces(shell)) == 2
+
+
 def test_cad_introspection_helpers():
     # area / shape_type / face_surface_type — backend-neutral replacements for
     # GProp + TopAbs + BRep_Tool::Surface introspection.

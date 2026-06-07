@@ -47,6 +47,7 @@
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepBuilderAPI_TransitionMode.hxx>
 #include <BRepCheck_Analyzer.hxx>
@@ -56,6 +57,7 @@
 #include <BRepOffsetAPI_ThruSections.hxx>
 #include <BRepGProp.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
+#include <ShapeFix_Shape.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
 #include <Geom_Surface.hxx>
@@ -198,8 +200,9 @@ ShapeHandle make_sphere_impl(float radius) {
 // Mesh a single shape and APPEND its triangles into the shared buffers,
 // offsetting triangle indices by the current vertex base. Shared by the single
 // tessellate (one shape) and the batch path (many shapes into one mesh).
-static void append_shape_triangles(const TopoDS_Shape &shape, double linear_deflection,
+static void append_shape_triangles(const TopoDS_Shape &shape_in, double linear_deflection,
                                    std::vector<float> &positions, std::vector<uint32_t> &indices) {
+    TopoDS_Shape shape = shape_in;
     // Auto deflection: a fraction of the bbox diagonal keeps tessellation tight
     // on small shapes without exploding triangle counts on large ones.
     if (linear_deflection <= 0.0) {
@@ -213,6 +216,30 @@ static void append_shape_triangles(const TopoDS_Shape &shape, double linear_defl
         linear_deflection = std::sqrt(dx * dx + dy * dy + dz * dz) * 0.05;
     }
     BRepMesh_IncrementalMesh(shape, linear_deflection);
+
+    // BRepMesh grids nothing when a face is missing its 2D p-curves (the parametric
+    // representation it triangulates against) — common for imported B-reps: a bspline/NURBS
+    // face trimmed by 3D-only boundary curves (IfcPolyline pcurves, IfcIntersectionCurve).
+    // The face is valid (exports to STEP) but renders empty. ShapeFix builds the missing
+    // p-curves; retry the mesh once. Only fires when the first pass produced no triangles,
+    // so there is no happy-path cost. Mirrors OccBackend's tessellate ShapeFix retry.
+    {
+        bool any_tris = false;
+        for (TopExp_Explorer e(shape, TopAbs_FACE); e.More() && !any_tris; e.Next()) {
+            TopLoc_Location l;
+            const Handle(Poly_Triangulation) t = BRep_Tool::Triangulation(TopoDS::Face(e.Current()), l);
+            if (!t.IsNull() && t->NbTriangles() > 0) any_tris = true;
+        }
+        if (!any_tris) {
+            ShapeFix_Shape sf(shape);
+            sf.Perform();
+            const TopoDS_Shape fixed = sf.Shape();
+            if (!fixed.IsNull()) {
+                shape = fixed;
+                BRepMesh_IncrementalMesh(shape, linear_deflection);
+            }
+        }
+    }
 
     // Pre-count this shape's nodes/triangles and grow the shared buffers once.
     // Appending without reserve reallocates repeatedly as the mesh grows — the
@@ -757,6 +784,28 @@ std::vector<std::array<double, 3>> vertex_points_impl(const ShapeHandle &sh) {
 // (BOPAlgo / BRepClass3d / BRepGProp), no pythonocc — mirrors adapy's
 // OccBackend so both backends agree.
 // ----------------------------------------------------------------------------
+
+// Sew a set of faces into a single shell (BRepBuilderAPI_Sewing). Unlike
+// make_volumes_from_faces (which partitions space into solids and only suits a
+// watertight face soup), this preserves an OPEN surface model as one connected
+// shell handle — the IfcShellBasedSurfaceModel / open-shell case where the
+// faces are b-spline AdvancedFaces that don't bound a volume. Returns whatever
+// the sewer yields (a shell, or a compound of shells/faces if disjoint).
+ShapeHandle sew_faces_impl(const std::vector<ShapeHandle> &faces, double tolerance) {
+    BRepBuilderAPI_Sewing sewer(tolerance > 0.0 ? tolerance : 1e-6);
+    int added = 0;
+    for (const auto &f : faces) {
+        const TopoDS_Shape s = f.topods();
+        if (s.IsNull()) continue;
+        sewer.Add(s);
+        ++added;
+    }
+    if (added == 0) throw std::runtime_error("sew_faces: no faces");
+    sewer.Perform();
+    const TopoDS_Shape sewn = sewer.SewedShape();
+    if (sewn.IsNull()) throw std::runtime_error("sew_faces: sewing produced a null shape");
+    return ShapeHandle(sewn);
+}
 
 std::vector<ShapeHandle> make_volumes_from_faces_impl(const std::vector<ShapeHandle> &faces, double tolerance) {
     BOPAlgo_MakerVolume mv;
@@ -2068,6 +2117,12 @@ void cad_module(nb::module_ &m) {
           "faces"_a, "tolerance"_a = 1e-6,
           "Partition space into solids from a face soup (BOPAlgo_MakerVolume). "
           "Interior faces come out shared between the two cells they separate.");
+
+    m.def("sew_faces", &sew_faces_impl,
+          "faces"_a, "tolerance"_a = 1e-6,
+          "Sew faces into one connected shell (BRepBuilderAPI_Sewing). For OPEN "
+          "surface models (IfcShellBasedSurfaceModel / open shell) that don't "
+          "bound a volume, where make_volumes_from_faces would yield nothing.");
 
     m.def("non_manifold_merge", &non_manifold_merge_impl,
           "shapes"_a, "tolerance"_a = 1e-6, "glue"_a = true,
