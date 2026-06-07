@@ -58,6 +58,7 @@
 #include <BRepOffsetAPI_ThruSections.hxx>
 #include <BRepGProp.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
+#include <ShapeFix_Face.hxx>
 #include <ShapeFix_Shape.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
@@ -1054,7 +1055,8 @@ TopoDS_Edge edge_from_record(const std::vector<double> &e) {
         const bool rational = std::lround(e[2]) != 0;
         const bool trim = std::lround(e[3]) != 0;
         const double t_start = e[4], t_end = e[5];
-        std::size_t i = 6;
+        const gp_Pnt p_start(e[6], e[7], e[8]), p_end(e[9], e[10], e[11]);
+        std::size_t i = 12;
         const int n_poles = static_cast<int>(std::lround(e[i++]));
         TColgp_Array1OfPnt poles(1, n_poles);
         for (int p = 1; p <= n_poles; ++p) {
@@ -1075,6 +1077,10 @@ TopoDS_Edge edge_from_record(const std::vector<double> &e) {
             curve = new Geom_BSplineCurve(poles, knots, mults, degree, Standard_False);
         }
         if (trim) return BRepBuilderAPI_MakeEdge(curve, t_start, t_end).Edge();
+        // No parametric trim: the record's start/end points define the segment of an
+        // otherwise-full b-spline curve. Trim by points (OCC projects them onto the curve) —
+        // without this the whole curve is used and the edge overshoots the real boundary.
+        if (p_start.Distance(p_end) > 1e-9) return BRepBuilderAPI_MakeEdge(curve, p_start, p_end).Edge();
         return BRepBuilderAPI_MakeEdge(curve).Edge();
     }
     throw std::runtime_error("edge_from_record: unknown edge kind " + std::to_string(kind));
@@ -1303,6 +1309,33 @@ ShapeHandle build_advanced_face_bspline_impl(
     TopoDS_Face face = fm.Face();
     BRepLib::BuildCurves3d(face);  // pcurve-built edges have no 3D curve yet
     return ShapeHandle(face);
+}
+
+// Bounds-trimmed AdvancedFace over a PLANE surface (flat SAT/IFC plates). The supporting
+// plane is INFERRED from the (planar) boundary wire via MakeFace(wire, OnlyPlane=true),
+// which also computes each edge's 2D p-curve — including a b-spline boundary edge — so the
+// face is correctly bounded by the wire and meshes. bounds[0] is the outer boundary, the
+// rest are holes. loc/axis/ref_dir are accepted for signature parity but unused (the wire
+// fixes the plane). Mirrors adapy's make_closed_shell_from_geom AdvancedFace(Plane) path.
+ShapeHandle build_advanced_face_planar_impl(
+        std::array<double, 3>, std::array<double, 3>, std::array<double, 3>,
+        const std::vector<std::vector<std::vector<double>>> &bounds) {
+    if (bounds.empty()) throw std::runtime_error("build_advanced_face_planar: no bounds");
+
+    auto wire_of = [&](const std::vector<std::vector<double>> &edges) -> TopoDS_Wire {
+        BRepBuilderAPI_MakeWire wm;
+        for (const auto &rec : edges) wm.Add(edge_from_record(rec));
+        wm.Build();
+        if (!wm.IsDone()) throw std::runtime_error("build_advanced_face_planar: wire build failed");
+        return wm.Wire();
+    };
+
+    BRepBuilderAPI_MakeFace fm(wire_of(bounds[0]), Standard_True);
+    for (std::size_t b = 1; b < bounds.size(); ++b) fm.Add(wire_of(bounds[b]));
+    if (!fm.IsDone()) throw std::runtime_error("build_advanced_face_planar: MakeFace failed");
+    ShapeFix_Face fixer(fm.Face());
+    fixer.Perform();
+    return ShapeHandle(fixer.Face());
 }
 
 // Extract the 2D UV pcurve of an edge on a face (BRep_Tool::CurveOnSurface →
@@ -2094,6 +2127,12 @@ void cad_module(nb::module_ &m) {
           "Bounds-trimmed AdvancedFace over a B-spline surface. bounds[0] is the outer "
           "boundary, the rest are holes; each edge is a 3D edge record or a kind-6 2D "
           "pcurve record laid on the surface. Ports make_face_from_geom (SAT-pcurve path).");
+
+    m.def("build_advanced_face_planar", &build_advanced_face_planar_impl,
+          "loc"_a, "axis"_a, "ref_dir"_a, "bounds"_a,
+          "Bounds-trimmed AdvancedFace over a Plane inferred from the (planar) boundary wire "
+          "(MakeFace OnlyPlane). bounds[0] outer, rest holes; 3D edge records. loc/axis/ref_dir "
+          "are accepted for parity but unused. Ports make_closed_shell_from_geom's planar path.");
 
     m.def("face_to_advanced_face", &face_to_advanced_face_impl, "face"_a,
           "Decompose a B-spline face into AdvancedFaceData (surface poles/knots + per-wire "
