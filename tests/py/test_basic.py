@@ -283,6 +283,46 @@ def test_cad_build_bspline_surface_face():
     assert bb == (0.0, 0.0, 0.0, 2.0, 2.0, 0.375)
 
 
+def _quad_edges(pts):
+    # Closed polygon as line edge records [0, p1, p2] for build_planar_face.
+    return [[0.0, *pts[i], *pts[(i + 1) % len(pts)]] for i in range(len(pts))]
+
+
+def test_cad_sew_faces_open_shell():
+    # Two quads sharing an edge sew into a single connected shell (one handle, two
+    # faces) — the open-shell case (IfcShellBasedSurfaceModel) where
+    # make_volumes_from_faces would yield nothing because nothing bounds a volume.
+    f1 = adacpp.cad.build_planar_face(
+        _quad_edges([(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]), [], [0, 0, 0], [0, 0, 1], [1, 0, 0]
+    )
+    f2 = adacpp.cad.build_planar_face(
+        _quad_edges([(1, 0, 0), (2, 0, 0), (2, 1, 0), (1, 1, 0)]), [], [0, 0, 0], [0, 0, 1], [1, 0, 0]
+    )
+    faces = adacpp.cad.faces(f1) + adacpp.cad.faces(f2)
+    shell = adacpp.cad.sew_faces(faces)
+    assert adacpp.cad.shape_type(shell) == "shell"
+    assert len(adacpp.cad.faces(shell)) == 2
+
+
+def test_cad_polygon_face():
+    # A closed quad polygon -> one planar face (divider face for make_volumes_from_faces).
+    face = adacpp.cad.polygon_face([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]])
+    assert adacpp.cad.shape_type(face) == "face"
+    assert round(adacpp.cad.area(face), 6) == 1.0
+
+
+def test_cad_build_advanced_face_planar():
+    # Planar AdvancedFace from a closed line-edge quad: plane inferred from the wire, one
+    # face of the expected area. (bounds[0] outer; loc/axis/ref_dir accepted but unused.)
+    quad = [[0.0, *a, *b] for a, b in zip(
+        [(0, 0, 0), (2, 0, 0), (2, 1, 0), (0, 1, 0)],
+        [(2, 0, 0), (2, 1, 0), (0, 1, 0), (0, 0, 0)],
+    )]
+    face = adacpp.cad.build_advanced_face_planar([0, 0, 0], [0, 0, 1], [1, 0, 0], [quad])
+    assert adacpp.cad.shape_type(face) == "face"
+    assert round(adacpp.cad.area(face), 6) == 2.0
+
+
 def test_cad_introspection_helpers():
     # area / shape_type / face_surface_type — backend-neutral replacements for
     # GProp + TopAbs + BRep_Tool::Surface introspection.
@@ -343,8 +383,10 @@ def test_cad_build_wire_curve_zoo():
     w = adacpp.cad.build_wire(edges)
     assert adacpp.cad.shape_type(w) == "wire"
 
-    # Degree-2 B-spline curve edge (3 poles, clamped knots) + a closing line.
-    bs_edge = [3, 2, 0, 0, 0.0, 0.0, 3, 0, 0, 0, 1, 1, 0, 2, 0, 0, 2, 0.0, 1.0, 3, 3]
+    # Degree-2 B-spline curve edge (3 poles, clamped knots) + a closing line. Layout:
+    # [3, degree, rational, trim, t_start, t_end, sx,sy,sz, ex,ey,ez, n_poles, <poles>,
+    #  n_knots, <knots>, <mults>]. start/end span the whole curve here (no trim).
+    bs_edge = [3, 2, 0, 0, 0.0, 0.0, 0, 0, 0, 2, 0, 0, 3, 0, 0, 0, 1, 1, 0, 2, 0, 0, 2, 0.0, 1.0, 3, 3]
     w2 = adacpp.cad.build_wire([bs_edge, [0, 2, 0, 0, 0, 0, 0]])
     assert adacpp.cad.shape_type(w2) == "wire"
     assert len(adacpp.cad.edges(w2)) == 2

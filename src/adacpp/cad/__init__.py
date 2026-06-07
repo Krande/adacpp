@@ -43,6 +43,7 @@ build_wire = _cad.build_wire
 build_filled_face = _cad.build_filled_face
 build_bspline_surface_face = _cad.build_bspline_surface_face
 build_advanced_face_bspline = _cad.build_advanced_face_bspline
+build_advanced_face_planar = _cad.build_advanced_face_planar
 face_to_advanced_face = _cad.face_to_advanced_face
 extrude_face_along_normal = _cad.extrude_face_along_normal
 build_face_based_surface_model = _cad.build_face_based_surface_model
@@ -68,6 +69,8 @@ to_topods_pointer = _cad.to_topods_pointer
 # Topology-kernel ops (non-manifold core: cells from a face soup, non-manifold
 # merge, free-face extraction, point-in-solid, centre of mass).
 make_volumes_from_faces = _cad.make_volumes_from_faces
+sew_faces = _cad.sew_faces
+polygon_face = _cad.polygon_face
 merge_cells = _cad.merge_cells
 face_id = _cad.face_id
 non_manifold_merge = _cad.non_manifold_merge
@@ -121,6 +124,7 @@ __all__ = [
     "build_filled_face",
     "build_bspline_surface_face",
     "build_advanced_face_bspline",
+    "build_advanced_face_planar",
     "face_to_advanced_face",
     "extrude_face_along_normal",
     "build_face_based_surface_model",
@@ -141,6 +145,8 @@ __all__ = [
     "face_plane",
     "to_topods_pointer",
     "make_volumes_from_faces",
+    "sew_faces",
+    "polygon_face",
     "merge_cells",
     "face_id",
     "non_manifold_merge",
