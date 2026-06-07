@@ -69,6 +69,7 @@ to_topods_pointer = _cad.to_topods_pointer
 # merge, free-face extraction, point-in-solid, centre of mass).
 make_volumes_from_faces = _cad.make_volumes_from_faces
 sew_faces = _cad.sew_faces
+polygon_face = _cad.polygon_face
 merge_cells = _cad.merge_cells
 face_id = _cad.face_id
 non_manifold_merge = _cad.non_manifold_merge
@@ -143,6 +144,7 @@ __all__ = [
     "to_topods_pointer",
     "make_volumes_from_faces",
     "sew_faces",
+    "polygon_face",
     "merge_cells",
     "face_id",
     "non_manifold_merge",

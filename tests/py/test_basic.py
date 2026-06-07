@@ -304,6 +304,13 @@ def test_cad_sew_faces_open_shell():
     assert len(adacpp.cad.faces(shell)) == 2
 
 
+def test_cad_polygon_face():
+    # A closed quad polygon -> one planar face (divider face for make_volumes_from_faces).
+    face = adacpp.cad.polygon_face([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]])
+    assert adacpp.cad.shape_type(face) == "face"
+    assert round(adacpp.cad.area(face), 6) == 1.0
+
+
 def test_cad_introspection_helpers():
     # area / shape_type / face_surface_type — backend-neutral replacements for
     # GProp + TopAbs + BRep_Tool::Surface introspection.

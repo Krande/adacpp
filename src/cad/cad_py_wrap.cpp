@@ -46,6 +46,7 @@
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
@@ -1128,6 +1129,17 @@ TopoDS_Shape place_at(TopoDS_Shape shape, const std::array<double, 3> &loc,
 // Face-based surface model: a set of polygon faces fused into one shell.
 // Port of adapy's make_shell_from_face_based_surface_geom. Each polygon is a
 // closed loop of 3D points.
+// Single planar face from a closed polygon of points (auto-closed). Ports adapy
+// OccBackend.polygon_face — used to feed internal divider faces into
+// make_volumes_from_faces so a lofted solid partitions into one cell per band.
+ShapeHandle polygon_face_impl(const std::vector<std::array<double, 3>> &poly) {
+    if (poly.size() < 3) throw std::runtime_error("polygon_face: need at least 3 points");
+    BRepBuilderAPI_MakePolygon mp;
+    for (const auto &p : poly) mp.Add(gp_Pnt(p[0], p[1], p[2]));
+    mp.Close();
+    return ShapeHandle(BRepBuilderAPI_MakeFace(mp.Wire(), Standard_True).Face());
+}
+
 ShapeHandle build_face_based_surface_model_impl(
         const std::vector<std::vector<std::array<double, 3>>> &polygons) {
     TopoDS_Shape result;
@@ -2123,6 +2135,11 @@ void cad_module(nb::module_ &m) {
           "Sew faces into one connected shell (BRepBuilderAPI_Sewing). For OPEN "
           "surface models (IfcShellBasedSurfaceModel / open shell) that don't "
           "bound a volume, where make_volumes_from_faces would yield nothing.");
+
+    m.def("polygon_face", &polygon_face_impl,
+          "points"_a,
+          "Planar face from a closed polygon of >=3 points (auto-closed). Divider "
+          "faces for make_volumes_from_faces; ports adapy OccBackend.polygon_face.");
 
     m.def("non_manifold_merge", &non_manifold_merge_impl,
           "shapes"_a, "tolerance"_a = 1e-6, "glue"_a = true,
