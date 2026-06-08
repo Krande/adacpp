@@ -349,6 +349,44 @@ def test_cad_build_advanced_face_cylindrical():
     assert len(mesh.indices) > 0
 
 
+def test_cad_build_advanced_face_conical():
+    # Half cone-frustum band (apex at origin, axis +Z, semi_angle=45deg so r=1+z),
+    # angle 0..pi, between z=0 (r=1) and z=1 (r=2): two CIRCLE arcs + two generatrix
+    # LINE edges (each a straight line on the cone). Surface must be a cone + tessellate.
+    import math
+
+    bottom = [1.0, 1, 0, 0, 0, 1, 0, -1, 0, 0]  # arc z=0 r=1
+    right = [0.0, -1, 0, 0, -2, 0, 1]  # generatrix at angle pi: (-1,0,0)->(-2,0,1)
+    top = [1.0, -2, 0, 1, 0, 2, 1, 2, 0, 1]  # arc z=1 r=2
+    left = [0.0, 2, 0, 1, 1, 0, 0]  # generatrix at angle 0: (2,0,1)->(1,0,0)
+    bounds = [[bottom, right, top, left]]
+
+    face = adacpp.cad.build_advanced_face_conical([0, 0, 0], [0, 0, 1], [1, 0, 0], 1.0, math.pi / 4, bounds)
+    assert adacpp.cad.shape_type(face) == "face"
+    assert adacpp.cad.face_surface_type(face) == "cone"
+    mesh = adacpp.cad.tessellate(face, 0.05)
+    assert len(mesh.positions) > 0 and len(mesh.indices) > 0
+
+
+def test_cad_build_advanced_face_toroidal():
+    # Quarter-quarter torus patch (major R=3, minor r=1): u 0..pi/2, v 0..pi/2,
+    # bounded by four CIRCLE arcs (two major, two minor). Surface must be a torus.
+    import math
+
+    s = 1.0 / math.sqrt(2.0)
+    e1 = [1.0, 4, 0, 0, 4 * s, 4 * s, 0, 0, 4, 0]  # v=0 outer arc (R+r=4), z=0
+    e2 = [1.0, 0, 4, 0, 0, 3 + s, s, 0, 3, 1]  # u=pi/2 minor arc about (0,3,0)
+    e3 = [1.0, 0, 3, 1, 3 * s, 3 * s, 1, 3, 0, 1]  # v=pi/2 arc (R=3), z=1
+    e4 = [1.0, 3, 0, 1, 3 + s, 0, s, 4, 0, 0]  # u=0 minor arc about (3,0,0)
+    bounds = [[e1, e2, e3, e4]]
+
+    face = adacpp.cad.build_advanced_face_toroidal([0, 0, 0], [0, 0, 1], [1, 0, 0], 3.0, 1.0, bounds)
+    assert adacpp.cad.shape_type(face) == "face"
+    assert adacpp.cad.face_surface_type(face) == "torus"
+    mesh = adacpp.cad.tessellate(face, 0.05)
+    assert len(mesh.positions) > 0 and len(mesh.indices) > 0
+
+
 def test_cad_introspection_helpers():
     # area / shape_type / face_surface_type — backend-neutral replacements for
     # GProp + TopAbs + BRep_Tool::Surface introspection.

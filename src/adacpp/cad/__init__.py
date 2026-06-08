@@ -45,6 +45,8 @@ build_bspline_surface_face = _cad.build_bspline_surface_face
 build_advanced_face_bspline = _cad.build_advanced_face_bspline
 build_advanced_face_planar = _cad.build_advanced_face_planar
 build_advanced_face_cylindrical = _cad.build_advanced_face_cylindrical
+build_advanced_face_conical = _cad.build_advanced_face_conical
+build_advanced_face_toroidal = _cad.build_advanced_face_toroidal
 face_to_advanced_face = _cad.face_to_advanced_face
 extrude_face_along_normal = _cad.extrude_face_along_normal
 build_face_based_surface_model = _cad.build_face_based_surface_model
@@ -127,6 +129,8 @@ __all__ = [
     "build_advanced_face_bspline",
     "build_advanced_face_planar",
     "build_advanced_face_cylindrical",
+    "build_advanced_face_conical",
+    "build_advanced_face_toroidal",
     "face_to_advanced_face",
     "extrude_face_along_normal",
     "build_face_based_surface_model",
