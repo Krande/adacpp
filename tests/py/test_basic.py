@@ -314,13 +314,39 @@ def test_cad_polygon_face():
 def test_cad_build_advanced_face_planar():
     # Planar AdvancedFace from a closed line-edge quad: plane inferred from the wire, one
     # face of the expected area. (bounds[0] outer; loc/axis/ref_dir accepted but unused.)
-    quad = [[0.0, *a, *b] for a, b in zip(
-        [(0, 0, 0), (2, 0, 0), (2, 1, 0), (0, 1, 0)],
-        [(2, 0, 0), (2, 1, 0), (0, 1, 0), (0, 0, 0)],
-    )]
+    quad = [
+        [0.0, *a, *b]
+        for a, b in zip(
+            [(0, 0, 0), (2, 0, 0), (2, 1, 0), (0, 1, 0)],
+            [(2, 0, 0), (2, 1, 0), (0, 1, 0), (0, 0, 0)],
+        )
+    ]
     face = adacpp.cad.build_advanced_face_planar([0, 0, 0], [0, 0, 1], [1, 0, 0], [quad])
     assert adacpp.cad.shape_type(face) == "face"
     assert round(adacpp.cad.area(face), 6) == 2.0
+
+
+def test_cad_build_advanced_face_cylindrical():
+    # Half-cylinder wall patch (r=1, h=2, angle 0..pi) bounded by two CIRCLE arcs
+    # (top/bottom) and two axis-parallel LINE edges. Surface must be a cylinder and
+    # the lateral area pi*r*h = 2*pi; it must also tessellate (p-curves projected).
+    import math
+
+    bottom = [1.0, 1, 0, 0, 0, 1, 0, -1, 0, 0]  # arc start->mid->end at z=0
+    right = [0.0, -1, 0, 0, -1, 0, 2]  # line up at angle pi
+    top = [1.0, -1, 0, 2, 0, 1, 2, 1, 0, 2]  # arc back at z=2
+    left = [0.0, 1, 0, 2, 1, 0, 0]  # line down at angle 0
+    bounds = [[bottom, right, top, left]]
+
+    face = adacpp.cad.build_advanced_face_cylindrical([0, 0, 0], [0, 0, 1], [1, 0, 0], 1.0, bounds)
+    assert adacpp.cad.shape_type(face) == "face"
+    assert adacpp.cad.face_surface_type(face) == "cylinder"
+    # lateral area pi*r*h = 2*pi (sign depends on face orientation)
+    assert round(abs(adacpp.cad.area(face)), 4) == round(2 * math.pi, 4)
+
+    mesh = adacpp.cad.tessellate(face, 0.05)
+    assert len(mesh.positions) > 0
+    assert len(mesh.indices) > 0
 
 
 def test_cad_introspection_helpers():
