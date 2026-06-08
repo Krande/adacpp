@@ -62,6 +62,9 @@
 #include <ShapeFix_Shape.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
+#include <Geom_ConicalSurface.hxx>
+#include <Geom_CylindricalSurface.hxx>
+#include <Geom_ToroidalSurface.hxx>
 #include <Geom_Surface.hxx>
 #include <Geom2d_BSplineCurve.hxx>
 #include <Geom2d_Curve.hxx>
@@ -1338,6 +1341,68 @@ ShapeHandle build_advanced_face_planar_impl(
     return ShapeHandle(fixer.Face());
 }
 
+// Bounds-trimmed AdvancedFace over an explicitly-positioned analytic surface
+// (cylinder / cone / torus). Unlike the planar path the surface is NOT inferred
+// from the wire; the boundary wire trims the given surface. The 3D boundary edges
+// (LINEs + CIRCLE arcs) carry no UV p-curve, so ShapeFix_Face projects them onto
+// the surface and SameParameter reconciles 3D/2D so BRepMesh can grid the face.
+// Mirrors adapy's make_closed_shell_from_geom analytic AdvancedFace path.
+static ShapeHandle bounds_trimmed_analytic_face(
+        const Handle(Geom_Surface) &surf,
+        const std::vector<std::vector<std::vector<double>>> &bounds, const char *who) {
+    if (bounds.empty()) throw std::runtime_error(std::string(who) + ": no bounds");
+
+    auto wire_of = [&](const std::vector<std::vector<double>> &edges) -> TopoDS_Wire {
+        BRepBuilderAPI_MakeWire wm;
+        for (const auto &rec : edges) wm.Add(edge_from_record(rec));
+        wm.Build();
+        if (!wm.IsDone()) throw std::runtime_error(std::string(who) + ": wire build failed");
+        return wm.Wire();
+    };
+
+    BRepBuilderAPI_MakeFace fm(surf, wire_of(bounds[0]), Standard_True);
+    for (std::size_t b = 1; b < bounds.size(); ++b) fm.Add(wire_of(bounds[b]));
+    if (!fm.IsDone()) throw std::runtime_error(std::string(who) + ": MakeFace failed");
+
+    TopoDS_Face face = fm.Face();
+    ShapeFix_Face fixer(face);
+    fixer.Perform();
+    face = fixer.Face();
+    BRepLib::SameParameter(face, 1.0e-6, Standard_True);
+    return ShapeHandle(face);
+}
+
+static gp_Ax3 _ax3(const std::array<double, 3> &loc, const std::array<double, 3> &axis,
+                   const std::array<double, 3> &ref_dir) {
+    return gp_Ax3(gp_Pnt(loc[0], loc[1], loc[2]), gp_Dir(axis[0], axis[1], axis[2]),
+                  gp_Dir(ref_dir[0], ref_dir[1], ref_dir[2]));
+}
+
+ShapeHandle build_advanced_face_cylindrical_impl(
+        std::array<double, 3> loc, std::array<double, 3> axis,
+        std::array<double, 3> ref_dir, double radius,
+        const std::vector<std::vector<std::vector<double>>> &bounds) {
+    Handle(Geom_CylindricalSurface) surf = new Geom_CylindricalSurface(_ax3(loc, axis, ref_dir), radius);
+    return bounds_trimmed_analytic_face(surf, bounds, "build_advanced_face_cylindrical");
+}
+
+ShapeHandle build_advanced_face_conical_impl(
+        std::array<double, 3> loc, std::array<double, 3> axis,
+        std::array<double, 3> ref_dir, double radius, double semi_angle,
+        const std::vector<std::vector<std::vector<double>>> &bounds) {
+    // Geom_ConicalSurface(ax3, semi_angle, ref_radius)
+    Handle(Geom_ConicalSurface) surf = new Geom_ConicalSurface(_ax3(loc, axis, ref_dir), semi_angle, radius);
+    return bounds_trimmed_analytic_face(surf, bounds, "build_advanced_face_conical");
+}
+
+ShapeHandle build_advanced_face_toroidal_impl(
+        std::array<double, 3> loc, std::array<double, 3> axis,
+        std::array<double, 3> ref_dir, double major_radius, double minor_radius,
+        const std::vector<std::vector<std::vector<double>>> &bounds) {
+    Handle(Geom_ToroidalSurface) surf = new Geom_ToroidalSurface(_ax3(loc, axis, ref_dir), major_radius, minor_radius);
+    return bounds_trimmed_analytic_face(surf, bounds, "build_advanced_face_toroidal");
+}
+
 // Extract the 2D UV pcurve of an edge on a face (BRep_Tool::CurveOnSurface →
 // trim → Geom2dConvert::CurveToBSplineCurve), plus the edge's 3D endpoints.
 // Port of adapy's _extract_pcurve + _edge_endpoints. has_pcurve=false when OCC
@@ -2133,6 +2198,23 @@ void cad_module(nb::module_ &m) {
           "Bounds-trimmed AdvancedFace over a Plane inferred from the (planar) boundary wire "
           "(MakeFace OnlyPlane). bounds[0] outer, rest holes; 3D edge records. loc/axis/ref_dir "
           "are accepted for parity but unused. Ports make_closed_shell_from_geom's planar path.");
+
+    m.def("build_advanced_face_cylindrical", &build_advanced_face_cylindrical_impl,
+          "loc"_a, "axis"_a, "ref_dir"_a, "radius"_a, "bounds"_a,
+          "Bounds-trimmed AdvancedFace over a Geom_CylindricalSurface. loc is the cylinder "
+          "axis base, axis its direction, ref_dir the U reference, radius its radius. bounds[0] "
+          "outer, rest holes; 3D edge records (LINE/CIRCLE). Ports make_closed_shell_from_geom's "
+          "AdvancedFace(CylindricalSurface) path for tube/pipe walls.");
+
+    m.def("build_advanced_face_conical", &build_advanced_face_conical_impl,
+          "loc"_a, "axis"_a, "ref_dir"_a, "radius"_a, "semi_angle"_a, "bounds"_a,
+          "Bounds-trimmed AdvancedFace over a Geom_ConicalSurface (radius at the axis base, "
+          "semi_angle the half-angle). bounds[0] outer, rest holes; 3D edge records.");
+
+    m.def("build_advanced_face_toroidal", &build_advanced_face_toroidal_impl,
+          "loc"_a, "axis"_a, "ref_dir"_a, "major_radius"_a, "minor_radius"_a, "bounds"_a,
+          "Bounds-trimmed AdvancedFace over a Geom_ToroidalSurface (pipe elbows). "
+          "bounds[0] outer, rest holes; 3D edge records.");
 
     m.def("face_to_advanced_face", &face_to_advanced_face_impl, "face"_a,
           "Decompose a B-spline face into AdvancedFaceData (surface poles/knots + per-wire "
