@@ -2,6 +2,15 @@
 
 
 
+## v0.7.0 (2026-06-08)
+
+### Feature
+
+* feat: cylindrical/conical/toroidal AdvancedFace builders (#26)
+
+Co-authored-by: Claude Opus 4.8 (1M context) &lt;noreply@anthropic.com&gt; ([`90b4247`](https://github.com/Krande/adacpp/commit/90b4247e5bceac14594acdcc93c982cbebeb8a17))
+
+
 ## v0.6.0 (2026-06-07)
 
 ### Feature
