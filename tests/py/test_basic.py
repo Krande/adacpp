@@ -229,6 +229,28 @@ def test_cad_extruded_area_solid_tapered():
     assert bb == (-1.0, -1.0, 0.0, 1.0, 1.0, 2.0)
 
 
+def test_cad_build_swept_disk_solid():
+    # Sweep a disk of radius 0.1 along a straight 1 m directrix (line edge record
+    # [0, p0, p1]) -> a cylinder. Volume = pi*r^2*h.
+    import math
+
+    directrix = [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]]
+    shp = adacpp.cad.build_swept_disk_solid(directrix, 0.1, 0.0)
+    assert adacpp.cad.is_valid(shp)
+    assert adacpp.cad.shape_type(shp) == "solid"
+    assert round(adacpp.cad.volume(shp), 5) == round(math.pi * 0.1**2 * 1.0, 5)
+
+
+def test_cad_build_swept_disk_solid_annular():
+    # Annular disk (tube): outer 0.1, inner 0.05 over 1 m. Volume = pi*(R^2-r^2)*h.
+    import math
+
+    directrix = [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]]
+    shp = adacpp.cad.build_swept_disk_solid(directrix, 0.1, 0.05)
+    assert adacpp.cad.is_valid(shp)
+    assert round(adacpp.cad.volume(shp), 5) == round(math.pi * (0.1**2 - 0.05**2) * 1.0, 5)
+
+
 def test_cad_loft_profiles_two_squares_is_box():
     # Loft two equal squares 1 apart in Z → a unit box: 6 faces, volume 1.
     def rect(half, z):

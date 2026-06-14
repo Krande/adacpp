@@ -1685,6 +1685,48 @@ ShapeHandle build_fixed_reference_swept_area_solid_impl(
     return ShapeHandle(BRepBuilderAPI_Transform(solid, tr, true).Shape());
 }
 
+// Native IfcSweptDiskSolid (pipes / rods): sweep a circular disk (optionally
+// annular) along the directrix. Port of adapy's make_swept_disk_solid_from_geom
+// — the disk is placed at the spine start, normal to the start tangent, and
+// MakePipeShell keeps it perpendicular along the spine; an inner radius is swept
+// the same way and cut out. The directrix arrives as edge records (so any curve
+// kind adapy can encode — line/arc/composite — works uniformly).
+ShapeHandle build_swept_disk_solid_impl(
+        const std::vector<std::vector<double>> &directrix,
+        double radius,
+        double inner_radius) {
+    const TopoDS_Wire spine = wire_from_edges(directrix);
+
+    // Start point + tangent of the spine (a circle is rotationally symmetric, so
+    // the tangent sign is irrelevant — only the plane it defines matters).
+    TopExp_Explorer exp(spine, TopAbs_EDGE);
+    if (!exp.More()) throw std::runtime_error("build_swept_disk_solid: empty directrix");
+    const TopoDS_Edge first_edge = TopoDS::Edge(exp.Current());
+    BRepAdaptor_Curve adaptor(first_edge);
+    gp_Pnt p0;
+    gp_Vec d0;
+    adaptor.D1(adaptor.FirstParameter(), p0, d0);
+    if (d0.Magnitude() < 1e-12) throw std::runtime_error("build_swept_disk_solid: degenerate start tangent");
+    const gp_Ax2 disk_axis(p0, gp_Dir(d0));
+
+    auto sweep = [&](double r) -> TopoDS_Shape {
+        const TopoDS_Edge circ_edge = BRepBuilderAPI_MakeEdge(gp_Circ(disk_axis, r)).Edge();
+        const TopoDS_Wire profile = BRepBuilderAPI_MakeWire(circ_edge).Wire();
+        BRepOffsetAPI_MakePipeShell mps(spine);
+        mps.SetTransitionMode(BRepBuilderAPI_RoundCorner);
+        mps.Add(profile, Standard_True, Standard_False);
+        mps.Build();
+        mps.MakeSolid();
+        return mps.Shape();
+    };
+
+    TopoDS_Shape solid = sweep(radius);
+    if (inner_radius > 0.0) {
+        solid = BRepAlgoAPI_Cut(solid, sweep(inner_radius)).Shape();
+    }
+    return ShapeHandle(solid);
+}
+
 // ----------------------------------------------------------------------------
 // cut_surfaces — extract polyline boundaries of CSG cut faces (native port of
 // adapy's ada.occ.cut_surfaces_occ). Self-contained in adacpp's own OCCT; does
@@ -2165,6 +2207,13 @@ void cad_module(nb::module_ &m) {
           "edge-record encoding as build_extruded_area_solid) with "
           "MakePipeShell + round-corner transitions, make a solid, and "
           "translate to `location`.");
+
+    m.def("build_swept_disk_solid", &build_swept_disk_solid_impl,
+          "directrix"_a, "radius"_a, "inner_radius"_a = 0.0,
+          "Swept-disk solid (IfcSweptDiskSolid — pipes/rods): sweep a circular "
+          "(annular when inner_radius>0) disk along the directrix spine (edge "
+          "records). The disk is placed at the spine start normal to its tangent "
+          "and kept perpendicular by MakePipeShell.");
 
     m.def("make_halfspace", &make_halfspace_impl,
           "origin"_a, "normal"_a, "flip"_a,
