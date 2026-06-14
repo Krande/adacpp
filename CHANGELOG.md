@@ -2,6 +2,15 @@
 
 
 
+## v0.8.0 (2026-06-14)
+
+### Feature
+
+* feat: add build_swept_disk_solid for IfcSweptDiskSolid parity (#27)
+
+Co-authored-by: Claude Opus 4.8 (1M context) &lt;noreply@anthropic.com&gt; ([`cb36bb3`](https://github.com/Krande/adacpp/commit/cb36bb3a1a9ed2e16193910b24000f3e253b1fd4))
+
+
 ## v0.7.0 (2026-06-08)
 
 ### Feature
