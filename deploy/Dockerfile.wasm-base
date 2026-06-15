@@ -10,7 +10,7 @@
 #
 # /out/ layout (consumed by downstream image builds, e.g. adapy's viewer via
 # `COPY --from=<this image> /out/`):
-#   ada_cpp-<ver>-cp312-cp312-emscripten_3_1_58_wasm32.whl
+#   ada_cpp-<ver>-cp313-cp313-pyodide_2025_0_wasm32.whl
 #   manifest.json   {"adacpp": "<wheel filename>"}
 #   adacpp.sha      the resolved adacpp commit
 #

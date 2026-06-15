@@ -24,12 +24,19 @@ endif ()
 
 # Create a list called ADA_CPP_SOURCES of all cpp files inside the src dir
 if (BUILD_WASM)
-    # Wasm builds don't yet have OCCT/CGAL/gmsh/IfcOpenShell available, so the source
-    # list is restricted to the kernel-agnostic cad surface plus the wasm-safe pieces
-    # of geom/. As OCCT-wasm comes online, more files will move out of the #else.
+    # Wasm builds now link the cross-built OCCT toolkits (see wasm_occt.cmake), so
+    # the OCCT-backed CAD sources that the wasm bindings call must be compiled in
+    # too. Anything still missing here is emitted as an `env` import by the side
+    # module and traps with `unreachable` when first called (the function table
+    # slot is a stub). step_writer.cpp + helpers.cpp back adacpp's STEP write
+    # (backend.write_step); without them write_shapes_to_step is an unresolved
+    # import. CGAL/gmsh/IfcOpenShell are still wasm-unavailable, so their sources
+    # stay in the #else.
     set(ADA_CPP_SOURCES
             src/geom/Color.cpp
             src/geom/Models.cpp
+            src/cadit/occt/step_writer.cpp
+            src/helpers/helpers.cpp
     )
 else ()
     set(ADA_CPP_SOURCES

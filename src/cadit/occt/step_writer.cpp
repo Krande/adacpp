@@ -5,6 +5,8 @@
 #include "static_param_guard.h"
 
 #include <BRep_Builder.hxx>
+#include <BinXCAFDrivers.hxx>
+#include <Standard_Failure.hxx>
 #include <Interface_Static.hxx>
 #include <STEPCAFControl_Writer.hxx>
 #include <TCollection_ExtendedString.hxx>
@@ -24,7 +26,15 @@ class AdaCPPStepWriter {
 public:
     explicit AdaCPPStepWriter(const std::string &top_level_name = "Assembly") {
         app_ = new TDocStd_Application();
-        doc_ = new TDocStd_Document(TCollection_ExtendedString("XmlOcaf"));
+        // Register the binary XCAF storage driver and create the in-memory doc
+        // with the "BinXCAF" format. OCCT is built with OCCT_NO_PLUGINS (no
+        // resource-file driver loading), so a format whose driver isn't
+        // explicitly registered (the previous "XmlOcaf" — the XML driver/TKXml*
+        // isn't even linked for wasm) throws when the document is created/used,
+        // which terminates the wasm module. BinXCAFDrivers::DefineFormat
+        // registers the (linked) binary driver so the doc is valid.
+        BinXCAFDrivers::DefineFormat(app_);
+        doc_ = new TDocStd_Document(TCollection_ExtendedString("BinXCAF"));
         app_->InitDocument(doc_);
 
         // The shape tool
@@ -88,8 +98,6 @@ public:
 
         if (status != IFSelect_RetDone) {
             throw std::runtime_error("STEP export failed");
-        } else {
-            std::cout << "STEP export status: " << static_cast<int>(status) << std::endl;
         }
     }
 
@@ -121,14 +129,22 @@ void write_shapes_to_step(const std::string &filename, const std::vector<TopoDS_
                           const std::vector<std::string> &names, const std::vector<Color> &colors,
                           const std::string &unit, const std::string &schema,
                           const std::string &top_level_name) {
-    AdaCPPStepWriter writer(top_level_name);
-    for (std::size_t i = 0; i < shapes.size(); ++i) {
-        if (shapes[i].IsNull()) continue;
-        const std::string name = i < names.size() ? names[i] : ("shape_" + std::to_string(i));
-        const Color color = i < colors.size() ? colors[i] : Color();
-        writer.add_shape_handle(shapes[i], name, color);
+    // Translate OCCT failures into a std::runtime_error so nanobind reports a
+    // Python exception instead of the module aborting (an uncaught Standard_Failure
+    // under wasm-EH calls std::terminate).
+    try {
+        AdaCPPStepWriter writer(top_level_name);
+        for (std::size_t i = 0; i < shapes.size(); ++i) {
+            if (shapes[i].IsNull()) continue;
+            const std::string name = i < names.size() ? names[i] : ("shape_" + std::to_string(i));
+            const Color color = i < colors.size() ? colors[i] : Color();
+            writer.add_shape_handle(shapes[i], name, color);
+        }
+        writer.export_step(filename, unit, schema);
+    } catch (const Standard_Failure &e) {
+        throw std::runtime_error(std::string("OCCT STEP write failed: ") +
+                                 e.DynamicType()->Name() + ": " + e.GetMessageString());
     }
-    writer.export_step(filename, unit, schema);
 }
 
 // take in a single box dimension and origin and write to step file using the STEPControl_Writer class

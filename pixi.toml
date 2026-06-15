@@ -14,7 +14,9 @@ test = { features = ["test", "common"], no-default-feature = true }
 rattler-build = "*"
 
 [feature.common.dependencies]
-python = "==3.12"
+# 3.13 to match pyodide 0.29.x's host interpreter (its xbuildenv install
+# requires a 3.13 host); also adacpp's target Python under the new ABI.
+python = "==3.13"
 occt = { version = "==7.9.3", build = "*novtk*" }
 # 0.8.5 is the first ifcopenshell built against occt 7.9.3 (0.8.3.post1 pins
 # occt 7.9.0). Keep in lockstep with adapy's OCCT for the shared-ABI bridge.
@@ -48,11 +50,14 @@ ruff = "==0.4.10"
 [feature.wasm.dependencies]
 nodejs = "*"
 ninja = "*"
-# Pinned to match pyodide 0.27.x's emscripten. Pyodide 0.28+ uses emscripten 4.0.9
-# but pyodide-build 0.34.3 (latest as of 2026-05) cannot install those xbuildenvs yet,
-# so 3.1.58 is the latest pyodide-loadable emscripten available.
-emscripten = "==3.1.58"
-pyodide-build = "==0.34.3"
+# Pyodide 0.29.x (Python 3.13, pyemscripten_2025_0 ABI) uses emscripten 4.0.9
+# and native WebAssembly exception handling (-fwasm-exceptions). This is the
+# latest pyodide our toolchain can build: conda-forge tops out at emscripten
+# 4.0.9 (no 5.0.3 for pyodide 314/2026_0 yet) and the ifcopenshell wasm wheel
+# targets the 2025_0 ABI. wasm-EH is required to fix OCCT STEP write under wasm
+# (the old -fexceptions JS-trampoline model fatally traps in STEPCAFControl_Writer).
+emscripten = "==4.0.9"
+pyodide-build = "==0.35.0"
 cmake = "*"
 
 [feature.lint.tasks]
@@ -61,16 +66,13 @@ lint = "isort . && black . --config pyproject.toml && ruff check . --fix"
 [feature.wasm.tasks]
 clean = { cmd = "rm -rf build-wasm && mkdir -p build-wasm" }
 wbuild = { cmd = "emcmake cmake . -B build-wasm -G Ninja -DBUILD_WASM=ON -DBUILD_PYTHON=OFF -DBUILD_TESTS=OFF -DBUILD_STP2GLB=OFF && cmake --build build-wasm", depends-on = ["clean"] }
-xbuildenv-install = { cmd = "pyodide xbuildenv install 0.27.7", description = "Install the pyodide cross-build environment (Python 3.12.7 + emscripten 3.1.58)" }
-build-occt-wasm = { cmd = "emcmake cmake --preset wasm-pyodide && cmake --build build/wasm-pyodide --target occt_external", description = "Cross-build + install ONLY the OCCT-wasm toolkits → build/wasm-pyodide/_deps/occt-install (the reusable base-image input)" }
-wbuild-pyodide = { cmd = "emcmake cmake --preset wasm-pyodide && cmake --build build/wasm-pyodide", description = "Build the adacpp nanobind module for pyodide" }
+xbuildenv-install = { cmd = "pyodide xbuildenv install 0.29.4", description = "Install the pyodide cross-build environment (Python 3.13 + emscripten 4.0.9)" }
+build-occt-wasm = { cmd = "emcmake cmake --preset wasm-pyodide -DPython_INCLUDE_DIR=\"$(pyodide config get python_include_dir)\" && cmake --build build/wasm-pyodide --target occt_external", description = "Cross-build + install ONLY the OCCT-wasm toolkits → build/wasm-pyodide/_deps/occt-install (the reusable base-image input)" }
+wbuild-pyodide = { cmd = "emcmake cmake --preset wasm-pyodide -DPython_INCLUDE_DIR=\"$(pyodide config get python_include_dir)\" && cmake --build build/wasm-pyodide", description = "Build the adacpp nanobind module for pyodide" }
 pack-wheel-pyodide = { cmd = "rm -rf build/wasm-pyodide/install dist && cmake --install build/wasm-pyodide --prefix build/wasm-pyodide/install && python tools/build_wheel.py build/wasm-pyodide/install/wheel dist", description = "Build a pyodide-tagged wheel from the wasm-pyodide build", depends-on = ["wbuild-pyodide"] }
 tools-install = { cmd = "cd tools && npm install --silent", description = "Install npm helpers (pyodide for the wheel sanity test) into tools/node_modules" }
 test-wheel-pyodide = { cmd = "node tools/test_wheel_pyodide.js", description = "Smoke-test the pyodide wheel via node-pyodide", depends-on = ["pack-wheel-pyodide", "tools-install"] }
 serve = { cmd = "docker run --rm -p 8088:80 -v $PIXI_PROJECT_ROOT/src/frontend/public:/usr/share/nginx/html:ro -v $PIXI_PROJECT_ROOT/src/frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro -v $PIXI_PROJECT_ROOT/dist:/usr/share/nginx/html/dist:ro nginx:alpine", description = "Serve src/frontend/public on http://localhost:8088 with COOP/COEP headers (requires docker)" }
-
-[feature.wasm.activation.env]
-PYODIDE_XBUILDENV = "$HOME/.cache/.pyodide-xbuildenv-0.34.3/0.27.7"
 
 [feature.conda.tasks]
 conda-build = { cmd = "rattler-build build -r conda/recipe.yaml --experimental", description = "Build the conda package" }
@@ -118,5 +120,7 @@ SP_DIR = "%CONDA_PREFIX%/Lib/site-packages"
 
 [feature.test.target.linux-64.activation.env]
 STP2GLB_EXE_DIR = "$CONDA_PREFIX/bin"
-SP_DIR = "$CONDA_PREFIX/lib/python3.12/site-packages"
+# python3.13 to match feature.common's python==3.13 pin (bumped for the pyodide
+# 0.29.x xbuildenv host); keep in lockstep if that pin moves.
+SP_DIR = "$CONDA_PREFIX/lib/python3.13/site-packages"
 #CMAKE_PREFIX_PATH = "$CONDA_PREFIX:$CONDA_PREFIX/include:$CONDA_PREFIX/lib:$CONDA_PREFIX/bin"
