@@ -24,7 +24,7 @@ if (EMSCRIPTEN)
         add_library(Python::SABIModule INTERFACE IMPORTED)
         target_include_directories(Python::SABIModule INTERFACE "${Python_INCLUDE_DIR}")
     endif ()
-    set(Python_SOABI   "cpython-312-wasm32-emscripten")
+    set(Python_SOABI   "cpython-313-wasm32-emscripten")
     set(Python_SOSABI  "abi3")
 
     # The emscripten toolchain pins TARGET_SUPPORTS_SHARED_LIBS=FALSE globally, which
@@ -85,7 +85,8 @@ if (EMSCRIPTEN)
     target_link_options(_ada_cpp_ext_impl PRIVATE
             "-sSIDE_MODULE=2"
             "-sWASM_BIGINT"
-            "-fexceptions"
+            "-fwasm-exceptions"
+            "-sSUPPORT_LONGJMP=wasm"
             "-Wl,--export=PyInit__ada_cpp_ext_impl"
             "-Wl,--no-gc-sections"
             # SIDE_MODULE=2 + nanobind's default `-Wl,--gc-sections` (added at
@@ -99,15 +100,16 @@ if (EMSCRIPTEN)
             "-sEXPORT_ALL=1"
     )
     # The matching compile flag is required so try/catch in our code (and in
-    # nanobind's dispatch) actually emit unwind tables. -fexceptions (the older
-    # JS-trampoline-based model) is what pyodide 0.27.x ships; switch to
-    # -fwasm-exceptions when targeting pyodide 0.28+.
-    target_compile_options(_ada_cpp_ext_impl PRIVATE "-fexceptions")
+    # nanobind's dispatch) actually emit unwind tables. pyodide 0.29.x/emscripten
+    # 4.0.9 use native WebAssembly exception handling (-fwasm-exceptions); every
+    # translation unit in the link (adacpp, OCCT, nanobind) must agree on the EH
+    # model or thrown exceptions reach std::terminate instead of the catch.
+    target_compile_options(_ada_cpp_ext_impl PRIVATE "-fwasm-exceptions")
     # nanobind's static lib (nanobind-static-abi3) holds the dispatch code that
-    # actually converts C++ exceptions into Python ones — without -fexceptions
+    # actually converts C++ exceptions into Python ones — without -fwasm-exceptions
     # there it'll pass them through as fatal aborts. Apply the same flag.
     if (TARGET nanobind-static-abi3)
-        target_compile_options(nanobind-static-abi3 PRIVATE "-fexceptions")
+        target_compile_options(nanobind-static-abi3 PRIVATE "-fwasm-exceptions")
     endif ()
 endif ()
 
