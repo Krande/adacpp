@@ -165,12 +165,14 @@ if (NOT WASM_OCCT_PREBUILT_DIR)
         -DUSE_TK=OFF
         -DUSE_XLIB=OFF
 
-        # OCCT throws Standard_Failure & friends extensively. Match adacpp's wasm
-        # build flag (commit 0566168 "wasm exceptions") so OCCT's catches actually
-        # fire. -fexceptions is the JS-trampoline model pyodide 0.27.x ships;
-        # switch to -fwasm-exceptions when we move to pyodide 0.28+.
-        -DCMAKE_CXX_FLAGS=-fexceptions
-        -DCMAKE_C_FLAGS=-fexceptions
+        # OCCT throws Standard_Failure & friends extensively, and uses
+        # setjmp/longjmp for OSD signal handling. Pyodide 0.28+/emscripten 4.0.9
+        # use native WebAssembly exception handling: -fwasm-exceptions (replaces
+        # the -fexceptions JS-trampoline model that fatally trapped STEP write)
+        # plus -sSUPPORT_LONGJMP=wasm so setjmp/longjmp also use wasm EH. Must
+        # match adacpp's own flag (one EH model across the whole link).
+        -DCMAKE_CXX_FLAGS=-fwasm-exceptions\ -sSUPPORT_LONGJMP=wasm
+        -DCMAKE_C_FLAGS=-fwasm-exceptions\ -sSUPPORT_LONGJMP=wasm
     )
 
     set(_WASM_OCCT_BYPRODUCTS)
@@ -187,6 +189,13 @@ if (NOT WASM_OCCT_PREBUILT_DIR)
         SOURCE_DIR      ${OCCT_SOURCE_DIR}
         BINARY_DIR      ${OCCT_BUILD_DIR}
         INSTALL_DIR     ${OCCT_INSTALL_DIR}
+        # Drop OCCT's OCC_CONVERT_SIGNALS define on wasm. It converts OS signals
+        # to C++ exceptions via setjmp INSIDE catch blocks — meaningless under
+        # wasm (no real signals) and it violates the wasm-EH + wasm-SjLj rule
+        # ("no setjmp within a catch"), which makes emscripten emit invalid wasm
+        # (CompileError: "br_table: label arity inconsistent") that fails to
+        # instantiate. Removing it lets the STEP write path compile to valid wasm.
+        PATCH_COMMAND   sed -i "/add_definitions(-DOCC_CONVERT_SIGNALS)/d" ${OCCT_SOURCE_DIR}/adm/cmake/occt_defs_flags.cmake
         CMAKE_ARGS      ${_OCCT_CMAKE_ARGS}
         BUILD_BYPRODUCTS ${_WASM_OCCT_BYPRODUCTS}
         USES_TERMINAL_DOWNLOAD  TRUE

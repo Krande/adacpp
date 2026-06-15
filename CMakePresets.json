@@ -154,8 +154,6 @@
         "BUILD_STP2GLB_TESTING": "OFF",
         "BUILD_DEBUG_TESTING": "OFF",
         "WASM_PYODIDE": "ON",
-        "PYODIDE_XBUILDENV": "$penv{PYODIDE_XBUILDENV}",
-        "Python_INCLUDE_DIR": "$penv{PYODIDE_XBUILDENV}/xbuildenv/pyodide-root/cpython/installs/python-3.12.7/include/python3.12",
         "Python_EXECUTABLE": "$penv{CONDA_PREFIX}/bin/python"
       }
     },
@@ -165,7 +163,7 @@
       "hidden": false,
       "binaryDir": "${sourceDir}/build",
       "environment": {
-        "SP_DIR": "$env{CONDA_PREFIX}/lib/python3.12/site-packages"
+        "SP_DIR": "$env{CONDA_PREFIX}/lib/python3.13/site-packages"
       },
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",

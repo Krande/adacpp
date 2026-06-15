@@ -28,12 +28,13 @@ import tomllib
 import zipfile
 from pathlib import Path
 
-# Pyodide 0.27.x ships emscripten 3.1.58. The wheel platform tag must match for
-# pyodide's micropip to accept it. Pyodide 0.28+ standardises on
-# pyodide_2025_0_wasm32 — bump this when we bump pyodide.
-PLATFORM_TAG = "emscripten_3_1_58_wasm32"
-PYTHON_TAG = "cp312"
-ABI_TAG = "cp312"
+# The wheel platform tag must match the target pyodide for micropip to accept
+# it. Pyodide 0.28+/0.29.x (Python 3.13, emscripten 4.0.9) standardise on the
+# pyodide_2025_0_wasm32 ABI tag (same as the ifcopenshell wasm wheels) — not the
+# raw emscripten_X_Y_Z tag the 0.27.x line used.
+PLATFORM_TAG = "pyodide_2025_0_wasm32"
+PYTHON_TAG = "cp313"
+ABI_TAG = "cp313"
 
 
 def _record_line(arcname: str, data: bytes) -> str:
