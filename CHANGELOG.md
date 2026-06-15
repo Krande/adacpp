@@ -2,6 +2,15 @@
 
 
 
+## v0.9.0 (2026-06-15)
+
+### Feature
+
+* feat: wasm conversion engine — STEP write, OCCT isolation, IFC serialize (pyodide 0.29.4) (#29)
+
+Co-authored-by: Claude Opus 4.8 (1M context) &lt;noreply@anthropic.com&gt; ([`d7948e7`](https://github.com/Krande/adacpp/commit/d7948e754c52224c32069c152c86d1c3d36e1dba))
+
+
 ## v0.8.0 (2026-06-14)
 
 ### Feature
