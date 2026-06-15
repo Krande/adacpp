@@ -90,6 +90,7 @@ read_step_bytes = _cad.read_step_bytes
 read_step_shapes = _cad.read_step_shapes
 write_glb_bytes = _cad.write_glb_bytes
 write_step = _cad.write_step
+serialize_brep = _cad.serialize_brep
 
 # Bridge from a raw OCCT TopoDS_Shape pointer (e.g. pythonocc-core's
 # `int(shape.this)`) into a cad ShapeHandle. Available on both targets;
@@ -169,5 +170,6 @@ __all__ = [
     "read_step_shapes",
     "write_glb_bytes",
     "write_step",
+    "serialize_brep",
     "from_topods_pointer",
 ]

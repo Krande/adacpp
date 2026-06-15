@@ -89,15 +89,16 @@ if (EMSCRIPTEN)
             "-sSUPPORT_LONGJMP=wasm"
             "-Wl,--export=PyInit__ada_cpp_ext_impl"
             "-Wl,--no-gc-sections"
-            # SIDE_MODULE=2 + nanobind's default `-Wl,--gc-sections` (added at
-            # Release build) end up dropping OCCT vtable entries whose only
-            # callers are intra-module — pyodide can't see those callers
-            # because side-module exports go through env imports it then
-            # stubs. EXPORT_ALL=1 keeps every symbol in the export table so
-            # pyodide's self-binding pass resolves intra-module references
-            # to real functions instead of stubs. Without this you get
-            # `getWasmTableEntry(...) is not a function` at module load.
-            "-sEXPORT_ALL=1"
+            # NO -sEXPORT_ALL=1. adacpp must NOT export its statically-linked OCCT
+            # symbols, or they interpose with the upstream ifcopenshell wheel's own
+            # static OCCT when both load in one pyodide runtime — corrupting OCCT's
+            # Standard_Type RTTI registry (a Geom_Line is misread and
+            # GeomAdaptor_Curve::BSpline() throws). The real isolation comes from
+            # building OCCT with -fvisibility=hidden (see wasm_occt.cmake), which
+            # makes wasm-ld bind adacpp's OCCT refs DIRECTLY (no interposable GOT
+            # imports); EXPORT_ALL would defeat that by re-exporting everything.
+            # --no-gc-sections keeps OCCT functions DEFINED so intra-module vtable
+            # refs resolve (the old EXPORT_ALL was a workaround for gc dropping them).
     )
     # The matching compile flag is required so try/catch in our code (and in
     # nanobind's dispatch) actually emit unwind tables. pyodide 0.29.x/emscripten

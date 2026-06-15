@@ -93,6 +93,7 @@
 #include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepTools.hxx>
+#include <BRepTools_ShapeSet.hxx>
 #include <BRepTools_WireExplorer.hxx>
 #include <GC_MakeArcOfCircle.hxx>
 #include <GCPnts_UniformDeflection.hxx>
@@ -1623,6 +1624,22 @@ ShapeHandle section_with_plane_impl(
 // Write shapes (with per-shape name + color) to a STEP file via the OCAF/XCAF
 // document model (adacpp's bundled OCCT). Backs adapy's StepWriter under the
 // adacpp CAD backend, so STEP export needs no pythonocc.
+// Serialize a shape to OCCT's BRepTools_ShapeSet text form (FormatNb 2), the
+// same string adapy's pyocc path produces via serialize_shape_via_shapeset and
+// feeds to ifcopenshell.geom.serialise. Lets the IFC tessellation fallback work
+// under the adacpp backend (ifcopenshell's wasm wheel ships no occ_utils, and
+// the shape here is an adacpp handle, not a pythonocc TopoDS). The BREP string
+// crosses the module boundary as plain text — no OCC object is shared, so the
+// two private OCCT copies never interpose.
+std::string serialize_brep_impl(const ShapeHandle &sh) {
+    BRepTools_ShapeSet ss;
+    ss.SetFormatNb(2);
+    ss.Add(sh.topods());
+    std::ostringstream oss;
+    ss.Write(oss);
+    return oss.str();
+}
+
 void write_step_impl(const std::vector<ShapeHandle> &shapes,
                      const std::vector<std::string> &names,
                      const std::vector<std::array<double, 3>> &colors,
@@ -2190,6 +2207,11 @@ void cad_module(nb::module_ &m) {
           "shapes"_a, "names"_a, "colors"_a, "filename"_a, "unit"_a = "m", "schema"_a = "AP214",
           "Write shapes (with per-shape name + RGB color) to a STEP file with "
           "OCAF names/colors via adacpp's bundled OCCT (no pythonocc needed).");
+
+    m.def("serialize_brep", &serialize_brep_impl, "shape"_a,
+          "Serialize a shape to OCCT BRepTools_ShapeSet text (FormatNb 2) — the "
+          "BREP string ifcopenshell.geom.serialise consumes for the IFC tessellation "
+          "fallback (replaces pythonocc-only ifcopenshell.geom.occ_utils).");
 
     m.def("build_revolved_area_solid", &build_revolved_area_solid_impl,
           "outer"_a, "inners"_a, "location"_a, "axis"_a, "ref_dir"_a,

@@ -1,6 +1,11 @@
 #include "binding_core.h"
 #include "cad/cad_py_wrap.h"
 
+#include <exception>
+#include <string>
+
+#include <Standard_Failure.hxx>
+
 #ifndef __EMSCRIPTEN__
 #include "cadit/occt/occt_py_wrap.h"
 #include "cadit/ifc/ifc_py_wrap.h"
@@ -12,6 +17,25 @@
 
 // Define the modules that will be exposed in python
 NB_MODULE(_ada_cpp_ext_impl, m) {
+    // OCCT's Standard_Failure derives from Standard_Transient, NOT std::exception,
+    // so nanobind's built-in std::exception translator can't convert it: an OCCT
+    // throw escaping a binding becomes an untranslatable SystemError
+    // ("nanobind::detail::nb_func_error_except(): exception could not be
+    // translated"). Register a translator so every adacpp verb surfaces OCCT
+    // failures as a clean Python RuntimeError (with the OCCT type + message)
+    // instead. Non-OCCT exceptions fall through to the next translator.
+    nb::register_exception_translator(
+        [](const std::exception_ptr &p, void * /*payload*/) {
+            try {
+                std::rethrow_exception(p);
+            } catch (const Standard_Failure &e) {
+                const char *msg = e.GetMessageString();
+                const std::string what =
+                    std::string("OCCT ") + e.DynamicType()->Name() + ": " + (msg ? msg : "");
+                PyErr_SetString(PyExc_RuntimeError, what.c_str());
+            }
+        });
+
     auto cad_sub_module = m.def_submodule("cad", "Backend-agnostic CAD operations");
         cad_module(cad_sub_module);
 

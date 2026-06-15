@@ -171,8 +171,15 @@ if (NOT WASM_OCCT_PREBUILT_DIR)
         # the -fexceptions JS-trampoline model that fatally trapped STEP write)
         # plus -sSUPPORT_LONGJMP=wasm so setjmp/longjmp also use wasm EH. Must
         # match adacpp's own flag (one EH model across the whole link).
-        -DCMAKE_CXX_FLAGS=-fwasm-exceptions\ -sSUPPORT_LONGJMP=wasm
-        -DCMAKE_C_FLAGS=-fwasm-exceptions\ -sSUPPORT_LONGJMP=wasm
+        # -fvisibility=hidden: make OCCT's symbols hidden so, when statically
+        # linked into adacpp's side module, wasm-ld binds adacpp's OCCT references
+        # DIRECTLY (no GOT import) instead of through the interposable global
+        # table. Without this, adacpp's own OCCT calls resolve against the global
+        # symbol table at load and pick up the upstream ifcopenshell wheel's
+        # separate static OCCT — corrupting OCCT's RTTI registry. Hidden OCCT
+        # stays private to adacpp; ifcopenshell keeps its own; no collision.
+        -DCMAKE_CXX_FLAGS=-fwasm-exceptions\ -sSUPPORT_LONGJMP=wasm\ -fvisibility=hidden\ -fvisibility-inlines-hidden
+        -DCMAKE_C_FLAGS=-fwasm-exceptions\ -sSUPPORT_LONGJMP=wasm\ -fvisibility=hidden
     )
 
     set(_WASM_OCCT_BYPRODUCTS)
