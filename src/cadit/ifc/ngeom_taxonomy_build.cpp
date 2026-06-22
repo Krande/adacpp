@@ -115,7 +115,17 @@ tax::surface::ptr to_surface(const Surface *s) {
 
 tax::edge::ptr to_edge(const OrientedEdgeN &oe) {
     auto e = tax::make<tax::edge>(tax::make<tax::point3>(ev(oe.start)), tax::make<tax::point3>(ev(oe.end)));
-    if (oe.geometry) e->basis = to_curve(oe.geometry.get());  // nullptr => taxonomy derives a line
+    e->matrix = tax::make<tax::matrix4>();
+    if (oe.geometry) {
+        e->basis = to_curve(oe.geometry.get());
+    }
+    if (!e->basis) {
+        // straight edge: give it an explicit line basis (origin + direction). The OCC kernel
+        // derefs edge->basis directly rather than calling loop::calculate_linear_edge_curves().
+        auto ln = tax::make<tax::line>();
+        ln->matrix = tax::make<tax::matrix4>(ev(oe.start), ev(oe.end - oe.start));
+        e->basis = ln;
+    }
     return e;
 }
 
@@ -124,12 +134,14 @@ tax::edge::ptr to_edge(const OrientedEdgeN &oe) {
 std::shared_ptr<tax::shell> to_taxonomy_shell(const std::vector<std::shared_ptr<FaceSurfaceN>> &faces) {
     auto sh = tax::make<tax::shell>();
     sh->closed = true;
+    sh->matrix = tax::make<tax::matrix4>();  // geom_item::matrix defaults to null; the kernel derefs it
     for (const auto &fp : faces) {
         if (!fp || !fp->surface) continue;
         tax::surface::ptr surf = to_surface(fp->surface.get());
         if (!surf) continue;  // unmappable surface (e.g. cone) -> skip this face
         auto f = tax::make<tax::face>();
         f->basis = surf;
+        f->matrix = tax::make<tax::matrix4>();
         if (!fp->same_sense) f->orientation = false;
         bool outer = true;
         for (const FaceBoundN &b : fp->bounds) {
@@ -139,6 +151,7 @@ std::shared_ptr<tax::shell> to_taxonomy_shell(const std::vector<std::shared_ptr<
             auto lp = tax::make<tax::loop>();
             lp->closed = true;
             lp->external = outer;
+            lp->matrix = tax::make<tax::matrix4>();
             if (b.loop && b.loop->is_poly) {
                 const auto &poly = b.loop->polygon;
                 for (size_t i = 0; i < poly.size(); ++i) {

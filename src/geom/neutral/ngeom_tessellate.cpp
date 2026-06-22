@@ -358,9 +358,11 @@ TessMesh tessellate_doc(const NgeomDoc &doc, const TessParams &tp) {
     TessMesh mesh;
     for (const NgeomRoot &root : doc.roots) {
         uint32_t first = (uint32_t)mesh.indices.size();
+        uint32_t vfirst = (uint32_t)(mesh.positions.size() / 3);
         for (const auto &face : root.faces)
             if (face) tessellate_face(*face, tp, mesh);
-        mesh.groups.push_back({root.id, first, (uint32_t)mesh.indices.size() - first});
+        mesh.groups.push_back({root.id, first, (uint32_t)mesh.indices.size() - first, vfirst,
+                               (uint32_t)(mesh.positions.size() / 3) - vfirst});
     }
     return mesh;
 }

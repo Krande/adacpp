@@ -19,11 +19,13 @@ struct TessMesh {
     std::vector<float> positions;   // flat xyz (3 per vertex)
     std::vector<uint32_t> indices;  // flat (3 per triangle)
     std::vector<float> normals;     // flat xyz (3 per vertex, parallel to positions)
-    // [first_index, index_count) ranges per source root, for batched grouping
+    // per source root: triangle-index range + vertex range (maps to adacpp GroupReference)
     struct Group {
         std::string id;
-        uint32_t first_index = 0;
-        uint32_t index_count = 0;
+        uint32_t first_index = 0;   // flat index into `indices`
+        uint32_t index_count = 0;   // number of indices (3 * triangles)
+        uint32_t first_vertex = 0;  // flat vertex index into `positions`/3
+        uint32_t vertex_count = 0;
     };
     std::vector<Group> groups;
 };

@@ -6,6 +6,9 @@
 #include "../geom/MeshType.h"
 #include "../cadit/occt/static_param_guard.h"
 #include "../cadit/occt/step_writer.h"
+#include "../cadit/ifc/ngeom_taxonomy.h"
+#include "../geom/neutral/ngeom_decode.h"
+#include "../geom/neutral/ngeom_tessellate.h"
 
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/array.h>
@@ -340,6 +343,47 @@ Mesh tessellate_batch_impl(const std::vector<ShapeHandle> &shapes, double linear
 // don't need the intermediate handle.
 Mesh tessellate_box_impl(float dx, float dy, float dz) {
     return tessellate_impl(make_box_impl(dx, dy, dz), -1.0);
+}
+
+// Decode an NGEOM stream buffer (adapy ada.geom serialized per the neutral schema) and
+// tessellate every instance through the chosen pipeline into ONE combined Mesh, with a
+// GroupReference per root (node_id = root index in serialization order; adapy maps it back
+// to its own instance id). pipeline: "libtess2" (OCC-free neutral path) | "occ" | "cgal"
+// | "hybrid" (ifcopenshell taxonomy kernels). angular is in DEGREES.
+Mesh tessellate_stream_impl(nb::bytes buffer, const std::string &pipeline, double deflection,
+                            double angular_deg) {
+    using namespace adacpp::ngeom;
+    NgeomDoc doc;
+    try {
+        doc = decode(reinterpret_cast<const uint8_t *>(buffer.c_str()), buffer.size());
+    } catch (const std::exception &) {
+        return Mesh(0, {}, {});  // malformed buffer -> empty mesh
+    }
+
+    TessMesh tm;
+    if (pipeline == "libtess2" || pipeline.empty()) {
+        TessParams tp;
+        tp.deflection = deflection;
+        tp.max_angle = angular_deg * 3.14159265358979323846 / 180.0;
+        tm = tessellate_doc(doc, tp);
+    } else {
+        // taxonomy kernels; accept "occ"/"cgal"/"hybrid" or "taxonomy-<k>"
+        std::string kern = pipeline;
+        auto dash = kern.find('-');
+        if (dash != std::string::npos) kern = kern.substr(dash + 1);
+        tm = tessellate_via_taxonomy(doc, kern, deflection, angular_deg);
+    }
+
+    std::vector<GroupReference> groups;
+    groups.reserve(tm.groups.size());
+    for (size_t i = 0; i < tm.groups.size(); ++i) {
+        const auto &g = tm.groups[i];
+        groups.emplace_back((int)i, (int)g.first_index, (int)g.index_count, (int)g.first_vertex,
+                            (int)g.vertex_count);
+    }
+    Mesh mesh(0, std::move(tm.positions), std::move(tm.indices), {}, std::move(tm.normals));
+    mesh.group_reference = std::move(groups);
+    return mesh;
 }
 
 // ----------------------------------------------------------------------------
@@ -2057,6 +2101,13 @@ void cad_module(nb::module_ &m) {
           "GroupReference per input shape (node_id=index, start/length=triangle-index "
           "range). Amortizes the per-call boundary cost and returns one zero-copy "
           "buffer. linear_deflection<=0 selects a per-shape bbox heuristic.");
+
+    m.def("tessellate_stream", &tessellate_stream_impl,
+          "buffer"_a, "pipeline"_a = "libtess2", "deflection"_a = 0.0, "angular_deg"_a = 20.0,
+          "Decode an NGEOM stream buffer (adapy ada.geom, neutral schema) and tessellate "
+          "every instance into ONE combined Mesh with a GroupReference per root "
+          "(node_id = root index). pipeline: 'libtess2' (OCC-free) | 'occ' | 'cgal' | "
+          "'hybrid' (ifcopenshell taxonomy kernels). angular_deg in degrees.");
 
     m.def("tessellate_box", &tessellate_box_impl,
           "dx"_a, "dy"_a, "dz"_a,

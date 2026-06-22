@@ -1,11 +1,22 @@
 # link the library files located in %LIBRARY_PREFIX%/lib/ifcparse/IfcParse.lib (on windows as an example)
 # to the executable
 
+# The geometry kernels (OpenCascadeKernel / CgalKernel) live in their own static libs,
+# separate from libIfcGeom.a (which defines AbstractKernel + the taxonomy + convert dispatch).
+# The NGEOM taxonomy path instantiates these kernels, so link them too. Static-lib symbol
+# resolution between the kernels and IfcGeom is mutual, so wrap them in a linker group.
 list(APPEND
         ADA_CPP_LINK_LIBS
+        -Wl,--start-group
+        geometry_kernel_opencascade
+        geometry_kernel_cgal
         IfcParse
         IfcGeom
+        -Wl,--end-group
 )
+# The CGAL kernel uses CGAL's exact arithmetic -> GMP/MPFR. They are leaf C libs, so they
+# must come AFTER the kernel group in static link order.
+list(APPEND ADA_CPP_LINK_LIBS mpfr gmp)
 
 # ifcopenshell >=0.8.5 statically embeds rocksdb in libIfcParse.a /
 # libIfcGeom.a, because rocksdb's shared library only exposes the C API

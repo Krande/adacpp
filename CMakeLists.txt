@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ada-cpp LANGUAGES CXX)
+project(ada-cpp LANGUAGES C CXX)  # C for the vendored libtess2 sources
 set(CMAKE_CXX_STANDARD 20)
 
 # Set policy CMP0167 to OLD to suppress warning about FindBoost module deprecation

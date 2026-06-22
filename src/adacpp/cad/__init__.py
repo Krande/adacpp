@@ -21,6 +21,7 @@ make_sphere = _cad.make_sphere
 tessellate = _cad.tessellate
 tessellate_batch = _cad.tessellate_batch
 tessellate_box = _cad.tessellate_box
+tessellate_stream = _cad.tessellate_stream
 
 bbox = _cad.bbox
 obb = _cad.obb
@@ -110,6 +111,7 @@ __all__ = [
     "tessellate",
     "tessellate_batch",
     "tessellate_box",
+    "tessellate_stream",
     "bbox",
     "obb",
     "build_box",
