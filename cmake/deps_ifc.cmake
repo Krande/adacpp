@@ -41,3 +41,13 @@ list(APPEND ADA_CPP_LINK_LIBS RocksDB::rocksdb)
 # fopen("")s and segfaults). Define it here to match the .a's layout. rocksdb
 # headers are on the conda -isystem include path, so the #include resolves.
 add_compile_definitions(IFOPSH_WITH_ROCKSDB)
+
+# ifcgeom/taxonomy.h includes <Eigen/Dense>, which conda-forge installs under
+# <prefix>/include/eigen3 (not directly on the -isystem include path). The NGEOM->taxonomy
+# adapter (src/cadit/ifc/ngeom_taxonomy_*.cpp) is the first adacpp TU to include taxonomy.h,
+# so add Eigen's include dir explicitly.
+find_package(Eigen3 CONFIG REQUIRED)
+# ifcgeom/taxonomy.h includes <Eigen/Dense> (conda installs Eigen under include/eigen3, off
+# the default -isystem path). Link the header-only Eigen3::Eigen target so its INTERFACE
+# include dir propagates to the NGEOM taxonomy TUs — the first adacpp code to include taxonomy.h.
+list(APPEND ADA_CPP_LINK_LIBS Eigen3::Eigen)

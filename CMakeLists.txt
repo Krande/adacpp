@@ -43,6 +43,10 @@ if (BUILD_WASM)
             src/geom/Models.cpp
             src/cadit/occt/step_writer.cpp
             src/helpers/helpers.cpp
+            # NGEOM OCC-free path (neutral layer is header-only; libtess2 tessellator + the
+            # vendored libtess2 C compile for wasm too). Taxonomy path is native-only (ifc).
+            src/geom/neutral/ngeom_tessellate.cpp
+            ${LIBTESS2_SOURCES}
     )
 else ()
     set(ADA_CPP_SOURCES
@@ -61,6 +65,11 @@ else ()
             src/visit/tess_helpers.cpp
             src/visit/manual/solids/boxes.cpp
             src/visit/TessellateFactory.cpp
+            # NGEOM: OCC-free libtess2 path + the taxonomy (ifcopenshell) path
+            src/geom/neutral/ngeom_tessellate.cpp
+            src/cadit/ifc/ngeom_taxonomy_build.cpp
+            src/cadit/ifc/ngeom_taxonomy_kernel.cpp
+            ${LIBTESS2_SOURCES}
     )
 endif ()
 set(ADA_CPP_HEADERS
