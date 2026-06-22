@@ -22,6 +22,12 @@ else()
     message(STATUS "TINY_INCLUDE_DIR not set")
 endif ()
 
+# Vendored libtess2 (native + wasm) — boundary-driven triangulator for the step2glb-style
+# tessellation path. Header-path only here; ${LIBTESS2_SOURCES} are appended to
+# ADA_CPP_SOURCES alongside the tessellator once src/visit/tessellate_libtess2.cpp lands.
+include(cmake/deps_libtess2.cmake)
+include_directories(${LIBTESS2_INCLUDE_DIR})
+
 # Create a list called ADA_CPP_SOURCES of all cpp files inside the src dir
 if (BUILD_WASM)
     # Wasm builds now link the cross-built OCCT toolkits (see wasm_occt.cmake), so
