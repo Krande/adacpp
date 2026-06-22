@@ -103,6 +103,102 @@ static void test_cylinder_patch() {
     CHECK(total_area(m) > 0.9 * analytic && total_area(m) < 1.02 * analytic, "cylinder patch area ~ analytic");
 }
 
+static size_t tri_count(const TessMesh &m) { return m.indices.size() / 3; }
+
+static void test_refinement_smooths_curved_face() {
+    auto cyl = std::make_shared<CylinderSurface>(Frame::from_axis_ref({0, 0, 0}, {0, 0, 1}, {1, 0, 0}), 5.0);
+    // a COARSE boundary so the interior triangulation has long edges for refinement to split
+    std::vector<Vec3> bnd;
+    const int N = 3;
+    for (int i = 0; i <= N; ++i) bnd.push_back(cyl->point(1.0 * i / N, 0.0));
+    for (int j = 1; j <= N; ++j) bnd.push_back(cyl->point(1.0, 8.0 * j / N));
+    for (int i = N - 1; i >= 0; --i) bnd.push_back(cyl->point(1.0 * i / N, 8.0));
+    for (int j = N - 1; j >= 1; --j) bnd.push_back(cyl->point(0.0, 8.0 * j / N));
+    FaceSurfaceN f;
+    f.surface = cyl;
+    f.same_sense = true;
+    f.bounds.push_back({poly(bnd), true});
+    double analytic = 5.0 * 1.0 * 8.0;
+
+    TessMesh coarse;
+    TessParams cp;
+    cp.deflection = 0.0;  // no refinement
+    tessellate_face(f, cp, coarse);
+
+    TessMesh fine;
+    TessParams fp;
+    fp.deflection = 0.02;  // refine to 0.02 chord sag
+    tessellate_face(f, fp, fine);
+
+    CHECK(tri_count(fine) > tri_count(coarse), "refinement adds triangles on a curved face");
+    CHECK(total_area(fine) > total_area(coarse), "refinement increases area toward analytic");
+    CHECK(total_area(fine) > 0.99 * analytic && total_area(fine) < 1.001 * analytic,
+          "refined cylinder area ~ analytic (faceting slightly under)");
+    bool on = true;
+    for (size_t i = 0; i < fine.positions.size(); i += 3) {
+        double rho = std::sqrt(fine.positions[i] * fine.positions[i] +
+                               fine.positions[i + 1] * fine.positions[i + 1]);
+        if (!close(rho, 5.0, 1e-3)) on = false;
+    }
+    CHECK(on, "refined verts still on radius");
+}
+
+static std::shared_ptr<LoopN> circle_loop(const CylinderSurface &c, double v, int n) {
+    std::vector<Vec3> pts;
+    for (int i = 0; i < n; ++i) pts.push_back(c.point(TWO_PI * i / n, v));
+    return poly(pts);
+}
+
+static void test_full_cylinder_gridded() {
+    auto cyl = std::make_shared<CylinderSurface>(Frame::from_axis_ref({0, 0, 0}, {0, 0, 1}, {1, 0, 0}), 5.0);
+    FaceSurfaceN f;
+    f.surface = cyl;
+    f.same_sense = true;
+    // two full-circle bounds (bottom v=0, top v=8): zero UV area -> gridded path (1c)
+    f.bounds.push_back({circle_loop(*cyl, 0.0, 48), true});
+    f.bounds.push_back({circle_loop(*cyl, 8.0, 48), true});
+    TessMesh m;
+    TessParams tp;
+    tp.deflection = 0.02;
+    CHECK(tessellate_face(f, tp, m), "full cylinder tessellates (gridded)");
+    double analytic = TWO_PI * 5.0 * 8.0;
+    CHECK(total_area(m) > 0.99 * analytic && total_area(m) < 1.001 * analytic,
+          "full cylinder lateral area ~ 2*pi*r*h");
+    bool on = true;
+    for (size_t i = 0; i < m.positions.size(); i += 3) {
+        double rho = std::sqrt(m.positions[i] * m.positions[i] + m.positions[i + 1] * m.positions[i + 1]);
+        if (!close(rho, 5.0, 1e-3)) on = false;
+    }
+    CHECK(on, "full cylinder verts on radius");
+}
+
+static void test_full_sphere_gridded() {
+    auto sph = std::make_shared<SphereSurface>(Frame::from_axis_ref({0, 0, 0}, {0, 0, 1}, {1, 0, 0}), 5.0);
+    // seam meridian loop (u=0): out-and-back -> zero UV area -> gridded path
+    std::vector<Vec3> seam;
+    const int N = 24;
+    for (int i = 0; i <= N; ++i) seam.push_back(sph->point(0.0, -PI / 2 + PI * i / N));
+    for (int i = N - 1; i >= 1; --i) seam.push_back(sph->point(0.0, -PI / 2 + PI * i / N));
+    FaceSurfaceN f;
+    f.surface = sph;
+    f.same_sense = true;
+    f.bounds.push_back({poly(seam), true});
+    TessMesh m;
+    TessParams tp;
+    tp.deflection = 0.02;
+    CHECK(tessellate_face(f, tp, m), "full sphere tessellates (gridded)");
+    double analytic = 4.0 * PI * 25.0;
+    CHECK(total_area(m) > 0.98 * analytic && total_area(m) < 1.001 * analytic,
+          "full sphere area ~ 4*pi*r^2");
+    bool on = true;
+    for (size_t i = 0; i < m.positions.size(); i += 3) {
+        double rr = std::sqrt(m.positions[i] * m.positions[i] + m.positions[i + 1] * m.positions[i + 1] +
+                              m.positions[i + 2] * m.positions[i + 2]);
+        if (!close(rr, 5.0, 2e-2)) on = false;
+    }
+    CHECK(on, "full sphere verts on radius");
+}
+
 static void test_doc_grouping() {
     NgeomDoc doc;
     auto plane = std::make_shared<PlaneSurface>(Frame::from_axis_ref({0, 0, 0}, {0, 0, 1}, {1, 0, 0}));
@@ -125,6 +221,9 @@ int main() {
     test_plane_square_with_hole();
     test_plane_same_sense_false_flips_normal();
     test_cylinder_patch();
+    test_refinement_smooths_curved_face();
+    test_full_cylinder_gridded();
+    test_full_sphere_gridded();
     test_doc_grouping();
     if (g_fail == 0)
         std::printf("ngeom tessellate: ALL PASS\n");

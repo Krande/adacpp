@@ -8,7 +8,9 @@ INC="-I src/geom/neutral -I third_party/libtess2/Include"
 TESS_SRC=(third_party/libtess2/Source/*.c)
 
 obj=$(mktemp -d)
-gcc -c -O2 -I third_party/libtess2/Include "${TESS_SRC[@]}"
+# -DNDEBUG: drop libtess2's debug asserts; real sweep errors fail soft via setjmp/longjmp
+# (tessTesselate returns 0), which the tessellator handles with a shrunk-hole retry.
+gcc -c -O2 -DNDEBUG -I third_party/libtess2/Include "${TESS_SRC[@]}"
 mv ./*.o "$obj"/
 
 # header-only suites
