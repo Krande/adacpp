@@ -8,8 +8,11 @@
 // runs IfcOpenShell's full face/wire conversion + healing and never touches `instance`.
 #include <Eigen/Dense>
 #include <ifcgeom/ConversionSettings.h>
+#include <ifcgeom/kernels/cgal/CgalKernel.h>
 #include <ifcgeom/kernels/opencascade/OpenCascadeKernel.h>
 #include <ifcgeom/taxonomy.h>
+
+#include <CGAL/number_utils.h>
 
 #include <BRep_Tool.hxx>
 #include <BRepBndLib.hxx>
@@ -105,17 +108,47 @@ void append_occ_shape(const TopoDS_Shape &shape, double deflection, TessMesh &ou
     (void)base;
 }
 
+// Extract triangles + per-facet normals from a CGAL polyhedron (exact coords -> double).
+// Facets may be n-gons (fan-triangulated); vertices are unwelded per facet.
+void append_cgal_shape(const cgal_shape_t &shape, TessMesh &out) {
+    for (auto f = shape.facets_begin(); f != shape.facets_end(); ++f) {
+        std::vector<Vec3> poly;
+        auto h = f->facet_begin();
+        do {
+            const auto &p = h->vertex()->point();
+            poly.push_back({CGAL::to_double(p.x()), CGAL::to_double(p.y()), CGAL::to_double(p.z())});
+        } while (++h != f->facet_begin());
+        if (poly.size() < 3) continue;
+        Vec3 n = (poly[1] - poly[0]).cross(poly[2] - poly[0]).normalized();
+        for (size_t i = 1; i + 1 < poly.size(); ++i) {
+            for (const Vec3 &v : {poly[0], poly[i], poly[i + 1]}) {
+                uint32_t idx = (uint32_t)(out.positions.size() / 3);
+                out.positions.push_back((float)v.x);
+                out.positions.push_back((float)v.y);
+                out.positions.push_back((float)v.z);
+                out.normals.push_back((float)n.x);
+                out.normals.push_back((float)n.y);
+                out.normals.push_back((float)n.z);
+                out.indices.push_back(idx);
+            }
+        }
+    }
+}
+
 }  // namespace
 
-TessMesh tessellate_via_taxonomy(const NgeomDoc &doc, const std::string & /*kernel*/, double deflection,
+TessMesh tessellate_via_taxonomy(const NgeomDoc &doc, const std::string &kernel_name, double deflection,
                                  double angular_deg) {
-    // v1: OCC kernel for all taxonomy variants (CgalKernel has the same null-instance path +
-    // a different shape type; deferred). angular currently unused by the OCC mesher here.
-    (void)angular_deg;
+    (void)angular_deg;  // the kernels mesh from their own settings
     TessMesh mesh;
     geom::Settings settings;
-    geom::kernels::AbstractKernel *base_kernel = new IfcGeom::OpenCascadeKernel(settings);
-    auto *kernel = static_cast<IfcGeom::OpenCascadeKernel *>(base_kernel);
+    const bool use_cgal = (kernel_name == "cgal");
+    std::unique_ptr<IfcGeom::OpenCascadeKernel> occ;
+    std::unique_ptr<geom::kernels::CgalKernel> cgal;
+    if (use_cgal)
+        cgal.reset(new geom::kernels::CgalKernel(settings));
+    else  // "occ" / "hybrid" (hybrid -> occ for now)
+        occ.reset(new IfcGeom::OpenCascadeKernel(settings));
 
     for (const NgeomRoot &root : doc.roots) {
         uint32_t first = (uint32_t)mesh.indices.size();
@@ -123,8 +156,13 @@ TessMesh tessellate_via_taxonomy(const NgeomDoc &doc, const std::string & /*kern
         auto shell = to_taxonomy_shell(root.faces);
         if (shell) {
             try {
-                TopoDS_Shape shape;
-                if (kernel->convert(shell, shape)) append_occ_shape(shape, deflection, mesh);
+                if (use_cgal) {
+                    cgal_shape_t shape;
+                    if (cgal->convert(shell, shape)) append_cgal_shape(shape, mesh);
+                } else {
+                    TopoDS_Shape shape;
+                    if (occ->convert(shell, shape)) append_occ_shape(shape, deflection, mesh);
+                }
             } catch (...) {
                 // fail-soft: a shell the kernel can't build yields no triangles for this root
             }
@@ -132,7 +170,6 @@ TessMesh tessellate_via_taxonomy(const NgeomDoc &doc, const std::string & /*kern
         mesh.groups.push_back({root.id, first, (uint32_t)mesh.indices.size() - first, vfirst,
                                (uint32_t)(mesh.positions.size() / 3) - vfirst});
     }
-    delete base_kernel;
     return mesh;
 }
 
