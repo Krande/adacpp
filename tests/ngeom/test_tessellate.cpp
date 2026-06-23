@@ -222,6 +222,83 @@ static void test_doc_grouping() {
     CHECK(m.groups[0].index_count == 6 && m.groups[1].index_count == 6, "each square = 2 tris");
 }
 
+static std::shared_ptr<LoopN> cone_circle_loop(const ConeSurface &c, double v, int n) {
+    std::vector<Vec3> pts;
+    for (int i = 0; i < n; ++i) pts.push_back(c.point(TWO_PI * i / n, v));
+    return poly(pts);
+}
+
+// Guards the cone AXIAL-v parameterization (step2glb geom.rs): point(u,v).z == v,
+// radius_at(v) == r0 + v*tan(a), apex == -r0/tan(a). The previous SLANT-v parameterization
+// (z = v*cos(a), radius = r0 + v*sin(a), apex = -r0/sin(a)) over-sampled cones; the cone SHAPE
+// is identical under both, so we assert the parameterization directly, plus a faithful frustum.
+static void test_cone_axial_v_parameterization() {
+    const double a = PI / 6.0;  // 30 deg
+    const double tan_a = std::tan(a), r0 = 5.0;
+    auto cone = std::make_shared<ConeSurface>(Frame::from_axis_ref({0, 0, 0}, {0, 0, 1}, {1, 0, 0}), r0, a);
+
+    Vec3 p = cone->point(0.0, 8.0);
+    CHECK(close(p.z, 8.0, 1e-9), "cone point(u,v).z == v (axial-v, not v*cos(a))");
+    CHECK(close(std::sqrt(p.x * p.x + p.y * p.y), r0 + 8.0 * tan_a, 1e-9),
+          "cone radius_at(v) == r0 + v*tan(a)");
+    auto caps = cone->v_caps();
+    CHECK(caps && close(caps->first, -r0 / tan_a, 1e-6), "cone apex == -r0/tan(a)");
+
+    // and a full frustum (z in [0,8]) tessellates faithfully to the analytic lateral area
+    FaceSurfaceN f;
+    f.surface = cone;
+    f.same_sense = true;
+    f.bounds.push_back({cone_circle_loop(*cone, 0.0, 48), true});
+    f.bounds.push_back({cone_circle_loop(*cone, 8.0, 48), true});
+    TessMesh m;
+    TessParams tp;
+    tp.deflection = 0.02;
+    CHECK(tessellate_face(f, tp, m), "cone frustum tessellates");
+    const double r1 = r0 + 8.0 * tan_a;
+    const double slant = std::sqrt((r1 - r0) * (r1 - r0) + 8.0 * 8.0);
+    const double analytic = PI * (r0 + r1) * slant;  // frustum lateral area
+    CHECK(total_area(m) > 0.99 * analytic && total_area(m) < 1.01 * analytic,
+          "cone frustum lateral area ~ pi*(r0+r1)*slant");
+    bool on = true;
+    for (size_t i = 0; i < m.positions.size(); i += 3) {
+        double z = m.positions[i + 2];
+        double rho = std::sqrt(m.positions[i] * m.positions[i] + m.positions[i + 1] * m.positions[i + 1]);
+        if (!close(rho, r0 + z * tan_a, 2e-2)) on = false;
+    }
+    CHECK(on, "cone verts satisfy axial-v radius = r0 + z*tan(a)");
+}
+
+// Guards the B-spline edge boundary fix: an edge whose geometry is a B-spline and which carries
+// NO trim params must be sampled over the curve's FULL natural domain (then aligned to the edge
+// vertices), NOT collapsed to a 2-point straight chord. (The collapse was the dominant ~2x density
+// gap vs step2glb.)
+static void test_bspline_edge_samples_natural_domain() {
+    // degree-3 clamped B-spline, 5 control points (curvy) -> unique knots [0,0.5,1] mults [4,1,4]
+    std::vector<Vec3> cps = {{0, 0, 0}, {2, 4, 0}, {5, 4, 0}, {8, -2, 0}, {10, 1, 0}};
+    auto bsp = std::make_shared<BSplineCurve>(3, cps, std::vector<double>{0.0, 0.5, 1.0},
+                                              std::vector<int>{4, 1, 4}, std::vector<double>{}, false);
+    double lo, hi, per;
+    bool periodic;
+    bsp->range(lo, hi, periodic, per);
+
+    OrientedEdgeN e;
+    e.geometry = bsp;
+    e.has_params = false;  // exporters often omit trim params; the fix must NOT bail to a chord
+    e.same_sense = true;
+    e.orientation = true;
+    e.start = e.e_start = bsp->point(lo);
+    e.end = e.e_end = bsp->point(hi);
+
+    auto pts = e.discretize(0.05, 0.349);
+    CHECK(pts.size() > 8, "B-spline edge sampled over its natural domain (dense, not a 2-pt chord)");
+    CHECK((pts.front() - e.start).norm() < 1e-6 && (pts.back() - e.end).norm() < 1e-6,
+          "B-spline edge endpoints snapped to the topological vertices");
+    // the polyline follows the curve, so it is materially longer than the straight start->end chord
+    double plen = 0.0;
+    for (size_t i = 1; i < pts.size(); ++i) plen += (pts[i] - pts[i - 1]).norm();
+    CHECK(plen > 1.2 * (e.end - e.start).norm(), "B-spline edge polyline follows the curve, not a chord");
+}
+
 int main() {
     test_plane_square_with_hole();
     test_plane_same_sense_false_flips_normal();
@@ -229,6 +306,8 @@ int main() {
     test_refinement_smooths_curved_face();
     test_full_cylinder_gridded();
     test_full_sphere_gridded();
+    test_cone_axial_v_parameterization();
+    test_bspline_edge_samples_natural_domain();
     test_doc_grouping();
     if (g_fail == 0)
         std::printf("ngeom tessellate: ALL PASS\n");
