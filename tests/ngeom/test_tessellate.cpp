@@ -120,14 +120,19 @@ static void test_refinement_smooths_curved_face() {
     f.bounds.push_back({poly(bnd), true});
     double analytic = 5.0 * 1.0 * 8.0;
 
+    // step2glb-faithful refine_uv always honours the parametric u_step cap + the chord-sag test
+    // on a curved surface, so "refinement" is driven by the deflection: a large deflection leaves
+    // a coarse mesh, a small one densifies it. (deflection=0 is the degenerate "auto" sentinel —
+    // the sag test dev>0 then fires on every curved edge and explodes to the budget, so it is not
+    // a meaningful "no refinement" baseline.)
     TessMesh coarse;
     TessParams cp;
-    cp.deflection = 0.0;  // no refinement
+    cp.deflection = 5.0;  // very loose chord sag -> few triangles
     tessellate_face(f, cp, coarse);
 
     TessMesh fine;
     TessParams fp;
-    fp.deflection = 0.02;  // refine to 0.02 chord sag
+    fp.deflection = 0.02;  // tight chord sag -> densified
     tessellate_face(f, fp, fine);
 
     CHECK(tri_count(fine) > tri_count(coarse), "refinement adds triangles on a curved face");

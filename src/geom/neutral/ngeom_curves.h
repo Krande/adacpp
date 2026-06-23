@@ -1,6 +1,8 @@
 // NGEOM neutral curves — native evaluation, no OCC. See spec §4.
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <memory>
 #include <vector>
 
@@ -21,6 +23,9 @@ struct Curve {
     std::vector<Vec3> discretize(double a, double b, double deflection, double max_angle) const;
     // public accessor for nominal_spans (used by composite/trimmed curves)
     int discretize_spans(double a, double b) const;
+    // >0 => an edge of this curve is sampled UNIFORMLY at this many segments instead of the adaptive
+    // midpoint refine (step2glb samples B-spline edges uniformly at clamp(cps*4,8,512), NOT adaptively).
+    virtual int uniform_edge_segments() const { return 0; }
 
   protected:
     // initial #spans a concrete curve suggests over [a,b] before refinement
@@ -55,10 +60,7 @@ struct CircleCurve : Curve {
         per = true;
         period = TWO_PI;
     }
-    int nominal_spans(double a, double b) const override {
-        int n = (int)std::ceil(std::abs(b - a) / (TWO_PI) * 16.0);
-        return n < 1 ? 1 : n;
-    }
+    int nominal_spans(double, double) const override { return 16; }  // Rust Curve3::nominal_spans
 };
 
 struct EllipseCurve : Curve {
@@ -75,9 +77,114 @@ struct EllipseCurve : Curve {
         per = true;
         period = TWO_PI;
     }
-    int nominal_spans(double a, double b) const override {
-        int n = (int)std::ceil(std::abs(b - a) / (TWO_PI) * 16.0);
-        return n < 1 ? 1 : n;
+    int nominal_spans(double, double) const override { return 16; }  // Rust Curve3::nominal_spans
+};
+
+// POLYLINE — an ordered list of points; the polyline IS the edge (spec §4).
+struct PolylineCurve : Curve {
+    std::vector<Vec3> pts;
+    explicit PolylineCurve(std::vector<Vec3> p) : pts(std::move(p)) {}
+    Vec3 point(double t) const override {  // t in [0,1] across the whole polyline
+        if (pts.size() < 2) return pts.empty() ? Vec3{0, 0, 0} : pts[0];
+        double s = clampd(t, 0.0, 1.0) * (pts.size() - 1);
+        int i = std::min((int)s, (int)pts.size() - 2);
+        return pts[i] + (pts[i + 1] - pts[i]) * (s - i);
+    }
+    Vec3 tangent(double t) const override {
+        if (pts.size() < 2) return {1, 0, 0};
+        double s = clampd(t, 0.0, 1.0) * (pts.size() - 1);
+        int i = std::min((int)s, (int)pts.size() - 2);
+        return (pts[i + 1] - pts[i]).normalized();
+    }
+    void range(double &lo, double &hi, bool &per, double &period) const override {
+        lo = 0;
+        hi = 1;
+        per = false;
+        period = 0;
+    }
+    int nominal_spans(double, double) const override { return std::max(1, (int)pts.size() - 1); }
+};
+
+// HYPERBOLA — P(u)=C+sa*cosh(u)*x+si*sinh(u)*y (ISO 10303-42; step2glb model.rs curve_polyline).
+struct HyperbolaCurve : Curve {
+    Frame f;
+    double sa, si;
+    HyperbolaCurve(const Frame &fr, double semi, double semi_imag) : f(fr), sa(semi), si(semi_imag) {}
+    Vec3 point(double u) const override { return f.to_world(sa * std::cosh(u), si * std::sinh(u), 0.0); }
+    Vec3 tangent(double u) const override {
+        return (f.x * (sa * std::sinh(u)) + f.y * (si * std::cosh(u))).normalized();
+    }
+    double param(const Vec3 &p) const {  // invert: u = asinh(localY/si)
+        return std::asinh(f.to_local(p).y / si);
+    }
+    void range(double &lo, double &hi, bool &per, double &period) const override {
+        lo = -1;
+        hi = 1;
+        per = false;
+        period = 0;
+    }
+};
+
+// PARABOLA — P(u)=C+fd*u^2*x+2*fd*u*y (ISO 10303-42; step2glb model.rs curve_polyline).
+struct ParabolaCurve : Curve {
+    Frame f;
+    double fd;
+    ParabolaCurve(const Frame &fr, double focal) : f(fr), fd(focal) {}
+    Vec3 point(double u) const override { return f.to_world(fd * u * u, 2.0 * fd * u, 0.0); }
+    Vec3 tangent(double u) const override {
+        return (f.x * (2.0 * fd * u) + f.y * (2.0 * fd)).normalized();
+    }
+    double param(const Vec3 &p) const { return f.to_local(p).y / (2.0 * fd); }
+    void range(double &lo, double &hi, bool &per, double &period) const override {
+        lo = -1;
+        hi = 1;
+        per = false;
+        period = 0;
+    }
+};
+
+// COMPOSITE_CURVE — an ordered chain of bounded parent curves (each oriented by same_sense).
+struct CompositeCurveN : Curve {
+    struct Seg {
+        std::shared_ptr<Curve> parent;
+        bool same_sense;
+    };
+    std::vector<Seg> segs;
+    explicit CompositeCurveN(std::vector<Seg> s) : segs(std::move(s)) {}
+    Vec3 point(double t) const override {
+        if (segs.empty()) return {0, 0, 0};
+        double s = clampd(t, 0.0, 1.0) * segs.size();
+        int i = std::min((int)s, (int)segs.size() - 1);
+        double local = s - i;
+        const Seg &sg = segs[i];
+        return sg.parent->point(sg.same_sense ? local : 1.0 - local);
+    }
+    Vec3 tangent(double t) const override {
+        double s = clampd(t, 0.0, 1.0) * std::max((size_t)1, segs.size());
+        int i = std::min((int)s, (int)segs.size() - 1);
+        Vec3 tg = segs[i].parent->tangent(s - i);
+        return segs[i].same_sense ? tg : tg * -1.0;
+    }
+    void range(double &lo, double &hi, bool &per, double &period) const override {
+        lo = 0;
+        hi = 1;
+        per = false;
+        period = 0;
+    }
+    // discretize the whole chain (each parent over its own range, oriented, stitched)
+    std::vector<Vec3> chain(double deflection, double max_angle) const {
+        std::vector<Vec3> out;
+        for (const Seg &sg : segs) {
+            double a, b;
+            bool pr;
+            double pe;
+            sg.parent->range(a, b, pr, pe);
+            std::vector<Vec3> sp = sg.parent->discretize(a, b, deflection, max_angle);
+            if (!sg.same_sense) std::reverse(sp.begin(), sp.end());
+            for (const Vec3 &p : sp)
+                if (out.empty() || (p - out.back()).norm() > 1e-9) out.push_back(p);
+        }
+        return out;
     }
 };
 

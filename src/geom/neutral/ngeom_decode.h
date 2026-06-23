@@ -22,6 +22,10 @@ enum : int {
     PLACEMENT3 = 1,
     PLACEMENT1 = 2,
     LINE = 10,
+    POLYLINE = 11,
+    HYPERBOLA = 12,
+    PARABOLA = 13,
+    COMPOSITE_CURVE = 14,
     CIRCLE = 20,
     ELLIPSE = 21,
     BSPLINE_CURVE = 22,
@@ -114,6 +118,7 @@ struct Slot {
     // EDGE_CURVE intermediate
     Vec3 e_start, e_end;
     std::shared_ptr<Curve> e_geom;
+    bool e_same_sense = true;
     bool is_edge = false;
 };
 
@@ -154,6 +159,36 @@ inline NgeomDoc decode(const uint8_t *data, size_t n) {
             case tag::LINE: {
                 Vec3 pnt = r.vec3(), dir = r.vec3();
                 slot.curve = std::make_shared<LineCurve>(pnt, dir);
+                break;
+            }
+            case tag::POLYLINE: {
+                int np = r.i32();
+                std::vector<Vec3> pts(np);
+                for (int i = 0; i < np; ++i) pts[i] = r.vec3();
+                slot.curve = std::make_shared<PolylineCurve>(std::move(pts));
+                break;
+            }
+            case tag::HYPERBOLA: {
+                int pl = r.i32();
+                double sa = r.f64(), si = r.f64();
+                slot.curve = std::make_shared<HyperbolaCurve>(frame_at(pl), sa, si);
+                break;
+            }
+            case tag::PARABOLA: {
+                int pl = r.i32();
+                double fd = r.f64();
+                slot.curve = std::make_shared<ParabolaCurve>(frame_at(pl), fd);
+                break;
+            }
+            case tag::COMPOSITE_CURVE: {
+                int ns = r.i32();
+                std::vector<CompositeCurveN::Seg> segs(ns);
+                for (int i = 0; i < ns; ++i) {
+                    int cref = r.i32();
+                    int ss = r.i32();
+                    segs[i] = {curve_at(cref), ss != 0};
+                }
+                slot.curve = std::make_shared<CompositeCurveN>(std::move(segs));
                 break;
             }
             case tag::CIRCLE: {
@@ -265,7 +300,7 @@ inline NgeomDoc decode(const uint8_t *data, size_t n) {
                 slot.e_start = r.vec3();
                 slot.e_end = r.vec3();
                 int g = r.i32();
-                r.i32();  // same_sense (direction handled by endpoint-snap at discretize)
+                slot.e_same_sense = r.i32() != 0;  // kept: closed circles need it for direction
                 slot.e_geom = (g >= 0) ? curve_at(g) : nullptr;
                 break;
             }
@@ -289,6 +324,10 @@ inline NgeomDoc decode(const uint8_t *data, size_t n) {
                     oe->start = es.e_end;
                     oe->end = es.e_start;
                 }
+                oe->e_start = es.e_start;
+                oe->e_end = es.e_end;
+                oe->same_sense = es.e_same_sense;
+                oe->orientation = orientation != 0;
                 oe->geometry = es.e_geom;
                 oe->has_params = has_params != 0;
                 oe->t_start = ts;
