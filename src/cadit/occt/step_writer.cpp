@@ -1,6 +1,8 @@
+#include <cctype>
 #include <iostream>
 #include <memory>
 #include <filesystem>
+#include <string>
 
 #include "static_param_guard.h"
 
@@ -88,9 +90,23 @@ public:
 
         // Interface_Static is process-global; restore these on scope exit so a
         // STEP write doesn't leak its unit/schema into later OCC operations.
+        const InterfaceStaticCValGuard cascade_guard("xstep.cascade.unit");
         const InterfaceStaticCValGuard unit_guard("write.step.unit");
         const InterfaceStaticCValGuard schema_guard("write.step.schema");
-        Interface_Static::SetCVal("write.step.unit", unit.c_str());
+        // OCC's write.step.unit only recognizes UPPERCASE units ("M", "MM", "INCH", ...); an
+        // unrecognized value (e.g. adapy's Units.M.value "m") silently falls back to MILLIMETRE,
+        // which then declares MILLI while the coordinates stay metre-valued — a malformed,
+        // 1000x-off round-trip. Uppercase so "m" -> "M" (parity with the pythonocc backend writer).
+        std::string unit_uc = unit;
+        for (char &c : unit_uc) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        // ``xstep.cascade.unit`` tells OCC what unit the IN-MEMORY model is in; ``write.step.unit``
+        // what the file declares (OCC converts between them). The cascade unit is a process-global
+        // that defaults to MM. adapy models are in ``unit`` (metres) — without pinning the cascade
+        // unit to match, OCC treats the metre coords as MM and writes every coordinate 1000x off
+        // (3.0 m -> "0.003"). Set both equal so no conversion happens (parity with the pythonocc
+        // backend writer, src/ada/occ/step/writer.py).
+        Interface_Static::SetCVal("xstep.cascade.unit", unit_uc.c_str());
+        Interface_Static::SetCVal("write.step.unit", unit_uc.c_str());
         Interface_Static::SetCVal("write.step.schema", schema.c_str());
 
         writer.Transfer(doc_, STEPControl_AsIs);
