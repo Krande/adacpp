@@ -28,6 +28,11 @@ endif ()
 include(cmake/deps_libtess2.cmake)
 include_directories(${LIBTESS2_INCLUDE_DIR})
 
+# Vendored meshoptimizer (native + wasm) — meshopt_simplify cleanup (step2glb merge parity) +
+# EXT_meshopt_compression encoders. ${MESHOPT_SOURCES} are appended to ADA_CPP_SOURCES below.
+include(cmake/deps_meshopt.cmake)
+include_directories(${MESHOPT_INCLUDE_DIR})
+
 # Create a list called ADA_CPP_SOURCES of all cpp files inside the src dir
 if (BUILD_WASM)
     # Wasm builds now link the cross-built OCCT toolkits (see wasm_occt.cmake), so
@@ -46,7 +51,9 @@ if (BUILD_WASM)
             # NGEOM OCC-free path (neutral layer is header-only; libtess2 tessellator + the
             # vendored libtess2 C compile for wasm too). Taxonomy path is native-only (ifc).
             src/geom/neutral/ngeom_tessellate.cpp
+            src/geom/neutral/ngeom_meshopt.cpp
             ${LIBTESS2_SOURCES}
+            ${MESHOPT_SOURCES}
     )
 else ()
     set(ADA_CPP_SOURCES
@@ -69,7 +76,9 @@ else ()
             src/geom/neutral/ngeom_tessellate.cpp
             src/cadit/ifc/ngeom_taxonomy_build.cpp
             src/cadit/ifc/ngeom_taxonomy_kernel.cpp
+            src/geom/neutral/ngeom_meshopt.cpp
             ${LIBTESS2_SOURCES}
+            ${MESHOPT_SOURCES}
     )
 endif ()
 set(ADA_CPP_HEADERS

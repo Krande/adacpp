@@ -9,6 +9,7 @@
 #include "../cadit/ifc/ngeom_taxonomy.h"
 #include "../geom/neutral/ngeom_decode.h"
 #include "../geom/neutral/ngeom_tessellate.h"
+#include "../geom/neutral/ngeom_meshopt.h"
 
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/array.h>
@@ -1986,6 +1987,15 @@ face_plane_impl(const ShapeHandle &face_sh) {
                           std::array<double, 3>{nrm.X(), nrm.Y(), nrm.Z()});
 }
 
+// step2glb merge cleanup: meshopt_simplify (LockBorder) toward threshold*index_count within
+// target_error, then drop degenerate tris + compact. Returns (positions xyz-interleaved, indices).
+std::pair<std::vector<float>, std::vector<uint32_t>> meshopt_simplify_mesh_impl(
+    const std::vector<float> &positions, const std::vector<uint32_t> &indices, float threshold,
+    float target_error) {
+    ngeom::SimplifiedMesh r = ngeom::meshopt_simplify_mesh(positions, indices, threshold, target_error);
+    return {std::move(r.positions), std::move(r.indices)};
+}
+
 } // namespace
 
 void cad_module(nb::module_ &m) {
@@ -2108,6 +2118,13 @@ void cad_module(nb::module_ &m) {
           "every instance into ONE combined Mesh with a GroupReference per root "
           "(node_id = root index). pipeline: 'libtess2' (OCC-free) | 'occ' | 'cgal' | "
           "'hybrid' (ifcopenshell taxonomy kernels). angular_deg in degrees.");
+
+    m.def("meshopt_simplify_mesh", &meshopt_simplify_mesh_impl,
+          "positions"_a, "indices"_a, "threshold"_a = 0.75f, "target_error"_a = 0.0f,
+          "step2glb merge cleanup: meshopt_simplify (border-locked) toward threshold*index_count "
+          "within target_error, then drop degenerate triangles + compact. positions xyz-interleaved "
+          "float, indices uint32. Returns (positions, indices). target_error 0.0 = lossless "
+          "coplanar-triangle collapse.");
 
     m.def("tessellate_box", &tessellate_box_impl,
           "dx"_a, "dy"_a, "dz"_a,
