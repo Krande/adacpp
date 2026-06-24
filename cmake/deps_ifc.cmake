@@ -4,16 +4,28 @@
 # The geometry kernels (OpenCascadeKernel / CgalKernel) live in their own static libs,
 # separate from libIfcGeom.a (which defines AbstractKernel + the taxonomy + convert dispatch).
 # The NGEOM taxonomy path instantiates these kernels, so link them too. Static-lib symbol
-# resolution between the kernels and IfcGeom is mutual, so wrap them in a linker group.
-list(APPEND
-        ADA_CPP_LINK_LIBS
-        -Wl,--start-group
-        geometry_kernel_opencascade
-        geometry_kernel_cgal
-        IfcParse
-        IfcGeom
-        -Wl,--end-group
-)
+# resolution between the kernels and IfcGeom is mutual.
+if(APPLE)
+    # Apple's ld64 has no --start-group/--end-group (it errors "ld: unknown option:
+    # --start-group"); it resolves circular static-archive deps via its own multi-pass,
+    # so just list the libs directly.
+    list(APPEND ADA_CPP_LINK_LIBS
+            geometry_kernel_opencascade
+            geometry_kernel_cgal
+            IfcParse
+            IfcGeom
+    )
+else()
+    # GNU ld / lld need the group to resolve the mutual references in one pass.
+    list(APPEND ADA_CPP_LINK_LIBS
+            -Wl,--start-group
+            geometry_kernel_opencascade
+            geometry_kernel_cgal
+            IfcParse
+            IfcGeom
+            -Wl,--end-group
+    )
+endif()
 # The CGAL kernel uses CGAL's exact arithmetic -> GMP/MPFR. They are leaf C libs, so they
 # must come AFTER the kernel group in static link order.
 list(APPEND ADA_CPP_LINK_LIBS mpfr gmp)
