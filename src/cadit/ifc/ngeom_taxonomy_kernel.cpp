@@ -217,9 +217,21 @@ TessMesh tessellate_via_taxonomy(const NgeomDoc &doc, const std::string &kernel_
     for (const NgeomRoot &root : doc.roots) {
         uint32_t first = (uint32_t)mesh.indices.size();
         uint32_t vfirst = (uint32_t)(mesh.positions.size() / 3);
-        auto shell = to_taxonomy_shell(root.faces);
-        if (shell) {
-            try {
+        try {
+            if (root.extrusion) {
+                // Swept solid: build a taxonomy::extrusion and let the kernel
+                // sweep + mesh it (the OCC/CGAL kernels both convert extrusions).
+                auto ext = to_taxonomy_extrusion(*root.extrusion);
+                if (ext) {
+                    if (use_cgal) {
+                        cgal_shape_t shape;
+                        if (cgal->convert(ext, shape)) append_cgal_shape(shape, mesh);
+                    } else {
+                        TopoDS_Shape shape;
+                        if (occ->convert(ext, shape)) append_occ_shape(shape, deflection, mesh);
+                    }
+                }
+            } else if (auto shell = to_taxonomy_shell(root.faces)) {
                 if (use_cgal) {
                     cgal_shape_t shape;
                     if (cgal->convert(shell, shape)) append_cgal_shape(shape, mesh);
@@ -227,9 +239,9 @@ TessMesh tessellate_via_taxonomy(const NgeomDoc &doc, const std::string &kernel_
                     TopoDS_Shape shape;
                     if (occ->convert(shell, shape)) append_occ_shape(shape, deflection, mesh);
                 }
-            } catch (...) {
-                // fail-soft: a shell the kernel can't build yields no triangles for this root
             }
+        } catch (...) {
+            // fail-soft: a root the kernel can't build yields no triangles
         }
         mesh.groups.push_back({root.id, first, (uint32_t)mesh.indices.size() - first, vfirst,
                                (uint32_t)(mesh.positions.size() / 3) - vfirst});

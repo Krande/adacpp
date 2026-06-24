@@ -215,10 +215,20 @@ struct ConnectedFaceSetN {
     std::vector<std::shared_ptr<FaceSurfaceN>> faces;
 };
 
+// An extruded-area solid: a planar profile face swept along `direction` by
+// `depth`, then placed by `frame`. Mapped to ifcopenshell taxonomy::extrusion.
+struct ExtrusionN {
+    std::shared_ptr<FaceSurfaceN> profile;  // planar profile face (local XY, z=0)
+    Frame frame;                            // placement of the swept solid
+    Vec3 direction{0, 0, 1};                // local extrusion direction
+    double depth = 0;
+};
+
 // One top-level streamed Geometry instance + its stable id (for Mesh grouping).
 struct NgeomRoot {
     std::string id;
     std::vector<std::shared_ptr<FaceSurfaceN>> faces;  // flattened (a CFS expands to its faces)
+    std::shared_ptr<ExtrusionN> extrusion;             // set if this root is an extruded solid
 };
 
 struct NgeomDoc {

@@ -172,4 +172,19 @@ std::shared_ptr<tax::shell> to_taxonomy_shell(const std::vector<std::shared_ptr<
     return sh->children.empty() ? nullptr : sh;
 }
 
+std::shared_ptr<tax::extrusion> to_taxonomy_extrusion(const ExtrusionN &ex) {
+    if (!ex.profile) return nullptr;
+    // Reuse the face builder: the profile is one planar face (local XY, z=0).
+    auto sh = to_taxonomy_shell({ex.profile});
+    if (!sh || sh->children.empty()) return nullptr;
+    tax::face::ptr face = sh->children[0];
+    // matrix = the solid's placement frame (origin, z=axis, x=ref_direction).
+    auto m = tax::make<tax::matrix4>(Eigen::Vector3d(ex.frame.o.x, ex.frame.o.y, ex.frame.o.z),
+                                     Eigen::Vector3d(ex.frame.z.x, ex.frame.z.y, ex.frame.z.z),
+                                     Eigen::Vector3d(ex.frame.x.x, ex.frame.x.y, ex.frame.x.z));
+    auto dir =
+        tax::make<tax::direction3>(Eigen::Vector3d(ex.direction.x, ex.direction.y, ex.direction.z));
+    return tax::make<tax::extrusion>(m, face, dir, ex.depth);
+}
+
 }  // namespace adacpp::ngeom

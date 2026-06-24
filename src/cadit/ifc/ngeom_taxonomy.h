@@ -19,6 +19,7 @@ namespace ifcopenshell {
 namespace geometry {
 namespace taxonomy {
 struct shell;
+struct extrusion;
 }
 }  // namespace geometry
 }  // namespace ifcopenshell
@@ -29,6 +30,10 @@ namespace adacpp::ngeom {
 // faces. Returns nullptr if nothing mappable. Defined in ngeom_taxonomy_build.cpp.
 std::shared_ptr<ifcopenshell::geometry::taxonomy::shell> to_taxonomy_shell(
     const std::vector<std::shared_ptr<FaceSurfaceN>> &faces);
+
+// Build an ifcopenshell taxonomy::extrusion (profile face + placement matrix +
+// direction + depth) from a decoded ExtrusionN. Defined in ngeom_taxonomy_build.cpp.
+std::shared_ptr<ifcopenshell::geometry::taxonomy::extrusion> to_taxonomy_extrusion(const ExtrusionN &ex);
 
 // Descriptor for one ifcopenshell ConversionSettings option, exposed so
 // Python / the frontend can enumerate + tune the taxonomy kernel settings.

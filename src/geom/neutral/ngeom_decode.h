@@ -39,6 +39,7 @@ enum : int {
     BSPLINE_SURFACE = 45,
     SURF_LIN_EXTRUSION = 46,
     SURF_REVOLUTION = 47,
+    EXTRUDED_AREA_SOLID = 50,
     EDGE_CURVE = 60,
     ORIENTED_EDGE = 61,
     EDGE_LOOP = 62,
@@ -114,6 +115,7 @@ struct Slot {
     std::shared_ptr<FaceBoundN> bound;
     std::shared_ptr<FaceSurfaceN> face;
     std::shared_ptr<ConnectedFaceSetN> cfs;
+    std::shared_ptr<ExtrusionN> extrusion;
     std::shared_ptr<OrientedEdgeN> oedge;
     // EDGE_CURVE intermediate
     Vec3 e_start, e_end;
@@ -378,6 +380,15 @@ inline NgeomDoc decode(const uint8_t *data, size_t n) {
                 slot.cfs = c;
                 break;
             }
+            case tag::EXTRUDED_AREA_SOLID: {
+                auto ex = std::make_shared<ExtrusionN>();
+                ex->profile = S.at(r.i32()).face;  // profile FACE_SURFACE
+                ex->frame = frame_at(r.i32());      // PLACEMENT3
+                ex->direction = r.vec3();
+                ex->depth = r.f64();
+                slot.extrusion = ex;
+                break;
+            }
             default:
                 break;  // unknown tag -> skipped via nbytes below
         }
@@ -396,7 +407,9 @@ inline NgeomDoc decode(const uint8_t *data, size_t n) {
         NgeomRoot root;
         root.id = std::move(id);
         const Slot &gs = S.at(gidx);
-        if (gs.face) {
+        if (gs.extrusion) {
+            root.extrusion = gs.extrusion;
+        } else if (gs.face) {
             root.faces.push_back(gs.face);
         } else if (gs.cfs) {
             root.faces = gs.cfs->faces;
