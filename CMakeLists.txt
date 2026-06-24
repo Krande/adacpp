@@ -52,6 +52,7 @@ if (BUILD_WASM)
             # vendored libtess2 C compile for wasm too). Taxonomy path is native-only (ifc).
             src/geom/neutral/ngeom_tessellate.cpp
             src/geom/neutral/ngeom_meshopt.cpp
+            src/geom/neutral/ngeom_boolean.cpp
             ${LIBTESS2_SOURCES}
             ${MESHOPT_SOURCES}
     )
@@ -77,6 +78,7 @@ else ()
             src/cadit/ifc/ngeom_taxonomy_build.cpp
             src/cadit/ifc/ngeom_taxonomy_kernel.cpp
             src/geom/neutral/ngeom_meshopt.cpp
+            src/geom/neutral/ngeom_boolean.cpp
             ${LIBTESS2_SOURCES}
             ${MESHOPT_SOURCES}
     )
@@ -161,6 +163,11 @@ if (NOT BUILD_WASM)
     include(cmake/deps_occ.cmake)
     include(cmake/deps_gmsh.cmake)
     include(cmake/deps_ifc.cmake)
+
+    # Manifold mesh-boolean (CSG) for the OCC-free libtess2 path (ngeom_boolean.cpp).
+    include(cmake/deps_manifold.cmake)
+    list(APPEND ADA_CPP_LINK_LIBS manifold)
+    add_compile_definitions(ADACPP_HAVE_MANIFOLD)
 
     # Find Threads package for pthread support on Linux
     find_package(Threads REQUIRED)

@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "ngeom_boolean.h"  // OCC-free CSG (Manifold) for boolean roots
 #include "ngeom_bspline.h"
 #include "ngeom_surfaces.h"
 #include "tesselator.h"  // vendored libtess2 (fails soft via setjmp/longjmp -> tessTesselate
@@ -1464,6 +1465,41 @@ void tessellate_revolve(const RevolveN &rv, const TessParams &tp, Mesh &mesh) {
     // NOTE: partial revolutions (angle < 2pi) would also need the two profile end caps; adapy's
     // Cone/Cylinder use full revolutions, so they are not generated here yet.
 }
+
+// Tessellate one boolean operand into its own world-space mesh (recursive for nested booleans).
+TessMesh tessellate_solid_item(const SolidItemN &it, const TessParams &tp);
+
+TessMesh tessellate_boolean_item(const BooleanN &bn, const TessParams &tp) {
+    TessMesh a = tessellate_solid_item(bn.a, tp);
+    TessMesh b = tessellate_solid_item(bn.b, tp);
+    TessMesh out;
+    mesh_boolean(bn.op, a, b, out);  // Manifold (native) / no-op stub (wasm)
+    return out;
+}
+
+TessMesh tessellate_solid_item(const SolidItemN &it, const TessParams &tp) {
+    if (it.boolean) return tessellate_boolean_item(*it.boolean, tp);
+    TessMesh m;
+    if (it.extrusion) {
+        Mesh mesh(m);
+        tessellate_extrusion(*it.extrusion, tp, mesh);
+    } else if (it.revolve) {
+        Mesh mesh(m);
+        tessellate_revolve(*it.revolve, tp, mesh);
+    } else {
+        for (const auto &f : it.faces)
+            if (f) tessellate_face(*f, tp, m);
+    }
+    return m;
+}
+
+// Concatenate src into dst, offsetting src's indices by dst's current vertex count.
+void append_mesh(TessMesh &dst, const TessMesh &src) {
+    uint32_t base = (uint32_t)(dst.positions.size() / 3);
+    dst.positions.insert(dst.positions.end(), src.positions.begin(), src.positions.end());
+    dst.normals.insert(dst.normals.end(), src.normals.begin(), src.normals.end());
+    for (uint32_t i : src.indices) dst.indices.push_back(base + i);
+}
 }  // namespace
 
 TessMesh tessellate_doc(const NgeomDoc &doc, const TessParams &tp) {
@@ -1477,8 +1513,10 @@ TessMesh tessellate_doc(const NgeomDoc &doc, const TessParams &tp) {
         } else if (root.revolve) {
             Mesh m(mesh);
             tessellate_revolve(*root.revolve, tp, m);
+        } else if (root.boolean) {
+            // CSG via Manifold (no-op on wasm until Manifold is wired there).
+            append_mesh(mesh, tessellate_boolean_item(*root.boolean, tp));
         } else {
-            // NOTE: boolean roots (CSG) are not meshed on the OCC-free path (no mesh-boolean yet).
             if (FDBG) {
                 size_t nnull = 0;
                 for (const auto &f : root.faces)
