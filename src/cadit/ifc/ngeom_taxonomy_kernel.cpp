@@ -137,11 +137,75 @@ void append_cgal_shape(const cgal_shape_t &shape, TessMesh &out) {
 
 }  // namespace
 
+namespace {
+bool parse_bool(const std::string &s) {
+    return s == "1" || s == "true" || s == "True" || s == "TRUE" || s == "on" || s == "yes";
+}
+std::string variant_to_string(const geom::Settings::value_variant_t &v) {
+    if (const bool *p = boost::get<bool>(&v)) return *p ? "true" : "false";
+    if (const int *p = boost::get<int>(&v)) return std::to_string(*p);
+    if (const double *p = boost::get<double>(&v)) return std::to_string(*p);
+    if (const std::string *p = boost::get<std::string>(&v)) return *p;
+    return "";  // non-scalar (set/vector/enum) — not exposed as a simple value
+}
+// Apply one (name, string-value) override to the kernel settings, parsing the
+// string per the setting's declared type. Unknown setting / bad value -> skip.
+void apply_setting(geom::Settings &s, const std::string &name, const std::string &val) {
+    std::string ty;
+    try {
+        ty = s.get_type(name);
+    } catch (...) {
+        return;  // not a known setting
+    }
+    try {
+        if (ty == "bool")
+            s.set(name, parse_bool(val));
+        else if (ty == "int")
+            s.set(name, (int)std::stol(val));
+        else if (ty == "double")
+            s.set(name, std::stod(val));
+        else if (ty == "std::string")
+            s.set(name, val);
+        // set<>/vector<>/enum settings are not exposed via the simple string API
+    } catch (...) {
+        // malformed value for the type -> leave the default
+    }
+}
+}  // namespace
+
+std::vector<TaxonomySetting> taxonomy_settings_info() {
+    geom::Settings s;
+    std::vector<TaxonomySetting> out;
+    for (const std::string &name : s.setting_names()) {
+        TaxonomySetting info;
+        info.name = name;
+        try {
+            info.type = s.get_type(name);
+        } catch (...) {
+            info.type = "?";
+        }
+        try {
+            info.default_value = variant_to_string(s.get(name));
+        } catch (...) {
+        }
+        out.push_back(info);
+    }
+    return out;
+}
+
 TessMesh tessellate_via_taxonomy(const NgeomDoc &doc, const std::string &kernel_name, double deflection,
-                                 double angular_deg) {
+                                 double angular_deg,
+                                 const std::vector<std::pair<std::string, std::string>> &overrides) {
     (void)angular_deg;  // the kernels mesh from their own settings
     TessMesh mesh;
     geom::Settings settings;
+    // Default: skip the wire self-intersection check. A live gdb profile showed
+    // IfcGeom::util::wire_intersections (recursive 2D curve-curve global
+    // optimization) dominating ~2/3 of taxonomy time, and our taxonomy shells
+    // come from already-validated solids. Callers can re-enable / tune any
+    // ifcopenshell setting via `overrides` (e.g. {"precision", "1e-3"}).
+    settings.get<geom::settings::NoWireIntersectionCheck>().value = true;
+    for (const auto &kv : overrides) apply_setting(settings, kv.first, kv.second);
     const bool use_cgal = (kernel_name == "cgal");
     std::unique_ptr<IfcGeom::OpenCascadeKernel> occ;
     std::unique_ptr<geom::kernels::CgalKernel> cgal;

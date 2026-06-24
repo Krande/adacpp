@@ -352,13 +352,21 @@ Mesh tessellate_box_impl(float dx, float dy, float dz) {
 // to its own instance id). pipeline: "libtess2" (OCC-free neutral path) | "occ" | "cgal"
 // | "hybrid" (ifcopenshell taxonomy kernels). angular is in DEGREES.
 Mesh tessellate_stream_impl(nb::bytes buffer, const std::string &pipeline, double deflection,
-                            double angular_deg) {
+                            double angular_deg, nb::dict settings) {
     using namespace adacpp::ngeom;
     NgeomDoc doc;
     try {
         doc = decode(reinterpret_cast<const uint8_t *>(buffer.c_str()), buffer.size());
     } catch (const std::exception &) {
         return Mesh(0, {}, {});  // malformed buffer -> empty mesh
+    }
+
+    // ifcopenshell ConversionSettings overrides (taxonomy paths only). Any
+    // python scalar is stringified; the C++ side parses per the setting type.
+    std::vector<std::pair<std::string, std::string>> overrides;
+    for (auto item : settings) {
+        overrides.emplace_back(nb::cast<std::string>(item.first),
+                               nb::cast<std::string>(nb::str(item.second)));
     }
 
     TessMesh tm;
@@ -372,7 +380,7 @@ Mesh tessellate_stream_impl(nb::bytes buffer, const std::string &pipeline, doubl
         std::string kern = pipeline;
         auto dash = kern.find('-');
         if (dash != std::string::npos) kern = kern.substr(dash + 1);
-        tm = tessellate_via_taxonomy(doc, kern, deflection, angular_deg);
+        tm = tessellate_via_taxonomy(doc, kern, deflection, angular_deg, overrides);
     }
 
     std::vector<GroupReference> groups;
@@ -2114,10 +2122,29 @@ void cad_module(nb::module_ &m) {
 
     m.def("tessellate_stream", &tessellate_stream_impl,
           "buffer"_a, "pipeline"_a = "libtess2", "deflection"_a = 0.0, "angular_deg"_a = 20.0,
+          "settings"_a = nb::dict(),
           "Decode an NGEOM stream buffer (adapy ada.geom, neutral schema) and tessellate "
           "every instance into ONE combined Mesh with a GroupReference per root "
           "(node_id = root index). pipeline: 'libtess2' (OCC-free) | 'occ' | 'cgal' | "
-          "'hybrid' (ifcopenshell taxonomy kernels). angular_deg in degrees.");
+          "'hybrid' (ifcopenshell taxonomy kernels). angular_deg in degrees. settings: "
+          "ifcopenshell ConversionSettings overrides for the taxonomy paths, e.g. "
+          "{'no-wire-intersection-check': True, 'precision': 1e-3} — see ifc_taxonomy_settings().");
+
+    m.def(
+        "ifc_taxonomy_settings",
+        []() {
+            nb::list out;
+            for (const auto &si : adacpp::ngeom::taxonomy_settings_info()) {
+                nb::dict d;
+                d["name"] = si.name;
+                d["type"] = si.type;
+                d["default"] = si.default_value;
+                out.append(d);
+            }
+            return out;
+        },
+        "Enumerate the ifcopenshell taxonomy ConversionSettings (name, type, default) so "
+        "Python / the frontend can render + override them via tessellate_stream(settings=...).");
 
     m.def("meshopt_simplify_mesh", &meshopt_simplify_mesh_impl,
           "positions"_a, "indices"_a, "threshold"_a = 0.75f, "target_error"_a = 0.0f,
