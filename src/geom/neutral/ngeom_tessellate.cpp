@@ -1338,20 +1338,157 @@ bool tessellate_face(const FaceSurfaceN &face, const TessParams &tp, TessMesh &o
     return ok;
 }
 
+// ---- analytic solid -> boundary mesh (OCC-free; gives the libtess2 path solid support) -------
+namespace {
+constexpr double TWO_PI = 6.283185307179586;
+
+// flat-shaded triangle with an outward normal derived from the winding; skips degenerates.
+void emit_tri(Mesh &mesh, const Vec3 &a, const Vec3 &b, const Vec3 &c) {
+    Vec3 nrm = (b - a).cross(c - a);
+    double l = nrm.norm();
+    if (l < 1e-18) return;
+    nrm = nrm * (1.0 / l);
+    uint32_t base = (uint32_t)(mesh.m.positions.size() / 3);
+    mesh.push_vertex(a, nrm);
+    mesh.push_vertex(b, nrm);
+    mesh.push_vertex(c, nrm);
+    mesh.push_index(base);
+    mesh.push_index(base + 1);
+    mesh.push_index(base + 2);
+}
+
+// Rodrigues rotation of p about the line (o, unit k) by angle th.
+Vec3 rotate_about(const Vec3 &p, const Vec3 &o, const Vec3 &k, double th) {
+    Vec3 v = p - o;
+    double c = std::cos(th), s = std::sin(th);
+    return o + v * c + k.cross(v) * s + k * (k.dot(v) * (1.0 - c));
+}
+
+// ExtrudedAreaSolid -> two caps (profile triangulated in local XY via libtess2, with holes) +
+// a quad side band per boundary loop. Profile lives in the local XY plane (z=0); the position
+// frame F places the swept solid; d is the local sweep vector (direction * depth).
+void tessellate_extrusion(const ExtrusionN &ex, const TessParams &tp, Mesh &mesh) {
+    if (!ex.profile) return;
+    const Frame &F = ex.frame;
+    const Vec3 d = ex.direction * ex.depth;
+
+    std::vector<std::vector<Uv>> loops_uv;
+    for (const FaceBoundN &b : ex.profile->bounds) {
+        if (!b.loop) continue;
+        std::vector<Vec3> ring = b.loop->discretize(tp.deflection, tp.max_angle);
+        std::vector<Uv> uv;
+        uv.reserve(ring.size());
+        for (const Vec3 &p : ring) uv.push_back({p.x, p.y});
+        if (uv.size() >= 3) loops_uv.push_back(std::move(uv));
+    }
+    Tess2Out cap = run_tess2(loops_uv, 1.0, 1.0);
+    if (cap.ok) {
+        for (const Tri &t : cap.tris) {
+            const Uv &u0 = cap.verts[t[0]], &u1 = cap.verts[t[1]], &u2 = cap.verts[t[2]];
+            // bottom cap (z=0), reversed winding so the normal faces away from the sweep
+            emit_tri(mesh, F.to_world(u0[0], u0[1], 0), F.to_world(u2[0], u2[1], 0),
+                     F.to_world(u1[0], u1[1], 0));
+            // top cap (translated by d)
+            emit_tri(mesh, F.to_world(u0[0] + d.x, u0[1] + d.y, d.z),
+                     F.to_world(u1[0] + d.x, u1[1] + d.y, d.z),
+                     F.to_world(u2[0] + d.x, u2[1] + d.y, d.z));
+        }
+    }
+    for (const FaceBoundN &b : ex.profile->bounds) {
+        if (!b.loop) continue;
+        std::vector<Vec3> ring = b.loop->discretize(tp.deflection, tp.max_angle);
+        size_t n = ring.size();
+        if (n > 1 && (ring.front() - ring.back()).norm() < 1e-12) {
+            ring.pop_back();
+            --n;
+        }
+        for (size_t i = 0; i < n; ++i) {
+            const Vec3 &p0 = ring[i], &p1 = ring[(i + 1) % n];
+            Vec3 b0 = F.to_world(p0.x, p0.y, p0.z), b1 = F.to_world(p1.x, p1.y, p1.z);
+            Vec3 t0 = F.to_world(p0.x + d.x, p0.y + d.y, p0.z + d.z);
+            Vec3 t1 = F.to_world(p1.x + d.x, p1.y + d.y, p1.z + d.z);
+            emit_tri(mesh, b0, b1, t1);
+            emit_tri(mesh, b0, t1, t0);
+        }
+    }
+}
+
+// RevolvedAreaSolid -> sweep the profile boundary ring around (axis_origin, axis_dir) by angle.
+// Points on the axis trace nothing (their quads collapse), so a profile touching the axis (e.g.
+// a cone's apex/centre) closes correctly. Full revolutions need no end caps.
+void tessellate_revolve(const RevolveN &rv, const TessParams &tp, Mesh &mesh) {
+    if (!rv.profile) return;
+    const Frame &F = rv.frame;
+    const Vec3 axo = rv.axis_origin;
+    Vec3 axd = rv.axis_dir;
+    if (axd.norm() < 1e-12) axd = {0, 0, 1};
+    axd = axd.normalized();
+    const double ang = (rv.angle != 0.0) ? rv.angle : TWO_PI;
+
+    std::vector<Vec3> ring;
+    for (const FaceBoundN &b : rv.profile->bounds) {
+        if (!b.loop) continue;
+        ring = b.loop->discretize(tp.deflection, tp.max_angle);
+        break;  // outer loop; revolved profiles with holes are not expected
+    }
+    if (ring.size() > 1 && (ring.front() - ring.back()).norm() < 1e-12) ring.pop_back();
+    const size_t n = ring.size();
+    if (n < 2) return;
+
+    double rmax = 0;
+    for (const Vec3 &p : ring) {
+        Vec3 rel = p - axo;
+        rmax = std::max(rmax, (rel - axd * axd.dot(rel)).norm());
+    }
+    double defl = tp.deflection > 0 ? tp.deflection : std::max(rmax * 0.01, 1e-4);
+    double step = angle_step(rmax, defl, tp.max_angle);
+    int nseg = std::max(3, (int)std::ceil(ang / std::max(step, 1e-6)));
+
+    std::vector<std::vector<Vec3>> R(nseg + 1, std::vector<Vec3>(n));
+    for (int j = 0; j <= nseg; ++j) {
+        double th = ang * (double)j / (double)nseg;
+        for (size_t i = 0; i < n; ++i) {
+            Vec3 pr = rotate_about(ring[i], axo, axd, th);
+            R[j][i] = F.to_world(pr.x, pr.y, pr.z);
+        }
+    }
+    for (int j = 0; j < nseg; ++j) {
+        const auto &A = R[j];
+        const auto &B = R[j + 1];
+        for (size_t i = 0; i < n; ++i) {
+            size_t i2 = (i + 1) % n;
+            emit_tri(mesh, A[i], A[i2], B[i2]);
+            emit_tri(mesh, A[i], B[i2], B[i]);
+        }
+    }
+    // NOTE: partial revolutions (angle < 2pi) would also need the two profile end caps; adapy's
+    // Cone/Cylinder use full revolutions, so they are not generated here yet.
+}
+}  // namespace
+
 TessMesh tessellate_doc(const NgeomDoc &doc, const TessParams &tp) {
     TessMesh mesh;
     for (const NgeomRoot &root : doc.roots) {
         uint32_t first = (uint32_t)mesh.indices.size();
         uint32_t vfirst = (uint32_t)(mesh.positions.size() / 3);
-        if (FDBG) {
-            size_t nnull = 0;
-            for (const auto &f : root.faces)
-                if (!f) ++nnull;
-            std::fprintf(stderr, "FDBG ROOT id=%s faces=%zu null=%zu\n", root.id.c_str(),
-                         root.faces.size(), nnull);
+        if (root.extrusion) {
+            Mesh m(mesh);
+            tessellate_extrusion(*root.extrusion, tp, m);
+        } else if (root.revolve) {
+            Mesh m(mesh);
+            tessellate_revolve(*root.revolve, tp, m);
+        } else {
+            // NOTE: boolean roots (CSG) are not meshed on the OCC-free path (no mesh-boolean yet).
+            if (FDBG) {
+                size_t nnull = 0;
+                for (const auto &f : root.faces)
+                    if (!f) ++nnull;
+                std::fprintf(stderr, "FDBG ROOT id=%s faces=%zu null=%zu\n", root.id.c_str(),
+                             root.faces.size(), nnull);
+            }
+            for (const auto &face : root.faces)
+                if (face) tessellate_face(*face, tp, mesh);
         }
-        for (const auto &face : root.faces)
-            if (face) tessellate_face(*face, tp, mesh);
         mesh.groups.push_back({root.id, first, (uint32_t)mesh.indices.size() - first, vfirst,
                                (uint32_t)(mesh.positions.size() / 3) - vfirst});
     }
