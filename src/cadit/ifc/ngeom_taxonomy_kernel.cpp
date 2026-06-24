@@ -54,6 +54,28 @@ gp_Trsf trsf_from_frame(const Frame &f) {
     return t;
 }
 
+// Place mesh vertices [v_first..end) from local into world by frame F (positions translated +
+// rotated, normals rotated only). Used for cgal extrusions, where convert() ignores the matrix
+// and there is no cheap cgal-shape transform.
+void place_positions(TessMesh &mesh, size_t v_first, const Frame &F) {
+    size_t nv = mesh.positions.size() / 3;
+    bool has_n = mesh.normals.size() >= mesh.positions.size();
+    for (size_t v = v_first; v < nv; ++v) {
+        float *p = &mesh.positions[v * 3];
+        Vec3 w = F.to_world(p[0], p[1], p[2]);
+        p[0] = (float)w.x;
+        p[1] = (float)w.y;
+        p[2] = (float)w.z;
+        if (has_n) {
+            float *q = &mesh.normals[v * 3];
+            Vec3 n = F.x * q[0] + F.y * q[1] + F.z * q[2];  // rotate only
+            q[0] = (float)n.x;
+            q[1] = (float)n.y;
+            q[2] = (float)n.z;
+        }
+    }
+}
+
 // BRepMesh a healed OCC shape and append its triangles + smooth per-vertex normals to `out`.
 void append_occ_shape(const TopoDS_Shape &shape, double deflection, TessMesh &out) {
     if (shape.IsNull()) return;
@@ -201,6 +223,16 @@ TopoDS_Shape revolve_to_occ(IfcGeom::OpenCascadeKernel &occ, const RevolveN &rv)
     return BRepBuilderAPI_Transform(revolved, trsf_from_frame(rv.frame), Standard_True).Shape();
 }
 
+// convert(extrusion) returns the profile extruded in LOCAL coords -- ifcopenshell applies the
+// placement matrix downstream (in the ConversionResult flow we bypass), so place it here.
+TopoDS_Shape extrusion_to_occ(IfcGeom::OpenCascadeKernel &occ, const ExtrusionN &ex) {
+    auto et = to_taxonomy_extrusion(ex);
+    if (!et) return {};
+    TopoDS_Shape shape;
+    if (!occ.convert(et, shape) || shape.IsNull()) return {};
+    return BRepBuilderAPI_Transform(shape, trsf_from_frame(ex.frame), Standard_True).Shape();
+}
+
 TopoDS_Shape build_solid_occ(IfcGeom::OpenCascadeKernel &occ, const SolidItemN &it);
 
 TopoDS_Shape boolean_to_occ(IfcGeom::OpenCascadeKernel &occ, const BooleanN &bn) {
@@ -225,12 +257,7 @@ TopoDS_Shape boolean_to_occ(IfcGeom::OpenCascadeKernel &occ, const BooleanN &bn)
 TopoDS_Shape build_solid_occ(IfcGeom::OpenCascadeKernel &occ, const SolidItemN &it) {
     if (it.boolean) return boolean_to_occ(occ, *it.boolean);
     if (it.revolve) return revolve_to_occ(occ, *it.revolve);
-    if (it.extrusion) {
-        auto ext = to_taxonomy_extrusion(*it.extrusion);
-        TopoDS_Shape s;
-        if (ext && occ.convert(ext, s)) return s;
-        return {};
-    }
+    if (it.extrusion) return extrusion_to_occ(occ, *it.extrusion);
     if (!it.faces.empty()) {
         auto sh = to_taxonomy_shell(it.faces);
         TopoDS_Shape s;
@@ -287,17 +314,18 @@ TessMesh tessellate_via_taxonomy(const NgeomDoc &doc, const std::string &kernel_
         uint32_t vfirst = (uint32_t)(mesh.positions.size() / 3);
         try {
             if (root.extrusion) {
-                // Swept solid: build a taxonomy::extrusion and let the kernel
-                // sweep + mesh it (the OCC/CGAL kernels both convert extrusions).
-                auto ext = to_taxonomy_extrusion(*root.extrusion);
-                if (ext) {
-                    if (use_cgal) {
-                        cgal_shape_t shape;
-                        if (cgal->convert(ext, shape)) append_cgal_shape(shape, mesh);
-                    } else {
-                        TopoDS_Shape shape;
-                        if (occ->convert(ext, shape)) append_occ_shape(shape, deflection, mesh);
-                    }
+                // Swept solid. convert() yields the extrusion in LOCAL coords (the kernels
+                // ignore the placement matrix), so place it: occ via a shape transform,
+                // cgal via a vertex transform on the emitted mesh.
+                if (use_cgal) {
+                    size_t vb = mesh.positions.size() / 3;
+                    auto ext = to_taxonomy_extrusion(*root.extrusion);
+                    cgal_shape_t shape;
+                    if (ext && cgal->convert(ext, shape)) append_cgal_shape(shape, mesh);
+                    place_positions(mesh, vb, root.extrusion->frame);
+                } else {
+                    TopoDS_Shape shape = extrusion_to_occ(*occ, *root.extrusion);
+                    if (!shape.IsNull()) append_occ_shape(shape, deflection, mesh);
                 }
             } else if (root.revolve) {
                 // Revolved solid via OCC MakeRevol (ifcopenshell's revolve convert
