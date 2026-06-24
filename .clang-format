@@ -1,0 +1,45 @@
+# Strict, modern C++ formatting for adacpp's first-party sources (src/).
+# Vendored code (third_party/) is never formatted by the lint task.
+# Run via: pixi run -e lint lint-cpp   (check-only: lint-cpp-check)
+---
+Language: Cpp
+BasedOnStyle: LLVM
+Standard: c++20
+
+# Layout — matches the existing hand-written style so adopting this is low-churn.
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 120
+ContinuationIndentWidth: 4
+AccessModifierOffset: -4
+NamespaceIndentation: None
+FixNamespaceComments: true
+
+# Braces / control flow — attach style, no one-liners that hide control flow.
+BreakBeforeBraces: Attach
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Empty
+AllowShortCaseLabelsOnASingleLine: false
+
+# Pointers/refs bind to the name (e.g. `const void *data`), as the code already does.
+PointerAlignment: Right
+ReferenceAlignment: Pointer
+QualifierAlignment: Leave
+
+# Includes — leave order untouched. OCCT headers carry real order dependencies
+# and the existing nanobind / std / OCCT grouping is deliberate; reordering would
+# risk silent compile breakage for zero formatting benefit.
+SortIncludes: Never
+IncludeBlocks: Preserve
+
+# Spacing / alignment hygiene.
+SpaceAfterCStyleCast: true
+SpaceBeforeParens: ControlStatements
+AlignAfterOpenBracket: Align
+AlignTrailingComments: true
+SeparateDefinitionBlocks: Leave
+EmptyLineBeforeAccessModifier: LogicalBlock
+MaxEmptyLinesToKeep: 1

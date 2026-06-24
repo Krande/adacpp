@@ -46,6 +46,7 @@ pip = "*"
 black = "==24.4.2"
 isort = "==5.13.2"
 ruff = "==0.4.10"
+clang-format = ">=18"
 
 [feature.wasm.dependencies]
 nodejs = "*"
@@ -61,7 +62,12 @@ pyodide-build = "==0.35.0"
 cmake = "*"
 
 [feature.lint.tasks]
-lint = "isort . && black . --config pyproject.toml && ruff check . --fix"
+# Format every first-party C++ unit under src/ (no vendored code lives there;
+# third_party/ is excluded by construction). git ls-files keeps it deterministic
+# and cross-platform; clang-format reads the repo-root .clang-format.
+lint-cpp = { cmd = "clang-format -i $(git ls-files 'src/*.cpp' 'src/*.h' 'src/*.hpp')", description = "Format first-party C++ in src/ per .clang-format" }
+lint-cpp-check = { cmd = "clang-format --dry-run --Werror $(git ls-files 'src/*.cpp' 'src/*.h' 'src/*.hpp')", description = "CI gate: fail on any unformatted C++" }
+lint = { cmd = "isort . && black . --config pyproject.toml && ruff check . --fix", depends-on = ["lint-cpp"], description = "Format + lint Python and C++" }
 
 [feature.wasm.tasks]
 clean = { cmd = "rm -rf build-wasm && mkdir -p build-wasm" }
