@@ -164,14 +164,16 @@ if (NOT BUILD_WASM)
     include(cmake/deps_gmsh.cmake)
     include(cmake/deps_ifc.cmake)
 
-    # Manifold mesh-boolean (CSG) for the OCC-free libtess2 path (ngeom_boolean.cpp).
-    include(cmake/deps_manifold.cmake)
-    list(APPEND ADA_CPP_LINK_LIBS manifold)
-    add_compile_definitions(ADACPP_HAVE_MANIFOLD)
-
     # Find Threads package for pthread support on Linux
     find_package(Threads REQUIRED)
 endif ()
+
+# Manifold mesh-boolean (CSG) for the OCC-free libtess2 path (ngeom_boolean.cpp) — native AND
+# wasm (it is self-contained + cross-compiles under emscripten). Included after the toolchain /
+# OCCT setup above so EMSCRIPTEN is defined for the wasm EH flags in deps_manifold.cmake.
+include(cmake/deps_manifold.cmake)
+list(APPEND ADA_CPP_LINK_LIBS manifold)
+add_compile_definitions(ADACPP_HAVE_MANIFOLD)
 
 if (BUILD_STP2GLB)
     message(STATUS "Building the STP2GLB executable")
