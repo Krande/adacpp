@@ -40,6 +40,7 @@ enum : int {
     SURF_LIN_EXTRUSION = 46,
     SURF_REVOLUTION = 47,
     EXTRUDED_AREA_SOLID = 50,
+    REVOLVED_AREA_SOLID = 51,
     EDGE_CURVE = 60,
     ORIENTED_EDGE = 61,
     EDGE_LOOP = 62,
@@ -116,6 +117,7 @@ struct Slot {
     std::shared_ptr<FaceSurfaceN> face;
     std::shared_ptr<ConnectedFaceSetN> cfs;
     std::shared_ptr<ExtrusionN> extrusion;
+    std::shared_ptr<RevolveN> revolve;
     std::shared_ptr<OrientedEdgeN> oedge;
     // EDGE_CURVE intermediate
     Vec3 e_start, e_end;
@@ -389,6 +391,17 @@ inline NgeomDoc decode(const uint8_t *data, size_t n) {
                 slot.extrusion = ex;
                 break;
             }
+            case tag::REVOLVED_AREA_SOLID: {
+                auto rv = std::make_shared<RevolveN>();
+                rv->profile = S.at(r.i32()).face;  // profile FACE_SURFACE
+                rv->frame = frame_at(r.i32());      // PLACEMENT3 (position)
+                Frame ax = frame_at(r.i32());       // PLACEMENT1 (axis: o=loc, z=dir)
+                rv->axis_origin = ax.o;
+                rv->axis_dir = ax.z;
+                rv->angle = r.f64();
+                slot.revolve = rv;
+                break;
+            }
             default:
                 break;  // unknown tag -> skipped via nbytes below
         }
@@ -409,6 +422,8 @@ inline NgeomDoc decode(const uint8_t *data, size_t n) {
         const Slot &gs = S.at(gidx);
         if (gs.extrusion) {
             root.extrusion = gs.extrusion;
+        } else if (gs.revolve) {
+            root.revolve = gs.revolve;
         } else if (gs.face) {
             root.faces.push_back(gs.face);
         } else if (gs.cfs) {

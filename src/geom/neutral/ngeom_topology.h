@@ -224,11 +224,23 @@ struct ExtrusionN {
     double depth = 0;
 };
 
+// A revolved-area solid: a planar profile face revolved about (axis_origin,
+// axis_dir) by `angle`, then placed by `frame`. Meshed via OCC MakeRevol
+// (ifcopenshell's revolve convert derefs a null schema instance -> segfault).
+struct RevolveN {
+    std::shared_ptr<FaceSurfaceN> profile;
+    Frame frame;               // placement of the swept solid
+    Vec3 axis_origin{0, 0, 0};
+    Vec3 axis_dir{0, 0, 1};
+    double angle = 0;          // 0 => full revolution
+};
+
 // One top-level streamed Geometry instance + its stable id (for Mesh grouping).
 struct NgeomRoot {
     std::string id;
     std::vector<std::shared_ptr<FaceSurfaceN>> faces;  // flattened (a CFS expands to its faces)
     std::shared_ptr<ExtrusionN> extrusion;             // set if this root is an extruded solid
+    std::shared_ptr<RevolveN> revolve;                 // set if this root is a revolved solid
 };
 
 struct NgeomDoc {

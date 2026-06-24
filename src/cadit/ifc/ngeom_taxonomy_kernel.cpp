@@ -16,7 +16,9 @@
 
 #include <BRep_Tool.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
+#include <BRepPrimAPI_MakeRevol.hxx>
 #include <Bnd_Box.hxx>
 #include <Poly_Triangulation.hxx>
 #include <TopAbs_Orientation.hxx>
@@ -24,7 +26,10 @@
 #include <TopLoc_Location.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
+#include <gp_Ax1.hxx>
+#include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
 
 #include <cmath>
 #include <memory>
@@ -38,6 +43,13 @@ namespace geom = ifcopenshell::geometry;
 namespace adacpp::ngeom {
 
 namespace {
+
+// gp_Trsf placing local coordinates into world via a Frame (columns x/y/z + origin).
+gp_Trsf trsf_from_frame(const Frame &f) {
+    gp_Trsf t;
+    t.SetValues(f.x.x, f.y.x, f.z.x, f.o.x, f.x.y, f.y.y, f.z.y, f.o.y, f.x.z, f.y.z, f.z.z, f.o.z);
+    return t;
+}
 
 // BRepMesh a healed OCC shape and append its triangles + smooth per-vertex normals to `out`.
 void append_occ_shape(const TopoDS_Shape &shape, double deflection, TessMesh &out) {
@@ -209,10 +221,11 @@ TessMesh tessellate_via_taxonomy(const NgeomDoc &doc, const std::string &kernel_
     const bool use_cgal = (kernel_name == "cgal");
     std::unique_ptr<IfcGeom::OpenCascadeKernel> occ;
     std::unique_ptr<geom::kernels::CgalKernel> cgal;
-    if (use_cgal)
-        cgal.reset(new geom::kernels::CgalKernel(settings));
-    else  // "occ" / "hybrid" (hybrid -> occ for now)
-        occ.reset(new IfcGeom::OpenCascadeKernel(settings));
+    // OCC kernel is always created: revolve uses it (MakeRevol + profile-face
+    // build) even in cgal mode. The cgal kernel is created additionally for the
+    // cgal pipeline (faces/extrusions).
+    occ.reset(new IfcGeom::OpenCascadeKernel(settings));
+    if (use_cgal) cgal.reset(new geom::kernels::CgalKernel(settings));
 
     for (const NgeomRoot &root : doc.roots) {
         uint32_t first = (uint32_t)mesh.indices.size();
@@ -229,6 +242,25 @@ TessMesh tessellate_via_taxonomy(const NgeomDoc &doc, const std::string &kernel_
                     } else {
                         TopoDS_Shape shape;
                         if (occ->convert(ext, shape)) append_occ_shape(shape, deflection, mesh);
+                    }
+                }
+            } else if (root.revolve) {
+                // Revolved solid: ifcopenshell's revolve convert derefs a null
+                // schema instance (segfault), so build the profile face via the
+                // OCC kernel and BRepPrimAPI_MakeRevol it directly, then place.
+                const RevolveN &rv = *root.revolve;
+                auto sh = to_taxonomy_shell({rv.profile});
+                if (sh && !sh->children.empty()) {
+                    TopoDS_Shape topo_face;
+                    if (occ->convert(sh->children[0], topo_face) && !topo_face.IsNull()) {
+                        gp_Ax1 ax(gp_Pnt(rv.axis_origin.x, rv.axis_origin.y, rv.axis_origin.z),
+                                  gp_Dir(rv.axis_dir.x, rv.axis_dir.y, rv.axis_dir.z));
+                        TopoDS_Shape revolved =
+                            rv.angle != 0.0 ? BRepPrimAPI_MakeRevol(topo_face, ax, rv.angle).Shape()
+                                            : BRepPrimAPI_MakeRevol(topo_face, ax).Shape();
+                        TopoDS_Shape placed =
+                            BRepBuilderAPI_Transform(revolved, trsf_from_frame(rv.frame), Standard_True).Shape();
+                        append_occ_shape(placed, deflection, mesh);
                     }
                 }
             } else if (auto shell = to_taxonomy_shell(root.faces)) {
