@@ -23,6 +23,7 @@
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
+#include <BRepPrimAPI_MakeSphere.hxx>
 #include <Bnd_Box.hxx>
 #include <Poly_Triangulation.hxx>
 #include <TopAbs_Orientation.hxx>
@@ -345,6 +346,12 @@ TessMesh tessellate_via_taxonomy(const NgeomDoc &doc, const std::string &kernel_
                 // CSG boolean: build each operand's TopoDS_Shape and apply
                 // BRepAlgoAPI directly (same null-instance reason as revolve).
                 TopoDS_Shape shape = boolean_to_occ(*occ, *root.boolean);
+                if (!shape.IsNull()) append_occ_shape(shape, deflection, mesh);
+            } else if (root.sphere) {
+                // Sphere primitive via OCC MakeSphere (taxonomy has no sphere solid).
+                const SphereN &s = *root.sphere;
+                TopoDS_Shape shape = BRepPrimAPI_MakeSphere(
+                    gp_Pnt(s.frame.o.x, s.frame.o.y, s.frame.o.z), s.radius).Shape();
                 if (!shape.IsNull()) append_occ_shape(shape, deflection, mesh);
             } else if (auto shell = to_taxonomy_shell(root.faces)) {
                 if (use_cgal) {

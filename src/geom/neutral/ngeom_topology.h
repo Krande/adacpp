@@ -251,6 +251,13 @@ struct BooleanN {
     SolidItemN a, b;
 };
 
+// A sphere primitive (centre = frame.o, radius). Taxonomy has no sphere solid, so it's
+// meshed analytically (libtess2) / via BRepPrimAPI_MakeSphere (occ/cgal).
+struct SphereN {
+    Frame frame;
+    double radius = 0;
+};
+
 // One top-level streamed Geometry instance + its stable id (for Mesh grouping).
 struct NgeomRoot {
     std::string id;
@@ -258,6 +265,7 @@ struct NgeomRoot {
     std::shared_ptr<ExtrusionN> extrusion;             // set if this root is an extruded solid
     std::shared_ptr<RevolveN> revolve;                 // set if this root is a revolved solid
     std::shared_ptr<BooleanN> boolean;                 // set if this root is a boolean result
+    std::shared_ptr<SphereN> sphere;                   // set if this root is a sphere primitive
 };
 
 struct NgeomDoc {

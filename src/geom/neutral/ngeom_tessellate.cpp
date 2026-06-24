@@ -1466,6 +1466,30 @@ void tessellate_revolve(const RevolveN &rv, const TessParams &tp, Mesh &mesh) {
     // Cone/Cylinder use full revolutions, so they are not generated here yet.
 }
 
+// Sphere primitive -> a UV (lat/long) sphere. Segment counts follow the deflection (angle_step),
+// so it honours the requested tolerance; pole quads collapse (emit_tri skips degenerates).
+void tessellate_sphere(const SphereN &sp, const TessParams &tp, Mesh &mesh) {
+    const Vec3 c = sp.frame.o;
+    const double r = sp.radius;
+    if (r <= 0) return;
+    const double PI = TWO_PI * 0.5;
+    double defl = tp.deflection > 0 ? tp.deflection : std::max(r * 0.01, 1e-4);
+    double step = std::max(angle_step(r, defl, tp.max_angle), 1e-6);
+    int nlon = std::max(6, (int)std::ceil(TWO_PI / step));
+    int nlat = std::max(3, (int)std::ceil(PI / step));
+    auto P = [&](int i, int j) -> Vec3 {
+        double lon = TWO_PI * (double)i / nlon, lat = -PI * 0.5 + PI * (double)j / nlat;
+        double cl = std::cos(lat);
+        return {c.x + r * cl * std::cos(lon), c.y + r * cl * std::sin(lon), c.z + r * std::sin(lat)};
+    };
+    for (int j = 0; j < nlat; ++j)
+        for (int i = 0; i < nlon; ++i) {
+            Vec3 a = P(i, j), b = P(i + 1, j), cc = P(i + 1, j + 1), d = P(i, j + 1);
+            emit_tri(mesh, a, b, cc);
+            emit_tri(mesh, a, cc, d);
+        }
+}
+
 // Tessellate one boolean operand into its own world-space mesh (recursive for nested booleans).
 TessMesh tessellate_solid_item(const SolidItemN &it, const TessParams &tp);
 
@@ -1516,6 +1540,9 @@ TessMesh tessellate_doc(const NgeomDoc &doc, const TessParams &tp) {
         } else if (root.boolean) {
             // CSG via Manifold (no-op on wasm until Manifold is wired there).
             append_mesh(mesh, tessellate_boolean_item(*root.boolean, tp));
+        } else if (root.sphere) {
+            Mesh m(mesh);
+            tessellate_sphere(*root.sphere, tp, m);
         } else {
             if (FDBG) {
                 size_t nnull = 0;

@@ -42,6 +42,7 @@ enum : int {
     EXTRUDED_AREA_SOLID = 50,
     REVOLVED_AREA_SOLID = 51,
     BOOLEAN_RESULT = 52,
+    SPHERE_SOLID = 53,
     EDGE_CURVE = 60,
     ORIENTED_EDGE = 61,
     EDGE_LOOP = 62,
@@ -120,6 +121,7 @@ struct Slot {
     std::shared_ptr<ExtrusionN> extrusion;
     std::shared_ptr<RevolveN> revolve;
     std::shared_ptr<BooleanN> boolean;
+    std::shared_ptr<SphereN> sphere;
     std::shared_ptr<OrientedEdgeN> oedge;
     // EDGE_CURVE intermediate
     Vec3 e_start, e_end;
@@ -428,6 +430,13 @@ inline NgeomDoc decode(const uint8_t *data, size_t n) {
                 slot.boolean = bn;
                 break;
             }
+            case tag::SPHERE_SOLID: {
+                auto sp = std::make_shared<SphereN>();
+                sp->frame = frame_at(r.i32());  // centre placement
+                sp->radius = r.f64();
+                slot.sphere = sp;
+                break;
+            }
             default:
                 break;  // unknown tag -> skipped via nbytes below
         }
@@ -452,6 +461,8 @@ inline NgeomDoc decode(const uint8_t *data, size_t n) {
             root.revolve = gs.revolve;
         } else if (gs.boolean) {
             root.boolean = gs.boolean;
+        } else if (gs.sphere) {
+            root.sphere = gs.sphere;
         } else if (gs.face) {
             root.faces.push_back(gs.face);
         } else if (gs.cfs) {
