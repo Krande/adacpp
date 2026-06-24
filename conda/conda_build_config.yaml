@@ -28,7 +28,7 @@ c_compiler:
 
 c_compiler_version:
   - '19'    # [osx]
-  - '13'    # [linux]
+  - '14'    # [linux]
 
 cxx_compiler:
   - vs2022  # [win]
@@ -37,4 +37,4 @@ cxx_compiler:
 
 cxx_compiler_version:
   - '19'    # [osx]
-  - '13'    # [linux]
+  - '14'    # [linux]
