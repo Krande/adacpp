@@ -15,6 +15,9 @@
 #include <CGAL/number_utils.h>
 
 #include <BRep_Tool.hxx>
+#include <BRepAlgoAPI_Common.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
+#include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
@@ -183,6 +186,58 @@ void apply_setting(geom::Settings &s, const std::string &name, const std::string
         // malformed value for the type -> leave the default
     }
 }
+
+// --- solid builders (used by revolve + boolean; both bypass ifcopenshell's
+// convert_impl, which derefs a null schema instance on our programmatic items) ---
+TopoDS_Shape revolve_to_occ(IfcGeom::OpenCascadeKernel &occ, const RevolveN &rv) {
+    auto sh = to_taxonomy_shell({rv.profile});
+    if (!sh || sh->children.empty()) return {};
+    TopoDS_Shape topo_face;
+    if (!occ.convert(sh->children[0], topo_face) || topo_face.IsNull()) return {};
+    gp_Ax1 ax(gp_Pnt(rv.axis_origin.x, rv.axis_origin.y, rv.axis_origin.z),
+              gp_Dir(rv.axis_dir.x, rv.axis_dir.y, rv.axis_dir.z));
+    TopoDS_Shape revolved = rv.angle != 0.0 ? BRepPrimAPI_MakeRevol(topo_face, ax, rv.angle).Shape()
+                                            : BRepPrimAPI_MakeRevol(topo_face, ax).Shape();
+    return BRepBuilderAPI_Transform(revolved, trsf_from_frame(rv.frame), Standard_True).Shape();
+}
+
+TopoDS_Shape build_solid_occ(IfcGeom::OpenCascadeKernel &occ, const SolidItemN &it);
+
+TopoDS_Shape boolean_to_occ(IfcGeom::OpenCascadeKernel &occ, const BooleanN &bn) {
+    TopoDS_Shape a = build_solid_occ(occ, bn.a);
+    if (a.IsNull()) return {};
+    TopoDS_Shape b = build_solid_occ(occ, bn.b);
+    if (b.IsNull()) return a;  // nothing to combine with -> first operand
+    try {
+        switch (bn.op) {
+            case 1:
+                return BRepAlgoAPI_Fuse(a, b).Shape();
+            case 2:
+                return BRepAlgoAPI_Common(a, b).Shape();
+            default:
+                return BRepAlgoAPI_Cut(a, b).Shape();  // 0 = difference
+        }
+    } catch (...) {
+        return a;
+    }
+}
+
+TopoDS_Shape build_solid_occ(IfcGeom::OpenCascadeKernel &occ, const SolidItemN &it) {
+    if (it.boolean) return boolean_to_occ(occ, *it.boolean);
+    if (it.revolve) return revolve_to_occ(occ, *it.revolve);
+    if (it.extrusion) {
+        auto ext = to_taxonomy_extrusion(*it.extrusion);
+        TopoDS_Shape s;
+        if (ext && occ.convert(ext, s)) return s;
+        return {};
+    }
+    if (!it.faces.empty()) {
+        auto sh = to_taxonomy_shell(it.faces);
+        TopoDS_Shape s;
+        if (sh && occ.convert(sh, s)) return s;
+    }
+    return {};
+}
 }  // namespace
 
 std::vector<TaxonomySetting> taxonomy_settings_info() {
@@ -245,24 +300,15 @@ TessMesh tessellate_via_taxonomy(const NgeomDoc &doc, const std::string &kernel_
                     }
                 }
             } else if (root.revolve) {
-                // Revolved solid: ifcopenshell's revolve convert derefs a null
-                // schema instance (segfault), so build the profile face via the
-                // OCC kernel and BRepPrimAPI_MakeRevol it directly, then place.
-                const RevolveN &rv = *root.revolve;
-                auto sh = to_taxonomy_shell({rv.profile});
-                if (sh && !sh->children.empty()) {
-                    TopoDS_Shape topo_face;
-                    if (occ->convert(sh->children[0], topo_face) && !topo_face.IsNull()) {
-                        gp_Ax1 ax(gp_Pnt(rv.axis_origin.x, rv.axis_origin.y, rv.axis_origin.z),
-                                  gp_Dir(rv.axis_dir.x, rv.axis_dir.y, rv.axis_dir.z));
-                        TopoDS_Shape revolved =
-                            rv.angle != 0.0 ? BRepPrimAPI_MakeRevol(topo_face, ax, rv.angle).Shape()
-                                            : BRepPrimAPI_MakeRevol(topo_face, ax).Shape();
-                        TopoDS_Shape placed =
-                            BRepBuilderAPI_Transform(revolved, trsf_from_frame(rv.frame), Standard_True).Shape();
-                        append_occ_shape(placed, deflection, mesh);
-                    }
-                }
+                // Revolved solid via OCC MakeRevol (ifcopenshell's revolve convert
+                // derefs a null schema instance -> segfault on our items).
+                TopoDS_Shape shape = revolve_to_occ(*occ, *root.revolve);
+                if (!shape.IsNull()) append_occ_shape(shape, deflection, mesh);
+            } else if (root.boolean) {
+                // CSG boolean: build each operand's TopoDS_Shape and apply
+                // BRepAlgoAPI directly (same null-instance reason as revolve).
+                TopoDS_Shape shape = boolean_to_occ(*occ, *root.boolean);
+                if (!shape.IsNull()) append_occ_shape(shape, deflection, mesh);
             } else if (auto shell = to_taxonomy_shell(root.faces)) {
                 if (use_cgal) {
                     cgal_shape_t shape;

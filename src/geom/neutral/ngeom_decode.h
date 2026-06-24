@@ -41,6 +41,7 @@ enum : int {
     SURF_REVOLUTION = 47,
     EXTRUDED_AREA_SOLID = 50,
     REVOLVED_AREA_SOLID = 51,
+    BOOLEAN_RESULT = 52,
     EDGE_CURVE = 60,
     ORIENTED_EDGE = 61,
     EDGE_LOOP = 62,
@@ -118,6 +119,7 @@ struct Slot {
     std::shared_ptr<ConnectedFaceSetN> cfs;
     std::shared_ptr<ExtrusionN> extrusion;
     std::shared_ptr<RevolveN> revolve;
+    std::shared_ptr<BooleanN> boolean;
     std::shared_ptr<OrientedEdgeN> oedge;
     // EDGE_CURVE intermediate
     Vec3 e_start, e_end;
@@ -141,6 +143,22 @@ inline NgeomDoc decode(const uint8_t *data, size_t n) {
 
     auto frame_at = [&](int idx) -> Frame { return S.at(idx).frame; };
     auto curve_at = [&](int idx) -> std::shared_ptr<Curve> { return S.at(idx).curve; };
+    // Resolve a boolean operand record into a SolidItemN (any supported solid).
+    auto solid_item_at = [&](int idx) -> SolidItemN {
+        const Slot &s = S.at(idx);
+        SolidItemN it;
+        if (s.extrusion)
+            it.extrusion = s.extrusion;
+        else if (s.revolve)
+            it.revolve = s.revolve;
+        else if (s.boolean)
+            it.boolean = s.boolean;
+        else if (s.cfs)
+            it.faces = s.cfs->faces;
+        else if (s.face)
+            it.faces = {s.face};
+        return it;
+    };
     auto surface_at = [&](int idx) -> std::shared_ptr<Surface> { return S.at(idx).surface; };
 
     for (int ri = 0; ri < record_count; ++ri) {
@@ -402,6 +420,14 @@ inline NgeomDoc decode(const uint8_t *data, size_t n) {
                 slot.revolve = rv;
                 break;
             }
+            case tag::BOOLEAN_RESULT: {
+                auto bn = std::make_shared<BooleanN>();
+                bn->op = r.i32();
+                bn->a = solid_item_at(r.i32());
+                bn->b = solid_item_at(r.i32());
+                slot.boolean = bn;
+                break;
+            }
             default:
                 break;  // unknown tag -> skipped via nbytes below
         }
@@ -424,6 +450,8 @@ inline NgeomDoc decode(const uint8_t *data, size_t n) {
             root.extrusion = gs.extrusion;
         } else if (gs.revolve) {
             root.revolve = gs.revolve;
+        } else if (gs.boolean) {
+            root.boolean = gs.boolean;
         } else if (gs.face) {
             root.faces.push_back(gs.face);
         } else if (gs.cfs) {

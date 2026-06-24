@@ -235,12 +235,29 @@ struct RevolveN {
     double angle = 0;          // 0 => full revolution
 };
 
+struct BooleanN;  // fwd (recursive)
+
+// One operand of a boolean (or a root): any of the supported solids.
+struct SolidItemN {
+    std::shared_ptr<ExtrusionN> extrusion;
+    std::shared_ptr<RevolveN> revolve;
+    std::shared_ptr<BooleanN> boolean;
+    std::vector<std::shared_ptr<FaceSurfaceN>> faces;  // shell operand
+};
+
+// A CSG boolean: op(a, b). op 0=difference (cut), 1=union (fuse), 2=intersection (common).
+struct BooleanN {
+    int op = 0;
+    SolidItemN a, b;
+};
+
 // One top-level streamed Geometry instance + its stable id (for Mesh grouping).
 struct NgeomRoot {
     std::string id;
     std::vector<std::shared_ptr<FaceSurfaceN>> faces;  // flattened (a CFS expands to its faces)
     std::shared_ptr<ExtrusionN> extrusion;             // set if this root is an extruded solid
     std::shared_ptr<RevolveN> revolve;                 // set if this root is a revolved solid
+    std::shared_ptr<BooleanN> boolean;                 // set if this root is a boolean result
 };
 
 struct NgeomDoc {
