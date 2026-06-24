@@ -24,6 +24,10 @@ tessellate_box = _cad.tessellate_box
 tessellate_stream = _cad.tessellate_stream
 ifc_taxonomy_settings = _cad.ifc_taxonomy_settings
 meshopt_simplify_mesh = _cad.meshopt_simplify_mesh
+meshopt_encode_vertex_buffer = _cad.meshopt_encode_vertex_buffer
+meshopt_encode_index_sequence = _cad.meshopt_encode_index_sequence
+meshopt_decode_vertex_buffer = _cad.meshopt_decode_vertex_buffer
+meshopt_decode_index_sequence = _cad.meshopt_decode_index_sequence
 
 bbox = _cad.bbox
 obb = _cad.obb

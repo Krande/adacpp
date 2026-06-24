@@ -2004,6 +2004,27 @@ std::pair<std::vector<float>, std::vector<uint32_t>> meshopt_simplify_mesh_impl(
     return {std::move(r.positions), std::move(r.indices)};
 }
 
+// EXT_meshopt_compression codecs (replace the sdist-only PyPI `meshoptimizer`). The adapy GLB
+// packer feeds raw bytes; we wrap the vendored meshoptimizer C encoder/decoder.
+nb::bytes meshopt_encode_vertex_buffer_impl(nb::bytes data, size_t count, size_t stride) {
+    auto v = ngeom::meshopt_encode_vertices(data.c_str(), count, stride);
+    return nb::bytes(reinterpret_cast<const char *>(v.data()), v.size());
+}
+nb::bytes meshopt_encode_index_sequence_impl(nb::bytes idx, size_t count, size_t vertex_count) {
+    auto v = ngeom::meshopt_encode_indices(reinterpret_cast<const uint32_t *>(idx.c_str()), count, vertex_count);
+    return nb::bytes(reinterpret_cast<const char *>(v.data()), v.size());
+}
+nb::bytes meshopt_decode_vertex_buffer_impl(nb::bytes enc, size_t count, size_t stride) {
+    auto v = ngeom::meshopt_decode_vertices(reinterpret_cast<const unsigned char *>(enc.c_str()),
+                                            enc.size(), count, stride);
+    return nb::bytes(reinterpret_cast<const char *>(v.data()), v.size());
+}
+nb::bytes meshopt_decode_index_sequence_impl(nb::bytes enc, size_t count, size_t index_size) {
+    auto v = ngeom::meshopt_decode_indices(reinterpret_cast<const unsigned char *>(enc.c_str()),
+                                           enc.size(), count, index_size);
+    return nb::bytes(reinterpret_cast<const char *>(v.data()), v.size());
+}
+
 } // namespace
 
 void cad_module(nb::module_ &m) {
@@ -2152,6 +2173,16 @@ void cad_module(nb::module_ &m) {
           "within target_error, then drop degenerate triangles + compact. positions xyz-interleaved "
           "float, indices uint32. Returns (positions, indices). target_error 0.0 = lossless "
           "coplanar-triangle collapse.");
+
+    m.def("meshopt_encode_vertex_buffer", &meshopt_encode_vertex_buffer_impl, "data"_a, "count"_a,
+          "stride"_a, "EXT_meshopt_compression: encode a vertex buffer (count vertices x stride bytes).");
+    m.def("meshopt_encode_index_sequence", &meshopt_encode_index_sequence_impl, "indices"_a, "count"_a,
+          "vertex_count"_a,
+          "EXT_meshopt_compression: encode an index sequence (count uint32 indices; order-preserving).");
+    m.def("meshopt_decode_vertex_buffer", &meshopt_decode_vertex_buffer_impl, "data"_a, "count"_a,
+          "stride"_a, "Decode a meshopt vertex buffer back to count x stride raw bytes.");
+    m.def("meshopt_decode_index_sequence", &meshopt_decode_index_sequence_impl, "data"_a, "count"_a,
+          "index_size"_a, "Decode a meshopt index sequence back to count indices of index_size (2/4) bytes.");
 
     m.def("tessellate_box", &tessellate_box_impl,
           "dx"_a, "dy"_a, "dz"_a,

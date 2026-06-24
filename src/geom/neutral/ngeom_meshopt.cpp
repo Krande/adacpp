@@ -48,4 +48,34 @@ SimplifiedMesh meshopt_simplify_mesh(const std::vector<float> &positions,
     return out;
 }
 
+std::vector<unsigned char> meshopt_encode_vertices(const void *data, size_t count, size_t stride) {
+    std::vector<unsigned char> buf(meshopt_encodeVertexBufferBound(count, stride));
+    size_t n = meshopt_encodeVertexBuffer(buf.data(), buf.size(), data, count, stride);
+    buf.resize(n);
+    return buf;
+}
+
+std::vector<unsigned char> meshopt_encode_indices(const uint32_t *indices, size_t count,
+                                                  size_t vertex_count) {
+    std::vector<unsigned char> buf(meshopt_encodeIndexSequenceBound(count, vertex_count));
+    size_t n = meshopt_encodeIndexSequence(buf.data(), buf.size(),
+                                           reinterpret_cast<const unsigned int *>(indices), count);
+    buf.resize(n);
+    return buf;
+}
+
+std::vector<unsigned char> meshopt_decode_vertices(const unsigned char *enc, size_t enc_size,
+                                                   size_t count, size_t stride) {
+    std::vector<unsigned char> dest(count * stride);
+    if (meshopt_decodeVertexBuffer(dest.data(), count, stride, enc, enc_size) != 0) dest.clear();
+    return dest;
+}
+
+std::vector<unsigned char> meshopt_decode_indices(const unsigned char *enc, size_t enc_size,
+                                                  size_t count, size_t index_size) {
+    std::vector<unsigned char> out(count * index_size);
+    if (meshopt_decodeIndexSequence(out.data(), count, index_size, enc, enc_size) != 0) out.clear();
+    return out;
+}
+
 }  // namespace ngeom
