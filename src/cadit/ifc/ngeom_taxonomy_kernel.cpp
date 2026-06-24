@@ -12,6 +12,7 @@
 #include <ifcgeom/kernels/opencascade/OpenCascadeKernel.h>
 #include <ifcgeom/taxonomy.h>
 
+#include <CGAL/Polygon_mesh_processing/triangulate_faces.h>
 #include <CGAL/number_utils.h>
 
 #include <BRep_Tool.hxx>
@@ -146,8 +147,16 @@ void append_occ_shape(const TopoDS_Shape &shape, double deflection, TessMesh &ou
 }
 
 // Extract triangles + per-facet normals from a CGAL polyhedron (exact coords -> double).
-// Facets may be n-gons (fan-triangulated); vertices are unwelded per facet.
-void append_cgal_shape(const cgal_shape_t &shape, TessMesh &out) {
+// Taken by value so we can triangulate non-convex n-gon facets first: a CGAL extrusion's
+// end cap is the (possibly concave) profile as ONE facet — a naive fan over a concave
+// polygon spills outside it (the beam-end artifacts). PMP::triangulate_faces produces a
+// proper triangulation; after it every facet is a triangle and the loop below is exact.
+void append_cgal_shape(cgal_shape_t shape, TessMesh &out) {
+    try {
+        CGAL::Polygon_mesh_processing::triangulate_faces(shape);
+    } catch (...) {
+        // fall back to the fan extraction below if triangulation fails
+    }
     for (auto f = shape.facets_begin(); f != shape.facets_end(); ++f) {
         std::vector<Vec3> poly;
         auto h = f->facet_begin();
