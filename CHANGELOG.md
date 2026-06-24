@@ -2,6 +2,15 @@
 
 
 
+## v0.10.0 (2026-06-24)
+
+### Feature
+
+* feat: OCC-free NGEOM geometry layer + libtess2 tessellator + ifcopenshell taxonomy kernel (#30)
+
+Co-authored-by: Claude Opus 4.8 &lt;noreply@anthropic.com&gt; ([`d6b89cd`](https://github.com/Krande/adacpp/commit/d6b89cddeccd5005eab0f41eec40dbe2aa0ec1df))
+
+
 ## v0.9.0 (2026-06-15)
 
 ### Feature
