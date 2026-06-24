@@ -13,4 +13,4 @@ void step_to_glb_module(nb::module_ &m);
 
 void step_writer_module(nb::module_ &m);
 
-#endif //OCCT_PY_WRAP_H
+#endif // OCCT_PY_WRAP_H

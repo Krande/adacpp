@@ -6,20 +6,14 @@
 #include "tiny_gltf.h"
 #include "tiny_helpers.h"
 
-std::pair<std::vector<double>, std::vector<double> > calculateBounds(const std::vector<float> &positions) {
+std::pair<std::vector<double>, std::vector<double>> calculateBounds(const std::vector<float> &positions) {
     assert(positions.size() % 3 == 0); // Ensure there is 3D data
 
-    std::vector<double> minValues = {
-        std::numeric_limits<double>::max(),
-        std::numeric_limits<double>::max(),
-        std::numeric_limits<double>::max()
-    };
+    std::vector<double> minValues = {std::numeric_limits<double>::max(), std::numeric_limits<double>::max(),
+                                     std::numeric_limits<double>::max()};
 
-    std::vector<double> maxValues = {
-        std::numeric_limits<double>::lowest(),
-        std::numeric_limits<double>::lowest(),
-        std::numeric_limits<double>::lowest()
-    };
+    std::vector<double> maxValues = {std::numeric_limits<double>::lowest(), std::numeric_limits<double>::lowest(),
+                                     std::numeric_limits<double>::lowest()};
 
     for (size_t i = 0; i < positions.size(); i += 3) {
         minValues[0] = std::min(static_cast<double>(minValues[0]), static_cast<double>(positions[i]));
@@ -34,23 +28,22 @@ std::pair<std::vector<double>, std::vector<double> > calculateBounds(const std::
     return {minValues, maxValues};
 }
 
-
 void AddMesh(tinygltf::Model &model, const std::string &name, const Mesh &my_mesh) {
     const std::vector<float> positions = my_mesh.positions;
     const std::vector<uint32_t> indices = my_mesh.indices;
 
     // Append buffer for position data
     tinygltf::Buffer posBuffer;
-    posBuffer.data = std::vector<unsigned char>(reinterpret_cast<const unsigned char *>(positions.data()),
-                                                reinterpret_cast<const unsigned char *>(
-                                                    positions.data() + positions.size()));
+    posBuffer.data =
+        std::vector<unsigned char>(reinterpret_cast<const unsigned char *>(positions.data()),
+                                   reinterpret_cast<const unsigned char *>(positions.data() + positions.size()));
     model.buffers.push_back(posBuffer);
 
     // Buffer for indices
     tinygltf::Buffer indexBuffer;
-    indexBuffer.data = std::vector<unsigned char>(reinterpret_cast<const unsigned char *>(indices.data()),
-                                                  reinterpret_cast<const unsigned char *>(
-                                                      indices.data() + indices.size()));
+    indexBuffer.data =
+        std::vector<unsigned char>(reinterpret_cast<const unsigned char *>(indices.data()),
+                                   reinterpret_cast<const unsigned char *>(indices.data() + indices.size()));
     model.buffers.push_back(indexBuffer);
 
     // BufferView for positions
@@ -101,9 +94,8 @@ void AddMesh(tinygltf::Model &model, const std::string &name, const Mesh &my_mes
 
     // Create a material with PBR properties
     tinygltf::Material material;
-    material.pbrMetallicRoughness.baseColorFactor = {
-        my_mesh.color.r, my_mesh.color.g, my_mesh.color.b, my_mesh.color.a
-    };
+    material.pbrMetallicRoughness.baseColorFactor = {my_mesh.color.r, my_mesh.color.g, my_mesh.color.b,
+                                                     my_mesh.color.a};
     material.pbrMetallicRoughness.metallicFactor = 1.0;
     material.pbrMetallicRoughness.roughnessFactor = 0.5;
     material.alphaMode = "OPAQUE";
@@ -126,8 +118,7 @@ void AddMesh(tinygltf::Model &model, const std::string &name, const Mesh &my_mes
     model.scenes[0].nodes.push_back(model.nodes.size() - 1);
 }
 
-
-int write_to_gltf(const std::string& filename, const Mesh& mesh) {
+int write_to_gltf(const std::string &filename, const Mesh &mesh) {
     tinygltf::Model model;
 
     // Create a scene
@@ -147,9 +138,9 @@ int write_to_gltf(const std::string& filename, const Mesh& mesh) {
 
 // take in a list of box dimensions and origins and write to step file using the AdaCPPStepWriter class
 int write_boxes_to_gltf(const std::string &filename, const std::vector<std::vector<float>> &box_origins,
-                         const std::vector<std::vector<float>> &box_dims) {
+                        const std::vector<std::vector<float>> &box_dims) {
     tinygltf::Model model;
-    std::cout << "Exporting to " << filename <<"\n";
+    std::cout << "Exporting to " << filename << "\n";
 
     // Create a scene
     tinygltf::Scene scene;
@@ -157,8 +148,8 @@ int write_boxes_to_gltf(const std::string &filename, const std::vector<std::vect
     model.defaultScene = 0;
 
     for (int i = 0; i < box_origins.size(); i++) {
-        const auto& origin = box_origins[i];
-        const auto& dim = box_dims[i];
+        const auto &origin = box_origins[i];
+        const auto &dim = box_dims[i];
         TopoDS_Solid box = create_box(origin, dim);
         Mesh mesh = tessellate_shape(0, box, true, 1.0, false);
         mesh.color = random_color();

@@ -30,6 +30,4 @@ struct GlobalConfig {
     BuildConfig buildConfig;
 };
 
-
-
-#endif //CONFIG_STRUCTS_H
+#endif // CONFIG_STRUCTS_H

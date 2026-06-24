@@ -6,9 +6,6 @@
 #define FEM_PY_WRAP_H
 #include "../binding_core.h"
 
-
 void gmsh_module(nb::module_ &m);
 
-
-
-#endif //FEM_PY_WRAP_H
+#endif // FEM_PY_WRAP_H

@@ -9,12 +9,9 @@
 #include <TopoDS_Shape.hxx>
 #include "Color.h"
 
-
 class OccShape {
 public:
-    explicit OccShape(TopoDS_Shape shape,
-                      Color color = Color(),
-                      int num_tot_entities = 0,
+    explicit OccShape(TopoDS_Shape shape, Color color = Color(), int num_tot_entities = 0,
                       std::optional<std::string> name = std::nullopt);
 
     TopoDS_Shape shape;
@@ -23,4 +20,4 @@ public:
     std::optional<std::string> name;
 };
 
-#endif //NANO_OCCT_OCCSHAPE_H
+#endif // NANO_OCCT_OCCSHAPE_H

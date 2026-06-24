@@ -12,7 +12,6 @@
 #include <optional>
 #include "../geom/Color.h"
 
-
 TopoDS_Solid create_box(const std::vector<float> &box_origin, const std::vector<float> &box_dims) {
     const gp_Pnt aBoxOrigin(box_origin[0], box_origin[1], box_origin[2]);
     const gp_XYZ aBoxDims(box_dims[0], box_dims[1], box_dims[2]);
@@ -35,8 +34,7 @@ void set_name(const TDF_Label &label, const std::optional<std::string> &name) {
     TDataStd_Name::Set(label, ext_name);
 }
 
-void set_color(const TDF_Label &label, const Color &color,
-               const Handle(XCAFDoc_ColorTool) &tool) {
+void set_color(const TDF_Label &label, const Color &color, const Handle(XCAFDoc_ColorTool) & tool) {
     const float r = color.r;
     const float g = color.g;
     const float b = color.b;

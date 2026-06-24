@@ -32,11 +32,9 @@
 
 #include "step_helpers.h"
 
-
 // Function to compute the transformation matrix for a given assembly instance
-gp_Trsf GetTransformationMatrix(
-    const Handle(StepRepr_NextAssemblyUsageOccurrence) &nauo,
-    const Interface_Graph &theGraph) {
+gp_Trsf GetTransformationMatrix(const Handle(StepRepr_NextAssemblyUsageOccurrence) & nauo,
+                                const Interface_Graph &theGraph) {
     gp_Trsf transformation;
 
     // Get the Related ProductDefinition
@@ -71,9 +69,8 @@ gp_Trsf GetTransformationMatrix(
             // Extract translation
             if (!axisPlacement->Location().IsNull()) {
                 auto location = axisPlacement->Location();
-                transformation.SetTranslation(
-                    gp_Vec(location->CoordinatesValue(1), location->CoordinatesValue(2),
-                           location->CoordinatesValue(3)));
+                transformation.SetTranslation(gp_Vec(location->CoordinatesValue(1), location->CoordinatesValue(2),
+                                                     location->CoordinatesValue(3)));
             }
 
             // Extract rotation
@@ -83,9 +80,8 @@ gp_Trsf GetTransformationMatrix(
                 auto angle = 0.0;
 
                 transformation.SetRotation(
-                    gp_Ax1(gp_Pnt(0, 0, 0),
-                           gp_Dir(axis->DirectionRatiosValue(1), axis->DirectionRatiosValue(2),
-                                  axis->DirectionRatiosValue(3))),
+                    gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(axis->DirectionRatiosValue(1), axis->DirectionRatiosValue(2),
+                                                   axis->DirectionRatiosValue(3))),
                     angle);
             }
             break;
@@ -94,20 +90,19 @@ gp_Trsf GetTransformationMatrix(
     return transformation;
 }
 
-gp_Trsf ComputeTransformationFromAxis2Placement(const Handle(StepGeom_Axis2Placement3d) &placement) {
+gp_Trsf ComputeTransformationFromAxis2Placement(const Handle(StepGeom_Axis2Placement3d) & placement) {
     gp_Trsf transform;
     if (!placement.IsNull()) {
         // Extract translation
         if (!placement->Location().IsNull()) {
             const auto loc = placement->Location();
-            transform.SetTranslation(gp_Vec(loc->CoordinatesValue(1), loc->CoordinatesValue(2),
-                                            loc->CoordinatesValue(3)));
+            transform.SetTranslation(
+                gp_Vec(loc->CoordinatesValue(1), loc->CoordinatesValue(2), loc->CoordinatesValue(3)));
         }
 
         // Extract rotation from directions
         if (!placement->RefDirection().IsNull() && !placement->Axis().IsNull()) {
-            gp_Dir xDir(placement->Axis()->DirectionRatiosValue(1),
-                        placement->Axis()->DirectionRatiosValue(2),
+            gp_Dir xDir(placement->Axis()->DirectionRatiosValue(1), placement->Axis()->DirectionRatiosValue(2),
                         placement->Axis()->DirectionRatiosValue(3));
             gp_Dir zDir(placement->RefDirection()->DirectionRatiosValue(1),
                         placement->RefDirection()->DirectionRatiosValue(2),
@@ -119,8 +114,8 @@ gp_Trsf ComputeTransformationFromAxis2Placement(const Handle(StepGeom_Axis2Place
     return transform;
 }
 
-gp_Trsf GetTransformFromShapeRelWithTrans(
-    const Handle(StepRepr_RepresentationRelationshipWithTransformation) &relWithTrans) {
+gp_Trsf GetTransformFromShapeRelWithTrans(const Handle(StepRepr_RepresentationRelationshipWithTransformation) &
+                                          relWithTrans) {
     gp_Trsf transformation;
     auto itemDefinedTrans = relWithTrans->TransformationOperator();
     if (!itemDefinedTrans.IsNull()) {
@@ -146,10 +141,8 @@ gp_Trsf GetTransformFromShapeRelWithTrans(
     return transformation;
 }
 
-
-gp_Trsf GetAssemblyInstanceTransformation(
-    const Handle(StepRepr_NextAssemblyUsageOccurrence) &nauo,
-    const Interface_Graph &theGraph) {
+gp_Trsf GetAssemblyInstanceTransformation(const Handle(StepRepr_NextAssemblyUsageOccurrence) & nauo,
+                                          const Interface_Graph &theGraph) {
     gp_Trsf transformation;
 
     const Interface_EntityIterator refs = theGraph.Sharings(nauo);
@@ -162,11 +155,11 @@ gp_Trsf GetAssemblyInstanceTransformation(
                 const auto &pdsRef = pdsRefs.Value();
                 if (pdsRef->IsKind(STANDARD_TYPE(StepShape_ContextDependentShapeRepresentation))) {
                     const auto contextDependentShape =
-                            Handle(StepShape_ContextDependentShapeRepresentation)::DownCast(pdsRef);
+                        Handle(StepShape_ContextDependentShapeRepresentation)::DownCast(pdsRef);
                     auto r1 = contextDependentShape->RepresentationRelation();
                     auto r2 = contextDependentShape->RepresentedProductRelation();
-                    if (!r1.IsNull() && r1->
-                        IsKind(STANDARD_TYPE(StepRepr_RepresentationRelationshipWithTransformation))) {
+                    if (!r1.IsNull() &&
+                        r1->IsKind(STANDARD_TYPE(StepRepr_RepresentationRelationshipWithTransformation))) {
                         auto relWithTrans = Handle(StepRepr_RepresentationRelationshipWithTransformation)::DownCast(r1);
                         return GetTransformFromShapeRelWithTrans(relWithTrans);
                     }
@@ -178,18 +171,18 @@ gp_Trsf GetAssemblyInstanceTransformation(
     return transformation;
 }
 
-
 // Helper: given a Product, find its associated ProductDefinition (if any)
-static Handle(StepBasic_ProductDefinition) FindProductDefinition(
-    const Handle(StepBasic_Product) &product,
-    const Handle(Interface_InterfaceModel) &model, const Interface_Graph &theGraph) {
+static Handle(StepBasic_ProductDefinition)
+    FindProductDefinition(const Handle(StepBasic_Product) & product, const Handle(Interface_InterfaceModel) & model,
+                          const Interface_Graph &theGraph) {
     // A Product typically references a ProductDefinitionFormation
     // which references a ProductDefinition. Or in some schemas,
     // the Product's "FrameOfReference()" leads to the PDF.
     // So we walk the entire model to match the formation to the definition.
     //
     // If your schema doesn't use Formation(), adapt accordingly (e.g. FrameOfReference).
-    Handle(StepBasic_ProductDefinitionFormation) formation; {
+    Handle(StepBasic_ProductDefinitionFormation) formation;
+    {
         const Interface_EntityIterator childIter = theGraph.Sharings(product);
         for (childIter.Start(); childIter.More(); childIter.Next()) {
             Handle(Standard_Transient) ent = childIter.Value();
@@ -202,7 +195,8 @@ static Handle(StepBasic_ProductDefinition) FindProductDefinition(
 
     if (formation.IsNull()) {
         return nullptr;
-    } {
+    }
+    {
         const Interface_EntityIterator childIter = theGraph.Sharings(formation);
         for (childIter.Start(); childIter.More(); childIter.Next()) {
             Handle(Standard_Transient) ent = childIter.Value();
@@ -225,8 +219,8 @@ static Handle(StepBasic_ProductDefinition) FindProductDefinition(
 }
 
 // Build a map from StepBasic_Product -> entity index, for quick lookup
-static std::unordered_map<Handle(StepBasic_Product), int>
-BuildProductIndexMap(const Handle(Interface_InterfaceModel) &model) {
+static std::unordered_map<Handle(StepBasic_Product), int> BuildProductIndexMap(const Handle(Interface_InterfaceModel) &
+                                                                               model) {
     std::unordered_map<Handle(StepBasic_Product), int> productToIndex;
 
     for (Standard_Integer i = 1; i <= model->NbEntities(); i++) {
@@ -242,10 +236,10 @@ BuildProductIndexMap(const Handle(Interface_InterfaceModel) &model) {
 }
 
 // Build a map: parentIndex -> list of child indices
-static std::unordered_map<int, std::vector<int> >
-BuildAssemblyLinks(const Handle(Interface_InterfaceModel) &model, const Interface_Graph &theGraph) {
+static std::unordered_map<int, std::vector<int>> BuildAssemblyLinks(const Handle(Interface_InterfaceModel) & model,
+                                                                    const Interface_Graph &theGraph) {
     // We'll track: Parent's entity index -> [Child's entity index...]
-    std::unordered_map<int, std::vector<int> > parentToChildren;
+    std::unordered_map<int, std::vector<int>> parentToChildren;
 
     // Build a quick map from ProductDefinition -> (Product, index)
     // so that given a PD, we know which Product it belongs to
@@ -253,7 +247,7 @@ BuildAssemblyLinks(const Handle(Interface_InterfaceModel) &model, const Interfac
 
     // 1) find all products, map each to its product definition
     auto productIndexMap = BuildProductIndexMap(model);
-    for (auto &kv: productIndexMap) {
+    for (auto &kv : productIndexMap) {
         Handle(StepBasic_Product) product = kv.first;
         int productIdx = kv.second;
 
@@ -289,17 +283,17 @@ BuildAssemblyLinks(const Handle(Interface_InterfaceModel) &model, const Interfac
 }
 
 // Build a map: parentIndex -> list of child indices with transformations
-static std::unordered_map<int, std::vector<ParentChildRelationship> >
-BuildAssemblyLinksWithTransformation(const Handle(Interface_InterfaceModel) &model, const Interface_Graph &theGraph) {
+static std::unordered_map<int, std::vector<ParentChildRelationship>>
+BuildAssemblyLinksWithTransformation(const Handle(Interface_InterfaceModel) & model, const Interface_Graph &theGraph) {
     // Map to store parent-child relationships along with transformations
-    std::unordered_map<int, std::vector<ParentChildRelationship> > parentToChildrenWithTrans;
+    std::unordered_map<int, std::vector<ParentChildRelationship>> parentToChildrenWithTrans;
 
     // Build a quick map from ProductDefinition -> (Product, index)
     std::unordered_map<Handle(StepBasic_ProductDefinition), int> pdToProductIndex;
 
     // 1) Find all products, map each to its product definition
     auto productIndexMap = BuildProductIndexMap(model);
-    for (auto &kv: productIndexMap) {
+    for (auto &kv : productIndexMap) {
         Handle(StepBasic_Product) product = kv.first;
         int productIdx = kv.second;
 
@@ -342,16 +336,16 @@ BuildAssemblyLinksWithTransformation(const Handle(Interface_InterfaceModel) &mod
 // Definition of the static counter
 int ProductNode::instanceCounter = 0;
 // Main function: extracts top-level ProductNode trees with transformations
-std::vector<std::unique_ptr<ProductNode> > ExtractProductHierarchy(const Handle(Interface_InterfaceModel) &model,
-                                                                   const Interface_Graph &theGraph) {
+std::vector<std::unique_ptr<ProductNode>> ExtractProductHierarchy(const Handle(Interface_InterfaceModel) & model,
+                                                                  const Interface_Graph &theGraph) {
     // 1) Build the map of parent->children relationships
     // to be replaced by this
     const auto parentToChildrenWTransforms = BuildAssemblyLinksWithTransformation(model, theGraph);
 
     // 2) We want to find "root" products (those that never appear as a child)
     std::unordered_set<int> allChildren;
-    for (auto &kv: parentToChildrenWTransforms) {
-        for (const auto &childRel: kv.second) // Access the ParentChildRelationship (includes transformation)
+    for (auto &kv : parentToChildrenWTransforms) {
+        for (const auto &childRel : kv.second) // Access the ParentChildRelationship (includes transformation)
         {
             allChildren.insert(childRel.childIndex);
         }
@@ -359,13 +353,13 @@ std::vector<std::unique_ptr<ProductNode> > ExtractProductHierarchy(const Handle(
 
     // 3) Gather all product indices
     std::vector<int> allProducts;
-    for (auto productIndexMap = BuildProductIndexMap(model); auto &val: productIndexMap | std::views::values) {
+    for (auto productIndexMap = BuildProductIndexMap(model); auto &val : productIndexMap | std::views::values) {
         allProducts.push_back(val);
     }
 
     // 4) For each product, if it’s NOT in allChildren => it’s a root
-    std::vector<std::unique_ptr<ProductNode> > roots;
-    for (int idx: allProducts) {
+    std::vector<std::unique_ptr<ProductNode>> roots;
+    for (int idx : allProducts) {
         if (!allChildren.contains(idx)) {
             // This is a root product, start with the identity transformation
             roots.push_back(
@@ -375,11 +369,9 @@ std::vector<std::unique_ptr<ProductNode> > ExtractProductHierarchy(const Handle(
     return roots;
 }
 
-
-std::vector<Handle(StepRepr_NextAssemblyUsageOccurrence) > Get_NextAssemblyUsageOccurrences(
-    const Handle(StepBasic_Product) &product,
-    const Interface_Graph &theGraph) {
-    std::vector<Handle(StepRepr_NextAssemblyUsageOccurrence) > nauos;
+std::vector<Handle(StepRepr_NextAssemblyUsageOccurrence)>
+Get_NextAssemblyUsageOccurrences(const Handle(StepBasic_Product) & product, const Interface_Graph &theGraph) {
+    std::vector<Handle(StepRepr_NextAssemblyUsageOccurrence)> nauos;
 
     Interface_EntityIterator childIter = theGraph.Sharings(product);
     for (childIter.Start(); childIter.More(); childIter.Next()) {
@@ -402,8 +394,8 @@ std::vector<Handle(StepRepr_NextAssemblyUsageOccurrence) > Get_NextAssemblyUsage
     return nauos;
 }
 
-Handle(StepRepr_NextAssemblyUsageOccurrence) Get_NextAssemblyUsageOccurrence(const Handle(StepBasic_Product) &product,
-                                                                             const Interface_Graph &theGraph) {
+Handle(StepRepr_NextAssemblyUsageOccurrence)
+    Get_NextAssemblyUsageOccurrence(const Handle(StepBasic_Product) & product, const Interface_Graph &theGraph) {
     auto result = Get_NextAssemblyUsageOccurrences(product, theGraph);
     if (result.size() == 1) {
         return result[0];
@@ -412,9 +404,8 @@ Handle(StepRepr_NextAssemblyUsageOccurrence) Get_NextAssemblyUsageOccurrence(con
     return result[result.size() - 1];
 }
 
-
-void add_geometries_to_nodes(const std::vector<std::unique_ptr<ProductNode> > &nodes, const Interface_Graph &theGraph) {
-    for (auto &ref_node: nodes) {
+void add_geometries_to_nodes(const std::vector<std::unique_ptr<ProductNode>> &nodes, const Interface_Graph &theGraph) {
+    for (auto &ref_node : nodes) {
         // 'node' is a std::unique_ptr<ProductNode>&
         if (!ref_node) {
             // If it's a null pointer, skip it
@@ -423,9 +414,7 @@ void add_geometries_to_nodes(const std::vector<std::unique_ptr<ProductNode> > &n
         auto &node = *ref_node;
         auto &product = theGraph.Entity(node.entityIndex);
         Interface_EntityIterator breps =
-                Get_Associated_SolidModel_BiDirectional(product,
-                                                        STANDARD_TYPE(StepShape_SolidModel),
-                                                        theGraph);
+            Get_Associated_SolidModel_BiDirectional(product, STANDARD_TYPE(StepShape_SolidModel), theGraph);
         // get the geometry indices
         while (breps.More()) {
             const auto &entity = breps.Value();
@@ -442,11 +431,8 @@ void add_geometries_to_nodes(const std::vector<std::unique_ptr<ProductNode> > &n
 
 // Recursive function that builds a ProductNode tree with transformations
 static std::unique_ptr<ProductNode> BuildProductNodeWithTransform(
-    int productIndex,
-    const std::unordered_map<int, std::vector<ParentChildRelationship> > &parentToChildrenWTransforms,
-    const Handle(Interface_InterfaceModel) &model,
-    const Interface_Graph &theGraph,
-    const gp_Trsf &parentTransform,
+    int productIndex, const std::unordered_map<int, std::vector<ParentChildRelationship>> &parentToChildrenWTransforms,
+    const Handle(Interface_InterfaceModel) & model, const Interface_Graph &theGraph, const gp_Trsf &parentTransform,
     ProductNode *parent) {
     auto node = std::make_unique<ProductNode>();
     node->entityIndex = productIndex;
@@ -468,16 +454,15 @@ static std::unique_ptr<ProductNode> BuildProductNodeWithTransform(
     // Recurse for children, now using ParentChildRelationship
     auto it = parentToChildrenWTransforms.find(productIndex);
     if (it != parentToChildrenWTransforms.end()) {
-        for (const auto &childRel: it->second) // Access the ParentChildRelationship (includes transformation)
+        for (const auto &childRel : it->second) // Access the ParentChildRelationship (includes transformation)
         {
             // Combine parent transformation with the transformation from ParentChildRelationship
             gp_Trsf childAbsoluteTransform = absoluteTransform;
             childAbsoluteTransform.Multiply(childRel.transformation);
 
             // Build the child node
-            node->children.push_back(
-                BuildProductNodeWithTransform(childRel.childIndex, parentToChildrenWTransforms, model, theGraph,
-                                              childAbsoluteTransform, node.get()));
+            node->children.push_back(BuildProductNodeWithTransform(
+                childRel.childIndex, parentToChildrenWTransforms, model, theGraph, childAbsoluteTransform, node.get()));
         }
     }
 
@@ -485,12 +470,10 @@ static std::unique_ptr<ProductNode> BuildProductNodeWithTransform(
 }
 
 // Iterative function
-std::unique_ptr<ProductNode> BuildProductNodeWithTransformIterative(
-    int rootIndex,
-    const std::unordered_map<int, std::vector<int> > &parentToChildren,
-    const Handle(Interface_InterfaceModel) &model,
-    const Interface_Graph &theGraph,
-    const gp_Trsf &rootTransform) {
+std::unique_ptr<ProductNode>
+BuildProductNodeWithTransformIterative(int rootIndex, const std::unordered_map<int, std::vector<int>> &parentToChildren,
+                                       const Handle(Interface_InterfaceModel) & model, const Interface_Graph &theGraph,
+                                       const gp_Trsf &rootTransform) {
     // Create the root node
     auto rootNode = std::make_unique<ProductNode>();
     rootNode->parent = nullptr;
@@ -499,8 +482,8 @@ std::unique_ptr<ProductNode> BuildProductNodeWithTransformIterative(
 
     // A stack item for our DFS
     struct StackItem {
-        ProductNode *node; // pointer to the node in which we'll store data
-        int productIndex; // which product index this node corresponds to
+        ProductNode *node;  // pointer to the node in which we'll store data
+        int productIndex;   // which product index this node corresponds to
         gp_Trsf parentTrsf; // the parent's final transform to be combined with local transform
     };
 
@@ -569,7 +552,7 @@ std::unique_ptr<ProductNode> BuildProductNodeWithTransformIterative(
         // --- 5) Create child nodes and push them onto the stack ---
         auto it = parentToChildren.find(productIdx);
         if (it != parentToChildren.end()) {
-            for (int childIdx: it->second) {
+            for (int childIdx : it->second) {
                 // If we've already seen this index, skip to avoid cycles
                 if (!visited.insert(childIdx).second) {
                     continue;
@@ -595,7 +578,8 @@ std::unique_ptr<ProductNode> BuildProductNodeWithTransformIterative(
 static void TransformationToJson(const gp_Trsf &transform, std::ostream &os, int indentLevel) {
     // Utility lambda to insert some indentation spaces
     auto indent = [&](int level) {
-        for (int i = 0; i < level; i++) os << "  ";
+        for (int i = 0; i < level; i++)
+            os << "  ";
     };
 
     indent(indentLevel);
@@ -608,10 +592,12 @@ static void TransformationToJson(const gp_Trsf &transform, std::ostream &os, int
         for (int j = 1; j <= 4; j++) // OpenCASCADE uses 1-based indexing
         {
             os << transform.Value(i, j);
-            if (j < 4) os << ", ";
+            if (j < 4)
+                os << ", ";
         }
         os << "]";
-        if (i < 3) os << ",\n";
+        if (i < 3)
+            os << ",\n";
     }
 
     // Add the homogeneous row for a 4x4 matrix
@@ -627,7 +613,8 @@ static void TransformationToJson(const gp_Trsf &transform, std::ostream &os, int
 static void ProductNodeToJson(const ProductNode &node, std::ostream &os, int indentLevel) {
     // Utility lambda to insert some indentation spaces
     auto indent = [&](int level) {
-        for (int i = 0; i < level; i++) os << "  ";
+        for (int i = 0; i < level; i++)
+            os << "  ";
     };
 
     indent(indentLevel);
@@ -675,8 +662,7 @@ static void ProductNodeToJson(const ProductNode &node, std::ostream &os, int ind
     os << "}";
 }
 
-
-std::string ExportHierarchyToJson(const std::vector<std::unique_ptr<ProductNode> > &roots) {
+std::string ExportHierarchyToJson(const std::vector<std::unique_ptr<ProductNode>> &roots) {
     std::ostringstream oss;
     oss << "[\n";
     for (size_t i = 0; i < roots.size(); i++) {

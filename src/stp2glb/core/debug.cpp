@@ -26,8 +26,7 @@
 #include "step_tree.h"
 #include "../config_structs.h"
 
-
-bool should_process_geometry(const Handle(Standard_Transient) &brep, const ProductNode &node,
+bool should_process_geometry(const Handle(Standard_Transient) & brep, const ProductNode &node,
                              const GlobalConfig &config) {
     if (!brep->IsKind(STANDARD_TYPE(StepShape_SolidModel))) {
         if (config.solidOnly) {
@@ -47,7 +46,6 @@ bool should_process_geometry(const Handle(Standard_Transient) &brep, const Produ
     }
     return true;
 }
-
 
 void debug_stp_to_glb(const GlobalConfig &config) {
     // Initialize the STEPCAFControl_Reader
@@ -109,8 +107,8 @@ void debug_stp_to_glb(const GlobalConfig &config) {
     std::string jsonOutput = ExportHierarchyToJson(roots);
 
     // Then write to file or print to console:
-    const std::filesystem::path out_json_file = config.glbFile.parent_path() / config.glbFile.stem().concat(
-                                                    "-hierarchy.json");
+    const std::filesystem::path out_json_file =
+        config.glbFile.parent_path() / config.glbFile.stem().concat("-hierarchy.json");
     std::ofstream file(out_json_file);
     file << jsonOutput;
     file.close();
@@ -121,7 +119,7 @@ void debug_stp_to_glb(const GlobalConfig &config) {
     int num_products = 0;
 
     // first find the number of geometries
-    for (const auto &node: GeometryRange(roots)) {
+    for (const auto &node : GeometryRange(roots)) {
         num_geometry += node.geometryInstances.size();
         num_products++;
     }
@@ -133,15 +131,16 @@ void debug_stp_to_glb(const GlobalConfig &config) {
     Handle(XCAFDoc_ColorTool) colorTool = XCAFDoc_DocumentTool::ColorTool(step_store.doc_->Main());
 
     // Iterate over all nodes with geometry indices
-    for (const auto &node: GeometryRange(roots)) {
+    for (const auto &node : GeometryRange(roots)) {
         Handle(StepBasic_Product) product = Handle(StepBasic_Product)::DownCast(model->Entity(node.entityIndex));
 
         std::cout << "Node: " << node.name << " (" << curr_product << "/" << num_products << ")"
-                << ", EntityIndex: " << node.entityIndex
-                << ", Geometry count: " << node.geometryInstances.size() << '\n';
-        for (const GeometryInstance geometry_instance: node.geometryInstances) {
+                  << ", EntityIndex: " << node.entityIndex << ", Geometry count: " << node.geometryInstances.size()
+                  << '\n';
+        for (const GeometryInstance geometry_instance : node.geometryInstances) {
 
-            std::cout << "Geometry: " << geometry_instance.entityIndex << " (" << curr_shape << "/" << num_geometry << ")\n";
+            std::cout << "Geometry: " << geometry_instance.entityIndex << " (" << curr_shape << "/" << num_geometry
+                      << ")\n";
 
             auto geometry = model->Entity(geometry_instance.entityIndex);
 
@@ -211,12 +210,12 @@ void debug_stp_to_glb(const GlobalConfig &config) {
     step_store.to_step(out_file.string().c_str());
 
     // iterate over all nodes that werent added to the model and save the list to json
-    const std::filesystem::path out_json_log_file = config.glbFile.parent_path() / config.glbFile.stem().concat(
-                                                    "-log.json");
+    const std::filesystem::path out_json_log_file =
+        config.glbFile.parent_path() / config.glbFile.stem().concat("-log.json");
     std::ofstream log_file(out_json_log_file);
     log_file << "[\n";
 
-    for (const auto &node: GeometryRange(roots)) {
+    for (const auto &node : GeometryRange(roots)) {
         if (!node.processResult.added_to_model && node.processResult.geometryIndex != 0) {
             log_file << "{\n";
             log_file << R"("name": ")" << node.name << "\",\n";
@@ -228,6 +227,4 @@ void debug_stp_to_glb(const GlobalConfig &config) {
     }
     log_file << "]\n";
     log_file.close();
-
-
 }

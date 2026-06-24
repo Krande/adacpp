@@ -42,15 +42,18 @@ adacpp = "src/adacpp"
 
 [tool.black]
 line-length = 120
+# build/ holds CMake FetchContent deps (manifold, etc.) and third_party/ is vendored;
+# black already skips build/ via its default exclude, force-exclude keeps third_party out too.
+force-exclude = "(^|/)(build|third_party)/"
 
 [tool.ruff]
 line-length = 120
-exclude = ["examples/", ".pixi/", "temp/", "node_modules/", "output/"]
+exclude = ["examples/", ".pixi/", "temp/", "node_modules/", "output/", "build/", "third_party/"]
 
 [tool.ruff.lint]
 ignore = ["E741"]
 
 [tool.isort]
 profile = "black"
-skip = [".pixi", "node_modules", "temp", "output"]
-skip_glob = ["**/node_modules/**", "**/temp/**", "**/output/**"]
+skip = [".pixi", "node_modules", "temp", "output", "build", "third_party"]
+skip_glob = ["**/node_modules/**", "**/temp/**", "**/output/**", "**/build/**", "**/third_party/**"]

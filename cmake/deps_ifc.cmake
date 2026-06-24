@@ -1,11 +1,34 @@
 # link the library files located in %LIBRARY_PREFIX%/lib/ifcparse/IfcParse.lib (on windows as an example)
 # to the executable
 
-list(APPEND
-        ADA_CPP_LINK_LIBS
-        IfcParse
-        IfcGeom
-)
+# The geometry kernels (OpenCascadeKernel / CgalKernel) live in their own static libs,
+# separate from libIfcGeom.a (which defines AbstractKernel + the taxonomy + convert dispatch).
+# The NGEOM taxonomy path instantiates these kernels, so link them too. Static-lib symbol
+# resolution between the kernels and IfcGeom is mutual.
+if(APPLE)
+    # Apple's ld64 has no --start-group/--end-group (it errors "ld: unknown option:
+    # --start-group"); it resolves circular static-archive deps via its own multi-pass,
+    # so just list the libs directly.
+    list(APPEND ADA_CPP_LINK_LIBS
+            geometry_kernel_opencascade
+            geometry_kernel_cgal
+            IfcParse
+            IfcGeom
+    )
+else()
+    # GNU ld / lld need the group to resolve the mutual references in one pass.
+    list(APPEND ADA_CPP_LINK_LIBS
+            -Wl,--start-group
+            geometry_kernel_opencascade
+            geometry_kernel_cgal
+            IfcParse
+            IfcGeom
+            -Wl,--end-group
+    )
+endif()
+# The CGAL kernel uses CGAL's exact arithmetic -> GMP/MPFR. They are leaf C libs, so they
+# must come AFTER the kernel group in static link order.
+list(APPEND ADA_CPP_LINK_LIBS mpfr gmp)
 
 # ifcopenshell >=0.8.5 statically embeds rocksdb in libIfcParse.a /
 # libIfcGeom.a, because rocksdb's shared library only exposes the C API
@@ -41,3 +64,13 @@ list(APPEND ADA_CPP_LINK_LIBS RocksDB::rocksdb)
 # fopen("")s and segfaults). Define it here to match the .a's layout. rocksdb
 # headers are on the conda -isystem include path, so the #include resolves.
 add_compile_definitions(IFOPSH_WITH_ROCKSDB)
+
+# ifcgeom/taxonomy.h includes <Eigen/Dense>, which conda-forge installs under
+# <prefix>/include/eigen3 (not directly on the -isystem include path). The NGEOM->taxonomy
+# adapter (src/cadit/ifc/ngeom_taxonomy_*.cpp) is the first adacpp TU to include taxonomy.h,
+# so add Eigen's include dir explicitly.
+find_package(Eigen3 CONFIG REQUIRED)
+# ifcgeom/taxonomy.h includes <Eigen/Dense> (conda installs Eigen under include/eigen3, off
+# the default -isystem path). Link the header-only Eigen3::Eigen target so its INTERFACE
+# include dir propagates to the NGEOM taxonomy TUs — the first adacpp code to include taxonomy.h.
+list(APPEND ADA_CPP_LINK_LIBS Eigen3::Eigen)

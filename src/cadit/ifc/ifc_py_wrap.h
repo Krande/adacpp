@@ -7,8 +7,6 @@
 
 #include "../../binding_core.h"
 
-
 void ifc_module(nb::module_ &m);
 
-
-#endif //IFC_PY_WRAP_H
+#endif // IFC_PY_WRAP_H

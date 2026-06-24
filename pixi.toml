@@ -1,7 +1,7 @@
 [workspace]
 name = "ada-cpp"
 channels = ["conda-forge"]
-platforms = ["win-64", "linux-64", "osx-64"]
+platforms = ["win-64", "linux-64", "osx-arm64"]
 
 [environments]
 lint = { features = ["lint"], no-default-feature = true }
@@ -46,10 +46,17 @@ pip = "*"
 black = "==24.4.2"
 isort = "==5.13.2"
 ruff = "==0.4.10"
+clang-format = ">=18"
 
 [feature.wasm.dependencies]
 nodejs = "*"
 ninja = "*"
+cmake = "*"
+
+# The emscripten/pyodide wasm cross-build is Linux-only (CI builds wasm on ubuntu).
+# Scoping the toolchain to linux-64 keeps the `wasm` environment solvable on the
+# other workspace platforms (osx-arm64 has no satisfiable emscripten 4.0.9).
+[feature.wasm.target.linux-64.dependencies]
 # Pyodide 0.29.x (Python 3.13, pyemscripten_2025_0 ABI) uses emscripten 4.0.9
 # and native WebAssembly exception handling (-fwasm-exceptions). This is the
 # latest pyodide our toolchain can build: conda-forge tops out at emscripten
@@ -58,10 +65,14 @@ ninja = "*"
 # (the old -fexceptions JS-trampoline model fatally traps in STEPCAFControl_Writer).
 emscripten = "==4.0.9"
 pyodide-build = "==0.35.0"
-cmake = "*"
 
 [feature.lint.tasks]
-lint = "isort . && black . --config pyproject.toml && ruff check . --fix"
+# Format every first-party C++ unit under src/ (no vendored code lives there;
+# third_party/ is excluded by construction). git ls-files keeps it deterministic
+# and cross-platform; clang-format reads the repo-root .clang-format.
+lint-cpp = { cmd = "clang-format -i $(git ls-files 'src/*.cpp' 'src/*.h' 'src/*.hpp')", description = "Format first-party C++ in src/ per .clang-format" }
+lint-cpp-check = { cmd = "clang-format --dry-run --Werror $(git ls-files 'src/*.cpp' 'src/*.h' 'src/*.hpp')", description = "CI gate: fail on any unformatted C++" }
+lint = { cmd = "isort . && black . --config pyproject.toml && ruff check . --fix", depends-on = ["lint-cpp"], description = "Format + lint Python and C++" }
 
 [feature.wasm.tasks]
 clean = { cmd = "rm -rf build-wasm && mkdir -p build-wasm" }

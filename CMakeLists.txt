@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ada-cpp LANGUAGES CXX)
+project(ada-cpp LANGUAGES C CXX)  # C for the vendored libtess2 sources
 set(CMAKE_CXX_STANDARD 20)
 
 # Set policy CMP0167 to OLD to suppress warning about FindBoost module deprecation
@@ -22,6 +22,17 @@ else()
     message(STATUS "TINY_INCLUDE_DIR not set")
 endif ()
 
+# Vendored libtess2 (native + wasm) — boundary-driven triangulator for the step2glb-style
+# tessellation path. Header-path only here; ${LIBTESS2_SOURCES} are appended to
+# ADA_CPP_SOURCES alongside the tessellator once src/visit/tessellate_libtess2.cpp lands.
+include(cmake/deps_libtess2.cmake)
+include_directories(${LIBTESS2_INCLUDE_DIR})
+
+# Vendored meshoptimizer (native + wasm) — meshopt_simplify cleanup (step2glb merge parity) +
+# EXT_meshopt_compression encoders. ${MESHOPT_SOURCES} are appended to ADA_CPP_SOURCES below.
+include(cmake/deps_meshopt.cmake)
+include_directories(${MESHOPT_INCLUDE_DIR})
+
 # Create a list called ADA_CPP_SOURCES of all cpp files inside the src dir
 if (BUILD_WASM)
     # Wasm builds now link the cross-built OCCT toolkits (see wasm_occt.cmake), so
@@ -37,6 +48,13 @@ if (BUILD_WASM)
             src/geom/Models.cpp
             src/cadit/occt/step_writer.cpp
             src/helpers/helpers.cpp
+            # NGEOM OCC-free path (neutral layer is header-only; libtess2 tessellator + the
+            # vendored libtess2 C compile for wasm too). Taxonomy path is native-only (ifc).
+            src/geom/neutral/ngeom_tessellate.cpp
+            src/geom/neutral/ngeom_meshopt.cpp
+            src/geom/neutral/ngeom_boolean.cpp
+            ${LIBTESS2_SOURCES}
+            ${MESHOPT_SOURCES}
     )
 else ()
     set(ADA_CPP_SOURCES
@@ -55,6 +73,14 @@ else ()
             src/visit/tess_helpers.cpp
             src/visit/manual/solids/boxes.cpp
             src/visit/TessellateFactory.cpp
+            # NGEOM: OCC-free libtess2 path + the taxonomy (ifcopenshell) path
+            src/geom/neutral/ngeom_tessellate.cpp
+            src/cadit/ifc/ngeom_taxonomy_build.cpp
+            src/cadit/ifc/ngeom_taxonomy_kernel.cpp
+            src/geom/neutral/ngeom_meshopt.cpp
+            src/geom/neutral/ngeom_boolean.cpp
+            ${LIBTESS2_SOURCES}
+            ${MESHOPT_SOURCES}
     )
 endif ()
 set(ADA_CPP_HEADERS
@@ -141,6 +167,13 @@ if (NOT BUILD_WASM)
     # Find Threads package for pthread support on Linux
     find_package(Threads REQUIRED)
 endif ()
+
+# Manifold mesh-boolean (CSG) for the OCC-free libtess2 path (ngeom_boolean.cpp) — native AND
+# wasm (it is self-contained + cross-compiles under emscripten). Included after the toolchain /
+# OCCT setup above so EMSCRIPTEN is defined for the wasm EH flags in deps_manifold.cmake.
+include(cmake/deps_manifold.cmake)
+list(APPEND ADA_CPP_LINK_LIBS manifold)
+add_compile_definitions(ADACPP_HAVE_MANIFOLD)
 
 if (BUILD_STP2GLB)
     message(STATUS "Building the STP2GLB executable")

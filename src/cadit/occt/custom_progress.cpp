@@ -25,7 +25,7 @@ Standard_Boolean CustomProgressIndicator::UserBreak() {
 void CustomProgressIndicator::Show(const Message_ProgressScope &theScope, const Standard_Boolean isForce) {
     // This function will be used to set progress from your existing logic
     const double newProgress = GetPosition(); // Get current progress [0.0, 1.0]
-    SetProgress(newProgress);  // Update progress asynchronously
+    SetProgress(newProgress);                 // Update progress asynchronously
 }
 
 void CustomProgressIndicator::Cancel() {
@@ -34,7 +34,7 @@ void CustomProgressIndicator::Cancel() {
 
 void CustomProgressIndicator::Reset() {
     shouldCancel = false;
-    SetProgress(0.0);  // Reset progress to 0
+    SetProgress(0.0); // Reset progress to 0
 }
 
 void CustomProgressIndicator::SetProgress(double newProgress) {
@@ -60,14 +60,17 @@ void CustomProgressIndicator::UpdateProgress() {
             std::lock_guard<std::mutex> coutLock(coutMutex);
 
             // Clear the line before printing the new progress
-            std::cout << "\r" << std::string(80, ' ');  // Clear the current line (adjust the size if necessary)
+            std::cout << "\r" << std::string(80, ' '); // Clear the current line (adjust the size if necessary)
             std::cout << "\r[";
 
             // Build the progress bar
             for (int i = 0; i < barWidth; ++i) {
-                if (i < pos) std::cout << "="; // Completed part
-                else if (i == pos) std::cout << ">"; // Current progress
-                else std::cout << " "; // Remaining part
+                if (i < pos)
+                    std::cout << "="; // Completed part
+                else if (i == pos)
+                    std::cout << ">"; // Current progress
+                else
+                    std::cout << " "; // Remaining part
             }
 
             std::cout << "] " << static_cast<int>(progress * 100.0) << "%   " << std::flush;

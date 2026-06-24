@@ -13,22 +13,20 @@
 #include "step_tree.h"
 #include "../../geom/Color.h"
 
-
-
 class StepStore {
 public:
     Handle(TDocStd_Document) doc_;
 
-    explicit StepStore(const std::string& top_level_name = "Assembly");
+    explicit StepStore(const std::string &top_level_name = "Assembly");
 
-    explicit StepStore(const std::vector<std::unique_ptr<ProductNode>>& product_hierarchy);
+    explicit StepStore(const std::vector<std::unique_ptr<ProductNode>> &product_hierarchy);
 
-    void add_shape(const TopoDS_Shape& shape, const std::string& name, const Color& rgb_color,
-        const ProductNode& parent_node);
+    void add_shape(const TopoDS_Shape &shape, const std::string &name, const Color &rgb_color,
+                   const ProductNode &parent_node);
 
-    void to_step(const std::filesystem::path& step_file) const;
+    void to_step(const std::filesystem::path &step_file) const;
 
-    void to_glb(const std::filesystem::path& glb_file) const;
+    void to_glb(const std::filesystem::path &glb_file) const;
 
 private:
     // Handles (smart pointers) to OCC classes
@@ -48,6 +46,6 @@ private:
 
     void initialize();
     void create_hierarchy(const std::vector<std::unique_ptr<ProductNode>> &nodes, const TDF_Label &parent_label);
-    static void set_name(const TDF_Label& label, const std::string& name);
-    static void set_color(const TDF_Label& label, const Color& rgb_color, const Handle(XCAFDoc_ColorTool)& color_tool);
+    static void set_name(const TDF_Label &label, const std::string &name);
+    static void set_color(const TDF_Label &label, const Color &rgb_color, const Handle(XCAFDoc_ColorTool) & color_tool);
 };

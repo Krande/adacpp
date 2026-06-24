@@ -8,9 +8,8 @@
 #include <TopoDS_Shape.hxx>
 #include "../geom/Mesh.h"
 
-
 Mesh tessellate_shape(int id, const TopoDS_Shape &shape, bool compute_edges, float mesh_quality, bool parallel_meshing);
 
 Mesh get_box_mesh(const std::vector<float> &box_origin, const std::vector<float> &box_dims);
 
-#endif //NANO_OCCT_TESS_HELPERS_H
+#endif // NANO_OCCT_TESS_HELPERS_H

@@ -3,6 +3,6 @@
 
 #include "../../binding_core.h"
 
-void tiny_gltf_module(nb::module_&m);
+void tiny_gltf_module(nb::module_ &m);
 
-#endif //ADA_CPP_TINY_H
+#endif // ADA_CPP_TINY_H

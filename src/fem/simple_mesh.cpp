@@ -1,7 +1,7 @@
 #include "simple_mesh.h"
 #include <gmsh.h>
 
-void simple_gmesh(const std::string& filename) {
+void simple_gmesh(const std::string &filename) {
     gmsh::initialize();
     gmsh::model::add("square");
     gmsh::model::geo::addPoint(0, 0, 0, 0.1, 1);
@@ -20,4 +20,3 @@ void simple_gmesh(const std::string& filename) {
     gmsh::model::mesh::generate(2);
     gmsh::write(filename);
 };
-

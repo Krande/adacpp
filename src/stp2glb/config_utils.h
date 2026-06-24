@@ -8,8 +8,6 @@
 
 #include "config_structs.h"
 
+GlobalConfig process_parameters(CLI::App &app);
 
-GlobalConfig process_parameters(CLI::App& app);
-
-
-#endif //CONFIG_UTILS_H
+#endif // CONFIG_UTILS_H
