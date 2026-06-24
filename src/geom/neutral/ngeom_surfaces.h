@@ -184,7 +184,7 @@ struct ConeSurface : Surface {
             // beyond the apex the signed radius r+v·tan(a) flips, so the point is on the far nappe
             // at u+π (ISO 10303-42 conical_surface spans all v) — match exactly.
             if (r0 + v * std::tan(semi_angle) < 0.0)
-                u += M_PI;
+                u += PI; // portable; MSVC <cmath> doesn't define M_PI without _USE_MATH_DEFINES
             u = wrap_2pi(u);
         }
         return true;
