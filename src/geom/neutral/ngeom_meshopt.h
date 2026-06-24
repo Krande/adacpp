@@ -9,7 +9,7 @@ struct SimplifiedMesh {
     std::vector<uint32_t> indices;
 };
 
-// Faithful port of step2glb mesh.rs simplify_meshopt: meshopt_simplify toward
+// Faithful port of mesh.rs simplify_meshopt: meshopt_simplify toward
 // threshold*index_count within target_error, border LOCKED (shared seams keep shape), then drop
 // degenerate triangles and compact to the surviving vertices. With target_error 0.0 this is a
 // lossless coplanar-triangle collapse (the cleanup a merged GLB applies, ~16% on a dense scene).

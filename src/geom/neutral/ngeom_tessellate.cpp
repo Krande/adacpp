@@ -17,9 +17,9 @@
 #include "ngeom_bspline.h"
 #include "ngeom_surfaces.h"
 #include "tesselator.h" // vendored libtess2 (fails soft via setjmp/longjmp -> tessTesselate
-                        // returns 0 on any sweep error; no panic to guard like step2glb's wasm)
+                        // returns 0 on any sweep error; no panic to guard against, unlike the original wasm build)
 
-// 1:1 port of step2glb crates/core/src/tessellate.rs onto the OCC-free neutral geometry layer.
+// 1:1 port of crates/core/src/tessellate.rs onto the OCC-free neutral geometry layer.
 // Function names and logic mirror the Rust source so the two tessellators stay in lockstep; any
 // remaining divergence localizes to the parsing/serialization stage that feeds this layer.
 namespace adacpp::ngeom {
@@ -32,7 +32,7 @@ namespace {
 constexpr double INF = std::numeric_limits<double>::infinity();
 const bool FDBG = std::getenv("NGEOM_FDBG") != nullptr;
 // NGEOM_TESSDBG: step-by-step tess-path logging (surface params, path, grid dims, pre/post-refine
-// triangle counts, all tess params) — for head-to-head comparison with step2glb's S2G_FACEDBG.
+// triangle counts, all tess params) — for head-to-head comparison with the reference tessellator's face-debug dump.
 const bool TESSDBG = std::getenv("NGEOM_TESSDBG") != nullptr;
 
 // ---- diagnostics (env-gated) ----------------------------------------------------------------
@@ -56,7 +56,7 @@ const bool TESSDBG = std::getenv("NGEOM_TESSDBG") != nullptr;
     return "?";
 }
 
-// distinctive surface params, so a face can be matched to step2glb's by geometry
+// distinctive surface params, so a face can be matched to the reference output by geometry
 void log_surf_params(const Surface &s) {
     if (const auto *c = dynamic_cast<const CylinderSurface *>(&s))
         std::fprintf(stderr, " r=%.3f o=(%.1f,%.1f,%.1f)", c->r, c->f.o.x, c->f.o.y, c->f.o.z);
@@ -71,7 +71,7 @@ void log_surf_params(const Surface &s) {
                      (int) !b->weights.empty(), b->size());
 }
 
-// ---- mesh accumulator with checkpoint/rollback (step2glb TriMesh) ----------------------------
+// ---- mesh accumulator with checkpoint/rollback (TriMesh) ----------------------------
 struct Mesh {
     TessMesh &m;
     explicit Mesh(TessMesh &mm) : m(mm) {}
@@ -162,7 +162,7 @@ bool poly_self_intersects(const std::vector<Uv> &c) {
     return false;
 }
 
-// Metric scale mapping UV toward the 3D arc-length metric (step2glb metric_scale).
+// Metric scale mapping UV toward the 3D arc-length metric (metric_scale).
 std::pair<double, double> metric_scale(const Surface &s, double umin, double umax, double vmin, double vmax) {
     double du = std::max(umax - umin, 1e-12);
     double dv = std::max(vmax - vmin, 1e-12);
@@ -175,7 +175,7 @@ std::pair<double, double> metric_scale(const Surface &s, double umin, double uma
 }
 
 // ---- tess2 plumbing --------------------------------------------------------------------------
-// Build tess2's flat (scaled) contour, dropping coincident points + closing dup (step2glb
+// Build tess2's flat (scaled) contour, dropping coincident points + closing dup (
 // sanitize_contour). Returns empty for <3 distinct points.
 std::vector<TESSreal> sanitize_contour(const std::vector<Uv> &l, double su, double sv) {
     if (l.size() < 3)
@@ -255,7 +255,7 @@ Tess2Out run_tess2(const std::vector<std::vector<Uv>> &loops_uv, double su, doub
     return out;
 }
 
-// Retry tess2 with interior holes nudged toward their centroids (step2glb tess2_with_shrunk_holes).
+// Retry tess2 with interior holes nudged toward their centroids (tess2_with_shrunk_holes).
 Tess2Out tess2_with_shrunk_holes(const std::vector<std::vector<Uv>> &loops_uv, double su, double sv) {
     if (loops_uv.size() < 2)
         return {};
@@ -298,7 +298,7 @@ Tess2Out tess2_with_shrunk_holes(const std::vector<std::vector<Uv>> &loops_uv, d
     return {};
 }
 
-// ---- refinement (step2glb refine_uv + delaunay_flip) -----------------------------------------
+// ---- refinement (refine_uv + delaunay_flip) -----------------------------------------
 void delaunay_flip(const std::vector<Uv> &verts, std::vector<Tri> &tris, double su, double sv) {
     auto p = [&](uint32_t i) -> Uv { return {verts[i][0] * su, verts[i][1] * sv}; };
     auto len = [](const Uv &x, const Uv &y) {
@@ -599,7 +599,7 @@ bool emit_uv_region(const Surface &s, const std::vector<std::vector<Uv>> &loops_
     return true;
 }
 
-// Grid a UV rectangle at ~2 samples/knot-span then refine (step2glb tessellate_uv_grid).
+// Grid a UV rectangle at ~2 samples/knot-span then refine (tessellate_uv_grid).
 bool tessellate_uv_grid(const Surface &s, double u0, double u1, double v0, double v1, const TessParams &tp,
                         bool same_sense, Mesh &mesh) {
     int nu, nv;
@@ -642,7 +642,7 @@ bool tessellate_uv_grid(const Surface &s, double u0, double u1, double v0, doubl
     return true;
 }
 
-// ---- B-spline full-domain gates (step2glb) ---------------------------------------------------
+// ---- B-spline full-domain gates ---------------------------------------------------
 struct Rect {
     double u0, u1, v0, v1;
     bool ok = false;
@@ -804,7 +804,7 @@ bool tessellate_unbounded(const Surface &s, const TessParams &tp, bool same_sens
     return true;
 }
 
-// ---- periodic paths (step2glb) ---------------------------------------------------------------
+// ---- periodic paths ---------------------------------------------------------------
 bool tessellate_periodic_winding(const Surface &s, const std::vector<LoopUv> &loops_uv, const TessParams &tp,
                                  bool same_sense, Mesh &mesh) {
     auto pu = s.u_period();
@@ -1057,7 +1057,7 @@ bool tessellate_periodic_complement(const Surface &s, const std::vector<std::vec
     return emit_uv_region(s, all, tp, same_sense, mesh);
 }
 
-// ---- plane fit fallbacks (step2glb) ----------------------------------------------------------
+// ---- plane fit fallbacks ----------------------------------------------------------
 bool surface_is_planar(const Surface &s) {
     if (dynamic_cast<const PlaneSurface *>(&s))
         return true;
@@ -1125,7 +1125,7 @@ std::shared_ptr<PlaneSurface> fit_plane(const std::vector<Loop3> &loops) {
     return std::make_shared<PlaneSurface>(Frame::from_axis_ref(c, n, Vec3{1, 0, 0}));
 }
 
-// ---- face mesher (step2glb face_to_mesh) -----------------------------------------------------
+// ---- face mesher (face_to_mesh) -----------------------------------------------------
 // returns empty string on success, else a failure reason
 const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d, const TessParams &tp, bool same_sense,
                          Mesh &mesh) {
@@ -1324,7 +1324,7 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
     return emit_uv_region(surf, contours, tp, same_sense, mesh) ? nullptr : "UV tessellation produced no triangles";
 }
 
-// ---- boundary building from neutral topology (step2glb build_loops3d / loop_polyline) --------
+// ---- boundary building from neutral topology (build_loops3d / loop_polyline) --------
 std::vector<Loop3> build_loops3d(const FaceSurfaceN &face, const TessParams &tp) {
     std::vector<Loop3> loops;
     for (const FaceBoundN &b : face.bounds) {
@@ -1393,7 +1393,7 @@ bool boundary_is_degenerate(const FaceSurfaceN &face, const TessParams &tp) {
 namespace {
 bool tessellate_face_impl(const FaceSurfaceN &face, const TessParams &tp, TessMesh &outm) {
     // NOTE: do NOT bail on empty bounds — a closed quadric (full sphere/torus) or B-spline patch
-    // with no FACE_BOUND tessellates via tessellate_unbounded below (step2glb tessellate_face: it
+    // with no FACE_BOUND tessellates via tessellate_unbounded below (tessellate_face: it
     // never short-circuits on empty bounds; empty loops3d -> tessellate_unbounded).
     if (!face.surface)
         return false;

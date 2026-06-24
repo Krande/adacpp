@@ -1,6 +1,11 @@
-// NGEOM libtess2 tessellator — port of step2glb crates/core/src/tessellate.rs onto the
-// neutral geometry layer. OCC-free: all surface evaluation goes through the neutral types.
+// NGEOM libtess2 tessellator — OCC-free: all surface evaluation goes through the neutral types.
 // Spec: dap/plan/v3/notes_libtess2_and_geom_streaming.md (Part A).
+//
+// ATTRIBUTION: this whole NGEOM libtess2 path is a C++ port of step2glb
+// (https://github.com/vegarringdal/step2glb), an open-source (MIT) Rust STEP->GLB
+// converter. Comments throughout this path cite the original Rust module/function
+// names (tessellate.rs, geom.rs, model.rs, mesh.rs, ...) purely as provenance for
+// the algorithm being mirrored.
 #pragma once
 
 #include <cstdint>

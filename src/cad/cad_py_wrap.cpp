@@ -2084,7 +2084,7 @@ std::optional<std::pair<std::array<double, 3>, std::array<double, 3>>> face_plan
                           std::array<double, 3>{nrm.X(), nrm.Y(), nrm.Z()});
 }
 
-// step2glb merge cleanup: meshopt_simplify (LockBorder) toward threshold*index_count within
+// merge cleanup: meshopt_simplify (LockBorder) toward threshold*index_count within
 // target_error, then drop degenerate tris + compact. Returns (positions xyz-interleaved, indices).
 std::pair<std::vector<float>, std::vector<uint32_t>> meshopt_simplify_mesh_impl(const std::vector<float> &positions,
                                                                                 const std::vector<uint32_t> &indices,
@@ -2254,7 +2254,7 @@ void cad_module(nb::module_ &m) {
 
     m.def("meshopt_simplify_mesh", &meshopt_simplify_mesh_impl, "positions"_a, "indices"_a, "threshold"_a = 0.75f,
           "target_error"_a = 0.0f,
-          "step2glb merge cleanup: meshopt_simplify (border-locked) toward threshold*index_count "
+          "merge cleanup: meshopt_simplify (border-locked) toward threshold*index_count "
           "within target_error, then drop degenerate triangles + compact. positions xyz-interleaved "
           "float, indices uint32. Returns (positions, indices). target_error 0.0 = lossless "
           "coplanar-triangle collapse.");

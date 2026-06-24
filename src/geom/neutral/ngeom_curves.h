@@ -19,12 +19,12 @@ struct Curve {
 
     // Discretize into 3D points [t in [a,b]] honouring a chord deflection and a max
     // angular step between successive tangents. Midpoint-refines an initial nominal split
-    // (step2glb geom.rs nominal_spans + refine). Endpoints a,b are always included.
+    // (geom.rs nominal_spans + refine). Endpoints a,b are always included.
     std::vector<Vec3> discretize(double a, double b, double deflection, double max_angle) const;
     // public accessor for nominal_spans (used by composite/trimmed curves)
     int discretize_spans(double a, double b) const;
     // >0 => an edge of this curve is sampled UNIFORMLY at this many segments instead of the adaptive
-    // midpoint refine (step2glb samples B-spline edges uniformly at clamp(cps*4,8,512), NOT adaptively).
+    // midpoint refine (samples B-spline edges uniformly at clamp(cps*4,8,512), NOT adaptively).
     virtual int uniform_edge_segments() const {
         return 0;
     }
@@ -127,7 +127,7 @@ struct PolylineCurve : Curve {
     }
 };
 
-// HYPERBOLA — P(u)=C+sa*cosh(u)*x+si*sinh(u)*y (ISO 10303-42; step2glb model.rs curve_polyline).
+// HYPERBOLA — P(u)=C+sa*cosh(u)*x+si*sinh(u)*y (ISO 10303-42; model.rs curve_polyline).
 struct HyperbolaCurve : Curve {
     Frame f;
     double sa, si;
@@ -149,7 +149,7 @@ struct HyperbolaCurve : Curve {
     }
 };
 
-// PARABOLA — P(u)=C+fd*u^2*x+2*fd*u*y (ISO 10303-42; step2glb model.rs curve_polyline).
+// PARABOLA — P(u)=C+fd*u^2*x+2*fd*u*y (ISO 10303-42; model.rs curve_polyline).
 struct ParabolaCurve : Curve {
     Frame f;
     double fd;

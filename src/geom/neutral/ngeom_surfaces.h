@@ -16,7 +16,7 @@
 namespace adacpp::ngeom {
 
 // Angular sampling step (radians) so a circular arc of radius r is approximated within chord
-// sag `defl`, clamped to [2deg, max_angle]. Ported from step2glb geom.rs angle_step — the
+// sag `defl`, clamped to [2deg, max_angle]. Ported from geom.rs angle_step — the
 // curvature-driven density that drives grid resolution on quadric/swept surfaces.
 inline double angle_step(double r, double defl, double max_angle) {
     if (r < 1e-12)
@@ -36,7 +36,7 @@ struct Surface {
     // can't converge. Closed-form for quadrics (hints ignored).
     virtual bool uv(const Vec3 &p, double uhint, double vhint, double &u, double &v) const = 0;
     // Curvature-driven parametric sampling step (radians/units) per direction; INFINITY means
-    // "flat — no density floor, refinement decides". Mirrors step2glb u_step/v_step.
+    // "flat — no density floor, refinement decides". Mirrors u_step/v_step.
     virtual double u_step(double defl, double max_angle) const {
         return std::numeric_limits<double>::infinity();
     }
@@ -53,7 +53,7 @@ struct Surface {
         return false;
     }
 
-    // --- step2glb geom.rs Surface helpers (ported; used by the faithful tessellator) ---
+    // --- geom.rs Surface helpers (ported; used by the faithful tessellator) ---
     // Optional period in each parameter direction (nullopt = not periodic). Default derives
     // from periods(); B-spline/swept override where their closed-flag differs.
     virtual std::optional<double> u_period() const {
@@ -159,7 +159,7 @@ struct ConeSurface : Surface {
     double r0;         // radius at v = 0
     double semi_angle; // half-angle from axis
     ConeSurface(const Frame &fr, double radius, double a) : f(fr), r0(radius), semi_angle(a) {}
-    // step2glb geom.rs Surface::Cone parameterizes v as AXIAL height (z = v), radius = r + v·tan(a).
+    // geom.rs Surface::Cone parameterizes v as AXIAL height (z = v), radius = r + v·tan(a).
     // (NOT slant length — using sin/v·cos(a) is a different parameterization that over-samples cones.)
     double radius_at(double v) const {
         return r0 + v * std::tan(semi_angle);
@@ -175,14 +175,14 @@ struct ConeSurface : Surface {
     }
     bool uv(const Vec3 &p, double uh, double, double &u, double &v) const override {
         Vec3 l = f.to_local(p);
-        v = l.z; // axial height (step2glb Cone uv: v = d·axis)
+        v = l.z; // axial height (Cone uv: v = d·axis)
         double rxy = std::sqrt(l.x * l.x + l.y * l.y);
         if (rxy < 1e-9 * std::max(l.norm(), 1.0)) {
             u = std::isnan(uh) ? 0.0 : uh; // at the apex u is undefined: keep the hint meridian
         } else {
             u = std::atan2(l.y, l.x);
             // beyond the apex the signed radius r+v·tan(a) flips, so the point is on the far nappe
-            // at u+π (ISO 10303-42 conical_surface spans all v) — match step2glb exactly.
+            // at u+π (ISO 10303-42 conical_surface spans all v) — match exactly.
             if (r0 + v * std::tan(semi_angle) < 0.0)
                 u += M_PI;
             u = wrap_2pi(u);
@@ -208,7 +208,7 @@ struct ConeSurface : Surface {
         return true;
     }
     std::optional<std::pair<double, double>> v_caps() const override {
-        // apex is the v where radius_at(v)=r0+v*tan(a)=0 (axial-v parameterization, step2glb geom.rs).
+        // apex is the v where radius_at(v)=r0+v*tan(a)=0 (axial-v parameterization, geom.rs).
         double t = std::tan(semi_angle);
         if (std::abs(t) < 1e-12)
             return std::nullopt;

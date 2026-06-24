@@ -115,13 +115,13 @@ struct BSplineCurve : Curve {
         per = closed;
         period = closed ? (hi - lo) : 0.0;
     }
-    // step2glb model.rs sample_bspline_to_polyline samples a B-spline EDGE uniformly at this density.
+    // model.rs sample_bspline_to_polyline samples a B-spline EDGE uniformly at this density.
     int uniform_edge_segments() const override {
         int n = std::max((int) ctrl.size(), degree + 1) * 4;
         return n < 8 ? 8 : (n > 512 ? 512 : n);
     }
     int nominal_spans(double a, double b) const override {
-        // step2glb geom.rs Curve3::BSpline: (flat_knots.len()-(2*deg+1)).max(1)*2, clamped [4,64].
+        // geom.rs Curve3::BSpline: (flat_knots.len()-(2*deg+1)).max(1)*2, clamped [4,64].
         int spans = std::max((int) U.size() - (2 * degree + 1), 1);
         int n = spans * 2;
         if (n < 4)
@@ -236,7 +236,7 @@ struct BSplineSurface : Surface {
         uper = u_closed ? (umax - umin) : 0.0;
         vper = v_closed ? (vmax - vmin) : 0.0;
     }
-    // control-net bbox diagonal — characteristic size (step2glb BSplineSurface.size)
+    // control-net bbox diagonal — characteristic size (BSplineSurface.size)
     double size() const {
         if (ctrl.empty())
             return 1.0;
@@ -250,7 +250,7 @@ struct BSplineSurface : Surface {
     double approx_size() const override {
         return size();
     }
-    // loose ≤8-span floor; the perpendicular-sag refinement drives the real density (step2glb
+    // loose ≤8-span floor; the perpendicular-sag refinement drives the real density (
     // u_step/v_step BSpline arm — a hard per-knot-span floor explodes on hundreds-of-span coils).
     double u_step(double, double) const override {
         double a = Uu[u_degree], b = Uu[nu];

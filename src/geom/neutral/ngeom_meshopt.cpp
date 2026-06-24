@@ -23,7 +23,7 @@ SimplifiedMesh meshopt_simplify_mesh(const std::vector<float> &positions, const 
         meshopt_simplify(dest.data(), indices.data(), index_count, positions.data(), vertex_count, sizeof(float) * 3,
                          target, target_error, meshopt_SimplifyLockBorder, &result_error);
 
-    // compact to surviving vertices, dropping degenerate triangles (step2glb simplify_meshopt)
+    // compact to surviving vertices, dropping degenerate triangles (simplify_meshopt)
     std::unordered_map<uint32_t, uint32_t> remap;
     remap.reserve(new_count);
     out.indices.reserve(new_count);

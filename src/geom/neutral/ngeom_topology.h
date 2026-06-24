@@ -14,8 +14,8 @@
 namespace adacpp::ngeom {
 
 // Discretize a circular/elliptical arc between two 3D endpoints by projecting them onto the
-// curve to recover the angular parameter range — a port of step2glb model.rs curve_polyline's
-// CIRCLE/ELLIPSE arm. step2glb never trusts stored edge parameters; it always rebuilds the arc
+// curve to recover the angular parameter range — a port of model.rs curve_polyline's
+// CIRCLE/ELLIPSE arm. The reference never trusts stored edge parameters; it always rebuilds the arc
 // from (frame, radii, vertex_a, vertex_b), handling the closed (a==b → full 2pi) case. We mirror
 // that so a closed-circle edge whose `has_params` was dropped upstream doesn't collapse to a
 // single point (and drop its whole face).
@@ -47,7 +47,7 @@ inline std::vector<Vec3> discretize_arc(const Frame &f, double rx, double ry, co
     return pts;
 }
 
-// Faithful port of step2glb model.rs align_polyline_to_vertices: a basis curve is sampled over its
+// Faithful port of model.rs align_polyline_to_vertices: a basis curve is sampled over its
 // FULL natural domain, but the edge trims it to an interior stretch between vertices a,b. Exporters
 // close closed edges at a vertex away from the curve's own seam, so blindly snapping the curve's
 // natural endpoints onto a,b would fold the polyline through long false chords. Instead: if the
@@ -120,13 +120,13 @@ struct OrientedEdgeN {
     double t_start = 0, t_end = 0;
 
     // Ordered points start->end along the edge (endpoints included). Circle/ellipse edges are a
-    // faithful port of step2glb model.rs edge_polyline+curve_polyline: rebuild the arc CCW from
+    // faithful port of model.rs edge_polyline+curve_polyline: rebuild the arc CCW from
     // (a,b) = same_sense?(e_start,e_end):(e_end,e_start), then reverse for !same_sense and for
-    // !orientation. This is the analog of step2glb's STEP->geometry layer (NOT tessellate.rs); the
+    // !orientation. This is the analog of STEP->geometry layer (NOT tessellate.rs); the
     // ported tessellator stays untouched. Other curves keep the stored-param + endpoint-snap path.
     std::vector<Vec3> discretize(double deflection, double max_angle) const {
         const Curve *g = geometry.get();
-        // Curve types that rebuild from the endpoint vertices + edge flags (step2glb edge_polyline/
+        // Curve types that rebuild from the endpoint vertices + edge flags (edge_polyline/
         // curve_polyline): an arc/conic derives its parameter range by projecting the endpoints;
         // a polyline/composite carries its own point chain. All then honour same_sense + orientation.
         Vec3 a = same_sense ? e_start : e_end;
@@ -154,12 +154,12 @@ struct OrientedEdgeN {
         } else if (const auto *co = dynamic_cast<const CompositeCurveN *>(g)) {
             pts = co->chain(deflection, max_angle);
         } else if (g && g->uniform_edge_segments() > 0) {
-            // step2glb sample_bspline_to_polyline: sample the basis curve over its FULL natural
+            // sample_bspline_to_polyline: sample the basis curve over its FULL natural
             // parametric domain (edges are trimmed to interior stretches, so the trim params do NOT
             // bound the sampling — using them collapses untrimmed-param edges to a 2-point chord),
-            // then align to the edge's vertices a,b (same_sense-adjusted, exactly as step2glb
+            // then align to the edge's vertices a,b (same_sense-adjusted, exactly as
             // curve_polyline(a,b)); the unified same_sense + orientation reversals below then match
-            // step2glb edge_polyline's post-reversals. (Aligning to the orientation-applied
+            // edge_polyline's post-reversals. (Aligning to the orientation-applied
             // start/end instead trims against the wrong vertices and over-samples some edges.)
             int useg = g->uniform_edge_segments();
             double lo, hi, period;
