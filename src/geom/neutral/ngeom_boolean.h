@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ngeom_tessellate.h"  // TessMesh
+#include "ngeom_tessellate.h" // TessMesh
 
 namespace adacpp::ngeom {
 
@@ -11,4 +11,4 @@ namespace adacpp::ngeom {
 // compiled in (e.g. the wasm build) or an operand is not a valid manifold.
 bool mesh_boolean(int op, const TessMesh &a, const TessMesh &b, TessMesh &out);
 
-}  // namespace adacpp::ngeom
+} // namespace adacpp::ngeom

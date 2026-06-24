@@ -10,9 +10,9 @@
 #include <string>
 #include <chrono>
 
-std::string strip_quotes(const std::string& input);
+std::string strip_quotes(const std::string &input);
 
-std::vector<std::string> split(const std::string& input, char delimiter);
+std::vector<std::string> split(const std::string &input, char delimiter);
 
 bool check_if_string_in_vector(const std::vector<std::string> &vec, const std::string &str);
 
@@ -22,13 +22,9 @@ Color random_color();
 
 void set_name(const TDF_Label &label, const std::optional<std::string> &name);
 
-void set_color(const TDF_Label &label, const Color &color,
-               const Handle(XCAFDoc_ColorTool) &tool);
+void set_color(const TDF_Label &label, const Color &color, const Handle(XCAFDoc_ColorTool) & tool);
 
-
-
-class TimingContext
-{
+class TimingContext {
 public:
     explicit TimingContext(std::string name);
     ~TimingContext();

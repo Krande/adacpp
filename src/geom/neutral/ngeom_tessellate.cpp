@@ -13,11 +13,11 @@
 #include <utility>
 #include <vector>
 
-#include "ngeom_boolean.h"  // OCC-free CSG (Manifold) for boolean roots
+#include "ngeom_boolean.h" // OCC-free CSG (Manifold) for boolean roots
 #include "ngeom_bspline.h"
 #include "ngeom_surfaces.h"
-#include "tesselator.h"  // vendored libtess2 (fails soft via setjmp/longjmp -> tessTesselate
-                         // returns 0 on any sweep error; no panic to guard like step2glb's wasm)
+#include "tesselator.h" // vendored libtess2 (fails soft via setjmp/longjmp -> tessTesselate
+                        // returns 0 on any sweep error; no panic to guard like step2glb's wasm)
 
 // 1:1 port of step2glb crates/core/src/tessellate.rs onto the OCC-free neutral geometry layer.
 // Function names and logic mirror the Rust source so the two tessellators stay in lockstep; any
@@ -37,14 +37,22 @@ const bool TESSDBG = std::getenv("NGEOM_TESSDBG") != nullptr;
 
 // ---- diagnostics (env-gated) ----------------------------------------------------------------
 [[maybe_unused]] const char *surf_kind(const Surface &s) {
-    if (dynamic_cast<const PlaneSurface *>(&s)) return "plane";
-    if (dynamic_cast<const CylinderSurface *>(&s)) return "cyl";
-    if (dynamic_cast<const ConeSurface *>(&s)) return "cone";
-    if (dynamic_cast<const SphereSurface *>(&s)) return "sphere";
-    if (dynamic_cast<const TorusSurface *>(&s)) return "torus";
-    if (dynamic_cast<const BSplineSurface *>(&s)) return "bspline";
-    if (dynamic_cast<const LinearExtrusionSurface *>(&s)) return "extrusion";
-    if (dynamic_cast<const RevolutionSurface *>(&s)) return "revolution";
+    if (dynamic_cast<const PlaneSurface *>(&s))
+        return "plane";
+    if (dynamic_cast<const CylinderSurface *>(&s))
+        return "cyl";
+    if (dynamic_cast<const ConeSurface *>(&s))
+        return "cone";
+    if (dynamic_cast<const SphereSurface *>(&s))
+        return "sphere";
+    if (dynamic_cast<const TorusSurface *>(&s))
+        return "torus";
+    if (dynamic_cast<const BSplineSurface *>(&s))
+        return "bspline";
+    if (dynamic_cast<const LinearExtrusionSurface *>(&s))
+        return "extrusion";
+    if (dynamic_cast<const RevolutionSurface *>(&s))
+        return "revolution";
     return "?";
 }
 
@@ -59,25 +67,31 @@ void log_surf_params(const Surface &s) {
     else if (const auto *c = dynamic_cast<const TorusSurface *>(&s))
         std::fprintf(stderr, " R=%.3f r=%.3f", c->R, c->r);
     else if (const auto *b = dynamic_cast<const BSplineSurface *>(&s))
-        std::fprintf(stderr, " nu=%d nv=%d deg=(%d,%d) rational=%d size=%.2f", b->nu, b->nv,
-                     b->u_degree, b->v_degree, (int)!b->weights.empty(), b->size());
+        std::fprintf(stderr, " nu=%d nv=%d deg=(%d,%d) rational=%d size=%.2f", b->nu, b->nv, b->u_degree, b->v_degree,
+                     (int) !b->weights.empty(), b->size());
 }
 
 // ---- mesh accumulator with checkpoint/rollback (step2glb TriMesh) ----------------------------
 struct Mesh {
     TessMesh &m;
     explicit Mesh(TessMesh &mm) : m(mm) {}
-    uint32_t base() const { return (uint32_t)(m.positions.size() / 3); }
-    void push_vertex(const Vec3 &p, const Vec3 &n) {
-        m.positions.push_back((float)p.x);
-        m.positions.push_back((float)p.y);
-        m.positions.push_back((float)p.z);
-        m.normals.push_back((float)n.x);
-        m.normals.push_back((float)n.y);
-        m.normals.push_back((float)n.z);
+    uint32_t base() const {
+        return (uint32_t) (m.positions.size() / 3);
     }
-    void push_index(uint32_t i) { m.indices.push_back(i); }
-    std::array<size_t, 2> checkpoint() const { return {m.positions.size(), m.indices.size()}; }
+    void push_vertex(const Vec3 &p, const Vec3 &n) {
+        m.positions.push_back((float) p.x);
+        m.positions.push_back((float) p.y);
+        m.positions.push_back((float) p.z);
+        m.normals.push_back((float) n.x);
+        m.normals.push_back((float) n.y);
+        m.normals.push_back((float) n.z);
+    }
+    void push_index(uint32_t i) {
+        m.indices.push_back(i);
+    }
+    std::array<size_t, 2> checkpoint() const {
+        return {m.positions.size(), m.indices.size()};
+    }
     void rollback(const std::array<size_t, 2> &cp) {
         m.positions.resize(cp[0]);
         m.normals.resize(cp[0]);
@@ -92,8 +106,8 @@ struct Loop3 {
 // per-loop UV polyline plus winding bookkeeping
 struct LoopUv {
     std::vector<Uv> uv;
-    int w = 0;                     // net winding around the u period
-    bool interior_above = false;   // interior is on +v side of this winding loop
+    int w = 0;                   // net winding around the u period
+    bool interior_above = false; // interior is on +v side of this winding loop
 };
 
 // ---- small geometry helpers ------------------------------------------------------------------
@@ -114,9 +128,8 @@ bool point_in_poly(const Uv &pt, const std::vector<Uv> &poly) {
     size_t j = n - 1;
     for (size_t i = 0; i < n; ++i) {
         if (((poly[i][1] > pt[1]) != (poly[j][1] > pt[1])) &&
-            (pt[0] < (poly[j][0] - poly[i][0]) * (pt[1] - poly[i][1]) /
-                             (poly[j][1] - poly[i][1] + 1e-300) +
-                         poly[i][0]))
+            (pt[0] <
+             (poly[j][0] - poly[i][0]) * (pt[1] - poly[i][1]) / (poly[j][1] - poly[i][1] + 1e-300) + poly[i][0]))
             inside = !inside;
         j = i;
     }
@@ -134,21 +147,23 @@ bool segments_cross(const Uv &p1, const Uv &p2, const Uv &p3, const Uv &p4) {
 
 bool poly_self_intersects(const std::vector<Uv> &c) {
     size_t n = c.size();
-    if (n < 4) return false;
+    if (n < 4)
+        return false;
     for (size_t i = 0; i < n; ++i) {
         const Uv &a1 = c[i];
         const Uv &a2 = c[(i + 1) % n];
         for (size_t j = i + 2; j < n; ++j) {
-            if (i == 0 && j == n - 1) continue;
-            if (segments_cross(a1, a2, c[j], c[(j + 1) % n])) return true;
+            if (i == 0 && j == n - 1)
+                continue;
+            if (segments_cross(a1, a2, c[j], c[(j + 1) % n]))
+                return true;
         }
     }
     return false;
 }
 
 // Metric scale mapping UV toward the 3D arc-length metric (step2glb metric_scale).
-std::pair<double, double> metric_scale(const Surface &s, double umin, double umax, double vmin,
-                                       double vmax) {
+std::pair<double, double> metric_scale(const Surface &s, double umin, double umax, double vmin, double vmax) {
     double du = std::max(umax - umin, 1e-12);
     double dv = std::max(vmax - vmin, 1e-12);
     double uc = (umin + umax) * 0.5, vc = (vmin + vmax) * 0.5;
@@ -163,7 +178,8 @@ std::pair<double, double> metric_scale(const Surface &s, double umin, double uma
 // Build tess2's flat (scaled) contour, dropping coincident points + closing dup (step2glb
 // sanitize_contour). Returns empty for <3 distinct points.
 std::vector<TESSreal> sanitize_contour(const std::vector<Uv> &l, double su, double sv) {
-    if (l.size() < 3) return {};
+    if (l.size() < 3)
+        return {};
     double w = 0, h = 0;
     for (const Uv &p : l) {
         w = std::max(w, std::abs(p[0] * su));
@@ -176,17 +192,19 @@ std::vector<TESSreal> sanitize_contour(const std::vector<Uv> &l, double su, doub
         double x = p[0] * su, y = p[1] * sv;
         if (flat.size() >= 2) {
             double lx = flat[flat.size() - 2], ly = flat[flat.size() - 1];
-            if (std::abs(x - lx) <= eps && std::abs(y - ly) <= eps) continue;
+            if (std::abs(x - lx) <= eps && std::abs(y - ly) <= eps)
+                continue;
         }
-        flat.push_back((TESSreal)x);
-        flat.push_back((TESSreal)y);
+        flat.push_back((TESSreal) x);
+        flat.push_back((TESSreal) y);
     }
     if (flat.size() >= 4) {
         size_t n = flat.size();
         if (std::abs(flat[0] - flat[n - 2]) <= eps && std::abs(flat[1] - flat[n - 1]) <= eps)
             flat.resize(n - 2);
     }
-    if (flat.size() < 6) return {};
+    if (flat.size() < 6)
+        return {};
     return flat;
 }
 
@@ -199,14 +217,16 @@ struct Tess2Out {
 Tess2Out run_tess2(const std::vector<std::vector<Uv>> &loops_uv, double su, double sv) {
     Tess2Out out;
     TESStesselator *t = tessNewTess(nullptr);
-    if (!t) return out;
+    if (!t)
+        return out;
     std::vector<std::vector<TESSreal>> store;
     store.reserve(loops_uv.size());
     for (const auto &l : loops_uv) {
         std::vector<TESSreal> flat = sanitize_contour(l, su, sv);
-        if (flat.empty()) continue;
+        if (flat.empty())
+            continue;
         store.push_back(std::move(flat));
-        tessAddContour(t, 2, store.back().data(), sizeof(TESSreal) * 2, (int)store.back().size() / 2);
+        tessAddContour(t, 2, store.back().data(), sizeof(TESSreal) * 2, (int) store.back().size() / 2);
     }
     if (store.empty() || !tessTesselate(t, TESS_WINDING_ODD, TESS_POLYGONS, 3, 2, nullptr)) {
         tessDeleteTess(t);
@@ -221,11 +241,13 @@ Tess2Out run_tess2(const std::vector<std::vector<Uv>> &loops_uv, double su, doub
         return out;
     }
     out.verts.reserve(nv);
-    for (int i = 0; i < nv; ++i) out.verts.push_back({tv[i * 2] / su, tv[i * 2 + 1] / sv});
+    for (int i = 0; i < nv; ++i)
+        out.verts.push_back({tv[i * 2] / su, tv[i * 2 + 1] / sv});
     for (int e = 0; e < ne; ++e) {
         const TESSindex *p = &te[e * 3];
-        if (p[0] == TESS_UNDEF || p[1] == TESS_UNDEF || p[2] == TESS_UNDEF) continue;
-        out.tris.push_back({(uint32_t)p[0], (uint32_t)p[1], (uint32_t)p[2]});
+        if (p[0] == TESS_UNDEF || p[1] == TESS_UNDEF || p[2] == TESS_UNDEF)
+            continue;
+        out.tris.push_back({(uint32_t) p[0], (uint32_t) p[1], (uint32_t) p[2]});
     }
     // Rust returns Some(verts,tris) whenever tessellate succeeded + ne>0, even if every triangle
     // was UNDEF-filtered (caller then emits nothing rather than retrying shrunk holes). Match it.
@@ -235,12 +257,13 @@ Tess2Out run_tess2(const std::vector<std::vector<Uv>> &loops_uv, double su, doub
 
 // Retry tess2 with interior holes nudged toward their centroids (step2glb tess2_with_shrunk_holes).
 Tess2Out tess2_with_shrunk_holes(const std::vector<std::vector<Uv>> &loops_uv, double su, double sv) {
-    if (loops_uv.size() < 2) return {};
+    if (loops_uv.size() < 2)
+        return {};
     size_t outer = 0;
     double best = -1;
     for (size_t i = 0; i < loops_uv.size(); ++i) {
         double a = std::abs(poly_area(loops_uv[i]));
-        if (a >= best) {  // >= : last maximal wins, matching Rust Iterator::max_by
+        if (a >= best) { // >= : last maximal wins, matching Rust Iterator::max_by
             best = a;
             outer = i;
         }
@@ -254,7 +277,7 @@ Tess2Out tess2_with_shrunk_holes(const std::vector<std::vector<Uv>> &loops_uv, d
                 shrunk.push_back(c);
                 continue;
             }
-            double n = (double)c.size();
+            double n = (double) c.size();
             double cx = 0, cy = 0;
             for (const Uv &p : c) {
                 cx += p[0];
@@ -264,11 +287,13 @@ Tess2Out tess2_with_shrunk_holes(const std::vector<std::vector<Uv>> &loops_uv, d
             cy /= n;
             std::vector<Uv> s;
             s.reserve(c.size());
-            for (const Uv &p : c) s.push_back({p[0] + (cx - p[0]) * frac, p[1] + (cy - p[1]) * frac});
+            for (const Uv &p : c)
+                s.push_back({p[0] + (cx - p[0]) * frac, p[1] + (cy - p[1]) * frac});
             shrunk.push_back(std::move(s));
         }
         Tess2Out r = run_tess2(shrunk, su, sv);
-        if (r.ok) return r;
+        if (r.ok)
+            return r;
     }
     return {};
 }
@@ -281,7 +306,8 @@ void delaunay_flip(const std::vector<Uv> &verts, std::vector<Tri> &tris, double 
     };
     auto min_angle = [&](const Uv &a, const Uv &b, const Uv &c) -> double {
         double ab = len(a, b), bc = len(b, c), ca = len(c, a);
-        if (ab < 1e-300 || bc < 1e-300 || ca < 1e-300) return 0.0;
+        if (ab < 1e-300 || bc < 1e-300 || ca < 1e-300)
+            return 0.0;
         auto ang = [](double opp, double s1, double s2) {
             return std::acos(clampd((s1 * s1 + s2 * s2 - opp * opp) / (2.0 * s1 * s2), -1.0, 1.0));
         };
@@ -301,15 +327,18 @@ void delaunay_flip(const std::vector<Uv> &verts, std::vector<Tri> &tris, double 
         }
         std::vector<char> dirty(tris.size(), 0);
         int flips = 0;
-        for (auto &kv : edge_map) {  // std::map => sorted edge order => reproducible
+        for (auto &kv : edge_map) { // std::map => sorted edge order => reproducible
             uint32_t i = kv.first.first, j = kv.first.second;
             auto &adj = kv.second;
-            if (adj.size() != 2) continue;
+            if (adj.size() != 2)
+                continue;
             auto [t1, o1] = adj[0];
             auto [t2, o2] = adj[1];
-            if (dirty[t1] || dirty[t2] || o1 == o2) continue;
+            if (dirty[t1] || dirty[t2] || o1 == o2)
+                continue;
             Uv pi = p(i), pj = p(j), po1 = p(o1), po2 = p(o2);
-            if (area2(po1, po2, pj) <= 1e-18 || area2(po2, po1, pi) <= 1e-18) continue;
+            if (area2(po1, po2, pj) <= 1e-18 || area2(po2, po1, pi) <= 1e-18)
+                continue;
             double before = std::min(min_angle(pi, pj, po1), min_angle(pj, pi, po2));
             double after = std::min(min_angle(po1, po2, pj), min_angle(po2, po1, pi));
             if (after > before + 1e-12) {
@@ -319,14 +348,16 @@ void delaunay_flip(const std::vector<Uv> &verts, std::vector<Tri> &tris, double 
                 ++flips;
             }
         }
-        if (flips == 0) break;
+        if (flips == 0)
+            break;
     }
 }
 
-void refine_uv(const Surface &s, std::vector<Uv> &verts, std::vector<Tri> &tris, double max_du,
-               double max_dv, double defl, bool have_metric, double su, double sv) {
+void refine_uv(const Surface &s, std::vector<Uv> &verts, std::vector<Tri> &tris, double max_du, double max_dv,
+               double defl, bool have_metric, double su, double sv) {
     std::vector<Vec3> pts3(verts.size());
-    for (size_t i = 0; i < verts.size(); ++i) pts3[i] = s.point(verts[i][0], verts[i][1]);
+    for (size_t i = 0; i < verts.size(); ++i)
+        pts3[i] = s.point(verts[i][0], verts[i][1]);
     bool check_dev = dynamic_cast<const PlaneSurface *>(&s) == nullptr;
 
     double approx_area = 0;
@@ -337,19 +368,17 @@ void refine_uv(const Surface &s, std::vector<Uv> &verts, std::vector<Tri> &tris,
     size_t budget;
     if (defl > 0.0) {
         double raw = 4.0 * approx_area / (defl * defl);
-        size_t b = raw > 0 ? (size_t)raw : 0;
+        size_t b = raw > 0 ? (size_t) raw : 0;
         b = std::max(b, tris.size() * 4);
-        budget = std::min(std::max(b, (size_t)2048), (size_t)300000);
+        budget = std::min(std::max(b, (size_t) 2048), (size_t) 300000);
     } else {
         budget = 300000;
     }
     if (TESSDBG)
         std::fprintf(stderr, "TESSDBG     refine_uv approx_area=%.1f budget=%zu max_du=%.5f max_dv=%.5f check_dev=%d\n",
-                     approx_area, budget, max_du, max_dv, (int)check_dev);
+                     approx_area, budget, max_du, max_dv, (int) check_dev);
 
-    auto key = [](uint32_t i, uint32_t j) {
-        return std::make_pair(std::min(i, j), std::max(i, j));
-    };
+    auto key = [](uint32_t i, uint32_t j) { return std::make_pair(std::min(i, j), std::max(i, j)); };
 
     for (int pass = 0; pass < 12; ++pass) {
         std::set<std::pair<uint32_t, uint32_t>> marked;
@@ -357,12 +386,15 @@ void refine_uv(const Surface &s, std::vector<Uv> &verts, std::vector<Tri> &tris,
         auto edge_needs_split = [&](uint32_t i, uint32_t j) -> int {
             const Uv &a = verts[i];
             const Uv &b = verts[j];
-            if (std::abs(b[0] - a[0]) > max_du || std::abs(b[1] - a[1]) > max_dv) return 1;
-            if (!check_dev) return 0;
+            if (std::abs(b[0] - a[0]) > max_du || std::abs(b[1] - a[1]) > max_dv)
+                return 1;
+            if (!check_dev)
+                return 0;
             Vec3 pa = pts3[i];
             Vec3 chord = pts3[j] - pa;
             double l2 = chord.dot(chord);
-            if (l2 < (4.0 * defl) * (4.0 * defl)) return 0;  // sub-resolution floor
+            if (l2 < (4.0 * defl) * (4.0 * defl))
+                return 0; // sub-resolution floor
             Vec3 m = s.point((a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5);
             Vec3 d = m - pa;
             double dev;
@@ -379,7 +411,8 @@ void refine_uv(const Surface &s, std::vector<Uv> &verts, std::vector<Tri> &tris,
             const std::pair<uint32_t, uint32_t> es[3] = {{t[0], t[1]}, {t[1], t[2]}, {t[2], t[0]}};
             for (auto &e : es) {
                 auto k = key(e.first, e.second);
-                if (!marked.count(k) && edge_needs_split(e.first, e.second) != 0) marked.insert(k);
+                if (!marked.count(k) && edge_needs_split(e.first, e.second) != 0)
+                    marked.insert(k);
             }
             // fold detection: split the longest edge of a folded triangle (first 3 passes)
             if (check_dev && pass < 3) {
@@ -403,8 +436,7 @@ void refine_uv(const Surface &s, std::vector<Uv> &verts, std::vector<Tri> &tris,
                             e = {t[2], t[0]};
                         const Uv &ea = verts[e.first];
                         const Uv &eb = verts[e.second];
-                        if (std::abs(eb[0] - ea[0]) > max_du / 8.0 ||
-                            std::abs(eb[1] - ea[1]) > max_dv / 8.0)
+                        if (std::abs(eb[0] - ea[0]) > max_du / 8.0 || std::abs(eb[1] - ea[1]) > max_dv / 8.0)
                             marked.insert(key(e.first, e.second));
                     }
                 }
@@ -417,13 +449,14 @@ void refine_uv(const Surface &s, std::vector<Uv> &verts, std::vector<Tri> &tris,
         auto midpoint = [&](uint32_t i, uint32_t j) -> uint32_t {
             auto k = key(i, j);
             auto it = mid.find(k);
-            if (it != mid.end()) return it->second;
+            if (it != mid.end())
+                return it->second;
             const Uv &a = verts[i];
             const Uv &b = verts[j];
             Uv m = {(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5};
             verts.push_back(m);
             pts3.push_back(s.point(m[0], m[1]));
-            uint32_t idx = (uint32_t)(verts.size() - 1);
+            uint32_t idx = (uint32_t) (verts.size() - 1);
             mid[k] = idx;
             return idx;
         };
@@ -467,20 +500,22 @@ void refine_uv(const Surface &s, std::vector<Uv> &verts, std::vector<Tri> &tris,
             } else if (!h0 && h1 && !h2) {
                 out.push_back({t[0], t[1], b});
                 out.push_back({t[0], b, t[2]});
-            } else {  // !h0 && !h1 && h2
+            } else { // !h0 && !h1 && h2
                 out.push_back({t[0], t[1], c});
                 out.push_back({c, t[1], t[2]});
             }
         }
         tris.swap(out);
-        if (have_metric) delaunay_flip(verts, tris, su, sv);
-        if (!split_any || tris.size() > budget) break;
+        if (have_metric)
+            delaunay_flip(verts, tris, su, sv);
+        if (!split_any || tris.size() > budget)
+            break;
     }
 }
 
 // Shared tail of every UV tessellation: drop zero-area tris, normalize winding, refine, map to 3D.
-void refine_and_emit(const Surface &s, std::vector<Uv> verts, std::vector<Tri> tris, double su,
-                     double sv, const TessParams &tp, bool same_sense, Mesh &mesh) {
+void refine_and_emit(const Surface &s, std::vector<Uv> verts, std::vector<Tri> tris, double su, double sv,
+                     const TessParams &tp, bool same_sense, Mesh &mesh) {
     double umin = INF, umax = -INF, vmin = INF, vmax = -INF;
     for (const Uv &p : verts) {
         umin = std::min(umin, p[0]);
@@ -499,8 +534,10 @@ void refine_and_emit(const Surface &s, std::vector<Uv> verts, std::vector<Tri> t
     kept.reserve(tris.size());
     for (Tri &t : tris) {
         double a2 = uv_area2(t);
-        if (std::abs(a2) <= eps_a) continue;
-        if (a2 < 0.0) std::swap(t[1], t[2]);
+        if (std::abs(a2) <= eps_a)
+            continue;
+        if (a2 < 0.0)
+            std::swap(t[1], t[2]);
         kept.push_back(t);
     }
     tris.swap(kept);
@@ -525,7 +562,8 @@ void refine_and_emit(const Surface &s, std::vector<Uv> verts, std::vector<Tri> t
     for (const Uv &p : verts) {
         Vec3 pos = s.point(p[0], p[1]);
         Vec3 n = s.normal(p[0], p[1]);
-        if (flip) n = n * -1.0;
+        if (flip)
+            n = n * -1.0;
         mesh.push_vertex(pos, n);
     }
     for (const Tri &t : tris) {
@@ -541,8 +579,8 @@ void refine_and_emit(const Surface &s, std::vector<Uv> verts, std::vector<Tri> t
     }
 }
 
-bool emit_uv_region(const Surface &s, const std::vector<std::vector<Uv>> &loops_uv,
-                    const TessParams &tp, bool same_sense, Mesh &mesh) {
+bool emit_uv_region(const Surface &s, const std::vector<std::vector<Uv>> &loops_uv, const TessParams &tp,
+                    bool same_sense, Mesh &mesh) {
     double umin = INF, umax = -INF, vmin = INF, vmax = -INF;
     for (const auto &l : loops_uv)
         for (const Uv &p : l) {
@@ -553,45 +591,49 @@ bool emit_uv_region(const Surface &s, const std::vector<std::vector<Uv>> &loops_
         }
     auto [su, sv] = metric_scale(s, umin, umax, vmin, vmax);
     Tess2Out r = run_tess2(loops_uv, su, sv);
-    if (!r.ok) r = tess2_with_shrunk_holes(loops_uv, su, sv);
-    if (!r.ok) return false;
+    if (!r.ok)
+        r = tess2_with_shrunk_holes(loops_uv, su, sv);
+    if (!r.ok)
+        return false;
     refine_and_emit(s, std::move(r.verts), std::move(r.tris), su, sv, tp, same_sense, mesh);
     return true;
 }
 
 // Grid a UV rectangle at ~2 samples/knot-span then refine (step2glb tessellate_uv_grid).
-bool tessellate_uv_grid(const Surface &s, double u0, double u1, double v0, double v1,
-                        const TessParams &tp, bool same_sense, Mesh &mesh) {
+bool tessellate_uv_grid(const Surface &s, double u0, double u1, double v0, double v1, const TessParams &tp,
+                        bool same_sense, Mesh &mesh) {
     int nu, nv;
     if (const auto *b = dynamic_cast<const BSplineSurface *>(&s)) {
-        nu = (int)std::clamp((std::max(b->nu - b->u_degree, 1) * 2), 2, 64);
-        nv = (int)std::clamp((std::max(b->nv - b->v_degree, 1) * 2), 2, 8192);
+        nu = (int) std::clamp((std::max(b->nu - b->u_degree, 1) * 2), 2, 64);
+        nv = (int) std::clamp((std::max(b->nv - b->v_degree, 1) * 2), 2, 8192);
     } else {
         nu = 8;
         nv = 8;
     }
-    while ((long)nu * nv > 200000) {
+    while ((long) nu * nv > 200000) {
         if (nv > nu)
             nv /= 2;
         else
             nu /= 2;
     }
     std::vector<Uv> verts;
-    verts.reserve((size_t)(nu + 1) * (nv + 1));
+    verts.reserve((size_t) (nu + 1) * (nv + 1));
     for (int j = 0; j <= nv; ++j) {
         double v = v0 + (v1 - v0) * j / nv;
-        for (int i = 0; i <= nu; ++i) verts.push_back({u0 + (u1 - u0) * i / nu, v});
+        for (int i = 0; i <= nu; ++i)
+            verts.push_back({u0 + (u1 - u0) * i / nu, v});
     }
-    uint32_t w = (uint32_t)(nu + 1);
+    uint32_t w = (uint32_t) (nu + 1);
     std::vector<Tri> tris;
-    tris.reserve((size_t)nu * nv * 2);
-    for (uint32_t j = 0; j < (uint32_t)nv; ++j)
-        for (uint32_t i = 0; i < (uint32_t)nu; ++i) {
+    tris.reserve((size_t) nu * nv * 2);
+    for (uint32_t j = 0; j < (uint32_t) nv; ++j)
+        for (uint32_t i = 0; i < (uint32_t) nu; ++i) {
             uint32_t a = j * w + i;
             tris.push_back({a, a + 1, a + w + 1});
             tris.push_back({a, a + w + 1, a + w});
         }
-    if (tris.empty()) return false;
+    if (tris.empty())
+        return false;
     if (TESSDBG)
         std::fprintf(stderr, "TESSDBG   tessellate_uv_grid nu=%d nv=%d (u=[%.4f,%.4f] v=[%.4f,%.4f]) init_tris=%zu\n",
                      nu, nv, u0, u1, v0, v1, tris.size());
@@ -608,8 +650,10 @@ struct Rect {
 
 Rect full_patch_rect(const Surface &s, const std::vector<std::vector<Uv>> &contours) {
     const auto *b = dynamic_cast<const BSplineSurface *>(&s);
-    if (!b) return {};
-    if (contours.size() != 1 || contours[0].size() < 3) return {};
+    if (!b)
+        return {};
+    if (contours.size() != 1 || contours[0].size() < 3)
+        return {};
     double du0, du1, dv0, dv1;
     b->domain(du0, du1, dv0, dv1);
     double umin = INF, umax = -INF, vmin = INF, vmax = -INF;
@@ -621,16 +665,19 @@ Rect full_patch_rect(const Surface &s, const std::vector<std::vector<Uv>> &conto
     }
     double du = umax - umin, dv = vmax - vmin;
     double ddu = std::abs(du1 - du0), ddv = std::abs(dv1 - dv0);
-    if (ddu < 1e-12 || ddv < 1e-12 || du < 1e-6 * ddu || dv < 1e-6 * ddv) return {};
-    if (std::abs(poly_area(contours[0])) < 0.92 * du * dv) return {};
-    return {clampd(umin, du0, du1), clampd(umax, du0, du1), clampd(vmin, dv0, dv1),
-            clampd(vmax, dv0, dv1), true};
+    if (ddu < 1e-12 || ddv < 1e-12 || du < 1e-6 * ddu || dv < 1e-6 * ddv)
+        return {};
+    if (std::abs(poly_area(contours[0])) < 0.92 * du * dv)
+        return {};
+    return {clampd(umin, du0, du1), clampd(umax, du0, du1), clampd(vmin, dv0, dv1), clampd(vmax, dv0, dv1), true};
 }
 
 Rect full_domain_bspline(const Surface &s, const std::vector<std::vector<Uv>> &contours) {
     const auto *b = dynamic_cast<const BSplineSurface *>(&s);
-    if (!b) return {};
-    if (contours.size() != 1 || contours[0].size() < 3) return {};
+    if (!b)
+        return {};
+    if (contours.size() != 1 || contours[0].size() < 3)
+        return {};
     double du0, du1, dv0, dv1;
     b->domain(du0, du1, dv0, dv1);
     double umin = INF, umax = -INF, vmin = INF, vmax = -INF;
@@ -641,7 +688,8 @@ Rect full_domain_bspline(const Surface &s, const std::vector<std::vector<Uv>> &c
         vmax = std::max(vmax, p[1]);
     }
     double ddu = std::abs(du1 - du0), ddv = std::abs(dv1 - dv0);
-    if (ddu < 1e-12 || ddv < 1e-12) return {};
+    if (ddu < 1e-12 || ddv < 1e-12)
+        return {};
     if ((umax - umin) >= 0.9 * ddu && (vmax - vmin) >= 0.9 * ddv)
         return {du0, du1, dv0, dv1, true};
     return {};
@@ -649,10 +697,12 @@ Rect full_domain_bspline(const Surface &s, const std::vector<std::vector<Uv>> &c
 
 Rect full_wrap_bspline(const Surface &s, const std::vector<std::vector<Uv>> &contours) {
     const auto *b = dynamic_cast<const BSplineSurface *>(&s);
-    if (!b) return {};
+    if (!b)
+        return {};
     auto pu = s.u_period();
     auto pv = s.v_period();
-    if (!pu && !pv) return {};
+    if (!pu && !pv)
+        return {};
     double du0, du1, dv0, dv1;
     b->domain(du0, du1, dv0, dv1);
     double umin = INF, umax = -INF, vmin = INF, vmax = -INF;
@@ -664,31 +714,37 @@ Rect full_wrap_bspline(const Surface &s, const std::vector<std::vector<Uv>> &con
             vmax = std::max(vmax, p[1]);
         }
     double ddu = std::abs(du1 - du0), ddv = std::abs(dv1 - dv0);
-    if (ddu < 1e-12 || ddv < 1e-12) return {};
+    if (ddu < 1e-12 || ddv < 1e-12)
+        return {};
     bool u_full = (umax - umin) >= 0.9 * (pu ? *pu : ddu);
     bool v_full = (vmax - vmin) >= 0.9 * (pv ? *pv : ddv);
-    if (u_full && v_full) return {du0, du1, dv0, dv1, true};
+    if (u_full && v_full)
+        return {du0, du1, dv0, dv1, true};
     return {};
 }
 
 bool bspline_has_v_pole(const Surface &s) {
     const auto *b = dynamic_cast<const BSplineSurface *>(&s);
-    if (!b) return false;
-    if (b->nu < 2 || b->nv == 0) return false;
+    if (!b)
+        return false;
+    if (b->nu < 2 || b->nv == 0)
+        return false;
     double eps = 1e-6 * std::max(b->size(), 1.0);
     auto collapsed = [&](int iv) {
         Vec3 first = b->ctrl[iv];
         for (int iu = 1; iu < b->nu; ++iu)
-            if ((b->ctrl[iu * b->nv + iv] - first).norm() >= eps) return false;
+            if ((b->ctrl[iu * b->nv + iv] - first).norm() >= eps)
+                return false;
         return true;
     };
     return collapsed(0) || collapsed(b->nv - 1);
 }
 
-bool tessellate_full_patch(const Surface &s, const std::vector<std::vector<Uv>> &contours,
-                           const TessParams &tp, bool same_sense, Mesh &mesh) {
+bool tessellate_full_patch(const Surface &s, const std::vector<std::vector<Uv>> &contours, const TessParams &tp,
+                           bool same_sense, Mesh &mesh) {
     Rect r = full_patch_rect(s, contours);
-    if (!r.ok) return false;
+    if (!r.ok)
+        return false;
     return tessellate_uv_grid(s, r.u0, r.u1, r.v0, r.v1, tp, same_sense, mesh);
 }
 
@@ -712,41 +768,52 @@ bool tessellate_unbounded(const Surface &s, const TessParams &tp, bool same_sens
     }
     double du = s.u_step(tp.deflection, tp.max_angle);
     double dv = std::min(s.v_step(tp.deflection, tp.max_angle), du);
-    int nu = std::max(4, (int)std::ceil((u1 - u0) / du));
-    int nv = std::max(3, (int)std::ceil((v1 - v0) / dv));
+    int nu = std::max(4, (int) std::ceil((u1 - u0) / du));
+    int nv = std::max(3, (int) std::ceil((v1 - v0) / dv));
     uint32_t base = mesh.base();
     for (int j = 0; j <= nv; ++j) {
         double v = v0 + (v1 - v0) * j / nv;
         for (int i = 0; i <= nu; ++i) {
             double u = u0 + (u1 - u0) * i / nu;
             Vec3 n = s.normal(u, v);
-            if (!same_sense) n = n * -1.0;
+            if (!same_sense)
+                n = n * -1.0;
             mesh.push_vertex(s.point(u, v), n);
         }
     }
-    uint32_t w = (uint32_t)(nu + 1);
-    for (uint32_t j = 0; j < (uint32_t)nv; ++j)
-        for (uint32_t i = 0; i < (uint32_t)nu; ++i) {
+    uint32_t w = (uint32_t) (nu + 1);
+    for (uint32_t j = 0; j < (uint32_t) nv; ++j)
+        for (uint32_t i = 0; i < (uint32_t) nu; ++i) {
             uint32_t a = base + j * w + i, b = a + 1, c = a + w, d = c + 1;
             if (same_sense) {
-                mesh.push_index(a); mesh.push_index(b); mesh.push_index(d);
-                mesh.push_index(a); mesh.push_index(d); mesh.push_index(c);
+                mesh.push_index(a);
+                mesh.push_index(b);
+                mesh.push_index(d);
+                mesh.push_index(a);
+                mesh.push_index(d);
+                mesh.push_index(c);
             } else {
-                mesh.push_index(a); mesh.push_index(d); mesh.push_index(b);
-                mesh.push_index(a); mesh.push_index(c); mesh.push_index(d);
+                mesh.push_index(a);
+                mesh.push_index(d);
+                mesh.push_index(b);
+                mesh.push_index(a);
+                mesh.push_index(c);
+                mesh.push_index(d);
             }
         }
     return true;
 }
 
 // ---- periodic paths (step2glb) ---------------------------------------------------------------
-bool tessellate_periodic_winding(const Surface &s, const std::vector<LoopUv> &loops_uv,
-                                 const TessParams &tp, bool same_sense, Mesh &mesh) {
+bool tessellate_periodic_winding(const Surface &s, const std::vector<LoopUv> &loops_uv, const TessParams &tp,
+                                 bool same_sense, Mesh &mesh) {
     auto pu = s.u_period();
-    if (!pu) return false;
+    if (!pu)
+        return false;
     std::vector<const LoopUv *> winders;
     for (const LoopUv &l : loops_uv)
-        if (l.w != 0) winders.push_back(&l);
+        if (l.w != 0)
+            winders.push_back(&l);
     if (winders.size() != 1 || std::abs(winders[0]->w) != 1 || winders[0]->uv.size() < 3)
         return false;
     const LoopUv &wl = *winders[0];
@@ -757,8 +824,9 @@ bool tessellate_periodic_winding(const Surface &s, const std::vector<LoopUv> &lo
     }
     if (FDBG)
         std::fprintf(stderr, "FDBG winding %-10s vext=%.4g caps=%d\n", surf_kind(s), vmax - vmin,
-                     (int)s.v_caps().has_value());
-    if (!(vmax - vmin > 1e-9 * std::max(std::max(std::abs(vmax), std::abs(vmin)), 1.0))) return false;
+                     (int) s.v_caps().has_value());
+    if (!(vmax - vmin > 1e-9 * std::max(std::max(std::abs(vmax), std::abs(vmin)), 1.0)))
+        return false;
 
     double cb = -INF, ct = INF;
     if (auto caps = s.v_caps()) {
@@ -777,7 +845,8 @@ bool tessellate_periodic_winding(const Surface &s, const std::vector<LoopUv> &lo
         vfar = above(ct);
     } else {
         if (auto pv = s.v_period()) {
-            if (vmax - vmin >= *pv - 1e-9) return false;
+            if (vmax - vmin >= *pv - 1e-9)
+                return false;
         }
         vfar = wl.interior_above ? vmax : vmin;
     }
@@ -785,18 +854,21 @@ bool tessellate_periodic_winding(const Surface &s, const std::vector<LoopUv> &lo
     double uend = wl.uv.back()[0];
     std::vector<Uv> poly = wl.uv;
     double du = s.u_step(tp.deflection, tp.max_angle);
-    int n = (int)std::clamp((int)std::ceil(std::abs(uend - u0) / du), 2, 256);
-    for (int k = 0; k <= n; ++k) poly.push_back({uend + (u0 - uend) * k / n, vfar});
+    int n = (int) std::clamp((int) std::ceil(std::abs(uend - u0) / du), 2, 256);
+    for (int k = 0; k <= n; ++k)
+        poly.push_back({uend + (u0 - uend) * k / n, vfar});
     std::vector<std::vector<Uv>> all = {poly};
     for (const LoopUv &l : loops_uv)
-        if (l.w == 0) all.push_back(l.uv);
+        if (l.w == 0)
+            all.push_back(l.uv);
     return emit_uv_region(s, all, tp, same_sense, mesh);
 }
 
-bool tessellate_periodic_band(const Surface &s, const std::vector<LoopUv> &loops_uv,
-                              const TessParams &tp, bool same_sense, Mesh &mesh) {
+bool tessellate_periodic_band(const Surface &s, const std::vector<LoopUv> &loops_uv, const TessParams &tp,
+                              bool same_sense, Mesh &mesh) {
     auto puopt = s.u_period();
-    if (!puopt) return false;
+    if (!puopt)
+        return false;
     double per = *puopt;
     struct BandCurve {
         std::vector<Uv> pts;
@@ -810,15 +882,17 @@ bool tessellate_periodic_band(const Surface &s, const std::vector<LoopUv> &loops
             holes.push_back(l.uv);
             continue;
         }
-        if (std::abs(l.w) != 1 || l.uv.size() < 3) return false;
+        if (std::abs(l.w) != 1 || l.uv.size() < 3)
+            return false;
         std::vector<Uv> ext = l.uv;
         ext.push_back({l.uv[0][0] + l.w * per, l.uv[0][1]});
-        if (!seam) seam = ext[0][0];
+        if (!seam)
+            seam = ext[0][0];
         double c = *seam;
         std::optional<std::pair<size_t, Uv>> cut;
         for (size_t i = 0; i + 1 < ext.size() && !cut; ++i) {
             double u0 = ext[i][0], u1 = ext[i + 1][0];
-            long k0 = (long)std::floor((std::min(u0, u1) - c) / per);
+            long k0 = (long) std::floor((std::min(u0, u1) - c) / per);
             for (long k = k0; k <= k0 + 2; ++k) {
                 double cv = c + k * per;
                 if (std::abs(u0 - cv) < 1e-12) {
@@ -835,7 +909,8 @@ bool tessellate_periodic_band(const Surface &s, const std::vector<LoopUv> &loops
                 }
             }
         }
-        if (!cut) return false;
+        if (!cut)
+            return false;
         size_t ci = cut->first;
         Uv cp = cut->second;
         size_t n = l.uv.size();
@@ -843,7 +918,7 @@ bool tessellate_periodic_band(const Surface &s, const std::vector<LoopUv> &loops
         open.push_back(cp);
         for (size_t j = 1; j <= n; ++j) {
             size_t idx = (ci + j) % n;
-            double wraps = (double)((ci + j) / n);
+            double wraps = (double) ((ci + j) / n);
             const Uv &p = l.uv[idx];
             open.push_back({p[0] + wraps * l.w * per, p[1]});
         }
@@ -851,34 +926,39 @@ bool tessellate_periodic_band(const Surface &s, const std::vector<LoopUv> &loops
         // dedup consecutive
         std::vector<Uv> dd;
         for (const Uv &p : open)
-            if (dd.empty() || std::abs(p[0] - dd.back()[0]) >= 1e-12 ||
-                std::abs(p[1] - dd.back()[1]) >= 1e-12)
+            if (dd.empty() || std::abs(p[0] - dd.back()[0]) >= 1e-12 || std::abs(p[1] - dd.back()[1]) >= 1e-12)
                 dd.push_back(p);
         open.swap(dd);
-        if (l.w < 0) std::reverse(open.begin(), open.end());
+        if (l.w < 0)
+            std::reverse(open.begin(), open.end());
         double shift = std::round((open[0][0] - c) / per) * per;
         if (shift != 0.0)
-            for (Uv &p : open) p[0] -= shift;
+            for (Uv &p : open)
+                p[0] -= shift;
         curves.push_back({open, l.interior_above});
     }
-    if (curves.empty()) return false;
+    if (curves.empty())
+        return false;
     auto mean_v = [](const BandCurve &c) {
         double s = 0;
-        for (const Uv &p : c.pts) s += p[1];
+        for (const Uv &p : c.pts)
+            s += p[1];
         return s / c.pts.size();
     };
     std::stable_sort(curves.begin(), curves.end(),
                      [&](const BandCurve &a, const BandCurve &b) { return mean_v(a) < mean_v(b); });
     if (curves.size() % 2 == 1) {
         auto caps = s.v_caps();
-        if (!caps) return false;
+        if (!caps)
+            return false;
         double c = seam ? *seam : 0.0;
         bool top_wants = !curves.empty() && curves.back().interior_above;
         bool bot_wants = !curves.empty() && !curves.front().interior_above;
         auto cap_line = [&](double vcap) {
-            int n = (int)std::clamp((int)std::ceil(per / s.u_step(tp.deflection, tp.max_angle)), 2, 256);
+            int n = (int) std::clamp((int) std::ceil(per / s.u_step(tp.deflection, tp.max_angle)), 2, 256);
             std::vector<Uv> out;
-            for (int i = 0; i <= n; ++i) out.push_back({c + per * i / n, vcap});
+            for (int i = 0; i <= n; ++i)
+                out.push_back({c + per * i / n, vcap});
             return out;
         };
         if (top_wants && std::isfinite(caps->second)) {
@@ -897,21 +977,25 @@ bool tessellate_periodic_band(const Surface &s, const std::vector<LoopUv> &loops
         const BandCurve &top = curves[i + 1];
         double vb = mean_v(bottom), vt = mean_v(top);
         std::vector<Uv> poly = bottom.pts;
-        for (auto it = top.pts.rbegin(); it != top.pts.rend(); ++it) poly.push_back(*it);
+        for (auto it = top.pts.rbegin(); it != top.pts.rend(); ++it)
+            poly.push_back(*it);
         std::vector<std::vector<Uv>> contours = {poly};
         for (const auto &h : holes) {
             double hv = 0;
-            for (const Uv &p : h) hv += p[1];
-            hv /= std::max((size_t)1, h.size());
+            for (const Uv &p : h)
+                hv += p[1];
+            hv /= std::max((size_t) 1, h.size());
             if (hv >= std::min(vb, vt) && hv <= std::max(vb, vt)) {
                 double hu = 0;
-                for (const Uv &p : h) hu += p[0];
-                hu /= std::max((size_t)1, h.size());
+                for (const Uv &p : h)
+                    hu += p[0];
+                hu /= std::max((size_t) 1, h.size());
                 double c = bottom.pts[0][0];
                 double shift = std::round((hu - (c + per / 2.0)) / per) * per;
                 std::vector<Uv> hh = h;
                 if (shift != 0.0)
-                    for (Uv &p : hh) p[0] -= shift;
+                    for (Uv &p : hh)
+                        p[0] -= shift;
                 contours.push_back(hh);
             }
         }
@@ -921,9 +1005,10 @@ bool tessellate_periodic_band(const Surface &s, const std::vector<LoopUv> &loops
 }
 
 bool complement_interior(const std::vector<std::vector<Uv>> &contours) {
-    if (contours.size() < 2) return false;
+    if (contours.size() < 2)
+        return false;
     auto centroid = [](const std::vector<Uv> &c) -> Uv {
-        double n = std::max((size_t)1, c.size());
+        double n = std::max((size_t) 1, c.size());
         double x = 0, y = 0;
         for (const Uv &p : c) {
             x += p[0];
@@ -935,18 +1020,19 @@ bool complement_interior(const std::vector<std::vector<Uv>> &contours) {
     double best = -1;
     for (size_t i = 0; i < contours.size(); ++i) {
         double a = std::abs(poly_area(contours[i]));
-        if (a >= best) {  // >= : last maximal wins, matching Rust Iterator::max_by
+        if (a >= best) { // >= : last maximal wins, matching Rust Iterator::max_by
             best = a;
             outer = i;
         }
     }
     for (size_t k = 0; k < contours.size(); ++k)
-        if (k != outer && !point_in_poly(centroid(contours[k]), contours[outer])) return true;
+        if (k != outer && !point_in_poly(centroid(contours[k]), contours[outer]))
+            return true;
     return false;
 }
 
-bool tessellate_periodic_complement(const Surface &s, const std::vector<std::vector<Uv>> &contours,
-                                    double per_u, const TessParams &tp, bool same_sense, Mesh &mesh) {
+bool tessellate_periodic_complement(const Surface &s, const std::vector<std::vector<Uv>> &contours, double per_u,
+                                    const TessParams &tp, bool same_sense, Mesh &mesh) {
     double umin = INF, vmin = INF, vmax = -INF;
     for (const auto &c : contours)
         for (const Uv &p : c) {
@@ -958,23 +1044,29 @@ bool tessellate_periodic_complement(const Surface &s, const std::vector<std::vec
     double vlo = vmin - pad, vhi = vmax + pad;
     if (auto caps = s.v_caps()) {
         double m = 1e-4 * std::max(std::abs(vhi - vlo), 1.0);
-        if (std::isfinite(caps->first)) vlo = std::max(vlo, caps->first + m);
-        if (std::isfinite(caps->second)) vhi = std::min(vhi, caps->second - m);
+        if (std::isfinite(caps->first))
+            vlo = std::max(vlo, caps->first + m);
+        if (std::isfinite(caps->second))
+            vhi = std::min(vhi, caps->second - m);
     }
     double u0 = umin - 1e-6;
     std::vector<std::vector<Uv>> all;
     all.push_back({{u0, vlo}, {u0 + per_u, vlo}, {u0 + per_u, vhi}, {u0, vhi}});
-    for (const auto &c : contours) all.push_back(c);
+    for (const auto &c : contours)
+        all.push_back(c);
     return emit_uv_region(s, all, tp, same_sense, mesh);
 }
 
 // ---- plane fit fallbacks (step2glb) ----------------------------------------------------------
 bool surface_is_planar(const Surface &s) {
-    if (dynamic_cast<const PlaneSurface *>(&s)) return true;
+    if (dynamic_cast<const PlaneSurface *>(&s))
+        return true;
     const auto *b = dynamic_cast<const BSplineSurface *>(&s);
-    if (!b) return false;
+    if (!b)
+        return false;
     const auto &cps = b->ctrl;
-    if (cps.size() < 3) return true;
+    if (cps.size() < 3)
+        return true;
     Vec3 o = cps[0];
     Vec3 a = cps[0];
     double amax = -1;
@@ -986,23 +1078,29 @@ bool surface_is_planar(const Surface &s) {
         }
     }
     Vec3 da = a - o;
-    if (da.norm() < 1e-9) return true;
+    if (da.norm() < 1e-9)
+        return true;
     Vec3 normal{0, 0, 0};
     for (const Vec3 &p : cps) {
         Vec3 n = da.cross(p - o);
-        if (n.norm() > normal.norm()) normal = n;
+        if (n.norm() > normal.norm())
+            normal = n;
     }
-    if (normal.norm() < 1e-12) return true;
+    if (normal.norm() < 1e-12)
+        return true;
     Vec3 n = normal.normalized();
     double span = 0;
-    for (const Vec3 &p : cps) span = std::max(span, (p - o).norm());
     for (const Vec3 &p : cps)
-        if (std::abs((p - o).dot(n)) > 1e-3 * span + 1e-6) return false;
+        span = std::max(span, (p - o).norm());
+    for (const Vec3 &p : cps)
+        if (std::abs((p - o).dot(n)) > 1e-3 * span + 1e-6)
+            return false;
     return true;
 }
 
 std::shared_ptr<PlaneSurface> fit_plane(const std::vector<Loop3> &loops) {
-    if (loops.empty() || loops[0].pts.size() < 3) return nullptr;
+    if (loops.empty() || loops[0].pts.size() < 3)
+        return nullptr;
     const auto &outer = loops[0].pts;
     Vec3 n{0, 0, 0}, c{0, 0, 0};
     size_t m = outer.size();
@@ -1012,7 +1110,8 @@ std::shared_ptr<PlaneSurface> fit_plane(const std::vector<Loop3> &loops) {
         n = n + Vec3{(a.y - b.y) * (a.z + b.z), (a.z - b.z) * (a.x + b.x), (a.x - b.x) * (a.y + b.y)};
         c = c + a;
     }
-    if (n.norm() < 1e-12) return nullptr;
+    if (n.norm() < 1e-12)
+        return nullptr;
     n = n.normalized();
     c = c * (1.0 / m);
     double span = 0, dev = 0;
@@ -1021,14 +1120,15 @@ std::shared_ptr<PlaneSurface> fit_plane(const std::vector<Loop3> &loops) {
             dev = std::max(dev, std::abs((p - c).dot(n)));
             span = std::max(span, (p - c).norm());
         }
-    if (dev > 1e-3 * std::max(span, 1e-9) + 1e-6) return nullptr;
+    if (dev > 1e-3 * std::max(span, 1e-9) + 1e-6)
+        return nullptr;
     return std::make_shared<PlaneSurface>(Frame::from_axis_ref(c, n, Vec3{1, 0, 0}));
 }
 
 // ---- face mesher (step2glb face_to_mesh) -----------------------------------------------------
 // returns empty string on success, else a failure reason
-const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
-                         const TessParams &tp, bool same_sense, Mesh &mesh) {
+const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d, const TessParams &tp, bool same_sense,
+                         Mesh &mesh) {
     if (surf.is_quadric()) {
         double tol = std::max(surf.approx_size(), 1.0);
         for (const Loop3 &l : loops3d)
@@ -1044,12 +1144,14 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
     if (per_u) {
         if (auto caps = surf.v_caps()) {
             for (double vv : {caps->first, caps->second})
-                if (std::isfinite(vv)) cap_pts.push_back(surf.point(0.0, vv));
+                if (std::isfinite(vv))
+                    cap_pts.push_back(surf.point(0.0, vv));
         }
     }
     auto singular = [&](const Vec3 &p) {
         for (const Vec3 &c : cap_pts)
-            if ((p - c).norm() < eps_cap) return true;
+            if ((p - c).norm() < eps_cap)
+                return true;
         return false;
     };
 
@@ -1063,9 +1165,11 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
                 start = i;
                 break;
             }
-        if (start == n) start = 0;
+        if (start == n)
+            start = 0;
         std::vector<Vec3> pts(n);
-        for (size_t i = 0; i < n; ++i) pts[i] = l.pts[(start + i) % n];
+        for (size_t i = 0; i < n; ++i)
+            pts[i] = l.pts[(start + i) % n];
 
         std::vector<Uv> uv;
         uv.reserve(n);
@@ -1075,8 +1179,7 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
         double hu = 0, hv = 0;
         for (size_t i = 0; i < pts.size(); ++i) {
             double u, v;
-            if (!surf.uv(pts[i], have_hint ? hu : Surface::NAN_HINT,
-                         have_hint ? hv : Surface::NAN_HINT, u, v)) {
+            if (!surf.uv(pts[i], have_hint ? hu : Surface::NAN_HINT, have_hint ? hv : Surface::NAN_HINT, u, v)) {
                 u = i > 0 ? uv[i - 1][0] : 0.0;
                 v = i > 0 ? uv[i - 1][1] : 0.0;
             }
@@ -1086,12 +1189,16 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
             if (i > 0) {
                 double pu = uv[i - 1][0], pv = uv[i - 1][1];
                 if (per_u) {
-                    while (u - pu > *per_u / 2.0) u -= *per_u;
-                    while (pu - u > *per_u / 2.0) u += *per_u;
+                    while (u - pu > *per_u / 2.0)
+                        u -= *per_u;
+                    while (pu - u > *per_u / 2.0)
+                        u += *per_u;
                 }
                 if (per_v) {
-                    while (v - pv > *per_v / 2.0) v -= *per_v;
-                    while (pv - v > *per_v / 2.0) v += *per_v;
+                    while (v - pv > *per_v / 2.0)
+                        v -= *per_v;
+                    while (pv - v > *per_v / 2.0)
+                        v += *per_v;
                 }
             }
             uv.push_back({u, v});
@@ -1101,7 +1208,8 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
         if (per_u) {
             bool any_sing = false;
             for (char x : sing)
-                if (x) any_sing = true;
+                if (x)
+                    any_sing = true;
             if (any_sing) {
                 double du = surf.u_step(tp.deflection, tp.max_angle);
                 std::vector<Uv> out2;
@@ -1111,9 +1219,11 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
                     if (sing[i]) {
                         double pu = uv[i][0];
                         double nu = uv[(i + 1) % uv.size()][0];
-                        while (nu - pu > *per_u / 2.0) nu -= *per_u;
-                        while (pu - nu > *per_u / 2.0) nu += *per_u;
-                        int steps = (int)std::clamp((int)std::ceil(std::abs(nu - pu) / du), 1, 256);
+                        while (nu - pu > *per_u / 2.0)
+                            nu -= *per_u;
+                        while (pu - nu > *per_u / 2.0)
+                            nu += *per_u;
+                        int steps = (int) std::clamp((int) std::ceil(std::abs(nu - pu) / du), 1, 256);
                         for (int k = 1; k <= steps; ++k)
                             out2.push_back({pu + (nu - pu) * k / steps, uv[i][1]});
                     }
@@ -1125,28 +1235,33 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
         if (per_u && uv.size() >= 3) {
             double uc = uv[0][0];
             double last = uv.back()[0];
-            while (uc - last > *per_u / 2.0) uc -= *per_u;
-            while (last - uc > *per_u / 2.0) uc += *per_u;
-            w = (int)std::lround((uc - uv[0][0]) / *per_u);
+            while (uc - last > *per_u / 2.0)
+                uc -= *per_u;
+            while (last - uc > *per_u / 2.0)
+                uc += *per_u;
+            w = (int) std::lround((uc - uv[0][0]) / *per_u);
         }
         bool interior_above = (w > 0) == same_sense;
         if (per_u && w == 0) {
             double mean = 0;
-            for (const Uv &p : uv) mean += p[0];
-            mean /= std::max((size_t)1, uv.size());
+            for (const Uv &p : uv)
+                mean += p[0];
+            mean /= std::max((size_t) 1, uv.size());
             if (!u_ref) {
                 u_ref = mean;
             } else {
                 double shift = std::round((mean - *u_ref) / *per_u) * *per_u;
                 if (shift != 0.0)
-                    for (Uv &p : uv) p[0] -= shift;
+                    for (Uv &p : uv)
+                        p[0] -= shift;
             }
         }
         loops_uv.push_back({std::move(uv), w, interior_above});
     }
 
     auto uv_slit = [&](const LoopUv &l) {
-        if (l.w != 0) return false;
+        if (l.w != 0)
+            return false;
         double area = 0, peri = 0;
         for (size_t i = 0; i < l.uv.size(); ++i) {
             const Uv &a = l.uv[i];
@@ -1158,11 +1273,10 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
     };
     bool all_slit = !loops_uv.empty();
     for (const LoopUv &l : loops_uv)
-        if (!uv_slit(l)) all_slit = false;
+        if (!uv_slit(l))
+            all_slit = false;
     if (all_slit)
-        return tessellate_unbounded(surf, tp, same_sense, mesh)
-                   ? nullptr
-                   : "slit/full-surface tessellation failed";
+        return tessellate_unbounded(surf, tp, same_sense, mesh) ? nullptr : "slit/full-surface tessellation failed";
 
     if (loops_uv.size() == 1 && bspline_has_v_pole(surf)) {
         std::vector<std::vector<Uv>> contour = {loops_uv[0].uv};
@@ -1173,10 +1287,12 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
 
     bool any_wind = false;
     for (const LoopUv &l : loops_uv)
-        if (l.w != 0) any_wind = true;
+        if (l.w != 0)
+            any_wind = true;
     if (any_wind) {
         auto cp = mesh.checkpoint();
-        if (tessellate_periodic_band(surf, loops_uv, tp, same_sense, mesh)) return nullptr;
+        if (tessellate_periodic_band(surf, loops_uv, tp, same_sense, mesh))
+            return nullptr;
         mesh.rollback(cp);
         return tessellate_periodic_winding(surf, loops_uv, tp, same_sense, mesh)
                    ? nullptr
@@ -1185,7 +1301,8 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
 
     std::vector<std::vector<Uv>> contours;
     contours.reserve(loops_uv.size());
-    for (auto &l : loops_uv) contours.push_back(std::move(l.uv));
+    for (auto &l : loops_uv)
+        contours.push_back(std::move(l.uv));
 
     {
         Rect r = full_wrap_bspline(surf, contours);
@@ -1202,20 +1319,21 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
             tessellate_uv_grid(surf, r.u0, r.u1, r.v0, r.v1, tp, same_sense, mesh))
             return nullptr;
     }
-    if (tessellate_full_patch(surf, contours, tp, same_sense, mesh)) return nullptr;
-    return emit_uv_region(surf, contours, tp, same_sense, mesh)
-               ? nullptr
-               : "UV tessellation produced no triangles";
+    if (tessellate_full_patch(surf, contours, tp, same_sense, mesh))
+        return nullptr;
+    return emit_uv_region(surf, contours, tp, same_sense, mesh) ? nullptr : "UV tessellation produced no triangles";
 }
 
 // ---- boundary building from neutral topology (step2glb build_loops3d / loop_polyline) --------
 std::vector<Loop3> build_loops3d(const FaceSurfaceN &face, const TessParams &tp) {
     std::vector<Loop3> loops;
     for (const FaceBoundN &b : face.bounds) {
-        if (!b.loop) continue;
+        if (!b.loop)
+            continue;
         std::vector<Vec3> lp = b.loop->discretize(tp.deflection, tp.max_angle);
         if (lp.size() >= 3) {
-            if (!b.orientation) std::reverse(lp.begin(), lp.end());
+            if (!b.orientation)
+                std::reverse(lp.begin(), lp.end());
             loops.push_back({std::move(lp)});
         }
     }
@@ -1226,29 +1344,35 @@ bool boundary_is_degenerate(const FaceSurfaceN &face, const TessParams &tp) {
     std::vector<Vec3> pts;
     double area = 0;
     for (const FaceBoundN &b : face.bounds) {
-        if (!b.loop) continue;
+        if (!b.loop)
+            continue;
         std::vector<Vec3> lp = b.loop->discretize(tp.deflection, tp.max_angle);
         if (lp.size() >= 3) {
             Vec3 c{0, 0, 0};
-            for (const Vec3 &p : lp) c = c + p;
+            for (const Vec3 &p : lp)
+                c = c + p;
             c = c * (1.0 / lp.size());
             Vec3 nrm{0, 0, 0};
             for (size_t i = 0; i < lp.size(); ++i)
                 nrm = nrm + (lp[i] - c).cross(lp[(i + 1) % lp.size()] - c);
             area += nrm.norm() * 0.5;
         }
-        for (const Vec3 &p : lp) pts.push_back(p);
+        for (const Vec3 &p : lp)
+            pts.push_back(p);
     }
-    if (pts.empty()) return false;
+    if (pts.empty())
+        return false;
     Vec3 lo = pts[0], hi = pts[0];
     for (const Vec3 &p : pts) {
         lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
         hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
     }
     double diag = (hi - lo).norm();
-    if (diag > 0.0 && area < 1e-6 * diag * diag) return true;
+    if (diag > 0.0 && area < 1e-6 * diag * diag)
+        return true;
     double mx = 1.0;
-    for (const Vec3 &p : pts) mx = std::max(mx, p.norm());
+    for (const Vec3 &p : pts)
+        mx = std::max(mx, p.norm());
     double eps = 1e-7 * mx;
     std::vector<Vec3> distinct;
     for (const Vec3 &p : pts) {
@@ -1258,33 +1382,38 @@ bool boundary_is_degenerate(const FaceSurfaceN &face, const TessParams &tp) {
                 dup = true;
                 break;
             }
-        if (!dup) distinct.push_back(p);
+        if (!dup)
+            distinct.push_back(p);
     }
     return distinct.size() < 3;
 }
 
-}  // namespace
+} // namespace
 
 namespace {
 bool tessellate_face_impl(const FaceSurfaceN &face, const TessParams &tp, TessMesh &outm) {
     // NOTE: do NOT bail on empty bounds — a closed quadric (full sphere/torus) or B-spline patch
     // with no FACE_BOUND tessellates via tessellate_unbounded below (step2glb tessellate_face: it
     // never short-circuits on empty bounds; empty loops3d -> tessellate_unbounded).
-    if (!face.surface) return false;
+    if (!face.surface)
+        return false;
     Mesh mesh(outm);
     const Surface &surf = *face.surface;
     bool same_sense = face.same_sense;
 
     std::vector<Loop3> loops3d = build_loops3d(face, tp);
     if (loops3d.empty()) {
-        if (tessellate_unbounded(surf, tp, same_sense, mesh)) return true;
-        if (boundary_is_degenerate(face, tp)) return false;  // degenerate, not a failure
+        if (tessellate_unbounded(surf, tp, same_sense, mesh))
+            return true;
+        if (boundary_is_degenerate(face, tp))
+            return false; // degenerate, not a failure
         return false;
     }
 
     auto cp = mesh.checkpoint();
     const char *reason = face_to_mesh(surf, loops3d, tp, same_sense, mesh);
-    if (!reason) return true;
+    if (!reason)
+        return true;
 
     // recovery: a tess2 failure on a thin curved face is usually a self-intersecting boundary
     // from coarse arc discretization — re-discretize much finer and retry.
@@ -1297,9 +1426,11 @@ bool tessellate_face_impl(const FaceSurfaceN &face, const TessParams &tp, TessMe
             fine.deflection = std::max(tp.deflection / div, 1e-4);
             fine.max_angle = std::max(tp.max_angle / std::sqrt(div), 0.02);
             std::vector<Loop3> fl = build_loops3d(face, fine);
-            if (fl.size() != loops3d.size()) continue;
+            if (fl.size() != loops3d.size())
+                continue;
             auto cp2 = mesh.checkpoint();
-            if (!face_to_mesh(surf, fl, fine, same_sense, mesh)) return true;
+            if (!face_to_mesh(surf, fl, fine, same_sense, mesh))
+                return true;
             mesh.rollback(cp2);
         }
     }
@@ -1307,35 +1438,37 @@ bool tessellate_face_impl(const FaceSurfaceN &face, const TessParams &tp, TessMe
     if (surface_is_planar(surf)) {
         mesh.rollback(cp);
         if (auto fitted = fit_plane(loops3d)) {
-            if (!face_to_mesh(*fitted, loops3d, tp, true, mesh)) return true;
+            if (!face_to_mesh(*fitted, loops3d, tp, true, mesh))
+                return true;
         }
         mesh.rollback(cp);
     }
-    if (boundary_is_degenerate(face, tp)) return false;
+    if (boundary_is_degenerate(face, tp))
+        return false;
     return false;
 }
-}  // namespace
+} // namespace
 
 bool tessellate_face(const FaceSurfaceN &face, const TessParams &tp, TessMesh &outm) {
-    if (!FDBG && !TESSDBG) return tessellate_face_impl(face, tp, outm);
+    if (!FDBG && !TESSDBG)
+        return tessellate_face_impl(face, tp, outm);
     size_t i0 = outm.indices.size();
     size_t bpts = 0;
     for (const FaceBoundN &b : face.bounds)
-        if (b.loop) bpts += b.loop->discretize(tp.deflection, tp.max_angle).size();
+        if (b.loop)
+            bpts += b.loop->discretize(tp.deflection, tp.max_angle).size();
     if (TESSDBG && face.surface) {
         std::fprintf(stderr, "TESSDBG FACE surf=%s", surf_kind(*face.surface));
         log_surf_params(*face.surface);
-        std::fprintf(stderr, " bounds=%zu bpts=%zu same_sense=%d\n", face.bounds.size(), bpts,
-                     (int)face.same_sense);
+        std::fprintf(stderr, " bounds=%zu bpts=%zu same_sense=%d\n", face.bounds.size(), bpts, (int) face.same_sense);
     }
     bool ok = tessellate_face_impl(face, tp, outm);
     if (FDBG)
         std::fprintf(stderr, "FDBG FACE %-11s bounds=%zu bpts=%zu tris=%zu ok=%d\n",
                      face.surface ? surf_kind(*face.surface) : "?", face.bounds.size(), bpts,
-                     (outm.indices.size() - i0) / 3, (int)ok);
+                     (outm.indices.size() - i0) / 3, (int) ok);
     if (TESSDBG)
-        std::fprintf(stderr, "TESSDBG FACE-DONE tris=%zu ok=%d\n", (outm.indices.size() - i0) / 3,
-                     (int)ok);
+        std::fprintf(stderr, "TESSDBG FACE-DONE tris=%zu ok=%d\n", (outm.indices.size() - i0) / 3, (int) ok);
     return ok;
 }
 
@@ -1347,9 +1480,10 @@ constexpr double TWO_PI = 6.283185307179586;
 void emit_tri(Mesh &mesh, const Vec3 &a, const Vec3 &b, const Vec3 &c) {
     Vec3 nrm = (b - a).cross(c - a);
     double l = nrm.norm();
-    if (l < 1e-18) return;
+    if (l < 1e-18)
+        return;
     nrm = nrm * (1.0 / l);
-    uint32_t base = (uint32_t)(mesh.m.positions.size() / 3);
+    uint32_t base = (uint32_t) (mesh.m.positions.size() / 3);
     mesh.push_vertex(a, nrm);
     mesh.push_vertex(b, nrm);
     mesh.push_vertex(c, nrm);
@@ -1369,34 +1503,37 @@ Vec3 rotate_about(const Vec3 &p, const Vec3 &o, const Vec3 &k, double th) {
 // a quad side band per boundary loop. Profile lives in the local XY plane (z=0); the position
 // frame F places the swept solid; d is the local sweep vector (direction * depth).
 void tessellate_extrusion(const ExtrusionN &ex, const TessParams &tp, Mesh &mesh) {
-    if (!ex.profile) return;
+    if (!ex.profile)
+        return;
     const Frame &F = ex.frame;
     const Vec3 d = ex.direction * ex.depth;
 
     std::vector<std::vector<Uv>> loops_uv;
     for (const FaceBoundN &b : ex.profile->bounds) {
-        if (!b.loop) continue;
+        if (!b.loop)
+            continue;
         std::vector<Vec3> ring = b.loop->discretize(tp.deflection, tp.max_angle);
         std::vector<Uv> uv;
         uv.reserve(ring.size());
-        for (const Vec3 &p : ring) uv.push_back({p.x, p.y});
-        if (uv.size() >= 3) loops_uv.push_back(std::move(uv));
+        for (const Vec3 &p : ring)
+            uv.push_back({p.x, p.y});
+        if (uv.size() >= 3)
+            loops_uv.push_back(std::move(uv));
     }
     Tess2Out cap = run_tess2(loops_uv, 1.0, 1.0);
     if (cap.ok) {
         for (const Tri &t : cap.tris) {
             const Uv &u0 = cap.verts[t[0]], &u1 = cap.verts[t[1]], &u2 = cap.verts[t[2]];
             // bottom cap (z=0), reversed winding so the normal faces away from the sweep
-            emit_tri(mesh, F.to_world(u0[0], u0[1], 0), F.to_world(u2[0], u2[1], 0),
-                     F.to_world(u1[0], u1[1], 0));
+            emit_tri(mesh, F.to_world(u0[0], u0[1], 0), F.to_world(u2[0], u2[1], 0), F.to_world(u1[0], u1[1], 0));
             // top cap (translated by d)
-            emit_tri(mesh, F.to_world(u0[0] + d.x, u0[1] + d.y, d.z),
-                     F.to_world(u1[0] + d.x, u1[1] + d.y, d.z),
+            emit_tri(mesh, F.to_world(u0[0] + d.x, u0[1] + d.y, d.z), F.to_world(u1[0] + d.x, u1[1] + d.y, d.z),
                      F.to_world(u2[0] + d.x, u2[1] + d.y, d.z));
         }
     }
     for (const FaceBoundN &b : ex.profile->bounds) {
-        if (!b.loop) continue;
+        if (!b.loop)
+            continue;
         std::vector<Vec3> ring = b.loop->discretize(tp.deflection, tp.max_angle);
         size_t n = ring.size();
         if (n > 1 && (ring.front() - ring.back()).norm() < 1e-12) {
@@ -1418,23 +1555,28 @@ void tessellate_extrusion(const ExtrusionN &ex, const TessParams &tp, Mesh &mesh
 // Points on the axis trace nothing (their quads collapse), so a profile touching the axis (e.g.
 // a cone's apex/centre) closes correctly. Full revolutions need no end caps.
 void tessellate_revolve(const RevolveN &rv, const TessParams &tp, Mesh &mesh) {
-    if (!rv.profile) return;
+    if (!rv.profile)
+        return;
     const Frame &F = rv.frame;
     const Vec3 axo = rv.axis_origin;
     Vec3 axd = rv.axis_dir;
-    if (axd.norm() < 1e-12) axd = {0, 0, 1};
+    if (axd.norm() < 1e-12)
+        axd = {0, 0, 1};
     axd = axd.normalized();
     const double ang = (rv.angle != 0.0) ? rv.angle : TWO_PI;
 
     std::vector<Vec3> ring;
     for (const FaceBoundN &b : rv.profile->bounds) {
-        if (!b.loop) continue;
+        if (!b.loop)
+            continue;
         ring = b.loop->discretize(tp.deflection, tp.max_angle);
-        break;  // outer loop; revolved profiles with holes are not expected
+        break; // outer loop; revolved profiles with holes are not expected
     }
-    if (ring.size() > 1 && (ring.front() - ring.back()).norm() < 1e-12) ring.pop_back();
+    if (ring.size() > 1 && (ring.front() - ring.back()).norm() < 1e-12)
+        ring.pop_back();
     const size_t n = ring.size();
-    if (n < 2) return;
+    if (n < 2)
+        return;
 
     double rmax = 0;
     for (const Vec3 &p : ring) {
@@ -1443,11 +1585,11 @@ void tessellate_revolve(const RevolveN &rv, const TessParams &tp, Mesh &mesh) {
     }
     double defl = tp.deflection > 0 ? tp.deflection : std::max(rmax * 0.01, 1e-4);
     double step = angle_step(rmax, defl, tp.max_angle);
-    int nseg = std::max(3, (int)std::ceil(ang / std::max(step, 1e-6)));
+    int nseg = std::max(3, (int) std::ceil(ang / std::max(step, 1e-6)));
 
     std::vector<std::vector<Vec3>> R(nseg + 1, std::vector<Vec3>(n));
     for (int j = 0; j <= nseg; ++j) {
-        double th = ang * (double)j / (double)nseg;
+        double th = ang * (double) j / (double) nseg;
         for (size_t i = 0; i < n; ++i) {
             Vec3 pr = rotate_about(ring[i], axo, axd, th);
             R[j][i] = F.to_world(pr.x, pr.y, pr.z);
@@ -1471,14 +1613,15 @@ void tessellate_revolve(const RevolveN &rv, const TessParams &tp, Mesh &mesh) {
 void tessellate_sphere(const SphereN &sp, const TessParams &tp, Mesh &mesh) {
     const Vec3 c = sp.frame.o;
     const double r = sp.radius;
-    if (r <= 0) return;
+    if (r <= 0)
+        return;
     const double PI = TWO_PI * 0.5;
     double defl = tp.deflection > 0 ? tp.deflection : std::max(r * 0.01, 1e-4);
     double step = std::max(angle_step(r, defl, tp.max_angle), 1e-6);
-    int nlon = std::max(6, (int)std::ceil(TWO_PI / step));
-    int nlat = std::max(3, (int)std::ceil(PI / step));
+    int nlon = std::max(6, (int) std::ceil(TWO_PI / step));
+    int nlat = std::max(3, (int) std::ceil(PI / step));
     auto P = [&](int i, int j) -> Vec3 {
-        double lon = TWO_PI * (double)i / nlon, lat = -PI * 0.5 + PI * (double)j / nlat;
+        double lon = TWO_PI * (double) i / nlon, lat = -PI * 0.5 + PI * (double) j / nlat;
         double cl = std::cos(lat);
         return {c.x + r * cl * std::cos(lon), c.y + r * cl * std::sin(lon), c.z + r * std::sin(lat)};
     };
@@ -1497,12 +1640,13 @@ TessMesh tessellate_boolean_item(const BooleanN &bn, const TessParams &tp) {
     TessMesh a = tessellate_solid_item(bn.a, tp);
     TessMesh b = tessellate_solid_item(bn.b, tp);
     TessMesh out;
-    mesh_boolean(bn.op, a, b, out);  // Manifold (native) / no-op stub (wasm)
+    mesh_boolean(bn.op, a, b, out); // Manifold (native) / no-op stub (wasm)
     return out;
 }
 
 TessMesh tessellate_solid_item(const SolidItemN &it, const TessParams &tp) {
-    if (it.boolean) return tessellate_boolean_item(*it.boolean, tp);
+    if (it.boolean)
+        return tessellate_boolean_item(*it.boolean, tp);
     TessMesh m;
     if (it.extrusion) {
         Mesh mesh(m);
@@ -1512,25 +1656,27 @@ TessMesh tessellate_solid_item(const SolidItemN &it, const TessParams &tp) {
         tessellate_revolve(*it.revolve, tp, mesh);
     } else {
         for (const auto &f : it.faces)
-            if (f) tessellate_face(*f, tp, m);
+            if (f)
+                tessellate_face(*f, tp, m);
     }
     return m;
 }
 
 // Concatenate src into dst, offsetting src's indices by dst's current vertex count.
 void append_mesh(TessMesh &dst, const TessMesh &src) {
-    uint32_t base = (uint32_t)(dst.positions.size() / 3);
+    uint32_t base = (uint32_t) (dst.positions.size() / 3);
     dst.positions.insert(dst.positions.end(), src.positions.begin(), src.positions.end());
     dst.normals.insert(dst.normals.end(), src.normals.begin(), src.normals.end());
-    for (uint32_t i : src.indices) dst.indices.push_back(base + i);
+    for (uint32_t i : src.indices)
+        dst.indices.push_back(base + i);
 }
-}  // namespace
+} // namespace
 
 TessMesh tessellate_doc(const NgeomDoc &doc, const TessParams &tp) {
     TessMesh mesh;
     for (const NgeomRoot &root : doc.roots) {
-        uint32_t first = (uint32_t)mesh.indices.size();
-        uint32_t vfirst = (uint32_t)(mesh.positions.size() / 3);
+        uint32_t first = (uint32_t) mesh.indices.size();
+        uint32_t vfirst = (uint32_t) (mesh.positions.size() / 3);
         if (root.extrusion) {
             Mesh m(mesh);
             tessellate_extrusion(*root.extrusion, tp, m);
@@ -1547,17 +1693,18 @@ TessMesh tessellate_doc(const NgeomDoc &doc, const TessParams &tp) {
             if (FDBG) {
                 size_t nnull = 0;
                 for (const auto &f : root.faces)
-                    if (!f) ++nnull;
-                std::fprintf(stderr, "FDBG ROOT id=%s faces=%zu null=%zu\n", root.id.c_str(),
-                             root.faces.size(), nnull);
+                    if (!f)
+                        ++nnull;
+                std::fprintf(stderr, "FDBG ROOT id=%s faces=%zu null=%zu\n", root.id.c_str(), root.faces.size(), nnull);
             }
             for (const auto &face : root.faces)
-                if (face) tessellate_face(*face, tp, mesh);
+                if (face)
+                    tessellate_face(*face, tp, mesh);
         }
-        mesh.groups.push_back({root.id, first, (uint32_t)mesh.indices.size() - first, vfirst,
-                               (uint32_t)(mesh.positions.size() / 3) - vfirst});
+        mesh.groups.push_back({root.id, first, (uint32_t) mesh.indices.size() - first, vfirst,
+                               (uint32_t) (mesh.positions.size() / 3) - vfirst});
     }
     return mesh;
 }
 
-}  // namespace adacpp::ngeom
+} // namespace adacpp::ngeom

@@ -18,29 +18,33 @@ namespace {
 manifold::Manifold to_manifold(const TessMesh &m) {
     manifold::MeshGL gl;
     gl.numProp = 3;
-    gl.vertProperties = m.positions;  // interleaved xyz (float)
-    gl.triVerts = m.indices;          // 3 uint32 indices per triangle
+    gl.vertProperties = m.positions; // interleaved xyz (float)
+    gl.triVerts = m.indices;         // 3 uint32 indices per triangle
     gl.Merge();
     return manifold::Manifold(gl);
 }
 
-}  // namespace
+} // namespace
 
 bool mesh_boolean(int op, const TessMesh &a, const TessMesh &b, TessMesh &out) {
-    if (a.indices.empty() || b.indices.empty()) return false;
+    if (a.indices.empty() || b.indices.empty())
+        return false;
     using E = manifold::Manifold::Error;
     manifold::Manifold ma = to_manifold(a);
     manifold::Manifold mb = to_manifold(b);
-    if (ma.Status() != E::NoError || mb.Status() != E::NoError) return false;
+    if (ma.Status() != E::NoError || mb.Status() != E::NoError)
+        return false;
 
-    manifold::OpType ot = op == 1   ? manifold::OpType::Add        // union
-                          : op == 2 ? manifold::OpType::Intersect  // intersection
-                                    : manifold::OpType::Subtract;  // 0 = difference
+    manifold::OpType ot = op == 1   ? manifold::OpType::Add       // union
+                          : op == 2 ? manifold::OpType::Intersect // intersection
+                                    : manifold::OpType::Subtract; // 0 = difference
     manifold::Manifold r = ma.Boolean(mb, ot);
-    if (r.Status() != E::NoError) return false;
+    if (r.Status() != E::NoError)
+        return false;
 
-    manifold::MeshGL gl = r.GetMeshGL();  // numProp == 3 (positions only)
-    if (gl.triVerts.empty()) return false;
+    manifold::MeshGL gl = r.GetMeshGL(); // numProp == 3 (positions only)
+    if (gl.triVerts.empty())
+        return false;
     out.positions = gl.vertProperties;
     out.indices = gl.triVerts;
 
@@ -70,12 +74,14 @@ bool mesh_boolean(int op, const TessMesh &a, const TessMesh &b, TessMesh &out) {
     return true;
 }
 
-}  // namespace adacpp::ngeom
+} // namespace adacpp::ngeom
 
-#else  // no Manifold (e.g. wasm): CSG not available on this build
+#else // no Manifold (e.g. wasm): CSG not available on this build
 
 namespace adacpp::ngeom {
-bool mesh_boolean(int, const TessMesh &, const TessMesh &, TessMesh &) { return false; }
-}  // namespace adacpp::ngeom
+bool mesh_boolean(int, const TessMesh &, const TessMesh &, TessMesh &) {
+    return false;
+}
+} // namespace adacpp::ngeom
 
 #endif

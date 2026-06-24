@@ -10,8 +10,8 @@
 #include "tess_helpers.h"
 #include "../helpers/helpers.h"
 
-
-Mesh tessellate_shape(const int id, const TopoDS_Shape &shape, const bool compute_edges, const float mesh_quality, const bool parallel_meshing) {
+Mesh tessellate_shape(const int id, const TopoDS_Shape &shape, const bool compute_edges, const float mesh_quality,
+                      const bool parallel_meshing) {
     ShapeTesselator shape_tess(shape);
     shape_tess.Compute(compute_edges, mesh_quality, parallel_meshing);
     const std::vector pos = shape_tess.GetVerticesPositionAsTuple();
@@ -26,7 +26,6 @@ Mesh tessellate_shape(const int id, const TopoDS_Shape &shape, const bool comput
     return mesh;
 }
 
-
 Mesh concatenate_meshes(const std::vector<std::shared_ptr<Mesh>> &meshes) {
     std::vector<GroupReference> groups;
     size_t total_positions = 0;
@@ -35,7 +34,7 @@ Mesh concatenate_meshes(const std::vector<std::shared_ptr<Mesh>> &meshes) {
     bool has_normal = !meshes[0]->normals.empty();
 
     // Calculate the total number of elements in positions, indices, and normals
-    for (const auto &s: meshes) {
+    for (const auto &s : meshes) {
         total_positions += s->positions.size();
         total_indices += s->indices.size();
         if (has_normal) {
@@ -53,7 +52,7 @@ Mesh concatenate_meshes(const std::vector<std::shared_ptr<Mesh>> &meshes) {
     size_t normal_offset = 0;
     size_t sum_positions = 0;
 
-    for (const auto &s: meshes) {
+    for (const auto &s : meshes) {
         groups.emplace_back(s->id, static_cast<int>(indices_offset), static_cast<int>(s->indices.size()),
                             static_cast<int>(position_offset / 3), static_cast<int>(s->positions.size() / 3));
 
@@ -74,14 +73,9 @@ Mesh concatenate_meshes(const std::vector<std::shared_ptr<Mesh>> &meshes) {
 
         sum_positions += s->positions.size();
     }
-    Mesh merged_mesh = Mesh(meshes[0]->id,
-                            position_list,
-                            indices_list,
-                            {},
-                            has_normal ? normal_list : std::vector<float>{},
-                            meshes[0]->mesh_type,
-                            meshes[0]->color,
-                            groups);
+    Mesh merged_mesh =
+        Mesh(meshes[0]->id, position_list, indices_list, {}, has_normal ? normal_list : std::vector<float>{},
+             meshes[0]->mesh_type, meshes[0]->color, groups);
     return merged_mesh;
 }
 
@@ -90,26 +84,22 @@ std::vector<std::shared_ptr<Mesh>> meshes_by_color(const std::vector<std::shared
     std::vector<std::shared_ptr<Mesh>> result;
     std::map<std::vector<float>, std::vector<std::shared_ptr<Mesh>>> color_map;
 
-    for (const auto &mesh: meshes) {
+    for (const auto &mesh : meshes) {
         // Create a vector that includes the RGB(A) values of the color object
-        std::vector<float> color_key {mesh->color.r, mesh->color.g, mesh->color.b, mesh->color.a};
+        std::vector<float> color_key{mesh->color.r, mesh->color.g, mesh->color.b, mesh->color.a};
 
         // Use this vector as the key for the color_map
         color_map[color_key].push_back(mesh);
     }
 
-    for (const auto &color_meshes: color_map) {
+    for (const auto &color_meshes : color_map) {
         result.push_back(std::make_shared<Mesh>(concatenate_meshes(color_meshes.second)));
     }
 
     return result;
 }
 
-
-
-
-Mesh get_box_mesh(const std::vector<float> &box_origin,
-                  const std::vector<float> &box_dims) {
+Mesh get_box_mesh(const std::vector<float> &box_origin, const std::vector<float> &box_dims) {
 
     TopoDS_Solid box = create_box(box_origin, box_dims);
     Mesh mesh = tessellate_shape(0, box, true, 1.0, false);

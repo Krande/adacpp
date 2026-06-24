@@ -23,7 +23,6 @@
 #include "../../helpers/helpers.h"
 #include "step_writer.h"
 
-
 class AdaCPPStepWriter {
 public:
     explicit AdaCPPStepWriter(const std::string &top_level_name = "Assembly") {
@@ -54,15 +53,15 @@ public:
         set_name(tll_, top_level_name);
     }
 
-    void add_shape(const TopoDS_Shape &shape, const std::string &name,
-                   const Color &rgb_color,
+    void add_shape(const TopoDS_Shape &shape, const std::string &name, const Color &rgb_color,
                    const TDF_Label &parent = TDF_Label()) {
         comp_builder_.Add(comp_, shape);
         TDF_Label parent_label = parent.IsNull() ? tll_ : parent;
         TDF_Label shape_label = shape_tool_->AddSubShape(parent_label, shape);
         if (shape_label.IsNull()) {
             shape_label = shape_tool_->AddShape(shape, Standard_False, Standard_False);
-//            std::cout << "Adding as SubShape label generated an IsNull label. Adding as shape instead" << std::endl;
+            //            std::cout << "Adding as SubShape label generated an IsNull label. Adding as shape instead" <<
+            //            std::endl;
         }
         set_color(shape_label, rgb_color, color_tool_);
         set_name(shape_label, name);
@@ -72,9 +71,8 @@ public:
         add_shape(shape, name, rgb_color);
     }
 
-    void export_step(const std::filesystem::path &step_file,
-                     const std::string &unit = "m", const std::string &schema = "AP214") const
-    {
+    void export_step(const std::filesystem::path &step_file, const std::string &unit = "m",
+                     const std::string &schema = "AP214") const {
         // Create the directory if it doesn't exist and check that step_file.parent_path() is not ""
 
         if (!step_file.parent_path().empty() && step_file.parent_path() != "") {
@@ -98,7 +96,8 @@ public:
         // which then declares MILLI while the coordinates stay metre-valued — a malformed,
         // 1000x-off round-trip. Uppercase so "m" -> "M" (parity with the pythonocc backend writer).
         std::string unit_uc = unit;
-        for (char &c : unit_uc) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        for (char &c : unit_uc)
+            c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
         // ``xstep.cascade.unit`` tells OCC what unit the IN-MEMORY model is in; ``write.step.unit``
         // what the file declares (OCC converts between them). The cascade unit is a process-global
         // that defaults to MM. adapy models are in ``unit`` (metres) — without pinning the cascade
@@ -143,23 +142,23 @@ void write_boxes_to_step(const std::string &filename, const std::vector<std::vec
 // names/colors. Backs adapy's StepWriter under the adacpp CAD backend.
 void write_shapes_to_step(const std::string &filename, const std::vector<TopoDS_Shape> &shapes,
                           const std::vector<std::string> &names, const std::vector<Color> &colors,
-                          const std::string &unit, const std::string &schema,
-                          const std::string &top_level_name) {
+                          const std::string &unit, const std::string &schema, const std::string &top_level_name) {
     // Translate OCCT failures into a std::runtime_error so nanobind reports a
     // Python exception instead of the module aborting (an uncaught Standard_Failure
     // under wasm-EH calls std::terminate).
     try {
         AdaCPPStepWriter writer(top_level_name);
         for (std::size_t i = 0; i < shapes.size(); ++i) {
-            if (shapes[i].IsNull()) continue;
+            if (shapes[i].IsNull())
+                continue;
             const std::string name = i < names.size() ? names[i] : ("shape_" + std::to_string(i));
             const Color color = i < colors.size() ? colors[i] : Color();
             writer.add_shape_handle(shapes[i], name, color);
         }
         writer.export_step(filename, unit, schema);
     } catch (const Standard_Failure &e) {
-        throw std::runtime_error(std::string("OCCT STEP write failed: ") +
-                                 e.DynamicType()->Name() + ": " + e.GetMessageString());
+        throw std::runtime_error(std::string("OCCT STEP write failed: ") + e.DynamicType()->Name() + ": " +
+                                 e.GetMessageString());
     }
 }
 
@@ -173,8 +172,8 @@ void write_box_to_step(const std::string &filename, const std::vector<float> &bo
     writer.Write(filename.c_str());
 }
 
-std::string step_writer_to_string(STEPCAFControl_Writer& writer) {
+std::string step_writer_to_string(STEPCAFControl_Writer &writer) {
     std::ostringstream stream;
-    writer.WriteStream(stream);  // Write to the string stream
-    return stream.str();  // Convert the stream to a string and return it
+    writer.WriteStream(stream); // Write to the string stream
+    return stream.str();        // Convert the stream to a string and return it
 }

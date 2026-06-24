@@ -8,9 +8,8 @@
 #include <Quantity_Color.hxx>
 #include <XCAFDoc_ColorTool.hxx>
 
-
 void setInstanceColorIfAvailable(XCAFDoc_ColorTool *color_tool, const TDF_Label &lab, const TopoDS_Shape &shape,
-                                         Quantity_Color &c) {
+                                 Quantity_Color &c) {
     const auto c1 = static_cast<const XCAFDoc_ColorType>(0);
     const auto c2 = static_cast<const XCAFDoc_ColorType>(1);
     const auto c3 = static_cast<const XCAFDoc_ColorType>(2);

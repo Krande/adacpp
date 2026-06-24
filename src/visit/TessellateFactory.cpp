@@ -4,5 +4,3 @@
 TessellateFactory::TessellateFactory(TessellationAlgorithm algorithm) {
     this->algorithm = algorithm;
 }
-
-

@@ -3,7 +3,6 @@
 
 #include <CGAL/Simple_cartesian.h>
 
-
 typedef CGAL::Simple_cartesian<double> Kernel;
 typedef Kernel::Point_3 Point_3;
 typedef Kernel::Vector_3 Vector_3;
@@ -22,11 +21,10 @@ struct Box : Shape {
     double width;
     double length;
     double height;
+
 public:
-    Box(const std::vector<double> &origin, double width, double length, double height) : origin(origin[0], origin[1],
-                                                                                                origin[2]),
-                                                                                         width(width), length(length),
-                                                                                         height(height) {}
+    Box(const std::vector<double> &origin, double width, double length, double height)
+        : origin(origin[0], origin[1], origin[2]), width(width), length(length), height(height) {}
 };
 
-#endif //ADA_CPP_GEOMETRIES_H
+#endif // ADA_CPP_GEOMETRIES_H

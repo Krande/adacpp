@@ -5,5 +5,4 @@
 
 void shape_module(nb::module_ &m);
 
-
-#endif //GEOM_PY_WRAP_H
+#endif // GEOM_PY_WRAP_H

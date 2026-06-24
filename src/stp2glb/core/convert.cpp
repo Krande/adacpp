@@ -21,8 +21,7 @@
 #include "step_tree.h"
 #include "../config_structs.h"
 
-void convert_stp_to_glb(const GlobalConfig& config)
-{
+void convert_stp_to_glb(const GlobalConfig &config) {
     // Initialize the STEPCAFControl_Reader
     STEPCAFControl_Reader reader;
     reader.SetColorMode(true);
@@ -79,8 +78,7 @@ void convert_stp_to_glb(const GlobalConfig& config)
 
     std::cout << "Beginning tessellation of shapes: " << labelSeq.Length() << "\n";
     start = std::chrono::high_resolution_clock::now();
-    for (Standard_Integer i = 1; i <= labelSeq.Length(); ++i)
-    {
+    for (Standard_Integer i = 1; i <= labelSeq.Length(); ++i) {
         auto label = labelSeq.Value(i);
         TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(label);
         std::cout << "Tessellating shape " << i << " of " << labelSeq.Length() << std::endl;
@@ -99,7 +97,7 @@ void convert_stp_to_glb(const GlobalConfig& config)
     std::cout << "Tessellation complete in " << std::fixed << std::setprecision(2) << duration << " seconds" << "\n";
 
     // Write to GLB
-    std:: cout << "Writing to GLB file: " << config.glbFile << "\n";
+    std::cout << "Writing to GLB file: " << config.glbFile << "\n";
     start = std::chrono::high_resolution_clock::now();
     RWGltf_CafWriter writer(config.glbFile.c_str(), true); // true for binary format
 
@@ -110,13 +108,11 @@ void convert_stp_to_glb(const GlobalConfig& config)
     const Message_ProgressRange progress;
 
     // if output parent directory is != "" and does not exist, create it
-    if (const std::filesystem::path glb_dir = config.glbFile.parent_path(); !glb_dir.empty() && !exists(glb_dir))
-    {
+    if (const std::filesystem::path glb_dir = config.glbFile.parent_path(); !glb_dir.empty() && !exists(glb_dir)) {
         create_directories(glb_dir);
     }
 
-    if (!writer.Perform(doc, file_info, progress))
-    {
+    if (!writer.Perform(doc, file_info, progress)) {
         throw std::runtime_error("Error writing GLB file");
     }
     stop = std::chrono::high_resolution_clock::now();
@@ -124,12 +120,12 @@ void convert_stp_to_glb(const GlobalConfig& config)
     std::cout << "Write complete in " << std::fixed << std::setprecision(2) << duration << " seconds" << "\n";
 
     // iterate over all nodes that weren't added to the model and save the list to json
-    const std::filesystem::path out_json_log_file = config.glbFile.parent_path() / config.glbFile.stem().concat(
-                                                    "-log.json");
+    const std::filesystem::path out_json_log_file =
+        config.glbFile.parent_path() / config.glbFile.stem().concat("-log.json");
     std::ofstream log_file(out_json_log_file);
     log_file << "[\n";
 
-    for (const auto &result: failed_nodes) {
+    for (const auto &result : failed_nodes) {
         log_file << "{\n";
         log_file << "\"geometryIndex\": " << result.geometryIndex << ",\n";
         log_file << R"("skipReason": ")" << result.skip_reason << "\"\n";
@@ -138,4 +134,3 @@ void convert_stp_to_glb(const GlobalConfig& config)
     log_file << "]\n";
     log_file.close();
 }
-

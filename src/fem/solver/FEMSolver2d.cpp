@@ -15,18 +15,16 @@ typedef Eigen::Vector3i Element;
 // 2D FEM solver
 class FEMSolver2D {
 public:
-    Eigen::VectorXd solve(const std::vector<Node>& nodes,
-                          const std::vector<Element>& elements,
-                          const Eigen::VectorXd& forces,
-                          const std::vector<int>& fixedDofs,
-                          const Eigen::VectorXd& fixedValues) {
+    Eigen::VectorXd solve(const std::vector<Node> &nodes, const std::vector<Element> &elements,
+                          const Eigen::VectorXd &forces, const std::vector<int> &fixedDofs,
+                          const Eigen::VectorXd &fixedValues) {
         // Create the global stiffness matrix and force vector
-        int nDofs = nodes.size() * 2;  // 2 degrees of freedom (x and y) for each node
+        int nDofs = nodes.size() * 2; // 2 degrees of freedom (x and y) for each node
         Eigen::MatrixXd K = Eigen::MatrixXd::Zero(nDofs, nDofs);
         Eigen::VectorXd F = forces;
 
         // Loop over all elements
-        for (const auto& element : elements) {
+        for (const auto &element : elements) {
             // Compute the local stiffness matrix
             Eigen::MatrixXd K_local = compute_local_stiffness(element, nodes);
 
@@ -56,7 +54,7 @@ public:
     }
 
 private:
-    Eigen::MatrixXd compute_local_stiffness(const Element& element, const std::vector<Node>& nodes) {
+    Eigen::MatrixXd compute_local_stiffness(const Element &element, const std::vector<Node> &nodes) {
         // Initialize the stiffness matrix for the current element
         Eigen::MatrixXd K_local = Eigen::MatrixXd::Zero(6, 6);
 
@@ -75,12 +73,10 @@ private:
         }
 
         // Define the D matrix (material matrix), assuming isotropic linear elastic material and plane stress
-        double E = 210000.0;  // Young's modulus
-        double nu = 0.3;  // Poisson's ratio
+        double E = 210000.0; // Young's modulus
+        double nu = 0.3;     // Poisson's ratio
         Eigen::Matrix3d D;
-        D << 1, nu, 0,
-                nu, 1, 0,
-                0, 0, 0.5 * (1 - nu);
+        D << 1, nu, 0, nu, 1, 0, 0, 0, 0.5 * (1 - nu);
         D *= E / (1 - nu * nu);
 
         // Compute the local stiffness matrix
@@ -88,8 +84,4 @@ private:
 
         return K_local;
     }
-
 };
-
-
-

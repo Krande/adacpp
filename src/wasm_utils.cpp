@@ -5,8 +5,7 @@
 #include "wasm_utils.h"
 
 extern "C" {
-    double multiply(const double a, const double b)
-    {
-        return a * b;
-    }
+double multiply(const double a, const double b) {
+    return a * b;
+}
 }

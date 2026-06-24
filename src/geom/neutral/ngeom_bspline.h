@@ -20,10 +20,11 @@ struct HPoint {
     double x = 0, y = 0, z = 0, w = 1;
 };
 inline HPoint mix(const HPoint &a, const HPoint &b, double t) {
-    return {a.x * (1 - t) + b.x * t, a.y * (1 - t) + b.y * t, a.z * (1 - t) + b.z * t,
-            a.w * (1 - t) + b.w * t};
+    return {a.x * (1 - t) + b.x * t, a.y * (1 - t) + b.y * t, a.z * (1 - t) + b.z * t, a.w * (1 - t) + b.w * t};
 }
-inline HPoint homog(const Vec3 &p, double w) { return {p.x * w, p.y * w, p.z * w, w}; }
+inline HPoint homog(const Vec3 &p, double w) {
+    return {p.x * w, p.y * w, p.z * w, w};
+}
 inline Vec3 project(const HPoint &h) {
     double w = std::abs(h.w) > 1e-300 ? h.w : 1.0;
     return {h.x / w, h.y / w, h.z / w};
@@ -33,14 +34,17 @@ inline Vec3 project(const HPoint &h) {
 inline std::vector<double> expand_knots(const std::vector<double> &knots, const std::vector<int> &mults) {
     std::vector<double> U;
     for (size_t i = 0; i < knots.size(); ++i)
-        for (int k = 0; k < mults[i]; ++k) U.push_back(knots[i]);
+        for (int k = 0; k < mults[i]; ++k)
+            U.push_back(knots[i]);
     return U;
 }
 
 // Find the knot span index for parameter u. n = #ctrl - 1, p = degree, U = flat knots.
 inline int find_span(int n, int p, double u, const std::vector<double> &U) {
-    if (u >= U[n + 1]) return n;
-    if (u <= U[p]) return p;
+    if (u >= U[n + 1])
+        return n;
+    if (u <= U[p])
+        return p;
     int lo = p, hi = n + 1, mid = (lo + hi) / 2;
     while (u < U[mid] || u >= U[mid + 1]) {
         if (u < U[mid])
@@ -63,13 +67,13 @@ inline HPoint deboor_gathered(int p, int span, double u, const std::vector<doubl
     return d[p];
 }
 
-}  // namespace bspline_detail
+} // namespace bspline_detail
 
 struct BSplineCurve : Curve {
     int degree = 1;
     std::vector<Vec3> ctrl;
-    std::vector<double> U;        // flat knot vector
-    std::vector<double> weights;  // empty => non-rational
+    std::vector<double> U;       // flat knot vector
+    std::vector<double> weights; // empty => non-rational
     bool closed = false;
 
     BSplineCurve(int deg, std::vector<Vec3> cp, std::vector<double> knots, std::vector<int> mults,
@@ -80,9 +84,10 @@ struct BSplineCurve : Curve {
 
     Vec3 point(double t) const override {
         using namespace bspline_detail;
-        int n = (int)ctrl.size() - 1;
-        if (n <= 0) return ctrl.empty() ? Vec3{0, 0, 0} : ctrl[0];
-        int p = std::min(degree, n);  // guard degree>=n_ctrl (Rust geom.rs p=degree.min(n-1)+guards)
+        int n = (int) ctrl.size() - 1;
+        if (n <= 0)
+            return ctrl.empty() ? Vec3{0, 0, 0} : ctrl[0];
+        int p = std::min(degree, n); // guard degree>=n_ctrl (Rust geom.rs p=degree.min(n-1)+guards)
         int span = find_span(n, p, t, U);
         std::vector<HPoint> d(p + 1);
         for (int j = 0; j <= p; ++j) {
@@ -106,26 +111,28 @@ struct BSplineCurve : Curve {
     }
     void range(double &lo, double &hi, bool &per, double &period) const override {
         lo = U[degree];
-        hi = U[(int)ctrl.size()];  // U[n+1]
+        hi = U[(int) ctrl.size()]; // U[n+1]
         per = closed;
         period = closed ? (hi - lo) : 0.0;
     }
     // step2glb model.rs sample_bspline_to_polyline samples a B-spline EDGE uniformly at this density.
     int uniform_edge_segments() const override {
-        int n = std::max((int)ctrl.size(), degree + 1) * 4;
+        int n = std::max((int) ctrl.size(), degree + 1) * 4;
         return n < 8 ? 8 : (n > 512 ? 512 : n);
     }
     int nominal_spans(double a, double b) const override {
         // step2glb geom.rs Curve3::BSpline: (flat_knots.len()-(2*deg+1)).max(1)*2, clamped [4,64].
-        int spans = std::max((int)U.size() - (2 * degree + 1), 1);
+        int spans = std::max((int) U.size() - (2 * degree + 1), 1);
         int n = spans * 2;
-        if (n < 4) n = 4;
-        if (n > 64) n = 64;
+        if (n < 4)
+            n = 4;
+        if (n > 64)
+            n = 64;
         double lo, hi, per;
         bool pr;
         range(lo, hi, pr, per);
         double frac = (hi > lo) ? std::abs(b - a) / (hi - lo) : 1.0;
-        int m = (int)std::ceil(n * frac);
+        int m = (int) std::ceil(n * frac);
         return m < 1 ? 1 : m;
     }
 };
@@ -133,8 +140,8 @@ struct BSplineCurve : Curve {
 // Generic seeded-Newton UV inversion for surfaces without a closed form (B-spline, swept).
 // Seeds from (useed,vseed) when finite, else a coarse grid scan over the domain. FD Jacobian,
 // Gauss-Newton step on the 3x2 system, clamped to the domain. Returns false if it can't converge.
-inline bool newton_uv(const Surface &s, const Vec3 &p, double umin, double umax, double vmin,
-                      double vmax, double useed, double vseed, double &u, double &v) {
+inline bool newton_uv(const Surface &s, const Vec3 &p, double umin, double umax, double vmin, double vmax, double useed,
+                      double vseed, double &u, double &v) {
     auto finite = [](double x) { return x == x && std::abs(x) < 1e300; };
     u = useed;
     v = vseed;
@@ -158,19 +165,22 @@ inline bool newton_uv(const Surface &s, const Vec3 &p, double umin, double umax,
     double hv = (vmax - vmin) * 1e-6 + 1e-9;
     for (int it = 0; it < 40; ++it) {
         Vec3 r = s.point(u, v) - p;
-        if (r.norm() < 1e-10) return true;
+        if (r.norm() < 1e-10)
+            return true;
         Vec3 Su = (s.point(u + hu, v) - s.point(u - hu, v)) * (0.5 / hu);
         Vec3 Sv = (s.point(u, v + hv) - s.point(u, v - hv)) * (0.5 / hv);
         // solve [Su Sv] d = -r  (least squares: normal equations 2x2)
         double a = Su.dot(Su), b = Su.dot(Sv), c = Sv.dot(Sv);
         double ru = -Su.dot(r), rv = -Sv.dot(r);
         double det = a * c - b * b;
-        if (std::abs(det) < 1e-300) break;
+        if (std::abs(det) < 1e-300)
+            break;
         double du = (ru * c - rv * b) / det;
         double dv = (a * rv - b * ru) / det;
         u = clampd(u + du, umin, umax);
         v = clampd(v + dv, vmin, vmax);
-        if (std::abs(du) < 1e-12 && std::abs(dv) < 1e-12) break;
+        if (std::abs(du) < 1e-12 && std::abs(dv) < 1e-12)
+            break;
     }
     return (s.point(u, v) - p).norm() < 1e-6;
 }
@@ -180,12 +190,12 @@ struct BSplineSurface : Surface {
     int nu = 0, nv = 0;          // #ctrl in u, v
     std::vector<Vec3> ctrl;      // row-major: index = iu*nv + iv
     std::vector<double> Uu, Uv;  // flat knots
-    std::vector<double> weights;  // empty => non-rational; else size nu*nv
+    std::vector<double> weights; // empty => non-rational; else size nu*nv
     bool u_closed = false, v_closed = false;
 
     void domain(double &umin, double &umax, double &vmin, double &vmax) const {
         umin = Uu[u_degree];
-        umax = Uu[nu];  // Uu[ (nu-1)+1 ]
+        umax = Uu[nu]; // Uu[ (nu-1)+1 ]
         vmin = Uv[v_degree];
         vmax = Uv[nv];
     }
@@ -211,7 +221,9 @@ struct BSplineSurface : Surface {
         }
         return project(deboor_gathered(v_degree, sv, v, Uv, std::move(tempV)));
     }
-    Vec3 normal(double u, double v) const override { return fd_normal(u, v); }
+    Vec3 normal(double u, double v) const override {
+        return fd_normal(u, v);
+    }
     // B-spline UV inversion uses the Greville-seeded, damped, fold-aware inverter (bspline_invert,
     // a port of Rust newton_invert_bspline) — NOT the generic uniform-grid newton_uv, which aliases
     // against folds on coiled/threaded nets and converges onto the wrong fold.
@@ -226,7 +238,8 @@ struct BSplineSurface : Surface {
     }
     // control-net bbox diagonal — characteristic size (step2glb BSplineSurface.size)
     double size() const {
-        if (ctrl.empty()) return 1.0;
+        if (ctrl.empty())
+            return 1.0;
         Vec3 lo = ctrl[0], hi = ctrl[0];
         for (const Vec3 &p : ctrl) {
             lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
@@ -234,7 +247,9 @@ struct BSplineSurface : Surface {
         }
         return (hi - lo).norm();
     }
-    double approx_size() const override { return size(); }
+    double approx_size() const override {
+        return size();
+    }
     // loose ≤8-span floor; the perpendicular-sag refinement drives the real density (step2glb
     // u_step/v_step BSpline arm — a hard per-knot-span floor explodes on hundreds-of-span coils).
     double u_step(double, double) const override {
@@ -253,8 +268,7 @@ struct BSplineSurface : Surface {
 // Port of Rust geom.rs newton_refine_bspline (30 iters, ±span/4 step clamp, 8-step backtracking
 // line search until the residual drops). The damping is what keeps it from ping-ponging across
 // tight folds where plain Gauss-Newton overshoots.
-inline std::pair<double, double> bspline_refine(const BSplineSurface &b, const Vec3 &p, double su,
-                                                double sv) {
+inline std::pair<double, double> bspline_refine(const BSplineSurface &b, const Vec3 &p, double su, double sv) {
     double u0, u1, v0, v1;
     b.domain(u0, u1, v0, v1);
     double du_span = std::max(u1 - u0, 1e-12), dv_span = std::max(v1 - v0, 1e-12);
@@ -267,7 +281,8 @@ inline std::pair<double, double> bspline_refine(const BSplineSurface &b, const V
         double a11 = Su.dot(Su), a12 = Su.dot(Sv), a22 = Sv.dot(Sv);
         double r1 = -f.dot(Su), r2 = -f.dot(Sv);
         double det = a11 * a22 - a12 * a12;
-        if (std::abs(det) < 1e-300) break;
+        if (std::abs(det) < 1e-300)
+            break;
         double duu = clampd((r1 * a22 - r2 * a12) / det, -du_span / 4.0, du_span / 4.0);
         double dvv = clampd((a11 * r2 - a12 * r1) / det, -dv_span / 4.0, dv_span / 4.0);
         double d0 = f.dot(f);
@@ -276,13 +291,15 @@ inline std::pair<double, double> bspline_refine(const BSplineSurface &b, const V
             nu_ = clampd(u + duu * scale, u0, u1);
             nv_ = clampd(v + dvv * scale, v0, v1);
             Vec3 d = b.point(nu_, nv_) - p;
-            if (d.dot(d) < d0) break;
+            if (d.dot(d) < d0)
+                break;
             scale *= 0.5;
         }
         double su_ = nu_ - u, sv_ = nv_ - v;
         u = nu_;
         v = nv_;
-        if (std::abs(su_) < 1e-12 * du_span && std::abs(sv_) < 1e-12 * dv_span) break;
+        if (std::abs(su_) < 1e-12 * du_span && std::abs(sv_) < 1e-12 * dv_span)
+            break;
     }
     return {u, v};
 }
@@ -291,8 +308,7 @@ inline std::pair<double, double> bspline_refine(const BSplineSurface &b, const V
 // (accept only if on-surface within (size*1e-4)^2), else seed at the Greville point of the nearest
 // control point + its 12 control-net neighbours (early-out on first on-surface hit), else a
 // span-resolution domain scan. Always returns a best-effort (u,v) (true), like Rust.
-inline bool bspline_invert(const BSplineSurface &b, const Vec3 &p, double uh, double vh, double &outu,
-                           double &outv) {
+inline bool bspline_invert(const BSplineSurface &b, const Vec3 &p, double uh, double vh, double &outu, double &outv) {
     auto dist2 = [&](double u, double v) {
         Vec3 d = b.point(u, v) - p;
         return d.dot(d);
@@ -302,7 +318,7 @@ inline bool bspline_invert(const BSplineSurface &b, const Vec3 &p, double uh, do
     double u0, u1, v0, v1;
     b.domain(u0, u1, v0, v1);
 
-    if (uh == uh && vh == vh) {  // finite hint
+    if (uh == uh && vh == vh) { // finite hint
         auto [ru, rv] = bspline_refine(b, p, uh, vh);
         if (dist2(ru, rv) <= tol2) {
             outu = ru;
@@ -313,7 +329,7 @@ inline bool bspline_invert(const BSplineSurface &b, const Vec3 &p, double uh, do
     // nearest control point
     int bi = 0;
     double bd = std::numeric_limits<double>::max();
-    for (int i = 0; i < (int)b.ctrl.size(); ++i) {
+    for (int i = 0; i < (int) b.ctrl.size(); ++i) {
         Vec3 d = b.ctrl[i] - p;
         double dd = d.dot(d);
         if (dd < bd) {
@@ -325,17 +341,18 @@ inline bool bspline_invert(const BSplineSurface &b, const Vec3 &p, double uh, do
     auto greville = [&](const std::vector<double> &knots, int deg, int i) {
         deg = std::max(deg, 1);
         double s = 0;
-        for (int k = i + 1; k <= i + deg; ++k) s += knots[k];
+        for (int k = i + 1; k <= i + deg; ++k)
+            s += knots[k];
         return s / deg;
     };
-    static const int OFFS[13][2] = {{0, 0},  {0, 1},  {0, -1}, {1, 0},  {-1, 0}, {0, 2},  {0, -2},
-                                    {1, 1},  {-1, -1}, {1, -1}, {-1, 1}, {2, 0},  {-2, 0}};
+    static const int OFFS[13][2] = {{0, 0}, {0, 1},   {0, -1}, {1, 0},  {-1, 0}, {0, 2}, {0, -2},
+                                    {1, 1}, {-1, -1}, {1, -1}, {-1, 1}, {2, 0},  {-2, 0}};
     double r1u = u0, r1v = v0, best1 = std::numeric_limits<double>::max();
     for (auto &o : OFFS) {
-        long iu = std::min(std::max(ciu + o[0], 0L), (long)b.nu - 1);
-        long iv = std::min(std::max(civ + o[1], 0L), (long)b.nv - 1);
-        double seedu = clampd(greville(b.Uu, b.u_degree, (int)iu), u0, u1);
-        double seedv = clampd(greville(b.Uv, b.v_degree, (int)iv), v0, v1);
+        long iu = std::min(std::max(ciu + o[0], 0L), (long) b.nu - 1);
+        long iv = std::min(std::max(civ + o[1], 0L), (long) b.nv - 1);
+        double seedu = clampd(greville(b.Uu, b.u_degree, (int) iu), u0, u1);
+        double seedv = clampd(greville(b.Uv, b.v_degree, (int) iv), v0, v1);
         auto [ru, rv] = bspline_refine(b, p, seedu, seedv);
         double rd = dist2(ru, rv);
         if (rd < best1) {
@@ -394,7 +411,7 @@ inline double profile_bbox_diag(const Curve &c, double a, double b) {
 // u = the profile curve's own parameter; v = distance along dir in [0, depth].
 struct LinearExtrusionSurface : Surface {
     std::shared_ptr<Curve> profile;
-    Vec3 dir;  // unit
+    Vec3 dir; // unit
     double depth;
     LinearExtrusionSurface(std::shared_ptr<Curve> c, const Vec3 &d, double dep)
         : profile(c), dir(d.normalized()), depth(dep) {}
@@ -405,7 +422,9 @@ struct LinearExtrusionSurface : Surface {
         vmin = 0;
         vmax = depth;
     }
-    Vec3 point(double u, double v) const override { return profile->point(u) + dir * v; }
+    Vec3 point(double u, double v) const override {
+        return profile->point(u) + dir * v;
+    }
     Vec3 normal(double u, double v) const override {
         return profile->tangent(u).cross(dir).normalized();
     }
@@ -425,7 +444,7 @@ struct LinearExtrusionSurface : Surface {
     double approx_size() const override {
         double umin, umax, vmin, vmax;
         domain(umin, umax, vmin, vmax);
-        return profile_bbox_diag(*profile, umin, umax) + depth;  // Rust curve.approx_size()+dir.len()
+        return profile_bbox_diag(*profile, umin, umax) + depth; // Rust curve.approx_size()+dir.len()
     }
     // a circular directrix makes the extrusion u-periodic (Rust u_period = curve.period())
     std::optional<double> u_period() const override {
@@ -441,7 +460,7 @@ struct LinearExtrusionSurface : Surface {
 // u = revolution angle [0,2pi) (periodic); v = the profile curve's own parameter.
 struct RevolutionSurface : Surface {
     std::shared_ptr<Curve> profile;
-    Vec3 axis_loc, axis_dir;  // axis_dir unit
+    Vec3 axis_loc, axis_dir; // axis_dir unit
     RevolutionSurface(std::shared_ptr<Curve> c, const Vec3 &loc, const Vec3 &dir)
         : profile(c), axis_loc(loc), axis_dir(dir.normalized()) {}
     void domain(double &umin, double &umax, double &vmin, double &vmax) const {
@@ -458,8 +477,12 @@ struct RevolutionSurface : Surface {
         Vec3 rotated = par + perp * std::cos(ang) + axis_dir.cross(perp) * std::sin(ang);
         return axis_loc + rotated;
     }
-    Vec3 point(double u, double v) const override { return rotate(profile->point(v), u); }
-    Vec3 normal(double u, double v) const override { return fd_normal(u, v); }
+    Vec3 point(double u, double v) const override {
+        return rotate(profile->point(v), u);
+    }
+    Vec3 normal(double u, double v) const override {
+        return fd_normal(u, v);
+    }
     bool uv(const Vec3 &p, double uhint, double vhint, double &u, double &v) const override {
         double umin, umax, vmin, vmax;
         domain(umin, umax, vmin, vmax);
@@ -493,8 +516,8 @@ struct RevolutionSurface : Surface {
     double approx_size() const override {
         double umin, umax, vmin, vmax;
         domain(umin, umax, vmin, vmax);
-        return profile_bbox_diag(*profile, vmin, vmax) * 2.0;  // Rust curve.approx_size()*2
+        return profile_bbox_diag(*profile, vmin, vmax) * 2.0; // Rust curve.approx_size()*2
     }
 };
 
-}  // namespace adacpp::ngeom
+} // namespace adacpp::ngeom

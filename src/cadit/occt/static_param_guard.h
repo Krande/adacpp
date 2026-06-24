@@ -17,7 +17,9 @@ public:
         const char *cur = Interface_Static::CVal(key);
         saved_ = (cur != nullptr) ? cur : "";
     }
-    ~InterfaceStaticCValGuard() { Interface_Static::SetCVal(key_, saved_.c_str()); }
+    ~InterfaceStaticCValGuard() {
+        Interface_Static::SetCVal(key_, saved_.c_str());
+    }
 
     InterfaceStaticCValGuard(const InterfaceStaticCValGuard &) = delete;
     InterfaceStaticCValGuard &operator=(const InterfaceStaticCValGuard &) = delete;

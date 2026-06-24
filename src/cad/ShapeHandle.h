@@ -14,7 +14,9 @@
 class ShapeHandle {
 public:
     explicit ShapeHandle(TopoDS_Shape shape) : shape_(std::move(shape)) {}
-    const TopoDS_Shape& topods() const { return shape_; }
+    const TopoDS_Shape &topods() const {
+        return shape_;
+    }
 
 private:
     TopoDS_Shape shape_;

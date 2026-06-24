@@ -5,4 +5,4 @@
 #ifndef WASM_UTILS_H
 #define WASM_UTILS_H
 
-#endif //WASM_UTILS_H
+#endif // WASM_UTILS_H

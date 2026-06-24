@@ -6,13 +6,8 @@
 #include <filesystem>
 #include <XCAFDoc_ShapeTool.hxx>
 
-
-void stp_to_glb(const std::string& stp_file,
-                const std::string& glb_file,
-                const double linearDeflection = 0.1,
-                const double angularDeflection = 0.5,
-                const bool relativeDeflection = false)
-{
+void stp_to_glb(const std::string &stp_file, const std::string &glb_file, const double linearDeflection = 0.1,
+                const double angularDeflection = 0.5, const bool relativeDeflection = false) {
     // Initialize the STEPCAFControl_Reader
     STEPCAFControl_Reader reader;
     reader.SetColorMode(true);
@@ -36,8 +31,7 @@ void stp_to_glb(const std::string& stp_file,
     const Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
     TDF_LabelSequence labelSeq;
     shapeTool->GetShapes(labelSeq);
-    for (Standard_Integer i = 1; i <= labelSeq.Length(); ++i)
-    {
+    for (Standard_Integer i = 1; i <= labelSeq.Length(); ++i) {
         TopoDS_Shape shape = shapeTool->GetShape(labelSeq.Value(i));
         BRepMesh_IncrementalMesh(shape, linearDeflection, relativeDeflection, angularDeflection, true);
     }
@@ -53,14 +47,11 @@ void stp_to_glb(const std::string& stp_file,
 
     // if output parent directory is != "" and does not exist, create it
     const std::filesystem::path glb_path(glb_file);
-    if (const std::filesystem::path glb_dir = glb_path.parent_path(); !glb_dir.empty() && !exists(glb_dir))
-    {
+    if (const std::filesystem::path glb_dir = glb_path.parent_path(); !glb_dir.empty() && !exists(glb_dir)) {
         create_directories(glb_dir);
     }
 
-    if (!writer.Perform(doc, file_info, progress))
-    {
+    if (!writer.Perform(doc, file_info, progress)) {
         throw std::runtime_error("Error writing GLB file");
     }
 }
-

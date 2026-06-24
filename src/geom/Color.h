@@ -8,7 +8,7 @@ public:
     float b;
     float a;
 
-    explicit Color(float r=0.5f, float g=0.5f, float b=0.5f, float a = 1.0f);
+    explicit Color(float r = 0.5f, float g = 0.5f, float b = 0.5f, float a = 1.0f);
 };
 
-#endif //NANO_OCCT_COLOR_H
+#endif // NANO_OCCT_COLOR_H

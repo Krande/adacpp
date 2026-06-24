@@ -25,32 +25,44 @@ struct Curve {
     int discretize_spans(double a, double b) const;
     // >0 => an edge of this curve is sampled UNIFORMLY at this many segments instead of the adaptive
     // midpoint refine (step2glb samples B-spline edges uniformly at clamp(cps*4,8,512), NOT adaptively).
-    virtual int uniform_edge_segments() const { return 0; }
+    virtual int uniform_edge_segments() const {
+        return 0;
+    }
 
-  protected:
+protected:
     // initial #spans a concrete curve suggests over [a,b] before refinement
-    virtual int nominal_spans(double a, double b) const { return 1; }
+    virtual int nominal_spans(double a, double b) const {
+        return 1;
+    }
 };
 
 struct LineCurve : Curve {
     Vec3 pnt, dir;
     LineCurve(const Vec3 &p, const Vec3 &d) : pnt(p), dir(d) {}
-    Vec3 point(double t) const override { return pnt + dir * t; }
-    Vec3 tangent(double) const override { return dir.normalized(); }
+    Vec3 point(double t) const override {
+        return pnt + dir * t;
+    }
+    Vec3 tangent(double) const override {
+        return dir.normalized();
+    }
     void range(double &lo, double &hi, bool &per, double &period) const override {
         lo = 0;
         hi = 1;
         per = false;
         period = 0;
     }
-    int nominal_spans(double, double) const override { return 1; }
+    int nominal_spans(double, double) const override {
+        return 1;
+    }
 };
 
 struct CircleCurve : Curve {
     Frame f;
     double r;
     CircleCurve(const Frame &fr, double radius) : f(fr), r(radius) {}
-    Vec3 point(double t) const override { return f.to_world(r * std::cos(t), r * std::sin(t), 0.0); }
+    Vec3 point(double t) const override {
+        return f.to_world(r * std::cos(t), r * std::sin(t), 0.0);
+    }
     Vec3 tangent(double t) const override {
         return (f.x * (-std::sin(t)) + f.y * std::cos(t)).normalized();
     }
@@ -60,14 +72,18 @@ struct CircleCurve : Curve {
         per = true;
         period = TWO_PI;
     }
-    int nominal_spans(double, double) const override { return 16; }  // Rust Curve3::nominal_spans
+    int nominal_spans(double, double) const override {
+        return 16;
+    } // Rust Curve3::nominal_spans
 };
 
 struct EllipseCurve : Curve {
     Frame f;
-    double a1, a2;  // semi axes along x, y
+    double a1, a2; // semi axes along x, y
     EllipseCurve(const Frame &fr, double s1, double s2) : f(fr), a1(s1), a2(s2) {}
-    Vec3 point(double t) const override { return f.to_world(a1 * std::cos(t), a2 * std::sin(t), 0.0); }
+    Vec3 point(double t) const override {
+        return f.to_world(a1 * std::cos(t), a2 * std::sin(t), 0.0);
+    }
     Vec3 tangent(double t) const override {
         return (f.x * (-a1 * std::sin(t)) + f.y * (a2 * std::cos(t))).normalized();
     }
@@ -77,23 +93,27 @@ struct EllipseCurve : Curve {
         per = true;
         period = TWO_PI;
     }
-    int nominal_spans(double, double) const override { return 16; }  // Rust Curve3::nominal_spans
+    int nominal_spans(double, double) const override {
+        return 16;
+    } // Rust Curve3::nominal_spans
 };
 
 // POLYLINE — an ordered list of points; the polyline IS the edge (spec §4).
 struct PolylineCurve : Curve {
     std::vector<Vec3> pts;
     explicit PolylineCurve(std::vector<Vec3> p) : pts(std::move(p)) {}
-    Vec3 point(double t) const override {  // t in [0,1] across the whole polyline
-        if (pts.size() < 2) return pts.empty() ? Vec3{0, 0, 0} : pts[0];
+    Vec3 point(double t) const override { // t in [0,1] across the whole polyline
+        if (pts.size() < 2)
+            return pts.empty() ? Vec3{0, 0, 0} : pts[0];
         double s = clampd(t, 0.0, 1.0) * (pts.size() - 1);
-        int i = std::min((int)s, (int)pts.size() - 2);
+        int i = std::min((int) s, (int) pts.size() - 2);
         return pts[i] + (pts[i + 1] - pts[i]) * (s - i);
     }
     Vec3 tangent(double t) const override {
-        if (pts.size() < 2) return {1, 0, 0};
+        if (pts.size() < 2)
+            return {1, 0, 0};
         double s = clampd(t, 0.0, 1.0) * (pts.size() - 1);
-        int i = std::min((int)s, (int)pts.size() - 2);
+        int i = std::min((int) s, (int) pts.size() - 2);
         return (pts[i + 1] - pts[i]).normalized();
     }
     void range(double &lo, double &hi, bool &per, double &period) const override {
@@ -102,7 +122,9 @@ struct PolylineCurve : Curve {
         per = false;
         period = 0;
     }
-    int nominal_spans(double, double) const override { return std::max(1, (int)pts.size() - 1); }
+    int nominal_spans(double, double) const override {
+        return std::max(1, (int) pts.size() - 1);
+    }
 };
 
 // HYPERBOLA — P(u)=C+sa*cosh(u)*x+si*sinh(u)*y (ISO 10303-42; step2glb model.rs curve_polyline).
@@ -110,11 +132,13 @@ struct HyperbolaCurve : Curve {
     Frame f;
     double sa, si;
     HyperbolaCurve(const Frame &fr, double semi, double semi_imag) : f(fr), sa(semi), si(semi_imag) {}
-    Vec3 point(double u) const override { return f.to_world(sa * std::cosh(u), si * std::sinh(u), 0.0); }
+    Vec3 point(double u) const override {
+        return f.to_world(sa * std::cosh(u), si * std::sinh(u), 0.0);
+    }
     Vec3 tangent(double u) const override {
         return (f.x * (sa * std::sinh(u)) + f.y * (si * std::cosh(u))).normalized();
     }
-    double param(const Vec3 &p) const {  // invert: u = asinh(localY/si)
+    double param(const Vec3 &p) const { // invert: u = asinh(localY/si)
         return std::asinh(f.to_local(p).y / si);
     }
     void range(double &lo, double &hi, bool &per, double &period) const override {
@@ -130,11 +154,15 @@ struct ParabolaCurve : Curve {
     Frame f;
     double fd;
     ParabolaCurve(const Frame &fr, double focal) : f(fr), fd(focal) {}
-    Vec3 point(double u) const override { return f.to_world(fd * u * u, 2.0 * fd * u, 0.0); }
+    Vec3 point(double u) const override {
+        return f.to_world(fd * u * u, 2.0 * fd * u, 0.0);
+    }
     Vec3 tangent(double u) const override {
         return (f.x * (2.0 * fd * u) + f.y * (2.0 * fd)).normalized();
     }
-    double param(const Vec3 &p) const { return f.to_local(p).y / (2.0 * fd); }
+    double param(const Vec3 &p) const {
+        return f.to_local(p).y / (2.0 * fd);
+    }
     void range(double &lo, double &hi, bool &per, double &period) const override {
         lo = -1;
         hi = 1;
@@ -152,16 +180,17 @@ struct CompositeCurveN : Curve {
     std::vector<Seg> segs;
     explicit CompositeCurveN(std::vector<Seg> s) : segs(std::move(s)) {}
     Vec3 point(double t) const override {
-        if (segs.empty()) return {0, 0, 0};
+        if (segs.empty())
+            return {0, 0, 0};
         double s = clampd(t, 0.0, 1.0) * segs.size();
-        int i = std::min((int)s, (int)segs.size() - 1);
+        int i = std::min((int) s, (int) segs.size() - 1);
         double local = s - i;
         const Seg &sg = segs[i];
         return sg.parent->point(sg.same_sense ? local : 1.0 - local);
     }
     Vec3 tangent(double t) const override {
-        double s = clampd(t, 0.0, 1.0) * std::max((size_t)1, segs.size());
-        int i = std::min((int)s, (int)segs.size() - 1);
+        double s = clampd(t, 0.0, 1.0) * std::max((size_t) 1, segs.size());
+        int i = std::min((int) s, (int) segs.size() - 1);
         Vec3 tg = segs[i].parent->tangent(s - i);
         return segs[i].same_sense ? tg : tg * -1.0;
     }
@@ -180,9 +209,11 @@ struct CompositeCurveN : Curve {
             double pe;
             sg.parent->range(a, b, pr, pe);
             std::vector<Vec3> sp = sg.parent->discretize(a, b, deflection, max_angle);
-            if (!sg.same_sense) std::reverse(sp.begin(), sp.end());
+            if (!sg.same_sense)
+                std::reverse(sp.begin(), sp.end());
             for (const Vec3 &p : sp)
-                if (out.empty() || (p - out.back()).norm() > 1e-9) out.push_back(p);
+                if (out.empty() || (p - out.back()).norm() > 1e-9)
+                    out.push_back(p);
         }
         return out;
     }
@@ -193,11 +224,15 @@ struct CompositeCurveN : Curve {
 struct TrimmedCurve : Curve {
     std::shared_ptr<Curve> basis;
     double t1, t2;
-    bool sense;  // true: traverse basis from t1->t2 in increasing sense
+    bool sense; // true: traverse basis from t1->t2 in increasing sense
     TrimmedCurve(std::shared_ptr<Curve> b, double a, double c, bool s) : basis(b), t1(a), t2(c), sense(s) {}
     // local s in [0,1] maps to a basis parameter
-    double map(double s) const { return sense ? (t1 + (t2 - t1) * s) : (t2 + (t1 - t2) * s); }
-    Vec3 point(double s) const override { return basis->point(map(s)); }
+    double map(double s) const {
+        return sense ? (t1 + (t2 - t1) * s) : (t2 + (t1 - t2) * s);
+    }
+    Vec3 point(double s) const override {
+        return basis->point(map(s));
+    }
     Vec3 tangent(double s) const override {
         Vec3 t = basis->tangent(map(s));
         return sense ? t : t * -1.0;
@@ -216,16 +251,20 @@ struct TrimmedCurve : Curve {
 
 // --- discretize (chord-deflection + max-angle midpoint refinement) ---------------------
 
-inline int Curve::discretize_spans(double a, double b) const { return nominal_spans(a, b); }
+inline int Curve::discretize_spans(double a, double b) const {
+    return nominal_spans(a, b);
+}
 
 inline std::vector<Vec3> Curve::discretize(double a, double b, double deflection, double max_angle) const {
     std::vector<Vec3> out;
     int n0 = nominal_spans(a, b);
-    if (n0 < 1) n0 = 1;
+    if (n0 < 1)
+        n0 = 1;
     // seed parameters
     std::vector<double> ts;
     ts.reserve(n0 + 1);
-    for (int i = 0; i <= n0; ++i) ts.push_back(a + (b - a) * (double)i / (double)n0);
+    for (int i = 0; i <= n0; ++i)
+        ts.push_back(a + (b - a) * (double) i / (double) n0);
 
     // refine each span until chord sag < deflection AND turn angle < max_angle, bounded depth
     auto sag_ok = [&](double t0, double t1) -> bool {
@@ -242,11 +281,13 @@ inline std::vector<Vec3> Curve::discretize(double a, double b, double deflection
             double proj = d.dot(chord) / (cl * cl);
             sag = (d - chord * proj).norm();
         }
-        if (deflection > 0 && sag > deflection) return false;
+        if (deflection > 0 && sag > deflection)
+            return false;
         if (max_angle > 0) {
             Vec3 t0v = tangent(t0), t1v = tangent(t1);
             double c = clampd(t0v.dot(t1v), -1.0, 1.0);
-            if (std::acos(c) > max_angle) return false;
+            if (std::acos(c) > max_angle)
+                return false;
         }
         return true;
     };
@@ -272,14 +313,18 @@ inline std::vector<Vec3> Curve::discretize(double a, double b, double deflection
             }
             next.push_back(spanpts.back());
             spanpts.swap(next);
-            if (!split_any) break;
-            if (++guard > 12) break;
+            if (!split_any)
+                break;
+            if (++guard > 12)
+                break;
         }
-        for (size_t k = 1; k < spanpts.size(); ++k) refined.push_back(spanpts[k]);
+        for (size_t k = 1; k < spanpts.size(); ++k)
+            refined.push_back(spanpts[k]);
     }
     out.reserve(refined.size());
-    for (double t : refined) out.push_back(point(t));
+    for (double t : refined)
+        out.push_back(point(t));
     return out;
 }
 
-}  // namespace adacpp::ngeom
+} // namespace adacpp::ngeom

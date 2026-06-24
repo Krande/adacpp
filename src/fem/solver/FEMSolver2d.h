@@ -5,10 +5,6 @@
 #ifndef ADA_CPP_FEMSOLVER2D_H
 #define ADA_CPP_FEMSOLVER2D_H
 
+class FEMSolver2d {};
 
-class FEMSolver2d {
-
-};
-
-
-#endif //ADA_CPP_FEMSOLVER2D_H
+#endif // ADA_CPP_FEMSOLVER2D_H

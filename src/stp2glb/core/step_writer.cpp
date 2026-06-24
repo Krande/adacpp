@@ -23,8 +23,7 @@
 #include "helpers.h"
 #include "step_tree.h"
 #include "../../geom/Color.h"
-#include <Standard_Handle.hxx>  // For Handle
-
+#include <Standard_Handle.hxx> // For Handle
 
 // Constructor with only top-level name
 StepStore::StepStore(const std::string &top_level_name) {
@@ -34,11 +33,10 @@ StepStore::StepStore(const std::string &top_level_name) {
 }
 
 // Constructor with product hierarchy
-StepStore::StepStore(const std::vector<std::unique_ptr<ProductNode> > &product_hierarchy) {
+StepStore::StepStore(const std::vector<std::unique_ptr<ProductNode>> &product_hierarchy) {
     initialize();
     create_hierarchy(product_hierarchy, tll_);
 }
-
 
 // Private initialization function
 void StepStore::initialize() {
@@ -53,9 +51,9 @@ void StepStore::initialize() {
 }
 
 // Create a hierarchy of products
-void StepStore::create_hierarchy(const std::vector<std::unique_ptr<ProductNode> > &nodes,
+void StepStore::create_hierarchy(const std::vector<std::unique_ptr<ProductNode>> &nodes,
                                  const TDF_Label &parent_label) {
-    for (auto &node: nodes) {
+    for (auto &node : nodes) {
         TDF_Label child_label = shape_tool_->NewShape();
         TDF_Label target_label;
         if (parent_label.IsNull()) {
@@ -83,14 +81,14 @@ void StepStore::set_name(const TDF_Label &label, const std::string &name) {
 
 // Set color for a label
 void StepStore::set_color(const TDF_Label &label, const Color &rgb_color,
-                          const Handle(XCAFDoc_ColorTool) &color_tool) {
+                          const Handle(XCAFDoc_ColorTool) & color_tool) {
     Quantity_Color color(rgb_color.r, rgb_color.g, rgb_color.b, Quantity_TOC_RGB);
     color_tool->SetColor(label, color, XCAFDoc_ColorGen);
 }
 
 // Add a shape
-void StepStore::add_shape(const TopoDS_Shape &shape, const std::string &name,
-                          const Color &rgb_color, const ProductNode &dummy_product) {
+void StepStore::add_shape(const TopoDS_Shape &shape, const std::string &name, const Color &rgb_color,
+                          const ProductNode &dummy_product) {
     const TDF_Label dummy_label = entity_labels_[dummy_product.instanceIndex];
     const TDF_Label parent_label = entity_labels_[dummy_product.parent->instanceIndex];
 

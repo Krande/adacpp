@@ -12,7 +12,9 @@ namespace adacpp::ngeom {
 
 namespace {
 
-Eigen::Vector3d ev(const Vec3 &v) { return Eigen::Vector3d(v.x, v.y, v.z); }
+Eigen::Vector3d ev(const Vec3 &v) {
+    return Eigen::Vector3d(v.x, v.y, v.z);
+}
 
 tax::matrix4::ptr mat4(const Frame &f) {
     return tax::make<tax::matrix4>(ev(f.o), ev(f.z), ev(f.x));
@@ -33,7 +35,7 @@ void compact_knots(const std::vector<double> &flat, std::vector<double> &knots, 
 tax::curve::ptr to_curve(const Curve *c) {
     if (auto *l = dynamic_cast<const LineCurve *>(c)) {
         auto ln = tax::make<tax::line>();
-        ln->matrix = tax::make<tax::matrix4>(ev(l->pnt), ev(l->dir));  // origin + direction(=X)
+        ln->matrix = tax::make<tax::matrix4>(ev(l->pnt), ev(l->dir)); // origin + direction(=X)
         return ln;
     }
     if (auto *ci = dynamic_cast<const CircleCurve *>(c)) {
@@ -52,10 +54,12 @@ tax::curve::ptr to_curve(const Curve *c) {
     if (auto *bs = dynamic_cast<const BSplineCurve *>(c)) {
         auto bc = tax::make<tax::bspline_curve>();
         bc->degree = bs->degree;
-        for (const Vec3 &p : bs->ctrl) bc->control_points.push_back(tax::make<tax::point3>(ev(p)));
+        for (const Vec3 &p : bs->ctrl)
+            bc->control_points.push_back(tax::make<tax::point3>(ev(p)));
         compact_knots(bs->U, bc->knots, bc->multiplicities);
-        if (!bs->weights.empty()) bc->weights = bs->weights;
-        bc->matrix = tax::make<tax::matrix4>();  // identity; control points are world-space
+        if (!bs->weights.empty())
+            bc->weights = bs->weights;
+        bc->matrix = tax::make<tax::matrix4>(); // identity; control points are world-space
         return bc;
     }
     if (auto *tc = dynamic_cast<const TrimmedCurve *>(c)) {
@@ -102,7 +106,8 @@ tax::surface::ptr to_surface(const Surface *s) {
         if (!bs->weights.empty()) {
             std::vector<std::vector<double>> w(bs->nu);
             for (int iu = 0; iu < bs->nu; ++iu)
-                for (int iv = 0; iv < bs->nv; ++iv) w[iu].push_back(bs->weights[iu * bs->nv + iv]);
+                for (int iv = 0; iv < bs->nv; ++iv)
+                    w[iu].push_back(bs->weights[iu * bs->nv + iv]);
             b->weights = w;
         }
         b->matrix = tax::make<tax::matrix4>();
@@ -129,20 +134,23 @@ tax::edge::ptr to_edge(const OrientedEdgeN &oe) {
     return e;
 }
 
-}  // namespace
+} // namespace
 
 std::shared_ptr<tax::shell> to_taxonomy_shell(const std::vector<std::shared_ptr<FaceSurfaceN>> &faces) {
     auto sh = tax::make<tax::shell>();
     sh->closed = true;
-    sh->matrix = tax::make<tax::matrix4>();  // geom_item::matrix defaults to null; the kernel derefs it
+    sh->matrix = tax::make<tax::matrix4>(); // geom_item::matrix defaults to null; the kernel derefs it
     for (const auto &fp : faces) {
-        if (!fp || !fp->surface) continue;
+        if (!fp || !fp->surface)
+            continue;
         tax::surface::ptr surf = to_surface(fp->surface.get());
-        if (!surf) continue;  // unmappable surface (e.g. cone) -> skip this face
+        if (!surf)
+            continue; // unmappable surface (e.g. cone) -> skip this face
         auto f = tax::make<tax::face>();
         f->basis = surf;
         f->matrix = tax::make<tax::matrix4>();
-        if (!fp->same_sense) f->orientation = false;
+        if (!fp->same_sense)
+            f->orientation = false;
         bool outer = true;
         for (const FaceBoundN &b : fp->bounds) {
             if (!b.loop || b.loop->is_poly && b.loop->polygon.size() < 3) {
@@ -161,30 +169,35 @@ std::shared_ptr<tax::shell> to_taxonomy_shell(const std::vector<std::shared_ptr<
                     lp->children.push_back(to_edge(oe));
                 }
             } else if (b.loop) {
-                for (const OrientedEdgeN &oe : b.loop->edges) lp->children.push_back(to_edge(oe));
+                for (const OrientedEdgeN &oe : b.loop->edges)
+                    lp->children.push_back(to_edge(oe));
             }
-            if (!b.orientation) lp->reverse();
-            if (!lp->children.empty()) f->children.push_back(lp);
+            if (!b.orientation)
+                lp->reverse();
+            if (!lp->children.empty())
+                f->children.push_back(lp);
             outer = false;
         }
-        if (!f->children.empty()) sh->children.push_back(f);
+        if (!f->children.empty())
+            sh->children.push_back(f);
     }
     return sh->children.empty() ? nullptr : sh;
 }
 
 std::shared_ptr<tax::extrusion> to_taxonomy_extrusion(const ExtrusionN &ex) {
-    if (!ex.profile) return nullptr;
+    if (!ex.profile)
+        return nullptr;
     // Reuse the face builder: the profile is one planar face (local XY, z=0).
     auto sh = to_taxonomy_shell({ex.profile});
-    if (!sh || sh->children.empty()) return nullptr;
+    if (!sh || sh->children.empty())
+        return nullptr;
     tax::face::ptr face = sh->children[0];
     // matrix = the solid's placement frame (origin, z=axis, x=ref_direction).
     auto m = tax::make<tax::matrix4>(Eigen::Vector3d(ex.frame.o.x, ex.frame.o.y, ex.frame.o.z),
                                      Eigen::Vector3d(ex.frame.z.x, ex.frame.z.y, ex.frame.z.z),
                                      Eigen::Vector3d(ex.frame.x.x, ex.frame.x.y, ex.frame.x.z));
-    auto dir =
-        tax::make<tax::direction3>(Eigen::Vector3d(ex.direction.x, ex.direction.y, ex.direction.z));
+    auto dir = tax::make<tax::direction3>(Eigen::Vector3d(ex.direction.x, ex.direction.y, ex.direction.z));
     return tax::make<tax::extrusion>(m, face, dir, ex.depth);
 }
 
-}  // namespace adacpp::ngeom
+} // namespace adacpp::ngeom

@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-#include "../../geom/neutral/ngeom_tessellate.h"  // TessMesh
+#include "../../geom/neutral/ngeom_tessellate.h" // TessMesh
 #include "../../geom/neutral/ngeom_topology.h"
 
 // Forward-declare the taxonomy shell so callers don't need the heavy ifcopenshell headers.
@@ -20,16 +20,16 @@ namespace geometry {
 namespace taxonomy {
 struct shell;
 struct extrusion;
-}
-}  // namespace geometry
-}  // namespace ifcopenshell
+} // namespace taxonomy
+} // namespace geometry
+} // namespace ifcopenshell
 
 namespace adacpp::ngeom {
 
 // Build a taxonomy shell (faces -> loops -> edges + basis surfaces/curves) from neutral
 // faces. Returns nullptr if nothing mappable. Defined in ngeom_taxonomy_build.cpp.
-std::shared_ptr<ifcopenshell::geometry::taxonomy::shell> to_taxonomy_shell(
-    const std::vector<std::shared_ptr<FaceSurfaceN>> &faces);
+std::shared_ptr<ifcopenshell::geometry::taxonomy::shell>
+to_taxonomy_shell(const std::vector<std::shared_ptr<FaceSurfaceN>> &faces);
 
 // Build an ifcopenshell taxonomy::extrusion (profile face + placement matrix +
 // direction + depth) from a decoded ExtrusionN. Defined in ngeom_taxonomy_build.cpp.
@@ -38,9 +38,9 @@ std::shared_ptr<ifcopenshell::geometry::taxonomy::extrusion> to_taxonomy_extrusi
 // Descriptor for one ifcopenshell ConversionSettings option, exposed so
 // Python / the frontend can enumerate + tune the taxonomy kernel settings.
 struct TaxonomySetting {
-    std::string name;           // e.g. "no-wire-intersection-check", "precision"
-    std::string type;           // "bool" | "int" | "double" | "std::string" | ...
-    std::string default_value;  // stringified default (empty for non-scalar types)
+    std::string name;          // e.g. "no-wire-intersection-check", "precision"
+    std::string type;          // "bool" | "int" | "double" | "std::string" | ...
+    std::string default_value; // stringified default (empty for non-scalar types)
 };
 
 // Enumerate every ifcopenshell ConversionSettings option with its type +
@@ -52,8 +52,7 @@ std::vector<TaxonomySetting> taxonomy_settings_info();
 //   settings: (name, string-value) overrides applied to the kernel's
 //             ifcopenshell ConversionSettings (parsed per the setting's type).
 // Returns one TessMesh with a Group per root. Defined in ngeom_taxonomy_kernel.cpp.
-TessMesh tessellate_via_taxonomy(const NgeomDoc &doc, const std::string &kernel, double deflection,
-                                 double angular_deg,
+TessMesh tessellate_via_taxonomy(const NgeomDoc &doc, const std::string &kernel, double deflection, double angular_deg,
                                  const std::vector<std::pair<std::string, std::string>> &settings = {});
 
-}  // namespace adacpp::ngeom
+} // namespace adacpp::ngeom

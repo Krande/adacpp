@@ -13,4 +13,4 @@ enum class MeshType {
 
 MeshType from_int(int value);
 
-#endif //NANO_OCCT_MESHTYPE_H
+#endif // NANO_OCCT_MESHTYPE_H
