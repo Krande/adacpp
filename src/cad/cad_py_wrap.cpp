@@ -1137,6 +1137,18 @@ ShapeHandle build_cone_impl(std::array<double, 3> loc, std::array<double, 3> axi
 //   3 bspline         : [3, degree, rational, trim, t_start, t_end, n_poles,
 //                        <3*n_poles coords>, n_knots, <knots>, <mults>,
 //                        <n_poles weights if rational>]
+// A circle/arc radius is a positive magnitude; gp_Circ throws Standard_ConstructionError on
+// radius <= 0, which aborts the entire solid build (one bad boundary edge drops the whole
+// solid as UnableToCreateSolidOCCGeom). A negative radius is a sign/serialization artifact —
+// radius has no sign — so take its magnitude. A near-zero radius is genuinely degenerate (a
+// point, not an edge): raise a clean, identifiable error rather than OCCT's opaque one.
+static double circle_radius_or_throw(double r) {
+    const double a = std::abs(r);
+    if (a < 1e-9)
+        throw std::runtime_error("edge_from_record: degenerate circle radius (|radius| < 1e-9)");
+    return a;
+}
+
 TopoDS_Edge edge_from_record(const std::vector<double> &e) {
     const int kind = static_cast<int>(std::lround(e[0]));
     if (kind == 0) {
@@ -1157,10 +1169,10 @@ TopoDS_Edge edge_from_record(const std::vector<double> &e) {
         if (e.size() >= 14) {
             const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]), gp_Dir(e[7], e[8], e[9]));
             const gp_Pnt p_start(e[11], e[12], e[13]);
-            return BRepBuilderAPI_MakeEdge(gp_Circ(ax, e[10]), p_start, p_start).Edge();
+            return BRepBuilderAPI_MakeEdge(gp_Circ(ax, circle_radius_or_throw(e[10])), p_start, p_start).Edge();
         }
         const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]));
-        return BRepBuilderAPI_MakeEdge(gp_Circ(ax, e[7])).Edge();
+        return BRepBuilderAPI_MakeEdge(gp_Circ(ax, circle_radius_or_throw(e[7]))).Edge();
     }
     if (kind == 5) {
         // Trimmed arc. new [loc(3), axis(3), ref(3), radius, t0, t1] (len 13) — ref places the arc
@@ -1168,10 +1180,10 @@ TopoDS_Edge edge_from_record(const std::vector<double> &e) {
         // radius, t0, t1] (len 10) — default axes.
         if (e.size() >= 13) {
             const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]), gp_Dir(e[7], e[8], e[9]));
-            return BRepBuilderAPI_MakeEdge(gp_Circ(ax, e[10]), e[11], e[12]).Edge();
+            return BRepBuilderAPI_MakeEdge(gp_Circ(ax, circle_radius_or_throw(e[10])), e[11], e[12]).Edge();
         }
         const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]));
-        return BRepBuilderAPI_MakeEdge(gp_Circ(ax, e[7]), e[8], e[9]).Edge();
+        return BRepBuilderAPI_MakeEdge(gp_Circ(ax, circle_radius_or_throw(e[7])), e[8], e[9]).Edge();
     }
     if (kind == 4) {
         const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]), gp_Dir(e[7], e[8], e[9]));
@@ -1236,7 +1248,7 @@ Handle(Geom_Curve) geom_curve_from_record(const std::vector<double> &e) {
     }
     if (kind == 2) {
         const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]));
-        return new Geom_Circle(ax, e[7]);
+        return new Geom_Circle(ax, circle_radius_or_throw(e[7]));
     }
     if (kind == 3) {
         const int degree = static_cast<int>(std::lround(e[1]));
@@ -2005,7 +2017,7 @@ ShapeHandle build_swept_disk_solid_impl(const std::vector<std::vector<double>> &
     const gp_Ax2 disk_axis(p0, gp_Dir(d0));
 
     auto sweep = [&](double r) -> TopoDS_Shape {
-        const TopoDS_Edge circ_edge = BRepBuilderAPI_MakeEdge(gp_Circ(disk_axis, r)).Edge();
+        const TopoDS_Edge circ_edge = BRepBuilderAPI_MakeEdge(gp_Circ(disk_axis, circle_radius_or_throw(r))).Edge();
         const TopoDS_Wire profile = BRepBuilderAPI_MakeWire(circ_edge).Wire();
         BRepOffsetAPI_MakePipeShell mps(spine);
         mps.SetTransitionMode(BRepBuilderAPI_RoundCorner);
