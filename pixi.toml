@@ -31,6 +31,10 @@ tinygltf = "==2.8.21" # This must be installed in target dir also if you want to
 gmsh = "*"
 ninja = "*"
 cxx-compiler = "*"
+# cmake FetchContent clones manifold (deps_manifold.cmake) at configure time; needs git on PATH.
+# CI runners (ubuntu-latest) have system git, but minimal build images (e.g. building adacpp inside
+# the adapy worker image) don't — pin it here so the build env is self-contained.
+git = "*"
 
 [feature.common.target.linux-64.dependencies]
 gxx = "*"

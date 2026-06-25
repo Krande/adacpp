@@ -66,6 +66,12 @@
 #include <ShapeFix_Shape.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
+#include <Geom_SurfaceOfRevolution.hxx>
+#include <Geom_SurfaceOfLinearExtrusion.hxx>
+#include <Geom_RectangularTrimmedSurface.hxx>
+#include <Geom_Line.hxx>
+#include <Geom_Circle.hxx>
+#include <Geom_TrimmedCurve.hxx>
 #include <Geom_ConicalSurface.hxx>
 #include <Geom_CylindricalSurface.hxx>
 #include <Geom_ToroidalSurface.hxx>
@@ -423,24 +429,34 @@ ShapeHandle from_topods_pointer_impl(uintptr_t ptr) {
 // Returns {xmin, ymin, zmin, xmax, ymax, zmax} — same order as OCCT's
 // Bnd_Box::Get and as adapy.occ.utils.get_boundingbox, so this slots in as
 // a drop-in replacement for callers using either side.
-std::array<double, 6> bbox_impl(const ShapeHandle &sh) {
+std::array<double, 6> bbox_impl(const ShapeHandle &sh, bool optimal = true) {
     const TopoDS_Shape &shape = sh.topods();
     if (shape.IsNull()) {
         throw std::runtime_error("bbox: ShapeHandle is null");
     }
-    // AddOptimal uses geometric extents (BSpline/B-rep aware) for a tight
-    // bbox; default Add inflates by shape tolerance (~1e-7) which would
-    // surprise callers querying a primitive's natural bbox.
-    //
-    // useTriangulation=False forces the analytic path — without this, OCCT
-    // returns the *mesh* bbox if a triangulation is already cached on the
-    // shape, which jitters ±1e-7 for box and ±0.1 for sphere/cylinder
-    // depending on tessellation deflection. Callers asking for `bbox(shape)`
-    // expect geometric extents, not mesh extents.
     Bnd_Box bb;
-    BRepBndLib::AddOptimal(shape, bb,
-                           /*useTriangulation=*/Standard_False,
-                           /*useShapeTolerance=*/Standard_False);
+    if (optimal) {
+        // AddOptimal uses geometric extents (BSpline/B-rep aware) for a tight
+        // bbox; default Add inflates by shape tolerance (~1e-7) which would
+        // surprise callers querying a primitive's natural bbox.
+        //
+        // useTriangulation=False forces the analytic path — without this, OCCT
+        // returns the *mesh* bbox if a triangulation is already cached on the
+        // shape, which jitters ±1e-7 for box and ±0.1 for sphere/cylinder
+        // depending on tessellation deflection. Callers asking for `bbox(shape)`
+        // expect geometric extents, not mesh extents.
+        BRepBndLib::AddOptimal(shape, bb,
+                               /*useTriangulation=*/Standard_False,
+                               /*useShapeTolerance=*/Standard_False);
+    } else {
+        // Fast path: a loose box without AddOptimal's per-surface refinement.
+        // AddOptimal samples every BSpline/B-rep face to tighten the box, which
+        // costs milliseconds per curved face — orders of magnitude more than a
+        // plain corner-extent Add. Callers that only need a rough extent (e.g. an
+        // empty-vs-non-empty probe before tessellation) pass optimal=false and
+        // avoid that per-face cost. useTriangulation=False keeps it analytic.
+        BRepBndLib::Add(shape, bb, /*useTriangulation=*/Standard_False);
+    }
     if (bb.IsVoid()) {
         throw std::runtime_error("bbox: empty bounding box (shape has no geometry)");
     }
@@ -1121,6 +1137,18 @@ ShapeHandle build_cone_impl(std::array<double, 3> loc, std::array<double, 3> axi
 //   3 bspline         : [3, degree, rational, trim, t_start, t_end, n_poles,
 //                        <3*n_poles coords>, n_knots, <knots>, <mults>,
 //                        <n_poles weights if rational>]
+// A circle/arc radius is a positive magnitude; gp_Circ throws Standard_ConstructionError on
+// radius <= 0, which aborts the entire solid build (one bad boundary edge drops the whole
+// solid as UnableToCreateSolidOCCGeom). A negative radius is a sign/serialization artifact —
+// radius has no sign — so take its magnitude. A near-zero radius is genuinely degenerate (a
+// point, not an edge): raise a clean, identifiable error rather than OCCT's opaque one.
+static double circle_radius_or_throw(double r) {
+    const double a = std::abs(r);
+    if (a < 1e-9)
+        throw std::runtime_error("edge_from_record: degenerate circle radius (|radius| < 1e-9)");
+    return a;
+}
+
 TopoDS_Edge edge_from_record(const std::vector<double> &e) {
     const int kind = static_cast<int>(std::lround(e[0]));
     if (kind == 0) {
@@ -1131,12 +1159,31 @@ TopoDS_Edge edge_from_record(const std::vector<double> &e) {
         return BRepBuilderAPI_MakeEdge(arc.Value()).Edge();
     }
     if (kind == 2) {
+        // Full circle. Two layouts (length-detected, back-compatible):
+        //   new   [loc(3), axis(3), ref(3), radius, start(3)] (len 14) — ref_direction sets the
+        //         angular origin and the start point anchors the closed edge's vertex so a seam
+        //         edge connects to it (else the vertex lands on OCC's default x-axis → the
+        //         cylinder/torus boundary wire fails to close). Emitted for face-bound edges.
+        //   legacy[loc(3), axis(3), radius] (len 8) — full circle, default axes. Still emitted for
+        //         closed PROFILE curves (extrude/revolve), where anchoring is irrelevant.
+        if (e.size() >= 14) {
+            const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]), gp_Dir(e[7], e[8], e[9]));
+            const gp_Pnt p_start(e[11], e[12], e[13]);
+            return BRepBuilderAPI_MakeEdge(gp_Circ(ax, circle_radius_or_throw(e[10])), p_start, p_start).Edge();
+        }
         const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]));
-        return BRepBuilderAPI_MakeEdge(gp_Circ(ax, e[7])).Edge();
+        return BRepBuilderAPI_MakeEdge(gp_Circ(ax, circle_radius_or_throw(e[7]))).Edge();
     }
     if (kind == 5) {
+        // Trimmed arc. new [loc(3), axis(3), ref(3), radius, t0, t1] (len 13) — ref places the arc
+        // endpoints at the right angle so they meet adjacent edges. legacy [loc(3), axis(3),
+        // radius, t0, t1] (len 10) — default axes.
+        if (e.size() >= 13) {
+            const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]), gp_Dir(e[7], e[8], e[9]));
+            return BRepBuilderAPI_MakeEdge(gp_Circ(ax, circle_radius_or_throw(e[10])), e[11], e[12]).Edge();
+        }
         const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]));
-        return BRepBuilderAPI_MakeEdge(gp_Circ(ax, e[7]), e[8], e[9]).Edge();
+        return BRepBuilderAPI_MakeEdge(gp_Circ(ax, circle_radius_or_throw(e[7])), e[8], e[9]).Edge();
     }
     if (kind == 4) {
         const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]), gp_Dir(e[7], e[8], e[9]));
@@ -1185,6 +1232,50 @@ TopoDS_Edge edge_from_record(const std::vector<double> &e) {
         return BRepBuilderAPI_MakeEdge(curve).Edge();
     }
     throw std::runtime_error("edge_from_record: unknown edge kind " + std::to_string(kind));
+}
+
+// Build a Geom_Curve (not an edge) from a curve record — used as the generatrix /
+// swept curve of a surface of revolution / linear extrusion. Returns the FULL curve
+// (the face bounds, not the curve, trim the surface). Handles the curve kinds a
+// generatrix realistically takes: B-spline (kind 3, the STEP case), line (kind 0,
+// returned as a finite trimmed segment) and full circle (kind 2).
+Handle(Geom_Curve) geom_curve_from_record(const std::vector<double> &e) {
+    const int kind = static_cast<int>(std::lround(e[0]));
+    if (kind == 0) {
+        const gp_Pnt a(e[1], e[2], e[3]), b(e[4], e[5], e[6]);
+        Handle(Geom_Line) ln = new Geom_Line(a, gp_Dir(gp_Vec(a, b)));
+        return new Geom_TrimmedCurve(ln, 0.0, a.Distance(b));
+    }
+    if (kind == 2) {
+        const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]));
+        return new Geom_Circle(ax, circle_radius_or_throw(e[7]));
+    }
+    if (kind == 3) {
+        const int degree = static_cast<int>(std::lround(e[1]));
+        const bool rational = std::lround(e[2]) != 0;
+        std::size_t i = 12; // skip kind,degree,rational,trim,t0,t1,pstart(3),pend(3)
+        const int n_poles = static_cast<int>(std::lround(e[i++]));
+        TColgp_Array1OfPnt poles(1, n_poles);
+        for (int p = 1; p <= n_poles; ++p) {
+            poles.SetValue(p, gp_Pnt(e[i], e[i + 1], e[i + 2]));
+            i += 3;
+        }
+        const int n_knots = static_cast<int>(std::lround(e[i++]));
+        TColStd_Array1OfReal knots(1, n_knots);
+        for (int k = 1; k <= n_knots; ++k)
+            knots.SetValue(k, e[i++]);
+        TColStd_Array1OfInteger mults(1, n_knots);
+        for (int k = 1; k <= n_knots; ++k)
+            mults.SetValue(k, static_cast<int>(std::lround(e[i++])));
+        if (rational) {
+            TColStd_Array1OfReal weights(1, n_poles);
+            for (int p = 1; p <= n_poles; ++p)
+                weights.SetValue(p, e[i++]);
+            return new Geom_BSplineCurve(poles, weights, knots, mults, degree, Standard_False);
+        }
+        return new Geom_BSplineCurve(poles, knots, mults, degree, Standard_False);
+    }
+    throw std::runtime_error("geom_curve_from_record: unsupported generatrix kind " + std::to_string(kind));
 }
 
 TopoDS_Wire wire_from_edges(const std::vector<std::vector<double>> &edges) {
@@ -1427,13 +1518,13 @@ ShapeHandle build_advanced_face_bspline_impl(int u_degree, int v_degree,
     return ShapeHandle(face);
 }
 
-// Bounds-trimmed AdvancedFace over a PLANE surface (flat SAT/IFC plates). The supporting
-// plane is INFERRED from the (planar) boundary wire via MakeFace(wire, OnlyPlane=true),
-// which also computes each edge's 2D p-curve — including a b-spline boundary edge — so the
-// face is correctly bounded by the wire and meshes. bounds[0] is the outer boundary, the
-// rest are holes. loc/axis/ref_dir are accepted for signature parity but unused (the wire
-// fixes the plane). Mirrors adapy's make_closed_shell_from_geom AdvancedFace(Plane) path.
-ShapeHandle build_advanced_face_planar_impl(std::array<double, 3>, std::array<double, 3>, std::array<double, 3>,
+// Bounds-trimmed AdvancedFace over a PLANE surface (flat SAT/IFC plates). The face is built on
+// the DECLARED plane (loc + axis normal): an only-near-planar boundary wire (import tolerance
+// above Precision::Confusion) still trims it, whereas MakeFace(wire) alone runs FindPlane and
+// fails ("MakeFace failed") on such wires. Falls back to inferring the plane from the wire when
+// the declared normal is degenerate. bounds[0] is the outer boundary, the rest are holes.
+ShapeHandle build_advanced_face_planar_impl(std::array<double, 3> loc, std::array<double, 3> axis,
+                                            std::array<double, 3> /*ref_dir*/,
                                             const std::vector<std::vector<std::vector<double>>> &bounds) {
     if (bounds.empty())
         throw std::runtime_error("build_advanced_face_planar: no bounds");
@@ -1448,12 +1539,40 @@ ShapeHandle build_advanced_face_planar_impl(std::array<double, 3>, std::array<do
         return wm.Wire();
     };
 
-    BRepBuilderAPI_MakeFace fm(wire_of(bounds[0]), Standard_True);
-    for (std::size_t b = 1; b < bounds.size(); ++b)
-        fm.Add(wire_of(bounds[b]));
-    if (!fm.IsDone())
+    TopoDS_Face face;
+    bool done = false;
+    // Primary: infer the plane from the wire — this also builds each edge's 2D p-curve (incl. a
+    // B-spline boundary edge), so a curved-boundary flat plate meshes.
+    {
+        BRepBuilderAPI_MakeFace fm(wire_of(bounds[0]), Standard_True);
+        for (std::size_t b = 1; b < bounds.size(); ++b)
+            fm.Add(wire_of(bounds[b]));
+        if (fm.IsDone()) {
+            face = fm.Face();
+            done = true;
+        }
+    }
+    // Fallback: a only-near-planar wire (import tolerance above Precision::Confusion) defeats
+    // FindPlane above — build on the DECLARED plane (loc + axis normal) instead, which projects
+    // the wire rather than fitting one.
+    const bool have_axis = (std::abs(axis[0]) + std::abs(axis[1]) + std::abs(axis[2])) > 1e-9;
+    if (!done && have_axis) {
+        try {
+            const gp_Pln pln(gp_Pnt(loc[0], loc[1], loc[2]), gp_Dir(axis[0], axis[1], axis[2]));
+            BRepBuilderAPI_MakeFace fm(pln, wire_of(bounds[0]), Standard_True);
+            for (std::size_t b = 1; b < bounds.size(); ++b)
+                fm.Add(wire_of(bounds[b]));
+            if (fm.IsDone()) {
+                face = fm.Face();
+                done = true;
+            }
+        } catch (const Standard_Failure &) {
+            // degenerate declared normal / projection failure → reported below
+        }
+    }
+    if (!done)
         throw std::runtime_error("build_advanced_face_planar: MakeFace failed");
-    ShapeFix_Face fixer(fm.Face());
+    ShapeFix_Face fixer(face);
     fixer.Perform();
     return ShapeHandle(fixer.Face());
 }
@@ -1485,12 +1604,20 @@ static ShapeHandle bounds_trimmed_analytic_face(const Handle(Geom_Surface) & sur
         fm.Add(wire_of(bounds[b]));
     if (!fm.IsDone())
         throw std::runtime_error(std::string(who) + ": MakeFace failed");
-
     TopoDS_Face face = fm.Face();
+
     ShapeFix_Face fixer(face);
     fixer.Perform();
     face = fixer.Face();
-    BRepLib::SameParameter(face, 1.0e-6, Standard_True);
+    // SameParameter is best-effort: an unbounded surface (e.g. Geom_SurfaceOfLinearExtrusion,
+    // infinite in V) can make it throw StdFail_NotDone while reconciling pcurves. A face that
+    // fails it is still a valid B-rep — BRepMesh rebuilds pcurves on demand — so don't let one
+    // step sink the whole face.
+    try {
+        BRepLib::SameParameter(face, 1.0e-6, Standard_True);
+    } catch (const Standard_Failure &) {
+        // keep the ShapeFix'd face as-is
+    }
     return ShapeHandle(face);
 }
 
@@ -1520,6 +1647,49 @@ ShapeHandle build_advanced_face_toroidal_impl(std::array<double, 3> loc, std::ar
                                               const std::vector<std::vector<std::vector<double>>> &bounds) {
     Handle(Geom_ToroidalSurface) surf = new Geom_ToroidalSurface(_ax3(loc, axis, ref_dir), major_radius, minor_radius);
     return bounds_trimmed_analytic_face(surf, bounds, "build_advanced_face_toroidal");
+}
+
+// Bounds-trimmed AdvancedFace over a surface of revolution: revolve the generatrix
+// curve (the meridian — a B-spline / line / circle, passed as a curve record) about
+// the axis, then trim the resulting surface to the boundary wire(s). Mirrors the
+// analytic builders; libtess2 covers this OCC-free (SURF_REVOLUTION), this is the
+// OCC AdacppBackend.build path for full-B-rep export (ifc/step).
+ShapeHandle
+build_advanced_face_surface_of_revolution_impl(std::array<double, 3> axis_loc, std::array<double, 3> axis_dir,
+                                               const std::vector<double> &generatrix,
+                                               const std::vector<std::vector<std::vector<double>>> &bounds) {
+    try {
+        Handle(Geom_Curve) gen = geom_curve_from_record(generatrix);
+        Handle(Geom_SurfaceOfRevolution) surf = new Geom_SurfaceOfRevolution(
+            gen, gp_Ax1(gp_Pnt(axis_loc[0], axis_loc[1], axis_loc[2]), gp_Dir(axis_dir[0], axis_dir[1], axis_dir[2])));
+        return bounds_trimmed_analytic_face(surf, bounds, "build_advanced_face_surface_of_revolution");
+    } catch (const Standard_Failure &ex) {
+        throw std::runtime_error(std::string("build_advanced_face_surface_of_revolution: ") + ex.GetMessageString());
+    }
+}
+
+// Bounds-trimmed AdvancedFace over a surface of linear extrusion: extrude the swept
+// curve along `direction`, then trim to the boundary wire(s). (libtess2 covers this
+// OCC-free via SURF_LIN_EXTRUSION; OCC path for B-rep export.)
+ShapeHandle
+build_advanced_face_surface_of_linear_extrusion_impl(std::array<double, 3> direction, const std::vector<double> &swept,
+                                                     const std::vector<std::vector<std::vector<double>>> &bounds) {
+    // Wrap in a catch so an OCC SameParameter/MakeFace failure on the extrusion face
+    // surfaces as a clean error (callers fall back / libtess2 covers it OCC-free)
+    // instead of propagating a raw OCCT abort.
+    // NOTE: OCC face construction over a B-spline-generatrix linear-extrusion surface currently
+    // fails (BRepBuilderAPI_MakeFace can't project the 3D boundary wire onto the infinite-V
+    // surface; SameParameter / explicit p-curve projection were also tried). Caught + reported
+    // cleanly; libtess2 (SURF_LIN_EXTRUSION, OCC-free) is the working path for this surface today.
+    try {
+        Handle(Geom_Curve) gen = geom_curve_from_record(swept);
+        Handle(Geom_SurfaceOfLinearExtrusion) surf =
+            new Geom_SurfaceOfLinearExtrusion(gen, gp_Dir(direction[0], direction[1], direction[2]));
+        return bounds_trimmed_analytic_face(surf, bounds, "build_advanced_face_surface_of_linear_extrusion");
+    } catch (const Standard_Failure &ex) {
+        throw std::runtime_error(std::string("build_advanced_face_surface_of_linear_extrusion: ") +
+                                 ex.GetMessageString());
+    }
 }
 
 // Extract the 2D UV pcurve of an edge on a face (BRep_Tool::CurveOnSurface →
@@ -1847,7 +2017,7 @@ ShapeHandle build_swept_disk_solid_impl(const std::vector<std::vector<double>> &
     const gp_Ax2 disk_axis(p0, gp_Dir(d0));
 
     auto sweep = [&](double r) -> TopoDS_Shape {
-        const TopoDS_Edge circ_edge = BRepBuilderAPI_MakeEdge(gp_Circ(disk_axis, r)).Edge();
+        const TopoDS_Edge circ_edge = BRepBuilderAPI_MakeEdge(gp_Circ(disk_axis, circle_radius_or_throw(r))).Edge();
         const TopoDS_Wire profile = BRepBuilderAPI_MakeWire(circ_edge).Wire();
         BRepOffsetAPI_MakePipeShell mps(spine);
         mps.SetTransitionMode(BRepBuilderAPI_RoundCorner);
@@ -2272,9 +2442,11 @@ void cad_module(nb::module_ &m) {
     m.def("tessellate_box", &tessellate_box_impl, "dx"_a, "dy"_a, "dz"_a,
           "Convenience: build a box and tessellate it in one call.");
 
-    m.def("bbox", &bbox_impl, "shape"_a,
+    m.def("bbox", &bbox_impl, "shape"_a, "optimal"_a = true,
           "Axis-aligned bounding box of a shape, returned as "
-          "(xmin, ymin, zmin, xmax, ymax, zmax).");
+          "(xmin, ymin, zmin, xmax, ymax, zmax). optimal=True gives a tight, "
+          "BSpline/B-rep-aware box (AddOptimal); optimal=False is a fast loose "
+          "box (Add) for rough-extent probes that don't need per-face refinement.");
 
     m.def("obb", &obb_impl, "shape"_a,
           "Oriented bounding box of a shape, returned as "
@@ -2455,6 +2627,16 @@ void cad_module(nb::module_ &m) {
           "major_radius"_a, "minor_radius"_a, "bounds"_a,
           "Bounds-trimmed AdvancedFace over a Geom_ToroidalSurface (pipe elbows). "
           "bounds[0] outer, rest holes; 3D edge records.");
+
+    m.def("build_advanced_face_surface_of_revolution", &build_advanced_face_surface_of_revolution_impl, "axis_loc"_a,
+          "axis_dir"_a, "generatrix"_a, "bounds"_a,
+          "Bounds-trimmed AdvancedFace over a Geom_SurfaceOfRevolution: revolve the generatrix "
+          "curve record (B-spline/line/circle) about (axis_loc, axis_dir). bounds[0] outer, rest holes.");
+
+    m.def("build_advanced_face_surface_of_linear_extrusion", &build_advanced_face_surface_of_linear_extrusion_impl,
+          "direction"_a, "swept"_a, "bounds"_a,
+          "Bounds-trimmed AdvancedFace over a Geom_SurfaceOfLinearExtrusion: extrude the swept "
+          "curve record along direction. bounds[0] outer, rest holes; 3D edge records.");
 
     m.def("face_to_advanced_face", &face_to_advanced_face_impl, "face"_a,
           "Decompose a B-spline face into AdvancedFaceData (surface poles/knots + per-wire "
