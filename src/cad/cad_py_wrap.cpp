@@ -429,24 +429,34 @@ ShapeHandle from_topods_pointer_impl(uintptr_t ptr) {
 // Returns {xmin, ymin, zmin, xmax, ymax, zmax} — same order as OCCT's
 // Bnd_Box::Get and as adapy.occ.utils.get_boundingbox, so this slots in as
 // a drop-in replacement for callers using either side.
-std::array<double, 6> bbox_impl(const ShapeHandle &sh) {
+std::array<double, 6> bbox_impl(const ShapeHandle &sh, bool optimal = true) {
     const TopoDS_Shape &shape = sh.topods();
     if (shape.IsNull()) {
         throw std::runtime_error("bbox: ShapeHandle is null");
     }
-    // AddOptimal uses geometric extents (BSpline/B-rep aware) for a tight
-    // bbox; default Add inflates by shape tolerance (~1e-7) which would
-    // surprise callers querying a primitive's natural bbox.
-    //
-    // useTriangulation=False forces the analytic path — without this, OCCT
-    // returns the *mesh* bbox if a triangulation is already cached on the
-    // shape, which jitters ±1e-7 for box and ±0.1 for sphere/cylinder
-    // depending on tessellation deflection. Callers asking for `bbox(shape)`
-    // expect geometric extents, not mesh extents.
     Bnd_Box bb;
-    BRepBndLib::AddOptimal(shape, bb,
-                           /*useTriangulation=*/Standard_False,
-                           /*useShapeTolerance=*/Standard_False);
+    if (optimal) {
+        // AddOptimal uses geometric extents (BSpline/B-rep aware) for a tight
+        // bbox; default Add inflates by shape tolerance (~1e-7) which would
+        // surprise callers querying a primitive's natural bbox.
+        //
+        // useTriangulation=False forces the analytic path — without this, OCCT
+        // returns the *mesh* bbox if a triangulation is already cached on the
+        // shape, which jitters ±1e-7 for box and ±0.1 for sphere/cylinder
+        // depending on tessellation deflection. Callers asking for `bbox(shape)`
+        // expect geometric extents, not mesh extents.
+        BRepBndLib::AddOptimal(shape, bb,
+                               /*useTriangulation=*/Standard_False,
+                               /*useShapeTolerance=*/Standard_False);
+    } else {
+        // Fast path: a loose box without AddOptimal's per-surface refinement.
+        // AddOptimal samples every BSpline/B-rep face to tighten the box, which
+        // costs milliseconds per curved face — orders of magnitude more than a
+        // plain corner-extent Add. Callers that only need a rough extent (e.g. an
+        // empty-vs-non-empty probe before tessellation) pass optimal=false and
+        // avoid that per-face cost. useTriangulation=False keeps it analytic.
+        BRepBndLib::Add(shape, bb, /*useTriangulation=*/Standard_False);
+    }
     if (bb.IsVoid()) {
         throw std::runtime_error("bbox: empty bounding box (shape has no geometry)");
     }
@@ -2420,9 +2430,11 @@ void cad_module(nb::module_ &m) {
     m.def("tessellate_box", &tessellate_box_impl, "dx"_a, "dy"_a, "dz"_a,
           "Convenience: build a box and tessellate it in one call.");
 
-    m.def("bbox", &bbox_impl, "shape"_a,
+    m.def("bbox", &bbox_impl, "shape"_a, "optimal"_a = true,
           "Axis-aligned bounding box of a shape, returned as "
-          "(xmin, ymin, zmin, xmax, ymax, zmax).");
+          "(xmin, ymin, zmin, xmax, ymax, zmax). optimal=True gives a tight, "
+          "BSpline/B-rep-aware box (AddOptimal); optimal=False is a fast loose "
+          "box (Add) for rough-extent probes that don't need per-face refinement.");
 
     m.def("obb", &obb_impl, "shape"_a,
           "Oriented bounding box of a shape, returned as "
