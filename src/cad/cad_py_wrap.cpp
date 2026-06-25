@@ -1137,19 +1137,31 @@ TopoDS_Edge edge_from_record(const std::vector<double> &e) {
         return BRepBuilderAPI_MakeEdge(arc.Value()).Edge();
     }
     if (kind == 2) {
-        // Full circle: [loc(3), axis(3), ref(3), radius, start(3)]. ref_direction sets the
-        // angular origin and the start point anchors the closed edge's vertex, so a seam edge
-        // connects to it (without these the vertex landed at OCC's default x-axis → the
-        // cylinder/torus boundary wire failed to close).
-        const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]), gp_Dir(e[7], e[8], e[9]));
-        const gp_Pnt p_start(e[11], e[12], e[13]);
-        return BRepBuilderAPI_MakeEdge(gp_Circ(ax, e[10]), p_start, p_start).Edge();
+        // Full circle. Two layouts (length-detected, back-compatible):
+        //   new   [loc(3), axis(3), ref(3), radius, start(3)] (len 14) — ref_direction sets the
+        //         angular origin and the start point anchors the closed edge's vertex so a seam
+        //         edge connects to it (else the vertex lands on OCC's default x-axis → the
+        //         cylinder/torus boundary wire fails to close). Emitted for face-bound edges.
+        //   legacy[loc(3), axis(3), radius] (len 8) — full circle, default axes. Still emitted for
+        //         closed PROFILE curves (extrude/revolve), where anchoring is irrelevant.
+        if (e.size() >= 14) {
+            const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]), gp_Dir(e[7], e[8], e[9]));
+            const gp_Pnt p_start(e[11], e[12], e[13]);
+            return BRepBuilderAPI_MakeEdge(gp_Circ(ax, e[10]), p_start, p_start).Edge();
+        }
+        const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]));
+        return BRepBuilderAPI_MakeEdge(gp_Circ(ax, e[7])).Edge();
     }
     if (kind == 5) {
-        // Trimmed arc: [loc(3), axis(3), ref(3), radius, t_start, t_end] — ref_direction places
-        // the arc endpoints at the right angle so they meet the adjacent edges.
-        const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]), gp_Dir(e[7], e[8], e[9]));
-        return BRepBuilderAPI_MakeEdge(gp_Circ(ax, e[10]), e[11], e[12]).Edge();
+        // Trimmed arc. new [loc(3), axis(3), ref(3), radius, t0, t1] (len 13) — ref places the arc
+        // endpoints at the right angle so they meet adjacent edges. legacy [loc(3), axis(3),
+        // radius, t0, t1] (len 10) — default axes.
+        if (e.size() >= 13) {
+            const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]), gp_Dir(e[7], e[8], e[9]));
+            return BRepBuilderAPI_MakeEdge(gp_Circ(ax, e[10]), e[11], e[12]).Edge();
+        }
+        const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]));
+        return BRepBuilderAPI_MakeEdge(gp_Circ(ax, e[7]), e[8], e[9]).Edge();
     }
     if (kind == 4) {
         const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]), gp_Dir(e[7], e[8], e[9]));
