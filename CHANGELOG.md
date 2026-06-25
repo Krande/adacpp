@@ -2,6 +2,15 @@
 
 
 
+## v0.10.1 (2026-06-25)
+
+### Fix
+
+* fix: OCC AdvancedFace build for closed-revolution + near-planar faces (#31)
+
+Co-authored-by: Claude Opus 4.8 &lt;noreply@anthropic.com&gt; ([`fc3e084`](https://github.com/Krande/adacpp/commit/fc3e0847d100f8837a9cba2d8070a4d367931486))
+
+
 ## v0.10.0 (2026-06-24)
 
 ### Feature
