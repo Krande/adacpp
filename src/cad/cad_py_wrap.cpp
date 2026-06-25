@@ -1484,13 +1484,13 @@ ShapeHandle build_advanced_face_bspline_impl(int u_degree, int v_degree,
     return ShapeHandle(face);
 }
 
-// Bounds-trimmed AdvancedFace over a PLANE surface (flat SAT/IFC plates). The supporting
-// plane is INFERRED from the (planar) boundary wire via MakeFace(wire, OnlyPlane=true),
-// which also computes each edge's 2D p-curve — including a b-spline boundary edge — so the
-// face is correctly bounded by the wire and meshes. bounds[0] is the outer boundary, the
-// rest are holes. loc/axis/ref_dir are accepted for signature parity but unused (the wire
-// fixes the plane). Mirrors adapy's make_closed_shell_from_geom AdvancedFace(Plane) path.
-ShapeHandle build_advanced_face_planar_impl(std::array<double, 3>, std::array<double, 3>, std::array<double, 3>,
+// Bounds-trimmed AdvancedFace over a PLANE surface (flat SAT/IFC plates). The face is built on
+// the DECLARED plane (loc + axis normal): an only-near-planar boundary wire (import tolerance
+// above Precision::Confusion) still trims it, whereas MakeFace(wire) alone runs FindPlane and
+// fails ("MakeFace failed") on such wires. Falls back to inferring the plane from the wire when
+// the declared normal is degenerate. bounds[0] is the outer boundary, the rest are holes.
+ShapeHandle build_advanced_face_planar_impl(std::array<double, 3> loc, std::array<double, 3> axis,
+                                            std::array<double, 3> /*ref_dir*/,
                                             const std::vector<std::vector<std::vector<double>>> &bounds) {
     if (bounds.empty())
         throw std::runtime_error("build_advanced_face_planar: no bounds");
@@ -1505,12 +1505,40 @@ ShapeHandle build_advanced_face_planar_impl(std::array<double, 3>, std::array<do
         return wm.Wire();
     };
 
-    BRepBuilderAPI_MakeFace fm(wire_of(bounds[0]), Standard_True);
-    for (std::size_t b = 1; b < bounds.size(); ++b)
-        fm.Add(wire_of(bounds[b]));
-    if (!fm.IsDone())
+    TopoDS_Face face;
+    bool done = false;
+    // Primary: infer the plane from the wire — this also builds each edge's 2D p-curve (incl. a
+    // B-spline boundary edge), so a curved-boundary flat plate meshes.
+    {
+        BRepBuilderAPI_MakeFace fm(wire_of(bounds[0]), Standard_True);
+        for (std::size_t b = 1; b < bounds.size(); ++b)
+            fm.Add(wire_of(bounds[b]));
+        if (fm.IsDone()) {
+            face = fm.Face();
+            done = true;
+        }
+    }
+    // Fallback: a only-near-planar wire (import tolerance above Precision::Confusion) defeats
+    // FindPlane above — build on the DECLARED plane (loc + axis normal) instead, which projects
+    // the wire rather than fitting one.
+    const bool have_axis = (std::abs(axis[0]) + std::abs(axis[1]) + std::abs(axis[2])) > 1e-9;
+    if (!done && have_axis) {
+        try {
+            const gp_Pln pln(gp_Pnt(loc[0], loc[1], loc[2]), gp_Dir(axis[0], axis[1], axis[2]));
+            BRepBuilderAPI_MakeFace fm(pln, wire_of(bounds[0]), Standard_True);
+            for (std::size_t b = 1; b < bounds.size(); ++b)
+                fm.Add(wire_of(bounds[b]));
+            if (fm.IsDone()) {
+                face = fm.Face();
+                done = true;
+            }
+        } catch (const Standard_Failure &) {
+            // degenerate declared normal / projection failure → reported below
+        }
+    }
+    if (!done)
         throw std::runtime_error("build_advanced_face_planar: MakeFace failed");
-    ShapeFix_Face fixer(fm.Face());
+    ShapeFix_Face fixer(face);
     fixer.Perform();
     return ShapeHandle(fixer.Face());
 }
