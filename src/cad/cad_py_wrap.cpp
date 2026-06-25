@@ -66,6 +66,11 @@
 #include <ShapeFix_Shape.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
+#include <Geom_SurfaceOfRevolution.hxx>
+#include <Geom_SurfaceOfLinearExtrusion.hxx>
+#include <Geom_Line.hxx>
+#include <Geom_Circle.hxx>
+#include <Geom_TrimmedCurve.hxx>
 #include <Geom_ConicalSurface.hxx>
 #include <Geom_CylindricalSurface.hxx>
 #include <Geom_ToroidalSurface.hxx>
@@ -1187,6 +1192,50 @@ TopoDS_Edge edge_from_record(const std::vector<double> &e) {
     throw std::runtime_error("edge_from_record: unknown edge kind " + std::to_string(kind));
 }
 
+// Build a Geom_Curve (not an edge) from a curve record — used as the generatrix /
+// swept curve of a surface of revolution / linear extrusion. Returns the FULL curve
+// (the face bounds, not the curve, trim the surface). Handles the curve kinds a
+// generatrix realistically takes: B-spline (kind 3, the STEP case), line (kind 0,
+// returned as a finite trimmed segment) and full circle (kind 2).
+Handle(Geom_Curve) geom_curve_from_record(const std::vector<double> &e) {
+    const int kind = static_cast<int>(std::lround(e[0]));
+    if (kind == 0) {
+        const gp_Pnt a(e[1], e[2], e[3]), b(e[4], e[5], e[6]);
+        Handle(Geom_Line) ln = new Geom_Line(a, gp_Dir(gp_Vec(a, b)));
+        return new Geom_TrimmedCurve(ln, 0.0, a.Distance(b));
+    }
+    if (kind == 2) {
+        const gp_Ax2 ax(gp_Pnt(e[1], e[2], e[3]), gp_Dir(e[4], e[5], e[6]));
+        return new Geom_Circle(ax, e[7]);
+    }
+    if (kind == 3) {
+        const int degree = static_cast<int>(std::lround(e[1]));
+        const bool rational = std::lround(e[2]) != 0;
+        std::size_t i = 12; // skip kind,degree,rational,trim,t0,t1,pstart(3),pend(3)
+        const int n_poles = static_cast<int>(std::lround(e[i++]));
+        TColgp_Array1OfPnt poles(1, n_poles);
+        for (int p = 1; p <= n_poles; ++p) {
+            poles.SetValue(p, gp_Pnt(e[i], e[i + 1], e[i + 2]));
+            i += 3;
+        }
+        const int n_knots = static_cast<int>(std::lround(e[i++]));
+        TColStd_Array1OfReal knots(1, n_knots);
+        for (int k = 1; k <= n_knots; ++k)
+            knots.SetValue(k, e[i++]);
+        TColStd_Array1OfInteger mults(1, n_knots);
+        for (int k = 1; k <= n_knots; ++k)
+            mults.SetValue(k, static_cast<int>(std::lround(e[i++])));
+        if (rational) {
+            TColStd_Array1OfReal weights(1, n_poles);
+            for (int p = 1; p <= n_poles; ++p)
+                weights.SetValue(p, e[i++]);
+            return new Geom_BSplineCurve(poles, weights, knots, mults, degree, Standard_False);
+        }
+        return new Geom_BSplineCurve(poles, knots, mults, degree, Standard_False);
+    }
+    throw std::runtime_error("geom_curve_from_record: unsupported generatrix kind " + std::to_string(kind));
+}
+
 TopoDS_Wire wire_from_edges(const std::vector<std::vector<double>> &edges) {
     BRepBuilderAPI_MakeWire wm;
     for (const auto &e : edges) {
@@ -1520,6 +1569,45 @@ ShapeHandle build_advanced_face_toroidal_impl(std::array<double, 3> loc, std::ar
                                               const std::vector<std::vector<std::vector<double>>> &bounds) {
     Handle(Geom_ToroidalSurface) surf = new Geom_ToroidalSurface(_ax3(loc, axis, ref_dir), major_radius, minor_radius);
     return bounds_trimmed_analytic_face(surf, bounds, "build_advanced_face_toroidal");
+}
+
+// Bounds-trimmed AdvancedFace over a surface of revolution: revolve the generatrix
+// curve (the meridian — a B-spline / line / circle, passed as a curve record) about
+// the axis, then trim the resulting surface to the boundary wire(s). Mirrors the
+// analytic builders; libtess2 covers this OCC-free (SURF_REVOLUTION), this is the
+// OCC AdacppBackend.build path for full-B-rep export (ifc/step).
+ShapeHandle
+build_advanced_face_surface_of_revolution_impl(std::array<double, 3> axis_loc, std::array<double, 3> axis_dir,
+                                               const std::vector<double> &generatrix,
+                                               const std::vector<std::vector<std::vector<double>>> &bounds) {
+    try {
+        Handle(Geom_Curve) gen = geom_curve_from_record(generatrix);
+        Handle(Geom_SurfaceOfRevolution) surf = new Geom_SurfaceOfRevolution(
+            gen, gp_Ax1(gp_Pnt(axis_loc[0], axis_loc[1], axis_loc[2]), gp_Dir(axis_dir[0], axis_dir[1], axis_dir[2])));
+        return bounds_trimmed_analytic_face(surf, bounds, "build_advanced_face_surface_of_revolution");
+    } catch (const Standard_Failure &ex) {
+        throw std::runtime_error(std::string("build_advanced_face_surface_of_revolution: ") + ex.GetMessageString());
+    }
+}
+
+// Bounds-trimmed AdvancedFace over a surface of linear extrusion: extrude the swept
+// curve along `direction`, then trim to the boundary wire(s). (libtess2 covers this
+// OCC-free via SURF_LIN_EXTRUSION; OCC path for B-rep export.)
+ShapeHandle
+build_advanced_face_surface_of_linear_extrusion_impl(std::array<double, 3> direction, const std::vector<double> &swept,
+                                                     const std::vector<std::vector<std::vector<double>>> &bounds) {
+    // Wrap in a catch so an OCC SameParameter/MakeFace failure on the extrusion face
+    // surfaces as a clean error (callers fall back / libtess2 covers it OCC-free)
+    // instead of propagating a raw OCCT abort.
+    try {
+        Handle(Geom_Curve) gen = geom_curve_from_record(swept);
+        Handle(Geom_SurfaceOfLinearExtrusion) surf =
+            new Geom_SurfaceOfLinearExtrusion(gen, gp_Dir(direction[0], direction[1], direction[2]));
+        return bounds_trimmed_analytic_face(surf, bounds, "build_advanced_face_surface_of_linear_extrusion");
+    } catch (const Standard_Failure &ex) {
+        throw std::runtime_error(std::string("build_advanced_face_surface_of_linear_extrusion: ") +
+                                 ex.GetMessageString());
+    }
 }
 
 // Extract the 2D UV pcurve of an edge on a face (BRep_Tool::CurveOnSurface →
@@ -2455,6 +2543,16 @@ void cad_module(nb::module_ &m) {
           "major_radius"_a, "minor_radius"_a, "bounds"_a,
           "Bounds-trimmed AdvancedFace over a Geom_ToroidalSurface (pipe elbows). "
           "bounds[0] outer, rest holes; 3D edge records.");
+
+    m.def("build_advanced_face_surface_of_revolution", &build_advanced_face_surface_of_revolution_impl, "axis_loc"_a,
+          "axis_dir"_a, "generatrix"_a, "bounds"_a,
+          "Bounds-trimmed AdvancedFace over a Geom_SurfaceOfRevolution: revolve the generatrix "
+          "curve record (B-spline/line/circle) about (axis_loc, axis_dir). bounds[0] outer, rest holes.");
+
+    m.def("build_advanced_face_surface_of_linear_extrusion", &build_advanced_face_surface_of_linear_extrusion_impl,
+          "direction"_a, "swept"_a, "bounds"_a,
+          "Bounds-trimmed AdvancedFace over a Geom_SurfaceOfLinearExtrusion: extrude the swept "
+          "curve record along direction. bounds[0] outer, rest holes; 3D edge records.");
 
     m.def("face_to_advanced_face", &face_to_advanced_face_impl, "face"_a,
           "Decompose a B-spline face into AdvancedFaceData (surface poles/knots + per-wire "

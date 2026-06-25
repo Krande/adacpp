@@ -55,6 +55,8 @@ build_advanced_face_planar = _cad.build_advanced_face_planar
 build_advanced_face_cylindrical = _cad.build_advanced_face_cylindrical
 build_advanced_face_conical = _cad.build_advanced_face_conical
 build_advanced_face_toroidal = _cad.build_advanced_face_toroidal
+build_advanced_face_surface_of_revolution = _cad.build_advanced_face_surface_of_revolution
+build_advanced_face_surface_of_linear_extrusion = _cad.build_advanced_face_surface_of_linear_extrusion
 face_to_advanced_face = _cad.face_to_advanced_face
 extrude_face_along_normal = _cad.extrude_face_along_normal
 build_face_based_surface_model = _cad.build_face_based_surface_model
@@ -143,6 +145,8 @@ __all__ = [
     "build_advanced_face_cylindrical",
     "build_advanced_face_conical",
     "build_advanced_face_toroidal",
+    "build_advanced_face_surface_of_revolution",
+    "build_advanced_face_surface_of_linear_extrusion",
     "face_to_advanced_face",
     "extrude_face_along_normal",
     "build_face_based_surface_model",
