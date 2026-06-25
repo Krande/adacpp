@@ -1,0 +1,92 @@
+name: Conda pre-release (homelab channel)
+
+# Manually-dispatched build of a pre-release ada-cpp conda package, uploaded to a private
+# conda channel so adapy can pin + consume it without a full conda-forge release. Lets a fix
+# branch reach the deployed worker quickly (the worker installs ada-cpp from conda).
+#
+# All infrastructure (channel server URL, channel name, upload token, the conda-forge mirror
+# config) lives ONLY in repo secrets — nothing about the host is committed here.
+#
+# Secrets used:
+#   PIXI_MIRROR_CONFIG  full contents of a .pixi/config.toml ([mirrors] redirecting conda-forge
+#                       to the homelab mirror + the pre-release channel) — written verbatim so
+#                       the build resolves dependencies from the mirror. Optional; skipped if unset.
+#   CONDA_SERVER_URL    base URL of the conda server (e.g. https://<host>).
+#   CONDA_CHANNEL       channel name to upload into.
+#   CONDA_UPLOAD_TOKEN  bearer token with write access to that channel.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Pre-release version to stamp (must sort ABOVE the conda-forge release, e.g. 0.10.1a1). Empty = use pyproject version as-is.'
+        required: false
+        default: ''
+
+jobs:
+  build-and-upload:
+    runs-on: docker-build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write pixi mirror config from secret
+        env:
+          PIXI_MIRROR_CONFIG: ${{ secrets.PIXI_MIRROR_CONFIG }}
+        run: |
+          if [ -z "$PIXI_MIRROR_CONFIG" ]; then
+            echo "PIXI_MIRROR_CONFIG unset — building against the default channels."
+            exit 0
+          fi
+          mkdir -p .pixi
+          printf '%s' "$PIXI_MIRROR_CONFIG" > .pixi/config.toml
+          echo "Wrote .pixi/config.toml ($(wc -c < .pixi/config.toml) bytes) — mirror config applied."
+
+      - name: Stamp pre-release version
+        env:
+          VERSION: ${{ github.event.inputs.version }}
+        run: |
+          # Optional: rewrite pyproject's [project].version so the package sorts above the
+          # released one (the recipe reads the version from pyproject.toml). No-op when empty.
+          if [ -z "$VERSION" ]; then
+            echo "No version override — using pyproject.toml as-is."
+            exit 0
+          fi
+          python -c "import re,sys; p='pyproject.toml'; s=open(p).read(); s=re.sub(r'(?m)^(version\\s*=\\s*\")[^\"]+(\")', r'\\g<1>${VERSION}\\g<2>', s, count=1); open(p,'w').write(s)"
+          echo "Stamped version=${VERSION}:"; grep -m1 -E '^version' pyproject.toml
+
+      - name: Build conda package
+        run: |
+          curl -fsSL https://pixi.sh/install.sh | bash
+          export PATH="$HOME/.pixi/bin:$PATH"
+          # rattler-build writes the .conda artifact(s) under ./output/<subdir>/.
+          pixi run conda-build
+
+      - name: Upload to the conda channel
+        env:
+          CONDA_SERVER_URL: ${{ secrets.CONDA_SERVER_URL }}
+          CONDA_CHANNEL: ${{ secrets.CONDA_CHANNEL }}
+          CONDA_UPLOAD_TOKEN: ${{ secrets.CONDA_UPLOAD_TOKEN }}
+        run: |
+          if [ -z "$CONDA_SERVER_URL" ] || [ -z "$CONDA_CHANNEL" ] || [ -z "$CONDA_UPLOAD_TOKEN" ]; then
+            echo "::error::CONDA_SERVER_URL / CONDA_CHANNEL / CONDA_UPLOAD_TOKEN must be set as repo secrets."
+            exit 1
+          fi
+          shopt -s globstar nullglob
+          pkgs=(output/**/*.conda output/**/*.tar.bz2)
+          if [ ${#pkgs[@]} -eq 0 ]; then
+            echo "::error::no built packages found under output/."
+            exit 1
+          fi
+          url="${CONDA_SERVER_URL%/}/api/channels/${CONDA_CHANNEL}/packages"
+          for f in "${pkgs[@]}"; do
+            echo "Uploading $(basename "$f") -> ${CONDA_CHANNEL}"
+            code=$(curl -sS -o /tmp/resp -w '%{http_code}' \
+              -H "Authorization: Bearer ${CONDA_UPLOAD_TOKEN}" \
+              -F "files=@${f}" "$url")
+            if [ "$code" != "200" ] && [ "$code" != "201" ] && [ "$code" != "202" ]; then
+              echo "::error::upload of $(basename "$f") failed (HTTP $code):"; head -c 500 /tmp/resp; echo
+              exit 1
+            fi
+            echo "  ok (HTTP $code)"
+          done
+          echo "Uploaded ${#pkgs[@]} package(s) to ${CONDA_CHANNEL}."
