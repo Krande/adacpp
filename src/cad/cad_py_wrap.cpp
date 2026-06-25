@@ -68,6 +68,7 @@
 #include <Geom_BSplineSurface.hxx>
 #include <Geom_SurfaceOfRevolution.hxx>
 #include <Geom_SurfaceOfLinearExtrusion.hxx>
+#include <Geom_RectangularTrimmedSurface.hxx>
 #include <Geom_Line.hxx>
 #include <Geom_Circle.hxx>
 #include <Geom_TrimmedCurve.hxx>
@@ -1534,12 +1535,20 @@ static ShapeHandle bounds_trimmed_analytic_face(const Handle(Geom_Surface) & sur
         fm.Add(wire_of(bounds[b]));
     if (!fm.IsDone())
         throw std::runtime_error(std::string(who) + ": MakeFace failed");
-
     TopoDS_Face face = fm.Face();
+
     ShapeFix_Face fixer(face);
     fixer.Perform();
     face = fixer.Face();
-    BRepLib::SameParameter(face, 1.0e-6, Standard_True);
+    // SameParameter is best-effort: an unbounded surface (e.g. Geom_SurfaceOfLinearExtrusion,
+    // infinite in V) can make it throw StdFail_NotDone while reconciling pcurves. A face that
+    // fails it is still a valid B-rep — BRepMesh rebuilds pcurves on demand — so don't let one
+    // step sink the whole face.
+    try {
+        BRepLib::SameParameter(face, 1.0e-6, Standard_True);
+    } catch (const Standard_Failure &) {
+        // keep the ShapeFix'd face as-is
+    }
     return ShapeHandle(face);
 }
 
@@ -1599,6 +1608,10 @@ build_advanced_face_surface_of_linear_extrusion_impl(std::array<double, 3> direc
     // Wrap in a catch so an OCC SameParameter/MakeFace failure on the extrusion face
     // surfaces as a clean error (callers fall back / libtess2 covers it OCC-free)
     // instead of propagating a raw OCCT abort.
+    // NOTE: OCC face construction over a B-spline-generatrix linear-extrusion surface currently
+    // fails (BRepBuilderAPI_MakeFace can't project the 3D boundary wire onto the infinite-V
+    // surface; SameParameter / explicit p-curve projection were also tried). Caught + reported
+    // cleanly; libtess2 (SURF_LIN_EXTRUSION, OCC-free) is the working path for this surface today.
     try {
         Handle(Geom_Curve) gen = geom_curve_from_record(swept);
         Handle(Geom_SurfaceOfLinearExtrusion) surf =
