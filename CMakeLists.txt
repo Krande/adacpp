@@ -33,6 +33,11 @@ include_directories(${LIBTESS2_INCLUDE_DIR})
 include(cmake/deps_meshopt.cmake)
 include_directories(${MESHOPT_INCLUDE_DIR})
 
+# Header-only NGEOM neutral types + the native STEP (Part-21) reader. On the include path so a
+# consumer (e.g. src/cad/cad_py_wrap.cpp) can include step_reader.h, whose own ngeom includes are
+# unqualified. OCC-free, so this is valid for the wasm build too.
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src/geom/neutral ${CMAKE_CURRENT_SOURCE_DIR}/src/cadit/step)
+
 # Create a list called ADA_CPP_SOURCES of all cpp files inside the src dir
 if (BUILD_WASM)
     # Wasm builds now link the cross-built OCCT toolkits (see wasm_occt.cmake), so

@@ -10,6 +10,7 @@
 #include "../geom/neutral/ngeom_decode.h"
 #include "../geom/neutral/ngeom_tessellate.h"
 #include "../geom/neutral/ngeom_meshopt.h"
+#include "../cadit/step/step_reader.h"
 
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/array.h>
@@ -391,6 +392,42 @@ Mesh tessellate_stream_impl(nb::bytes buffer, const std::string &pipeline, doubl
             kern = kern.substr(dash + 1);
         tm = tessellate_via_taxonomy(doc, kern, deflection, angular_deg, overrides);
     }
+
+    std::vector<GroupReference> groups;
+    groups.reserve(tm.groups.size());
+    for (size_t i = 0; i < tm.groups.size(); ++i) {
+        const auto &g = tm.groups[i];
+        groups.emplace_back((int) i, (int) g.first_index, (int) g.index_count, (int) g.first_vertex,
+                            (int) g.vertex_count);
+    }
+    Mesh mesh(0, std::move(tm.positions), std::move(tm.indices), {}, std::move(tm.normals));
+    mesh.group_reference = std::move(groups);
+    return mesh;
+}
+
+// Native STEP -> Mesh: read the .stp file and resolve it to neutral records with the native C++
+// reader (no OCC, no Python), then tessellate every solid into ONE combined Mesh with a
+// GroupReference per root (node_id = root index). The fully-native counterpart of
+// tessellate_stream (which decodes an NGEOM buffer produced by the adapy Python serializer).
+Mesh stream_step_to_meshes_impl(const std::string &path, const std::string &pipeline, double deflection,
+                                double angular_deg) {
+    using namespace adacpp::ngeom;
+    (void) pipeline; // only the OCC-free libtess2 kernel is wired for the native path
+
+    std::ifstream f(path, std::ios::binary);
+    if (!f)
+        return Mesh(0, {}, {});
+    std::stringstream ss;
+    ss << f.rdbuf();
+    std::string buf = ss.str();
+
+    std::vector<adacpp::step::Instance> store;
+    NgeomDoc doc = adacpp::step::read_step_brep(buf, store);
+
+    TessParams tp;
+    tp.deflection = deflection;
+    tp.max_angle = angular_deg * 3.14159265358979323846 / 180.0;
+    TessMesh tm = tessellate_doc(doc, tp);
 
     std::vector<GroupReference> groups;
     groups.reserve(tm.groups.size());
@@ -2405,6 +2442,13 @@ void cad_module(nb::module_ &m) {
           "'hybrid' (ifcopenshell taxonomy kernels). angular_deg in degrees. settings: "
           "ifcopenshell ConversionSettings overrides for the taxonomy paths, e.g. "
           "{'no-wire-intersection-check': True, 'precision': 1e-3} — see ifc_taxonomy_settings().");
+
+    m.def("stream_step_to_meshes", &stream_step_to_meshes_impl, "path"_a, "pipeline"_a = "libtess2",
+          "deflection"_a = 0.0, "angular_deg"_a = 20.0,
+          "Read a STEP file with the native C++ reader (no OCC, no Python) and tessellate every "
+          "solid into ONE combined Mesh with a GroupReference per root (node_id = root index). The "
+          "fully-native counterpart of tessellate_stream. pipeline: 'libtess2' is the only kernel "
+          "wired for this path. angular_deg in degrees.");
 
     m.def(
         "ifc_taxonomy_settings",
