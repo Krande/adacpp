@@ -33,9 +33,27 @@ struct GlbSolid {
     std::vector<uint32_t> indices;
     std::array<float, 4> color{0.5f, 0.5f, 0.5f, 1.0f};
     std::vector<std::array<float, 16>> transforms;
-    std::string id;
-    std::vector<std::pair<int, std::string>> path; // root-first STEP assembly chain (rep_id, name)
+    std::string id;           // solid's own name (fallback leaf name)
+    std::string product_name; // the solid's product name (the picking leaf name `gid`); "" => use id
+    // Per-instance assembly path (root-first (rep_id, product_name) levels, last level = the solid's
+    // own product), parallel to transforms. The writer emits ONE pickable leaf per instance — named
+    // gid (k==0) / gid/k+1 — parented under path[:-1] (the solid's own level collapses into the leaf),
+    // matching the Python scene builder 1:1.
+    std::vector<std::vector<std::pair<int, std::string>>> instance_paths;
 };
+
+// Per-instance pickable-leaf name + parent path (the writer emits one per world placement). gid is the
+// solid's product name (its own name as fallback); placements after the first are gid/k+1. The parent
+// path drops the solid's own (last) level so the leaf itself IS the product node (Python collapse_leaf).
+inline std::string instance_leaf_name(const GlbSolid &s, size_t t) {
+    const std::string &gid = s.product_name.empty() ? s.id : s.product_name;
+    return t == 0 ? gid : gid + "/" + std::to_string(t + 1);
+}
+inline std::vector<std::pair<int, std::string>> instance_parent_path(const GlbSolid &s, size_t t) {
+    if (t < s.instance_paths.size() && s.instance_paths[t].size() > 1)
+        return {s.instance_paths[t].begin(), s.instance_paths[t].end() - 1};
+    return {};
+}
 
 namespace glb_detail {
 
@@ -105,11 +123,15 @@ struct PartRange {
 };
 
 // Build the scenes[0].extras content: id_hierarchy {nid:[name,parent]} (the full STEP product tree —
-// each unique rep_id is one assembly node, each solid a leaf under its deepest path level; parent =
-// "*" for roots) + draw_ranges_node<m> {solid_nid:[start,len]}. Node ids are assigned here so the
-// draw ranges and the hierarchy agree.
+// assembly nodes shared by path prefix, one pickable LEAF per instance/placement named by product;
+// parent = "*" for roots) + draw_ranges_node<m> {leaf_nid:[start,len]}. Node ids are assigned here so
+// the draw ranges and the hierarchy agree. Each PartRange = one placement (its parent path is the
+// assembly above the solid; the solid's own level is collapsed into the leaf), 1:1 with the Python path.
 inline std::string build_scene_extras(const std::vector<std::vector<PartRange>> &per_mat) {
-    std::map<int, int> rep_nid; // STEP rep_id -> graph node id (shared assembly nodes)
+    // Assembly nodes are shared by PATH PREFIX (the full root-first rep_id chain), not by rep_id alone
+    // — so a sub-assembly instanced under two different parents yields two nodes (a tree, like the
+    // Python asm_nodes keyed by prefix), not one shared DAG node.
+    std::map<std::vector<int>, int> prefix_nid;
     std::ostringstream hier;
     int next = 0;
     bool first = true;
@@ -130,11 +152,13 @@ inline std::string build_scene_extras(const std::vector<std::vector<PartRange>> 
         for (size_t k = 0; k < per_mat[m].size(); ++k) {
             const PartRange &r = per_mat[m][k];
             int parent = -1; // scene root "*"
+            std::vector<int> prefix;
             for (const auto &[rid, nm] : r.path) {
-                auto it = rep_nid.find(rid);
-                if (it == rep_nid.end()) {
+                prefix.push_back(rid);
+                auto it = prefix_nid.find(prefix);
+                if (it == prefix_nid.end()) {
                     int nid = next++;
-                    rep_nid[rid] = nid;
+                    prefix_nid[prefix] = nid;
                     emit(nid, nm, parent);
                     parent = nid;
                 } else {
@@ -403,11 +427,11 @@ inline bool write_glb(const std::string &path, const std::vector<GlbSolid> &soli
             continue;
         Buf &m = mats[colour_key(s.color)];
         m.color = s.color;
-        uint32_t part_start = (uint32_t) m.idx.size();
         size_t ninst = s.transforms.empty() ? 1 : s.transforms.size();
         for (size_t t = 0; t < ninst; ++t) {
             const float *M = s.transforms.empty() ? IDENT : s.transforms[t].data();
             uint32_t base = (uint32_t) (m.pos.size() / 3);
+            uint32_t part_start = (uint32_t) m.idx.size();
             for (size_t i = 0; i + 2 < s.positions.size(); i += 3) {
                 float o[3];
                 xform(M, s.positions[i], s.positions[i + 1], s.positions[i + 2], o[0], o[1], o[2]);
@@ -422,8 +446,10 @@ inline bool write_glb(const std::string &path, const std::vector<GlbSolid> &soli
                 m.idx.push_back(v);
                 m.idx_max = std::max(m.idx_max, v);
             }
+            // One pickable leaf per placement (1:1 with the Python scene builder).
+            m.parts.push_back({instance_leaf_name(s, t), part_start, (uint32_t) m.idx.size() - part_start,
+                               instance_parent_path(s, t)});
         }
-        m.parts.push_back({s.id, part_start, (uint32_t) m.idx.size() - part_start, s.path});
     }
     std::vector<MatHeader> hdrs;
     std::vector<const Buf *> bufs;
@@ -497,11 +523,11 @@ public:
         if (m.pos_path.empty())
             open(m, key);
         m.color = s.color;
-        uint32_t before = m.index_count;
         size_t ninst = s.transforms.empty() ? 1 : s.transforms.size();
         for (size_t t = 0; t < ninst; ++t) {
             const float *M = s.transforms.empty() ? IDENT : s.transforms[t].data();
             uint32_t base = m.vert_count;
+            uint32_t inst_before = m.index_count;
             for (size_t i = 0; i + 2 < s.positions.size(); i += 3) {
                 float o[3];
                 xform(M, s.positions[i], s.positions[i + 1], s.positions[i + 2], o[0], o[1], o[2]);
@@ -518,8 +544,9 @@ public:
                 m.idx_max = std::max(m.idx_max, v);
                 ++m.index_count;
             }
+            // One pickable leaf per placement (1:1 with the Python scene builder).
+            m.parts.push_back({instance_leaf_name(s, t), m.index_count - inst_before, instance_parent_path(s, t)});
         }
-        m.parts.push_back({s.id, m.index_count - before, s.path});
     }
     void flush() {
         for (auto &[k, m] : mats_) {

@@ -599,9 +599,12 @@ int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_p
                             gs.indices = std::move(tm.indices);
                             gs.color = {rr.cr, rr.cg, rr.cb, rr.ca}; // grey default when !has_color
                             gs.transforms = rr.transforms;
-                            gs.id = rr.id; // solid name (id_hierarchy leaf name)
-                            if (!rr.instance_paths.empty())
-                                gs.path = rr.instance_paths[0]; // root-first assembly chain
+                            gs.id = rr.id; // fallback leaf name
+                            // gid = the solid's own product name (last level of its assembly path);
+                            // the writer names each placement gid / gid/k+1. Fall back to the solid name.
+                            if (!rr.instance_paths.empty() && !rr.instance_paths[0].empty())
+                                gs.product_name = rr.instance_paths[0].back().second;
+                            gs.instance_paths = rr.instance_paths; // all placements, parallel to transforms
                             // Convert the file's length unit (e.g. mm) to metres — adapy's default unit,
                             // and what the viewer assumes. Without this the GLB is e.g. 1000x oversized,
                             // which (besides looking wrong) defeats the viewer's edge-overlay spatial-hash

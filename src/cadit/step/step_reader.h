@@ -1160,8 +1160,15 @@ private:
                 (pdf && pdf->args.size() > 2 && pdf->args[2].is_ref()) ? inst(pdf->args[2].i) : nullptr;
             if (prod && prod->args.size() >= 2)
                 for (int k : {1, 0}) // PRODUCT(id, name, ...): prefer name, fall back to id
-                    if (prod->args[k].kind == Kind::Str && !prod->args[k].s.empty()) {
-                        name_of_rep_[in->args[1].i] = unescape(prod->args[k].s);
+                    if (prod->args[k].kind == Kind::Str) {
+                        std::string nm = unescape(prod->args[k].s);
+                        // Match the Python path's cand.strip(): trim surrounding whitespace and skip
+                        // whitespace-only candidates, so product names compare 1:1 (e.g. "M10 x 20").
+                        const char *ws = " \t\n\r\f\v";
+                        size_t a = nm.find_first_not_of(ws), b = nm.find_last_not_of(ws);
+                        if (a == std::string::npos)
+                            continue;
+                        name_of_rep_[in->args[1].i] = nm.substr(a, b - a + 1);
                         break;
                     }
         }
