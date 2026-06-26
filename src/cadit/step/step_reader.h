@@ -14,7 +14,9 @@
 // Python serializer's geom=-1 for Line). Metadata: per-solid colour (STYLED_ITEM -> COLOUR_RGB,
 // BFS style tree) + per-instance world placement matrices (CDSR/SRR/ITEM_DEFINED_TRANSFORMATION
 // assembly graph) on NgeomRoot, and the file length-unit scale (LENGTH_UNIT/SI_UNIT) on NgeomDoc.
-// Mixed-unit per-representation scaling (rep_factor) is stubbed at 1.0 (uniform-unit files).
+// Mixed-unit files (mm/cm/metre contexts in one file) are handled via per-representation rep_factor
+// (rep_scale/global_scale), baked into placement translations + each solid's rotation block — so a
+// metre-context part in an mm file is sized correctly instead of collapsing 1000x.
 #pragma once
 
 #include <algorithm>
@@ -417,8 +419,8 @@ public:
     void build_metadata(const TypeLists &tl) {
         build_colour_map(tl.styled);
         build_product_name_map(tl.sdr);
+        unit_scale_ = detect_unit_scale(tl.units); // BEFORE build_transform_map — its rep_factor needs it
         build_transform_map(tl.roots, tl.absr, tl.srr, tl.cdsr);
-        unit_scale_ = detect_unit_scale(tl.units);
         clear_geom_cache();
     }
 
@@ -1129,6 +1131,66 @@ private:
         return best;
     }
 
+    // Length-unit scale (to metres) of a representation's OWN context (its
+    // GLOBAL_UNIT_ASSIGNED_CONTEXT unit list), or -1 if it declares no length unit. Mixed
+    // mm/cm/metre files assign units per representation — mirrors the Python
+    // _representation_length_scale.
+    double representation_length_scale(long rep_id) {
+        const Instance *rep = inst(rep_id);
+        if (!rep || rep->complex || rep->args.empty())
+            return -1.0;
+        long ctx_id = -1; // the context is the last ref arg (after the items list)
+        for (auto it = rep->args.rbegin(); it != rep->args.rend(); ++it)
+            if (it->is_ref()) {
+                ctx_id = it->i;
+                break;
+            }
+        if (ctx_id < 0)
+            return -1.0;
+        const Instance *ctx = inst(ctx_id);
+        if (!ctx)
+            return -1.0;
+        const std::vector<Value> *gua = ctx->complex
+                                            ? sub(ctx, "GLOBAL_UNIT_ASSIGNED_CONTEXT")
+                                            : (ctx->type == "GLOBAL_UNIT_ASSIGNED_CONTEXT" ? &ctx->args : nullptr);
+        if (!gua || gua->empty() || (*gua)[0].kind != Kind::List)
+            return -1.0;
+        for (const Value &u : (*gua)[0].items) {
+            if (!u.is_ref())
+                continue;
+            const Instance *uin = inst(u.i);
+            if (!uin)
+                continue;
+            double s = -1.0;
+            if (uin->complex) {
+                if (sub(uin, "LENGTH_UNIT"))
+                    if (const auto *si = sub(uin, "SI_UNIT"))
+                        s = si_length_scale(*si);
+            } else if (uin->type == "SI_UNIT" && !uin->args.empty()) {
+                std::vector<Value> a(uin->args.begin() + 1, uin->args.end()); // drop the name
+                s = si_length_scale(a);
+            }
+            if (s > 0)
+                return s;
+        }
+        return -1.0;
+    }
+
+    // rep_id -> its length unit relative to the global unit (rep_scale / global_scale). 1.0 when the
+    // rep is in the global unit (the common case). A metre-context fastener in an mm file gives 1000.
+    std::unordered_map<long, double> rep_factor_cache_;
+    double rep_factor(long rep_id) {
+        if (rep_id < 0)
+            return 1.0;
+        auto it = rep_factor_cache_.find(rep_id);
+        if (it != rep_factor_cache_.end())
+            return it->second;
+        double s = representation_length_scale(rep_id);
+        double f = (s > 0 && std::abs(unit_scale_) > 1e-300) ? (s / unit_scale_) : 1.0;
+        rep_factor_cache_[rep_id] = f;
+        return f;
+    }
+
     // --- assembly transforms (CDSR / SRR / MAPPED_ITEM-style placement graph) -------------
     // A port of the Python reader's _build_transform_map / _world_matrices, validated there
     // against OCC to 1e-9. NOTE: per-representation length scaling (rep_factor, for mixed mm/cm/m
@@ -1184,7 +1246,18 @@ private:
         on_path.insert(rep_id);
         std::vector<std::pair<Mat4, Path>> out;
         for (const Edge &e : it->second) {
-            Mat4 t_edge = mat4::mul(mat4::rigid_inverse(placement_mat4(e.i1)), placement_mat4(e.i2));
+            // Placement translations are authored in their own rep's unit; bring each into the global
+            // unit frame before composing so a mixed-unit child/parent pair maps consistently (R is
+            // orthonormal, so rigid_inverse stays valid after only the translation is scaled).
+            Mat4 mc = placement_mat4(e.i1), mp = placement_mat4(e.i2);
+            const double fc = rep_factor(rep_id), fp = rep_factor(e.rep_2);
+            mc[12] *= fc;
+            mc[13] *= fc;
+            mc[14] *= fc;
+            mp[12] *= fp;
+            mp[13] *= fp;
+            mp[14] *= fp;
+            Mat4 t_edge = mat4::mul(mat4::rigid_inverse(mc), mp);
             for (auto &[t_parent, parent_path] : world_matrices(e.rep_2, on_path)) {
                 Path p = parent_path;
                 p.push_back(path_level(rep_id));
@@ -1278,6 +1351,16 @@ private:
                 mats.push_back(m);
                 paths.push_back(std::move(p));
             }
+            // Bake the solid's own length-unit factor into each instance's rotation block (uniform
+            // scale commutes with rotation, so this scales the local geometry into the global unit
+            // frame). A non-global-unit solid with an identity placement thus gains a pure-scale
+            // transform instead of collapsing to a near-zero-area sliver (mixed mm/cm/metre files).
+            const double gf = rep_factor(geom_rep);
+            if (std::abs(gf - 1.0) > 1e-12)
+                for (Mat4 &m : mats)
+                    for (int col = 0; col < 3; ++col)
+                        for (int row = 0; row < 3; ++row)
+                            m[col * 4 + row] *= gf;
             path_map_[sid] = std::move(paths); // always (>=1 path: the solid's own product)
             bool nontrivial = false;
             for (const Mat4 &m : mats)
