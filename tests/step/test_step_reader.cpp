@@ -7,6 +7,8 @@
 #include <vector>
 
 #include "ngeom_bspline.h"
+#include "ngeom_decode.h"
+#include "ngeom_encode.h"
 #include "ngeom_surfaces.h"
 #include "ngeom_tessellate.h"
 #include "step_reader.h"
@@ -374,6 +376,53 @@ static void test_assembly_transform() {
     }
 }
 
+// Resolve -> encode -> decode round-trip: the re-encoded buffer must decode back to the same
+// neutral structure (validates ngeom_encode.h, incl. B-spline knot RLE).
+static void test_ngeom_roundtrip() {
+    // curved solid: 4 analytic surfaces survive the round-trip with the right types
+    {
+        std::vector<Instance> store;
+        ng::NgeomDoc doc = read_step_brep(kCurvedSolid, store);
+        std::vector<uint8_t> buf = ng::encode(doc);
+        ng::NgeomDoc doc2 = ng::decode(buf.data(), buf.size());
+        CHECK(doc2.roots.size() == 1 && doc2.roots[0].faces.size() == 4, "roundtrip: 4 faces");
+        if (!doc2.roots.empty() && doc2.roots[0].faces.size() == 4) {
+            auto &fs = doc2.roots[0].faces;
+            CHECK(dynamic_cast<const ng::CylinderSurface *>(fs[0]->surface.get()), "roundtrip cylinder");
+            CHECK(dynamic_cast<const ng::ConeSurface *>(fs[1]->surface.get()), "roundtrip cone");
+            CHECK(dynamic_cast<const ng::SphereSurface *>(fs[2]->surface.get()), "roundtrip sphere");
+            CHECK(dynamic_cast<const ng::TorusSurface *>(fs[3]->surface.get()), "roundtrip torus");
+        }
+    }
+    // bspline solid: degree/grid + rational weights survive (knot RLE inverts expand_knots)
+    {
+        std::vector<Instance> store;
+        ng::NgeomDoc doc = read_step_brep(kBSplineSurf, store);
+        std::vector<uint8_t> buf = ng::encode(doc);
+        ng::NgeomDoc doc2 = ng::decode(buf.data(), buf.size());
+        CHECK(doc2.roots.size() == 1 && doc2.roots[0].faces.size() == 2, "roundtrip: 2 bspline faces");
+        if (!doc2.roots.empty() && doc2.roots[0].faces.size() == 2) {
+            auto *s1 = dynamic_cast<const ng::BSplineSurface *>(doc2.roots[0].faces[0]->surface.get());
+            CHECK(s1 && s1->u_degree == 1 && s1->nu == 2 && s1->nv == 2, "roundtrip bspline degree/grid");
+            auto *s2 = dynamic_cast<const ng::BSplineSurface *>(doc2.roots[0].faces[1]->surface.get());
+            CHECK(s2 && s2->weights.size() == 4 && std::abs(s2->weights[3] - 2.0) < 1e-9, "roundtrip rational weights");
+        }
+    }
+    // conic edge: the CIRCLE edge geometry survives
+    {
+        std::vector<Instance> store;
+        ng::NgeomDoc doc = read_step_brep(kDiskSolid, store);
+        std::vector<uint8_t> buf = ng::encode(doc);
+        ng::NgeomDoc doc2 = ng::decode(buf.data(), buf.size());
+        CHECK(!doc2.roots.empty() && doc2.roots[0].faces.size() == 1, "roundtrip disk face");
+        if (!doc2.roots.empty() && !doc2.roots[0].faces.empty()) {
+            const ng::LoopN &lp = *doc2.roots[0].faces[0]->bounds[0].loop;
+            CHECK(!lp.edges.empty() && dynamic_cast<const ng::CircleCurve *>(lp.edges[0].geometry.get()),
+                  "roundtrip circle edge geometry");
+        }
+    }
+}
+
 int main() {
     test_resolve_structure();
     test_tessellate();
@@ -383,6 +432,7 @@ int main() {
     test_bspline_edge_curve();
     test_colour_and_units();
     test_assembly_transform();
+    test_ngeom_roundtrip();
     if (g_fail == 0)
         std::printf("step reader: ALL PASS\n");
     else
