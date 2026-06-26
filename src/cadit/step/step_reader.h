@@ -11,13 +11,19 @@
 // CYLINDRICAL_SURFACE / CONICAL_SURFACE / SPHERICAL_SURFACE / TOROIDAL_SURFACE /
 // B_SPLINE_SURFACE_WITH_KNOTS (+ rational complex records); edge curves CIRCLE / ELLIPSE /
 // B_SPLINE_CURVE_WITH_KNOTS (+ rational) (LINE -> null, straight through endpoints, matching the
-// Python serializer's geom=-1 for Line). Assembly transforms, colours and units come later.
+// Python serializer's geom=-1 for Line). Metadata: per-solid colour (STYLED_ITEM -> COLOUR_RGB,
+// BFS style tree) on NgeomRoot, and the file length-unit scale (LENGTH_UNIT/SI_UNIT) on NgeomDoc.
+// Assembly transforms (CDSR/SRR/MAPPED_ITEM world matrices, which also fold in the unit scale)
+// come in the next slice.
 #pragma once
 
 #include <algorithm>
+#include <cctype>
+#include <deque>
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "ngeom_bspline.h"  // BSplineCurve / BSplineSurface / expand_knots
@@ -43,7 +49,9 @@ public:
                 root_ids.push_back(id);
         std::sort(root_ids.begin(), root_ids.end());
 
+        build_colour_map();
         ng::NgeomDoc doc;
+        doc.unit_scale = detect_unit_scale();
         doc.roots.reserve(root_ids.size());
         for (long id : root_ids) {
             const Instance *in = inst(id);
@@ -59,6 +67,15 @@ public:
                     if (sh.is_ref())
                         shell_into(sh.i, root.faces);
             }
+            // STYLED_ITEM colour usually targets the solid root itself.
+            auto cit = colour_map_.find(id);
+            if (cit != colour_map_.end()) {
+                root.has_color = true;
+                root.cr = cit->second.r;
+                root.cg = cit->second.g;
+                root.cb = cit->second.b;
+                root.ca = cit->second.a;
+            }
             doc.roots.push_back(std::move(root));
         }
         return doc;
@@ -69,6 +86,11 @@ private:
     std::unordered_map<long, std::shared_ptr<ng::Surface>> surf_cache_;
     std::unordered_map<long, std::shared_ptr<ng::Curve>> curve_cache_;
     std::unordered_map<long, std::shared_ptr<ng::FaceSurfaceN>> face_cache_;
+
+    struct RGBA {
+        float r, g, b, a;
+    };
+    std::unordered_map<long, RGBA> colour_map_; // STYLED_ITEM geometric-item id -> colour
 
     const Instance *inst(long id) const {
         auto it = m_.find(id);
@@ -377,6 +399,192 @@ private:
             for (const Value &fr : in->args[1].items)
                 if (fr.is_ref())
                     out.push_back(face(fr.i));
+    }
+
+    // --- presentation colours (STYLED_ITEM -> COLOUR_RGB) ---------------------------------
+    static void collect_refs(const std::vector<Value> &args, std::vector<long> &out) {
+        for (const Value &v : args) {
+            if (v.is_ref())
+                out.push_back(v.i);
+            else if (v.kind == Kind::List)
+                collect_refs(v.items, out);
+        }
+    }
+    static RGBA predefined_colour(std::string_view name, bool &found) {
+        std::string n;
+        n.reserve(name.size());
+        for (char c : name)
+            n.push_back((char) std::tolower((unsigned char) c));
+        found = true;
+        if (n == "red")
+            return {1, 0, 0, 1};
+        if (n == "green")
+            return {0, 1, 0, 1};
+        if (n == "blue")
+            return {0, 0, 1, 1};
+        if (n == "yellow")
+            return {1, 1, 0, 1};
+        if (n == "magenta")
+            return {1, 0, 1, 1};
+        if (n == "cyan")
+            return {0, 1, 1, 1};
+        if (n == "black")
+            return {0, 0, 0, 1};
+        if (n == "white")
+            return {1, 1, 1, 1};
+        found = false;
+        return {0.5f, 0.5f, 0.5f, 1};
+    }
+
+    // BFS an entity's style reference tree for the first COLOUR_RGB / pre-defined colour and the
+    // first SURFACE_STYLE_TRANSPARENT (alpha = 1 - transparency). Mirrors the Python _find_colour.
+    bool find_colour(long ref_id, RGBA &out) {
+        std::deque<std::pair<long, int>> q;
+        q.push_back({ref_id, 0});
+        std::unordered_set<long> seen;
+        bool have_rgb = false, have_t = false;
+        float r = 0, g = 0, b = 0, transp = 0;
+        while (!q.empty()) {
+            auto [rid, d] = q.front();
+            q.pop_front();
+            if (d > 12 || seen.count(rid))
+                continue;
+            seen.insert(rid);
+            const Instance *rec = inst(rid);
+            if (!rec || rec->complex)
+                continue;
+            std::string_view t = rec->type;
+            if (t == "COLOUR_RGB" && !have_rgb && rec->args.size() >= 4) {
+                r = (float) rec->args[1].as_double();
+                g = (float) rec->args[2].as_double();
+                b = (float) rec->args[3].as_double();
+                have_rgb = true;
+            } else if ((t == "DRAUGHTING_PRE_DEFINED_COLOUR" || t == "PRE_DEFINED_COLOUR") && !have_rgb) {
+                if (!rec->args.empty() && rec->args[0].kind == Kind::Str) {
+                    bool ok = false;
+                    RGBA c = predefined_colour(rec->args[0].s, ok);
+                    if (ok) {
+                        r = c.r;
+                        g = c.g;
+                        b = c.b;
+                        have_rgb = true;
+                    }
+                }
+            } else if (t == "SURFACE_STYLE_TRANSPARENT" && !have_t) {
+                for (const Value &v : rec->args)
+                    if (v.kind == Kind::Real || v.kind == Kind::Int) {
+                        transp = (float) v.as_double();
+                        have_t = true;
+                        break;
+                    }
+            } else {
+                std::vector<long> refs;
+                collect_refs(rec->args, refs);
+                for (long c : refs)
+                    q.push_back({c, d + 1});
+            }
+            if (have_rgb && have_t)
+                break;
+        }
+        if (!have_rgb)
+            return false;
+        out = {r, g, b, have_t ? std::clamp(1.0f - transp, 0.0f, 1.0f) : 1.0f};
+        return true;
+    }
+
+    // STYLED_ITEM('',(styles),#item) -> colour_map_[item id]. Search only the style refs.
+    void build_colour_map() {
+        for (const auto &[id, in] : m_) {
+            if (in->complex || in->type != "STYLED_ITEM" || in->args.size() < 3)
+                continue;
+            const Value &item = in->args[2];
+            if (!item.is_ref() || colour_map_.count(item.i))
+                continue;
+            std::vector<long> style_refs;
+            if (in->args[1].kind == Kind::List)
+                collect_refs(in->args[1].items, style_refs);
+            else if (in->args[1].is_ref())
+                style_refs.push_back(in->args[1].i);
+            for (long rid : style_refs) {
+                RGBA c{};
+                if (find_colour(rid, c)) {
+                    colour_map_[item.i] = c;
+                    break;
+                }
+            }
+        }
+    }
+
+    // --- length unit -> metres (LENGTH_UNIT / SI_UNIT) ------------------------------------
+    static double si_prefix_factor(std::string_view p) {
+        if (p == "EXA")
+            return 1e18;
+        if (p == "PETA")
+            return 1e15;
+        if (p == "TERA")
+            return 1e12;
+        if (p == "GIGA")
+            return 1e9;
+        if (p == "MEGA")
+            return 1e6;
+        if (p == "KILO")
+            return 1e3;
+        if (p == "HECTO")
+            return 1e2;
+        if (p == "DECA")
+            return 1e1;
+        if (p == "DECI")
+            return 1e-1;
+        if (p == "CENTI")
+            return 1e-2;
+        if (p == "MILLI")
+            return 1e-3;
+        if (p == "MICRO")
+            return 1e-6;
+        if (p == "NANO")
+            return 1e-9;
+        if (p == "PICO")
+            return 1e-12;
+        return 1.0;
+    }
+    // SI_UNIT args: (prefix?, .METRE.). Returns the scale to metres, or <0 if not a length unit.
+    static double si_length_scale(const std::vector<Value> &a) {
+        std::string_view prefix, unit;
+        if (a.size() >= 2 && a[1].kind == Kind::Enum) {
+            prefix = a[0].kind == Kind::Enum ? a[0].s : std::string_view{};
+            unit = a[1].s;
+        } else if (a.size() == 1 && a[0].kind == Kind::Enum) {
+            unit = a[0].s;
+        }
+        if (unit != "METRE" && unit != "METER")
+            return -1.0;
+        return si_prefix_factor(prefix);
+    }
+    // The lowest-id LENGTH_UNIT in the model -> its SI scale to metres (default 1.0). The
+    // ubiquitous form is a complex record ( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) );
+    // a plain top-level SI_UNIT('',prefix,.METRE.) is also handled. Lowest-id for determinism
+    // without materializing/sorting all ids.
+    double detect_unit_scale() {
+        long best_id = 0;
+        double best = 1.0;
+        bool found = false;
+        for (const auto &[id, in] : m_) {
+            double s = -1.0;
+            if (in->complex) {
+                if (sub(in, "LENGTH_UNIT"))
+                    if (const auto *si = sub(in, "SI_UNIT"))
+                        s = si_length_scale(*si);
+            } else if (in->type == "SI_UNIT" && !in->args.empty()) {
+                std::vector<Value> a(in->args.begin() + 1, in->args.end()); // drop the name
+                s = si_length_scale(a);
+            }
+            if (s > 0 && (!found || id < best_id)) {
+                best_id = id;
+                best = s;
+                found = true;
+            }
+        }
+        return best;
     }
 };
 

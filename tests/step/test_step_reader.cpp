@@ -271,6 +271,54 @@ static void test_bspline_edge_curve() {
     }
 }
 
+// The triangle solid + a STYLED_ITEM colour chain (RGB 0.2/0.4/0.6 via the usual
+// PRESENTATION_STYLE_ASSIGNMENT -> ... -> FILL_AREA_STYLE_COLOUR -> COLOUR_RGB tree) and a
+// millimetre LENGTH_UNIT complex record.
+static const char *kColouredSolid = "ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\n"
+                                    "#1=CARTESIAN_POINT('',(0.,0.,0.));\n"
+                                    "#2=CARTESIAN_POINT('',(1.,0.,0.));\n"
+                                    "#3=CARTESIAN_POINT('',(0.,1.,0.));\n"
+                                    "#11=VERTEX_POINT('',#1);\n"
+                                    "#12=VERTEX_POINT('',#2);\n"
+                                    "#13=VERTEX_POINT('',#3);\n"
+                                    "#41=EDGE_CURVE('',#11,#12,#11,.T.);\n"
+                                    "#42=EDGE_CURVE('',#12,#13,#11,.T.);\n"
+                                    "#43=EDGE_CURVE('',#13,#11,#11,.T.);\n"
+                                    "#51=ORIENTED_EDGE('',*,*,#41,.T.);\n"
+                                    "#52=ORIENTED_EDGE('',*,*,#42,.T.);\n"
+                                    "#53=ORIENTED_EDGE('',*,*,#43,.T.);\n"
+                                    "#60=EDGE_LOOP('',(#51,#52,#53));\n"
+                                    "#61=FACE_OUTER_BOUND('',#60,.T.);\n"
+                                    "#70=AXIS2_PLACEMENT_3D('',#1,$,$);\n"
+                                    "#71=PLANE('',#70);\n"
+                                    "#80=ADVANCED_FACE('',(#61),#71,.T.);\n"
+                                    "#90=CLOSED_SHELL('',(#80));\n"
+                                    "#100=MANIFOLD_SOLID_BREP('solid',#90);\n"
+                                    "#101=COLOUR_RGB('',0.2,0.4,0.6);\n"
+                                    "#102=FILL_AREA_STYLE_COLOUR('',#101);\n"
+                                    "#103=FILL_AREA_STYLE('',(#102));\n"
+                                    "#104=SURFACE_STYLE_FILL_AREA(#103);\n"
+                                    "#105=SURFACE_SIDE_STYLE('',(#104));\n"
+                                    "#106=SURFACE_STYLE_USAGE(.BOTH.,#105);\n"
+                                    "#107=PRESENTATION_STYLE_ASSIGNMENT((#106));\n"
+                                    "#108=STYLED_ITEM('',(#107),#100);\n"
+                                    "#200=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.));\n"
+                                    "ENDSEC;\nEND-ISO-10303-21;\n";
+
+static void test_colour_and_units() {
+    std::vector<Instance> store;
+    ng::NgeomDoc doc = read_step_brep(kColouredSolid, store);
+    CHECK(std::abs(doc.unit_scale - 0.001) < 1e-12, "millimetre length unit -> 0.001");
+    CHECK(doc.roots.size() == 1, "one solid root");
+    if (doc.roots.empty())
+        return;
+    const ng::NgeomRoot &r = doc.roots[0];
+    CHECK(r.has_color, "STYLED_ITEM colour resolved onto the solid");
+    CHECK(std::abs(r.cr - 0.2) < 1e-6 && std::abs(r.cg - 0.4) < 1e-6 && std::abs(r.cb - 0.6) < 1e-6 &&
+              std::abs(r.ca - 1.0) < 1e-6,
+          "colour rgba from the style tree");
+}
+
 int main() {
     test_resolve_structure();
     test_tessellate();
@@ -278,6 +326,7 @@ int main() {
     test_conic_edge();
     test_bspline_surfaces();
     test_bspline_edge_curve();
+    test_colour_and_units();
     if (g_fail == 0)
         std::printf("step reader: ALL PASS\n");
     else

@@ -292,10 +292,15 @@ struct NgeomRoot {
     std::shared_ptr<RevolveN> revolve;                // set if this root is a revolved solid
     std::shared_ptr<BooleanN> boolean;                // set if this root is a boolean result
     std::shared_ptr<SphereN> sphere;                  // set if this root is a sphere primitive
+    // Presentation colour (STYLED_ITEM -> COLOUR_RGB), populated by the native STEP reader; the
+    // NGEOM byte decoder leaves has_color=false (colour travels out-of-band on that path).
+    bool has_color = false;
+    float cr = 0.5f, cg = 0.5f, cb = 0.5f, ca = 1.0f; // rgba in 0..1 when has_color
 };
 
 struct NgeomDoc {
     std::vector<NgeomRoot> roots;
+    double unit_scale = 1.0; // file length unit -> metres (e.g. mm -> 0.001), from LENGTH_UNIT
 };
 
 } // namespace adacpp::ngeom
