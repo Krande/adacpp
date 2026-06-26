@@ -479,6 +479,31 @@ public:
         return root;
     }
 
+    // Cheap per-solid cost proxy for LPT scheduling: count the faces in the solid's shell(s) WITHOUT
+    // building any geometry (no points/surfaces/curves). Resolves only the solid + its shell records.
+    // A good-enough proxy for tessellation cost (triangle count tracks face count). Call
+    // clear_geom_cache() after a batch to free the parsed shell instances.
+    size_t solid_face_count(long sid) {
+        const Instance *in = inst(sid);
+        if (!in || in->args.size() < 2)
+            return 0;
+        size_t n = 0;
+        auto count_shell = [&](long shell_id) {
+            const Instance *sh = inst(shell_id);
+            if (sh && sh->args.size() > 1 && sh->args[1].kind == Kind::List)
+                n += sh->args[1].items.size();
+        };
+        if (in->type == "MANIFOLD_SOLID_BREP") {
+            if (in->args[1].is_ref())
+                count_shell(in->args[1].i);
+        } else if (in->args[1].kind == Kind::List) {
+            for (const Value &sh : in->args[1].items)
+                if (sh.is_ref())
+                    count_shell(sh.i);
+        }
+        return n;
+    }
+
     double unit_scale() const {
         return unit_scale_;
     }

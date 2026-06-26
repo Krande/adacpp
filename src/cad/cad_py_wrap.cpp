@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <deque>
@@ -533,7 +534,22 @@ int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_p
 
     unsigned hw = std::thread::hardware_concurrency();
     int nthreads = num_threads > 0 ? num_threads : (int) (hw > 1 ? hw : 1);
-    const std::vector<long> &roots = idx.lists.roots;
+
+    // LPT scheduling: order roots heaviest-first (by a cheap face-count proxy, no geometry built) so
+    // the big solids start while every thread is still busy — the dynamic queue then fills the tail
+    // with small ones instead of one thread chewing a giant solid alone at the end.
+    std::vector<long> roots(idx.lists.roots.begin(), idx.lists.roots.end());
+    if (nthreads > 1) {
+        std::vector<std::pair<size_t, long>> cost;
+        cost.reserve(roots.size());
+        for (long sid : roots)
+            cost.emplace_back(master.solid_face_count(sid), sid);
+        master.clear_geom_cache();
+        std::sort(cost.begin(), cost.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+        for (size_t i = 0; i < cost.size(); ++i)
+            roots[i] = cost[i].second;
+        prof.phase("lpt_order");
+    }
 
     char tmpl[] = "/tmp/adacpp_glb_XXXXXX";
     char *dir = ::mkdtemp(tmpl); // unique spill dir (removed after assembly)
@@ -548,19 +564,33 @@ int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_p
             // Each worker pulls roots off a shared counter (dynamic balancing handles the dense-solid
             // long tail), resolving with its OWN caches + a copy of the shared metadata, into its lane.
             auto worker = [&](int t) {
+                const bool tprof = prof.on(); // gate ALL per-solid clock reads -> zero cost in prod
                 adacpp::step::Resolver r(idx);
                 r.copy_metadata_from(master);
                 adacpp::glb::GlbSpillWriter &lane = lanes[t];
                 int local = 0;
+                double busy_ms = 0;
                 for (;;) {
                     size_t i = next.fetch_add(1, std::memory_order_relaxed);
                     if (i >= roots.size())
                         break;
+                    std::chrono::steady_clock::time_point b0;
+                    if (tprof)
+                        b0 = std::chrono::steady_clock::now();
                     NgeomRoot root = r.resolve_root(roots[i]);
                     if (!root.id.empty()) {
+                        size_t fc = root.faces.size();
                         NgeomDoc one;
                         one.roots.push_back(std::move(root));
+                        std::chrono::steady_clock::time_point tt0;
+                        if (tprof)
+                            tt0 = std::chrono::steady_clock::now();
                         TessMesh tm = tessellate_doc(one, tp);
+                        if (tprof && prof.timing())
+                            prof.solid_timed(
+                                roots[i], fc,
+                                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tt0)
+                                    .count());
                         if (!tm.indices.empty()) {
                             prof.solid(tm.indices.size() / 3);
                             const NgeomRoot &rr = one.roots[0];
@@ -574,9 +604,13 @@ int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_p
                         }
                     }
                     r.clear_geom_cache();
+                    if (tprof)
+                        busy_ms +=
+                            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - b0).count();
                     if (++local % 128 == 0)
                         ::malloc_trim(0); // return per-solid churn to the OS
                 }
+                prof.thread_done(t, busy_ms, (size_t) local);
             };
             std::vector<std::thread> pool;
             pool.reserve(nthreads - 1);
