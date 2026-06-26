@@ -602,7 +602,24 @@ int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_p
                             gs.id = rr.id; // solid name (id_hierarchy leaf name)
                             if (!rr.instance_paths.empty())
                                 gs.path = rr.instance_paths[0]; // root-first assembly chain
-                            lane.add(gs);                       // spilled to disk immediately
+                            // Convert the file's length unit (e.g. mm) to metres — adapy's default unit,
+                            // and what the viewer assumes. Without this the GLB is e.g. 1000x oversized,
+                            // which (besides looking wrong) defeats the viewer's edge-overlay spatial-hash
+                            // vertex welding (only valid for coordinates within ~1e5 units) -> its weldMap
+                            // overflows V8's 2^24 Map cap ("Map maximum size exceeded"). Scale local
+                            // positions + each instance transform's translation; rotation is unitless.
+                            const double usc = r.unit_scale();
+                            if (usc != 1.0) {
+                                const float s = (float) usc;
+                                for (float &p : gs.positions)
+                                    p *= s;
+                                for (auto &M : gs.transforms) {
+                                    M[12] *= s;
+                                    M[13] *= s;
+                                    M[14] *= s;
+                                }
+                            }
+                            lane.add(gs); // spilled to disk immediately
                             nwritten.fetch_add(1, std::memory_order_relaxed);
                         }
                     }
