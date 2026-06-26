@@ -10,6 +10,7 @@
 #include "../geom/neutral/ngeom_decode.h"
 #include "../geom/neutral/ngeom_encode.h"
 #include "../geom/neutral/ngeom_glb.h"
+#include "../geom/neutral/ngeom_profile.h"
 #include "../geom/neutral/ngeom_tessellate.h"
 #include "../geom/neutral/ngeom_meshopt.h"
 #include "../cadit/step/step_reader.h"
@@ -458,6 +459,7 @@ Mesh stream_step_to_meshes_impl(const std::string &path, const std::string &pipe
                                 double angular_deg) {
     using namespace adacpp::ngeom;
     (void) pipeline; // only the OCC-free libtess2 kernel is wired for the native path
+    adacpp::prof::StepProfiler prof("stream_step_to_meshes");
 
     std::ifstream f(path, std::ios::binary);
     if (!f)
@@ -465,6 +467,7 @@ Mesh stream_step_to_meshes_impl(const std::string &path, const std::string &pipe
     std::stringstream ss;
     ss << f.rdbuf();
     std::string buf = ss.str();
+    prof.phase("read_file");
 
     TessParams tp;
     tp.deflection = deflection;
@@ -478,6 +481,7 @@ Mesh stream_step_to_meshes_impl(const std::string &path, const std::string &pipe
         TessMesh tm = tessellate_doc(one, tp);
         if (tm.indices.empty())
             return;
+        prof.solid(tm.indices.size() / 3);
         uint32_t vstart = (uint32_t) (out.positions.size() / 3);
         uint32_t istart = (uint32_t) out.indices.size();
         out.positions.insert(out.positions.end(), tm.positions.begin(), tm.positions.end());
@@ -487,6 +491,7 @@ Mesh stream_step_to_meshes_impl(const std::string &path, const std::string &pipe
         groups.emplace_back((int) groups.size(), (int) istart, (int) tm.indices.size(), (int) vstart,
                             (int) (tm.positions.size() / 3));
     });
+    prof.phase("stream(resolve+tess)");
     out.group_reference = std::move(groups);
     return out;
 }
@@ -497,12 +502,14 @@ Mesh stream_step_to_meshes_impl(const std::string &path, const std::string &pipe
 int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_path, double deflection,
                             double angular_deg) {
     using namespace adacpp::ngeom;
+    adacpp::prof::StepProfiler prof("stream_step_to_glb");
     std::ifstream f(in_path, std::ios::binary);
     if (!f)
         return -1;
     std::stringstream ss;
     ss << f.rdbuf();
     std::string buf = ss.str();
+    prof.phase("read_file");
 
     TessParams tp;
     tp.deflection = deflection;
@@ -515,6 +522,7 @@ int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_p
         TessMesh tm = tessellate_doc(one, tp);
         if (tm.indices.empty())
             return;
+        prof.solid(tm.indices.size() / 3);
         adacpp::glb::GlbSolid gs;
         gs.positions = std::move(tm.positions);
         gs.indices = std::move(tm.indices);
@@ -523,7 +531,11 @@ int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_p
         gs.id = root.id;
         solids.push_back(std::move(gs));
     });
-    return adacpp::glb::write_glb(out_path, solids) ? (int) solids.size() : -1;
+    prof.phase("stream(resolve+tess)");
+    bool ok = adacpp::glb::write_glb(out_path, solids);
+    prof.phase("write_glb");
+    prof.note("threads", 1);
+    return ok ? (int) solids.size() : -1;
 }
 
 // ----------------------------------------------------------------------------
