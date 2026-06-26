@@ -512,7 +512,7 @@ Mesh stream_step_to_meshes_impl(const std::string &path, const std::string &pipe
 // stays bounded and the per-solid tessellation (the wall-time dominator) parallelizes. Returns the
 // number of solids written, or -1 on I/O error.
 int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_path, double deflection,
-                            double angular_deg, int num_threads) {
+                            double angular_deg, int num_threads, bool meshopt) {
     using namespace adacpp::ngeom;
     adacpp::prof::StepProfiler prof("stream_step_to_glb");
 
@@ -624,8 +624,9 @@ int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_p
             std::vector<adacpp::glb::GlbSpillWriter *> lane_ptrs;
             for (adacpp::glb::GlbSpillWriter &l : lanes)
                 lane_ptrs.push_back(&l);
-            ok = adacpp::glb::write_glb_merged(out_path, lane_ptrs, std::filesystem::path(in_path).stem().string());
-            prof.phase("write_glb_merged");
+            ok = adacpp::glb::write_glb_merged(out_path, lane_ptrs, std::filesystem::path(in_path).stem().string(),
+                                               meshopt);
+            prof.phase(meshopt ? "write_glb_merged(meshopt)" : "write_glb_merged");
         }
         ::rmdir(dir);
     }
@@ -2650,12 +2651,13 @@ void cad_module(nb::module_ &m) {
           "wired for this path. angular_deg in degrees.");
 
     m.def("stream_step_to_glb", &stream_step_to_glb_impl, "in_path"_a, "out_path"_a, "deflection"_a = 0.0,
-          "angular_deg"_a = 20.0, "num_threads"_a = 0,
+          "angular_deg"_a = 20.0, "num_threads"_a = 0, "meshopt"_a = true,
           "Native STEP -> GLB file: stream the .stp with the native reader (offset index + per-statement "
           "pread, bounded memory), tessellate each solid across num_threads worker threads (0 = auto = "
           "hardware_concurrency), each owning a spill lane joined at the end, bake world transform(s) + "
-          "colour, and write a merge-by-colour GLB matching the adapy viewer's structure. Returns the "
-          "number of solids written (-1 on I/O error). angular_deg in degrees.");
+          "colour, and write a merge-by-colour GLB matching the adapy viewer's structure. meshopt=true "
+          "(default) bakes EXT_meshopt_compression inline (no Python re-pack). Returns the number of "
+          "solids written (-1 on I/O error). angular_deg in degrees.");
 
     m.def("stream_step_to_ngeom", &stream_step_to_ngeom_impl, "path"_a,
           "Read a STEP file with the native C++ reader (no OCC, no Python) and return "

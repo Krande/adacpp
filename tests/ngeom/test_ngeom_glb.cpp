@@ -112,6 +112,26 @@ int main() {
     std::remove(ramp.c_str());
     std::remove(spillp.c_str());
 
+    // meshopt option: write_glb(meshopt=true) bakes EXT_meshopt_compression inline. The encoder
+    // round-trip-verifies (decode == source) before writing, so a true return == correct geometry;
+    // assert the EXT contract + that the picking extras survive (INDICES codec is order-preserving).
+    const std::string mop = "/tmp/adacpp_glb_meshopt.glb";
+    CHECK(write_glb(mop, {tri, quad}, /*meshopt=*/true), "write_glb meshopt returns true");
+    {
+        std::ifstream f(mop, std::ios::binary);
+        std::vector<uint8_t> b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        CHECK(u32(b, 0) == 0x46546C67u, "meshopt glTF magic");
+        std::string js((const char *) b.data() + 20, u32(b, 12));
+        CHECK(js.find("EXT_meshopt_compression") != std::string::npos, "EXT_meshopt_compression present");
+        CHECK(count(js, "\"fallback\":true") == 1, "one fallback buffer");
+        CHECK(js.find("\"mode\":\"INDICES\"") != std::string::npos &&
+                  js.find("\"mode\":\"ATTRIBUTES\"") != std::string::npos,
+              "INDICES + ATTRIBUTES meshopt bufferViews");
+        CHECK(js.find("draw_ranges_node0") != std::string::npos && js.find("id_hierarchy") != std::string::npos,
+              "meshopt preserves picking extras");
+    }
+    std::remove(mop.c_str());
+
     if (g_fail == 0)
         std::printf("ngeom glb: ALL PASS\n");
     else
