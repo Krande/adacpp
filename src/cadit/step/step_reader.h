@@ -97,80 +97,306 @@ inline bool is_identity(const Mat4 &m, double tol = 1e-12) {
 }
 } // namespace mat4
 
+// Entity ids grouped by the types the resolver scans wholesale (roots + the metadata entities).
+struct TypeLists {
+    std::vector<long> roots;  // MANIFOLD_SOLID_BREP / SHELL_BASED_SURFACE_MODEL
+    std::vector<long> styled; // STYLED_ITEM
+    std::vector<long> absr;   // ADVANCED_BREP_SHAPE_REPRESENTATION
+    std::vector<long> srr;    // SHAPE_REPRESENTATION_RELATIONSHIP
+    std::vector<long> cdsr;   // CONTEXT_DEPENDENT_SHAPE_REPRESENTATION
+    std::vector<long> sdr;    // SHAPE_DEFINITION_REPRESENTATION
+    std::vector<long> units;  // LENGTH_UNIT complex / SI_UNIT
+};
+
+// Single-pass offset index for streaming: id -> byte offset of its `#id=...;` statement, plus the
+// type-classified id lists. Builds NO value trees — instances are parsed lazily on demand. The
+// native peer of the Python reader's prepare_stream_index (bounded memory: index only).
+class StreamIndex {
+public:
+    std::string_view buf;
+    std::vector<long> ids;    // sorted
+    std::vector<size_t> offs; // statement-start offset, parallel to ids
+    TypeLists lists;
+
+    explicit StreamIndex(std::string_view b) : buf(b) {
+        scan();
+    }
+
+    // Lazily parse the instance with the given id. Returns false if absent.
+    bool parse(long id, Instance &out) const {
+        auto lo = std::lower_bound(ids.begin(), ids.end(), id);
+        if (lo == ids.end() || *lo != id)
+            return false;
+        return parse_statement(statement_at(offs[lo - ids.begin()]), out);
+    }
+
+private:
+    // The `#id=...` text starting at `off`, up to the terminating ';' (string/comment aware).
+    std::string_view statement_at(size_t off) const {
+        const char *p = buf.data() + off, *end = buf.data() + buf.size(), *s0 = p;
+        bool in_str = false;
+        while (p < end) {
+            char c = *p;
+            if (in_str) {
+                if (c == '\'') {
+                    if (p + 1 < end && p[1] == '\'') {
+                        p += 2;
+                        continue;
+                    }
+                    in_str = false;
+                }
+                ++p;
+                continue;
+            }
+            if (c == '\'') {
+                in_str = true;
+                ++p;
+                continue;
+            }
+            if (c == '/' && p + 1 < end && p[1] == '*') {
+                p += 2;
+                while (p + 1 < end && !(p[0] == '*' && p[1] == '/'))
+                    ++p;
+                p = (p + 1 < end) ? p + 2 : end;
+                continue;
+            }
+            if (c == ';')
+                break;
+            ++p;
+        }
+        return std::string_view(s0, p - s0);
+    }
+
+    void scan() {
+        std::vector<std::pair<long, size_t>> index;
+        const char *base = buf.data(), *p = base, *end = base + buf.size();
+        while (p < end) {
+            p21_detail::skip_ws(p, end);
+            if (p >= end)
+                break;
+            size_t off = (size_t) (p - base);
+            bool in_str = false; // advance to ';'
+            while (p < end) {
+                char c = *p;
+                if (in_str) {
+                    if (c == '\'') {
+                        if (p + 1 < end && p[1] == '\'') {
+                            p += 2;
+                            continue;
+                        }
+                        in_str = false;
+                    }
+                    ++p;
+                    continue;
+                }
+                if (c == '\'') {
+                    in_str = true;
+                    ++p;
+                    continue;
+                }
+                if (c == '/' && p + 1 < end && p[1] == '*') {
+                    p += 2;
+                    while (p + 1 < end && !(p[0] == '*' && p[1] == '/'))
+                        ++p;
+                    p = (p + 1 < end) ? p + 2 : end;
+                    continue;
+                }
+                if (c == ';')
+                    break;
+                ++p;
+            }
+            classify(off, index);
+            if (p < end)
+                ++p; // consume ';'
+        }
+        std::sort(index.begin(), index.end());
+        ids.reserve(index.size());
+        offs.reserve(index.size());
+        for (auto &[id, o] : index) {
+            ids.push_back(id);
+            offs.push_back(o);
+        }
+        std::sort(lists.roots.begin(), lists.roots.end()); // deterministic output order
+    }
+
+    // Light classify: extract id + type keyword (no arg parse) from the statement at `off`.
+    void classify(size_t off, std::vector<std::pair<long, size_t>> &index) {
+        const char *base = buf.data(), *p = base + off, *end = base + buf.size();
+        if (*p != '#')
+            return;
+        ++p;
+        long id = 0;
+        bool any = false;
+        while (p < end && *p >= '0' && *p <= '9') {
+            id = id * 10 + (*p++ - '0');
+            any = true;
+        }
+        if (!any)
+            return;
+        index.emplace_back(id, off);
+        p21_detail::skip_ws(p, end);
+        if (p >= end || *p != '=')
+            return;
+        ++p;
+        p21_detail::skip_ws(p, end);
+        if (p >= end)
+            return;
+        if (*p == '(') { // complex: peek the first sub-record name
+            ++p;
+            p21_detail::skip_ws(p, end);
+            const char *n0 = p;
+            while (p < end && (std::isalnum((unsigned char) *p) || *p == '_'))
+                ++p;
+            if (std::string_view(n0, p - n0) == "LENGTH_UNIT")
+                lists.units.push_back(id);
+            return;
+        }
+        const char *t0 = p;
+        while (p < end && (std::isalnum((unsigned char) *p) || *p == '_'))
+            ++p;
+        std::string_view t(t0, p - t0);
+        if (t == "MANIFOLD_SOLID_BREP" || t == "SHELL_BASED_SURFACE_MODEL")
+            lists.roots.push_back(id);
+        else if (t == "STYLED_ITEM")
+            lists.styled.push_back(id);
+        else if (t == "ADVANCED_BREP_SHAPE_REPRESENTATION")
+            lists.absr.push_back(id);
+        else if (t == "SHAPE_REPRESENTATION_RELATIONSHIP")
+            lists.srr.push_back(id);
+        else if (t == "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION")
+            lists.cdsr.push_back(id);
+        else if (t == "SHAPE_DEFINITION_REPRESENTATION")
+            lists.sdr.push_back(id);
+        else if (t == "SI_UNIT")
+            lists.units.push_back(id);
+    }
+};
+
 class Resolver {
 public:
-    explicit Resolver(const std::unordered_map<long, const Instance *> &by_id) : m_(by_id) {}
+    // Full-parse mode (tests / small files): the caller pre-parsed every instance into `by_id`.
+    explicit Resolver(const std::unordered_map<long, const Instance *> &by_id) : m_(&by_id) {}
+    // Streaming mode (large files): instances are parsed lazily on demand via the offset index.
+    explicit Resolver(const StreamIndex &idx) : idx_(&idx) {}
 
-    // Find every supported root and resolve it. Roots are ordered by ascending entity id (the map
-    // is unordered) for deterministic, parity-comparable output. Root types mirror the Python
-    // reader: MANIFOLD_SOLID_BREP (-> its shell) and SHELL_BASED_SURFACE_MODEL (-> its shells'
-    // faces; surface/no-thickness shapes, e.g. FEA-exported plates).
+    // Resolve every root into one in-memory document. (Bounds parse memory via the offset index in
+    // streaming mode, but still holds all roots' geometry — for fully bounded use, stream_step().)
     ng::NgeomDoc build() {
-        std::vector<long> root_ids;
-        for (const auto &[id, in] : m_)
-            if (!in->complex && (in->type == "MANIFOLD_SOLID_BREP" || in->type == "SHELL_BASED_SURFACE_MODEL"))
-                root_ids.push_back(id);
-        std::sort(root_ids.begin(), root_ids.end());
-
-        build_colour_map();
-        build_product_name_map();
-        build_transform_map(root_ids);
+        TypeLists tl = idx_ ? idx_->lists : collect_type_lists();
+        build_metadata(tl);
         ng::NgeomDoc doc;
-        doc.unit_scale = detect_unit_scale();
-        doc.roots.reserve(root_ids.size());
-        for (long id : root_ids) {
-            const Instance *in = inst(id);
-            if (!in || in->args.size() < 2)
-                continue;
-            ng::NgeomRoot root;
-            root.id = solid_name(in, id);
-            if (in->type == "MANIFOLD_SOLID_BREP") {
-                if (in->args[1].is_ref())
-                    shell_into(in->args[1].i, root.faces); // arg1 = the CLOSED_SHELL
-            } else if (in->args[1].kind == Kind::List) {
-                for (const Value &sh : in->args[1].items) // arg1 = list of shells
-                    if (sh.is_ref())
-                        shell_into(sh.i, root.faces);
-            }
-            // STYLED_ITEM colour usually targets the solid root itself.
-            auto cit = colour_map_.find(id);
-            if (cit != colour_map_.end()) {
-                root.has_color = true;
-                root.cr = cit->second.r;
-                root.cg = cit->second.g;
-                root.cb = cit->second.b;
-                root.ca = cit->second.a;
-            }
-            // Assembly placement(s): empty => single identity instance.
-            auto xit = xform_map_.find(id);
-            if (xit != xform_map_.end()) {
-                root.transforms.reserve(xit->second.size());
-                for (const Mat4 &m : xit->second) {
-                    std::array<float, 16> f;
-                    for (int k = 0; k < 16; ++k)
-                        f[k] = (float) m[k];
-                    root.transforms.push_back(f);
-                }
-            }
-            // Assembly path(s) for the part hierarchy: root-first (rep_id, product_name) levels.
-            auto pit = path_map_.find(id);
-            if (pit != path_map_.end()) {
-                root.instance_paths.reserve(pit->second.size());
-                for (const Path &path : pit->second) {
-                    std::vector<std::pair<int, std::string>> levels;
-                    levels.reserve(path.size());
-                    for (const auto &[rid, nm] : path)
-                        levels.emplace_back((int) rid, nm);
-                    root.instance_paths.push_back(std::move(levels));
-                }
-            }
-            doc.roots.push_back(std::move(root));
+        doc.unit_scale = unit_scale_;
+        doc.roots.reserve(tl.roots.size());
+        for (long sid : tl.roots) {
+            ng::NgeomRoot root = resolve_root(sid);
+            if (!root.id.empty())
+                doc.roots.push_back(std::move(root));
         }
         return doc;
     }
 
+    // Build the colour / product-name / transform / unit maps from the type-classified id lists,
+    // then free the entities they parsed (the maps hold the results). Call once before resolving.
+    void build_metadata(const TypeLists &tl) {
+        build_colour_map(tl.styled);
+        build_product_name_map(tl.sdr);
+        build_transform_map(tl.roots, tl.absr, tl.srr, tl.cdsr);
+        unit_scale_ = detect_unit_scale(tl.units);
+        clear_geom_cache();
+    }
+
+    // Resolve one root solid -> NgeomRoot (geometry + colour + per-instance transforms + paths).
+    ng::NgeomRoot resolve_root(long sid) {
+        ng::NgeomRoot root;
+        const Instance *in = inst(sid);
+        if (!in || in->args.size() < 2)
+            return root;
+        root.id = solid_name(in, sid);
+        if (in->type == "MANIFOLD_SOLID_BREP") {
+            if (in->args[1].is_ref())
+                shell_into(in->args[1].i, root.faces); // arg1 = the CLOSED_SHELL
+        } else if (in->args[1].kind == Kind::List) {
+            for (const Value &sh : in->args[1].items) // arg1 = list of shells
+                if (sh.is_ref())
+                    shell_into(sh.i, root.faces);
+        }
+        auto cit = colour_map_.find(sid); // STYLED_ITEM colour usually targets the solid root
+        if (cit != colour_map_.end()) {
+            root.has_color = true;
+            root.cr = cit->second.r;
+            root.cg = cit->second.g;
+            root.cb = cit->second.b;
+            root.ca = cit->second.a;
+        }
+        auto xit = xform_map_.find(sid); // empty => single identity instance
+        if (xit != xform_map_.end()) {
+            root.transforms.reserve(xit->second.size());
+            for (const Mat4 &m : xit->second) {
+                std::array<float, 16> f;
+                for (int k = 0; k < 16; ++k)
+                    f[k] = (float) m[k];
+                root.transforms.push_back(f);
+            }
+        }
+        auto pit = path_map_.find(sid); // root-first (rep_id, product_name) levels
+        if (pit != path_map_.end()) {
+            root.instance_paths.reserve(pit->second.size());
+            for (const Path &path : pit->second) {
+                std::vector<std::pair<int, std::string>> levels;
+                levels.reserve(path.size());
+                for (const auto &[rid, nm] : path)
+                    levels.emplace_back((int) rid, nm);
+                root.instance_paths.push_back(std::move(levels));
+            }
+        }
+        return root;
+    }
+
+    double unit_scale() const {
+        return unit_scale_;
+    }
+    // Free the per-solid working set (parsed instances + geometry caches). Maps are retained.
+    void clear_geom_cache() {
+        parse_cache_.clear();
+        surf_cache_.clear();
+        curve_cache_.clear();
+        face_cache_.clear();
+    }
+
 private:
-    const std::unordered_map<long, const Instance *> &m_;
+    // Classify every instance by type (full-map mode only; streaming uses the StreamIndex lists).
+    TypeLists collect_type_lists() {
+        TypeLists tl;
+        for (const auto &[id, in] : *m_) {
+            if (in->complex) {
+                if (sub(in, "LENGTH_UNIT"))
+                    tl.units.push_back(id);
+                continue;
+            }
+            std::string_view t = in->type;
+            if (t == "MANIFOLD_SOLID_BREP" || t == "SHELL_BASED_SURFACE_MODEL")
+                tl.roots.push_back(id);
+            else if (t == "STYLED_ITEM")
+                tl.styled.push_back(id);
+            else if (t == "ADVANCED_BREP_SHAPE_REPRESENTATION")
+                tl.absr.push_back(id);
+            else if (t == "SHAPE_REPRESENTATION_RELATIONSHIP")
+                tl.srr.push_back(id);
+            else if (t == "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION")
+                tl.cdsr.push_back(id);
+            else if (t == "SHAPE_DEFINITION_REPRESENTATION")
+                tl.sdr.push_back(id);
+            else if (t == "SI_UNIT")
+                tl.units.push_back(id);
+        }
+        std::sort(tl.roots.begin(), tl.roots.end());
+        return tl;
+    }
+
+    const std::unordered_map<long, const Instance *> *m_ = nullptr; // full-map mode
+    const StreamIndex *idx_ = nullptr;                              // streaming mode
+    std::unordered_map<long, Instance> parse_cache_;                // lazily parsed instances (streaming)
+    double unit_scale_ = 1.0;
     std::unordered_map<long, std::shared_ptr<ng::Surface>> surf_cache_;
     std::unordered_map<long, std::shared_ptr<ng::Curve>> curve_cache_;
     std::unordered_map<long, std::shared_ptr<ng::FaceSurfaceN>> face_cache_;
@@ -189,9 +415,20 @@ private:
     std::unordered_map<long, std::vector<Path>> path_map_;  // solid id -> per-instance assembly paths
     std::unordered_map<long, std::string> name_of_rep_;     // rep id -> product name
 
-    const Instance *inst(long id) const {
-        auto it = m_.find(id);
-        return it == m_.end() ? nullptr : it->second;
+    // Resolve an entity. Full-map mode: a direct lookup. Streaming mode: parse on demand from the
+    // offset index, caching the parsed Instance (kept alive until clear_geom_cache()).
+    const Instance *inst(long id) {
+        if (idx_) {
+            auto it = parse_cache_.find(id);
+            if (it != parse_cache_.end())
+                return &it->second;
+            Instance tmp;
+            if (!idx_->parse(id, tmp))
+                return nullptr;
+            return &parse_cache_.emplace(id, std::move(tmp)).first->second;
+        }
+        auto it = m_->find(id);
+        return it == m_->end() ? nullptr : it->second;
     }
 
     // A Part-21 boolean enum is .T. / .F.; anything but explicit F is true (matches the readers).
@@ -590,9 +827,10 @@ private:
     }
 
     // STYLED_ITEM('',(styles),#item) -> colour_map_[item id]. Search only the style refs.
-    void build_colour_map() {
-        for (const auto &[id, in] : m_) {
-            if (in->complex || in->type != "STYLED_ITEM" || in->args.size() < 3)
+    void build_colour_map(const std::vector<long> &styled) {
+        for (long id : styled) {
+            const Instance *in = inst(id);
+            if (!in || in->complex || in->args.size() < 3)
                 continue;
             const Value &item = in->args[2];
             if (!item.is_ref() || colour_map_.count(item.i))
@@ -661,11 +899,14 @@ private:
     // ubiquitous form is a complex record ( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) );
     // a plain top-level SI_UNIT('',prefix,.METRE.) is also handled. Lowest-id for determinism
     // without materializing/sorting all ids.
-    double detect_unit_scale() {
+    double detect_unit_scale(const std::vector<long> &units) {
         long best_id = 0;
         double best = 1.0;
         bool found = false;
-        for (const auto &[id, in] : m_) {
+        for (long id : units) {
+            const Instance *in = inst(id);
+            if (!in)
+                continue;
             double s = -1.0;
             if (in->complex) {
                 if (sub(in, "LENGTH_UNIT"))
@@ -700,9 +941,10 @@ private:
 
     // rep id -> product name, via SHAPE_DEFINITION_REPRESENTATION -> PRODUCT_DEFINITION_SHAPE ->
     // PRODUCT_DEFINITION -> ..._FORMATION -> PRODUCT. Mirrors the Python _build_product_name_map.
-    void build_product_name_map() {
-        for (const auto &[id, in] : m_) {
-            if (in->complex || in->type != "SHAPE_DEFINITION_REPRESENTATION" || in->args.size() < 2)
+    void build_product_name_map(const std::vector<long> &sdr) {
+        for (long id : sdr) {
+            const Instance *in = inst(id);
+            if (!in || in->complex || in->args.size() < 2)
                 continue;
             if (!in->args[0].is_ref() || !in->args[1].is_ref() || name_of_rep_.count(in->args[1].i))
                 continue;
@@ -742,13 +984,15 @@ private:
         return out;
     }
 
-    void build_transform_map(const std::vector<long> &root_ids) {
+    void build_transform_map(const std::vector<long> &root_ids, const std::vector<long> &absr_ids,
+                             const std::vector<long> &srr_ids, const std::vector<long> &cdsr_ids) {
         std::unordered_set<long> root_set(root_ids.begin(), root_ids.end());
         // ABSR items -> solid (geom rep of each solid); collect the ABSR id set.
         std::unordered_set<long> absr_set;
         std::unordered_map<long, long> geomrep_of_solid;
-        for (const auto &[id, in] : m_) {
-            if (in->complex || in->type != "ADVANCED_BREP_SHAPE_REPRESENTATION")
+        for (long id : absr_ids) {
+            const Instance *in = inst(id);
+            if (!in || in->complex)
                 continue;
             absr_set.insert(id);
             if (in->args.size() < 2 || in->args[1].kind != Kind::List)
@@ -759,8 +1003,9 @@ private:
         }
         // Standalone SHAPE_REPRESENTATION_RELATIONSHIP: the non-ABSR side is the placement rep.
         std::unordered_map<long, long> place_rep_of_geom;
-        for (const auto &[id, in] : m_) {
-            if (in->complex || in->type != "SHAPE_REPRESENTATION_RELATIONSHIP" || in->args.size() < 4)
+        for (long id : srr_ids) {
+            const Instance *in = inst(id);
+            if (!in || in->complex || in->args.size() < 4)
                 continue;
             if (!in->args[2].is_ref() || !in->args[3].is_ref())
                 continue;
@@ -772,8 +1017,9 @@ private:
         }
         // CDSR -> complex rep_rel -> (rep_1, rep_2, IDT) edge.
         edges_.clear();
-        for (const auto &[id, in] : m_) {
-            if (in->complex || in->type != "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION" || in->args.empty())
+        for (long id : cdsr_ids) {
+            const Instance *in = inst(id);
+            if (!in || in->complex || in->args.empty())
                 continue;
             if (!in->args[0].is_ref())
                 continue;
@@ -834,8 +1080,8 @@ private:
     }
 };
 
-// Convenience: parse a whole STEP buffer and resolve it. Holds the parsed instances (their
-// string_views point into `buf`, which the caller must keep alive for the returned doc's strings).
+// Convenience (full-parse): materialize every instance, then resolve into one document. Fine for
+// small/medium files + tests; for large files use stream_step (bounded memory).
 inline ng::NgeomDoc read_step_brep(std::string_view buf, std::vector<Instance> &store) {
     store.clear();
     scan_instances(buf, [&](const Instance &in) { store.push_back(in); });
@@ -845,6 +1091,22 @@ inline ng::NgeomDoc read_step_brep(std::string_view buf, std::vector<Instance> &
         by_id[in.id] = &in;
     Resolver r(by_id);
     return r.build();
+}
+
+// Streaming resolve (bounded memory): build the offset index, then resolve + emit one root at a
+// time, freeing each solid's working set after emit. Memory stays at the index (~12 bytes/instance)
+// plus a single solid's entities — mirrors the Python prepare_stream_index / build_one_solid + the
+// per-worker discipline. `emit(const NgeomRoot&, double unit_scale)`.
+template <class F> inline void stream_step(std::string_view buf, F &&emit) {
+    StreamIndex idx(buf);
+    Resolver r(idx);
+    r.build_metadata(idx.lists);
+    for (long sid : idx.lists.roots) {
+        ng::NgeomRoot root = r.resolve_root(sid);
+        if (!root.id.empty())
+            emit(root, r.unit_scale());
+        r.clear_geom_cache();
+    }
 }
 
 } // namespace adacpp::step

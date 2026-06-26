@@ -436,7 +436,31 @@ static void test_ngeom_roundtrip() {
     }
 }
 
+// The streaming reader (offset index + per-solid lazy resolve) must produce roots identical to the
+// full-parse path — same geometry + colour + transforms + paths — on every fixture.
+static void test_streaming_parity() {
+    const char *fixtures[] = {kTriSolid, kCurvedSolid, kDiskSolid, kBSplineSurf, kColouredSolid, kAssemblySolid};
+    for (const char *step : fixtures) {
+        std::vector<Instance> store;
+        ng::NgeomDoc full = read_step_brep(step, store);
+        std::vector<ng::NgeomRoot> streamed;
+        stream_step(step, [&](const ng::NgeomRoot &r, double) { streamed.push_back(r); });
+        CHECK(streamed.size() == full.roots.size(), "stream root count == full");
+        if (streamed.size() != full.roots.size())
+            continue;
+        for (size_t i = 0; i < streamed.size(); ++i) {
+            const ng::NgeomRoot &a = streamed[i], &b = full.roots[i];
+            CHECK(a.id == b.id && a.faces.size() == b.faces.size(), "stream geometry matches full");
+            CHECK(a.has_color == b.has_color && std::abs(a.cr - b.cr) < 1e-6 && std::abs(a.cb - b.cb) < 1e-6,
+                  "stream colour matches full");
+            CHECK(a.transforms.size() == b.transforms.size() && a.instance_paths.size() == b.instance_paths.size(),
+                  "stream transforms/paths match full");
+        }
+    }
+}
+
 int main() {
+    test_streaming_parity();
     test_resolve_structure();
     test_tessellate();
     test_curved_surfaces_and_polyloop();
