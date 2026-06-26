@@ -127,6 +127,23 @@ install = { cmd = "cmake --preset pixi-test-linux && cmake --build build && cmak
     "build/STP2GLB",
     "build/_ada_cpp_ext_impl*.so",
 ] }
+# Build the native extension and assemble an importable adacpp package (python sources + the
+# freshly built abi3 .so) under build/dist, WITHOUT installing into a conda env. Point another
+# project's PYTHONPATH at build/dist to bridge a bleeding-edge adacpp (e.g. adapy's
+# tests-adacpp-dev env) and measure C++ changes without a reinstall. abi3 = stable ABI, so the
+# .so loads in any CPython 3.x.
+build-dist = { cmd = "cmake --preset pixi-test-linux && cmake --build build && rm -rf build/dist && mkdir -p build/dist && cp -r src/adacpp build/dist/adacpp && cp build/_ada_cpp_ext_impl.abi3.so build/dist/adacpp/ && echo \"bleeding-edge adacpp -> $PIXI_PROJECT_ROOT/build/dist  (bridge via PYTHONPATH)\"", description = "Build native ext + assemble an importable adacpp at build/dist for PYTHONPATH bridging", inputs = [
+    "CMakeLists.txt",
+    "CMakePresets.json",
+    "cmake/**/*.cmake",
+    "src/**/*.cpp",
+    "src/**/*.h",
+    "src/**/*.hpp",
+    "src/**/*.hxx",
+    "src/adacpp/**/*.py",
+], outputs = [
+    "build/dist/adacpp/_ada_cpp_ext_impl.abi3.so",
+] }
 stp2glb = { cmd = "STP2GLB", description = "Run the C++ tests" }
 
 [feature.test.target.win-64.activation.env]
