@@ -75,6 +75,25 @@ int main() {
     CHECK(placed, "transform baked into vertices (x ~ 10)");
 
     std::remove(path.c_str());
+
+    // The disk-spill writer (one lane) must produce a byte-identical GLB to the in-RAM writer.
+    const std::string ramp = "/tmp/adacpp_glb_ram.glb", spillp = "/tmp/adacpp_glb_spill.glb";
+    write_glb(ramp, {tri, quad});
+    {
+        GlbSpillWriter lane("/tmp", 0);
+        lane.add(tri);
+        lane.add(quad);
+        write_glb_merged(spillp, {&lane});
+    }
+    auto rd = [](const std::string &p) {
+        std::ifstream f(p, std::ios::binary);
+        return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    };
+    std::vector<uint8_t> ra = rd(ramp), sp = rd(spillp);
+    CHECK(!ra.empty() && ra == sp, "spill GLB byte-identical to in-RAM GLB");
+    std::remove(ramp.c_str());
+    std::remove(spillp.c_str());
+
     if (g_fail == 0)
         std::printf("ngeom glb: ALL PASS\n");
     else

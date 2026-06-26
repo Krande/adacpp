@@ -38,6 +38,11 @@
 #include <utility>
 #include <vector>
 
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <Bnd_Box.hxx>
 #include <Bnd_OBB.hxx>
 #include <BRepBndLib.hxx>
@@ -503,39 +508,63 @@ int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_p
                             double angular_deg) {
     using namespace adacpp::ngeom;
     adacpp::prof::StepProfiler prof("stream_step_to_glb");
-    std::ifstream f(in_path, std::ios::binary);
-    if (!f)
+
+    // mmap the input read-only so its pages stay reclaimable (out of anon RSS), unlike reading the
+    // whole 778MB file into a std::string.
+    int fd = ::open(in_path.c_str(), O_RDONLY);
+    if (fd < 0)
         return -1;
-    std::stringstream ss;
-    ss << f.rdbuf();
-    std::string buf = ss.str();
-    prof.phase("read_file");
+    struct stat st;
+    if (::fstat(fd, &st) != 0 || st.st_size == 0) {
+        ::close(fd);
+        return -1;
+    }
+    size_t fsize = (size_t) st.st_size;
+    void *map = ::mmap(nullptr, fsize, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (map == MAP_FAILED) {
+        ::close(fd);
+        return -1;
+    }
+    ::madvise(map, fsize, MADV_SEQUENTIAL);
+    std::string_view buf((const char *) map, fsize);
+    prof.phase("mmap");
 
     TessParams tp;
     tp.deflection = deflection;
     tp.max_angle = angular_deg * 3.14159265358979323846 / 180.0;
 
-    std::vector<adacpp::glb::GlbSolid> solids;
-    adacpp::step::stream_step(buf, [&](const NgeomRoot &root, double) {
-        NgeomDoc one;
-        one.roots.push_back(root);
-        TessMesh tm = tessellate_doc(one, tp);
-        if (tm.indices.empty())
-            return;
-        prof.solid(tm.indices.size() / 3);
-        adacpp::glb::GlbSolid gs;
-        gs.positions = std::move(tm.positions);
-        gs.indices = std::move(tm.indices);
-        gs.color = {root.cr, root.cg, root.cb, root.ca}; // grey default when !has_color
-        gs.transforms = root.transforms;
-        gs.id = root.id;
-        solids.push_back(std::move(gs));
-    });
-    prof.phase("stream(resolve+tess)");
-    bool ok = adacpp::glb::write_glb(out_path, solids);
-    prof.phase("write_glb");
+    char tmpl[] = "/tmp/adacpp_glb_XXXXXX";
+    char *dir = ::mkdtemp(tmpl); // unique spill dir (removed after assembly)
+    bool ok = false;
+    int n = 0;
+    if (dir) {
+        { // lane scoped so its temp files are removed before we rmdir
+            adacpp::glb::GlbSpillWriter lane(dir, 0);
+            adacpp::step::stream_step(buf, [&](const NgeomRoot &root, double) {
+                NgeomDoc one;
+                one.roots.push_back(root);
+                TessMesh tm = tessellate_doc(one, tp);
+                if (tm.indices.empty())
+                    return;
+                prof.solid(tm.indices.size() / 3);
+                adacpp::glb::GlbSolid gs;
+                gs.positions = std::move(tm.positions);
+                gs.indices = std::move(tm.indices);
+                gs.color = {root.cr, root.cg, root.cb, root.ca}; // grey default when !has_color
+                gs.transforms = root.transforms;
+                lane.add(gs); // spilled to disk immediately; gs freed after
+                ++n;
+            });
+            prof.phase("stream(resolve+tess+spill)");
+            ok = adacpp::glb::write_glb_merged(out_path, {&lane});
+            prof.phase("write_glb_merged");
+        }
+        ::rmdir(dir);
+    }
+    ::munmap(map, fsize);
+    ::close(fd);
     prof.note("threads", 1);
-    return ok ? (int) solids.size() : -1;
+    return ok ? n : -1;
 }
 
 // ----------------------------------------------------------------------------
