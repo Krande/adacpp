@@ -21,6 +21,7 @@
 #include <array>
 #include <cctype>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -367,7 +368,7 @@ private:
         while (p < end && (std::isalnum((unsigned char) *p) || *p == '_'))
             ++p;
         std::string_view t(t0, p - t0);
-        if (t == "MANIFOLD_SOLID_BREP" || t == "SHELL_BASED_SURFACE_MODEL")
+        if (t == "MANIFOLD_SOLID_BREP" || t == "SHELL_BASED_SURFACE_MODEL" || t == "BREP_WITH_VOIDS")
             lists.roots.push_back(id);
         else if (t == "STYLED_ITEM")
             lists.styled.push_back(id);
@@ -442,6 +443,13 @@ public:
         if (in->type == "MANIFOLD_SOLID_BREP") {
             if (in->args[1].is_ref())
                 shell_into(in->args[1].i, root.faces); // arg1 = the CLOSED_SHELL
+        } else if (in->type == "BREP_WITH_VOIDS") {
+            if (in->args[1].is_ref())
+                shell_into(in->args[1].i, root.faces); // arg1 = outer CLOSED_SHELL
+            if (in->args.size() > 2 && in->args[2].kind == Kind::List)
+                for (const Value &v : in->args[2].items) // arg2 = void (ORIENTED_CLOSED_)SHELLs
+                    if (v.is_ref())
+                        shell_into(v.i, root.faces);
         } else if (in->args[1].kind == Kind::List) {
             for (const Value &sh : in->args[1].items) // arg1 = list of shells
                 if (sh.is_ref())
@@ -489,14 +497,27 @@ public:
         if (!in || in->args.size() < 2)
             return 0;
         size_t n = 0;
-        auto count_shell = [&](long shell_id) {
+        std::function<void(long)> count_shell = [&](long shell_id) {
             const Instance *sh = inst(shell_id);
-            if (sh && sh->args.size() > 1 && sh->args[1].kind == Kind::List)
+            if (!sh)
+                return;
+            if (sh->type == "ORIENTED_CLOSED_SHELL") {
+                if (sh->args.size() > 2 && sh->args[2].is_ref())
+                    count_shell(sh->args[2].i);
+            } else if (sh->args.size() > 1 && sh->args[1].kind == Kind::List) {
                 n += sh->args[1].items.size();
+            }
         };
         if (in->type == "MANIFOLD_SOLID_BREP") {
             if (in->args[1].is_ref())
                 count_shell(in->args[1].i);
+        } else if (in->type == "BREP_WITH_VOIDS") {
+            if (in->args[1].is_ref())
+                count_shell(in->args[1].i);
+            if (in->args.size() > 2 && in->args[2].kind == Kind::List)
+                for (const Value &v : in->args[2].items)
+                    if (v.is_ref())
+                        count_shell(v.i);
         } else if (in->args[1].kind == Kind::List) {
             for (const Value &sh : in->args[1].items)
                 if (sh.is_ref())
@@ -893,10 +914,18 @@ private:
         return f;
     }
 
-    // CLOSED_SHELL / OPEN_SHELL('',(#face,...)) -> append its faces.
+    // CLOSED_SHELL / OPEN_SHELL('',(#face,...)) -> append its faces. ORIENTED_CLOSED_SHELL('',*,
+    // #base_shell,orient) (BREP_WITH_VOIDS void shells) -> dereference to its base shell.
     void shell_into(long id, std::vector<std::shared_ptr<ng::FaceSurfaceN>> &out) {
         const Instance *in = inst(id);
-        if (!in || (in->type != "CLOSED_SHELL" && in->type != "OPEN_SHELL"))
+        if (!in)
+            return;
+        if (in->type == "ORIENTED_CLOSED_SHELL") {
+            if (in->args.size() > 2 && in->args[2].is_ref())
+                shell_into(in->args[2].i, out); // orientation flag ignored for tessellation
+            return;
+        }
+        if (in->type != "CLOSED_SHELL" && in->type != "OPEN_SHELL")
             return;
         if (in->args.size() > 1 && in->args[1].kind == Kind::List)
             for (const Value &fr : in->args[1].items)
