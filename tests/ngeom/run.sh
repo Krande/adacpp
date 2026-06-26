@@ -14,7 +14,7 @@ gcc -c -O2 -DNDEBUG -I third_party/libtess2/Include "${TESS_SRC[@]}"
 mv ./*.o "$obj"/
 
 # header-only suites
-for t in test_analytic test_bspline test_decode; do
+for t in test_analytic test_bspline test_decode test_ngeom_glb; do
     g++ -std=c++20 -O2 -Wall $INC "tests/ngeom/$t.cpp" -o "$obj/$t"
     "$obj/$t"
 done
