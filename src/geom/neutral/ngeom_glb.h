@@ -325,10 +325,17 @@ inline bool write_glb_merged(const std::string &path, const std::vector<GlbSpill
                     continue;
                 const auto &m = it->second;
                 std::ifstream f(m.idx_path, std::ios::binary);
-                uint32_t v;
-                while (f.read(reinterpret_cast<char *>(&v), 4)) {
-                    uint32_t ov = v + base;
-                    out.write(reinterpret_cast<const char *>(&ov), 4);
+                // Re-offset in bulk (a buffer at a time) instead of per-uint32 read/add/write —
+                // there are tens of millions of indices, so the syscall + stream overhead dominates.
+                std::vector<uint32_t> ibuf(1u << 16);
+                while (f) {
+                    f.read(reinterpret_cast<char *>(ibuf.data()), (std::streamsize) (ibuf.size() * 4));
+                    size_t got = (size_t) (f.gcount() / 4);
+                    if (!got)
+                        break;
+                    for (size_t i = 0; i < got; ++i)
+                        ibuf[i] += base;
+                    out.write(reinterpret_cast<const char *>(ibuf.data()), (std::streamsize) (got * 4));
                 }
                 base += m.vert_count;
                 idx_bytes += m.index_count * 4;
