@@ -480,9 +480,10 @@ public:
     }
 
     // Cheap per-solid cost proxy for LPT scheduling: count the faces in the solid's shell(s) WITHOUT
-    // building any geometry (no points/surfaces/curves). Resolves only the solid + its shell records.
-    // A good-enough proxy for tessellation cost (triangle count tracks face count). Call
-    // clear_geom_cache() after a batch to free the parsed shell instances.
+    // building geometry. Weak (Spearman ~0.47 vs tessellation time — the real cost is B-spline
+    // boundary uv()-inversion, not face count) but ~free; kept as defensive ordering for the case
+    // where the heaviest solid would otherwise be dispatched last. The engine-block tail is lever 2
+    // (faster B-spline eval), not scheduling. Call clear_geom_cache() after the batch.
     size_t solid_face_count(long sid) {
         const Instance *in = inst(sid);
         if (!in || in->args.size() < 2)
