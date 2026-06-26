@@ -25,7 +25,13 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
+
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "ngeom_bspline.h"  // BSplineCurve / BSplineSurface / expand_knots
 #include "ngeom_topology.h" // pulls ngeom_curves.h / ngeom_surfaces.h / ngeom_math.h
@@ -108,68 +114,162 @@ struct TypeLists {
     std::vector<long> units;  // LENGTH_UNIT complex / SI_UNIT
 };
 
+// Position of the terminating unquoted ';' within `s` (string/comment aware), or s.size() if none
+// is contained yet (set `found` accordingly — the file path grows the read and retries).
+inline size_t stmt_end_in(std::string_view s, bool &found) {
+    const char *p = s.data(), *end = p + s.size(), *s0 = p;
+    bool in_str = false;
+    while (p < end) {
+        char c = *p;
+        if (in_str) {
+            if (c == '\'') {
+                if (p + 1 < end && p[1] == '\'') {
+                    p += 2;
+                    continue;
+                }
+                in_str = false;
+            }
+            ++p;
+            continue;
+        }
+        if (c == '\'') {
+            in_str = true;
+            ++p;
+            continue;
+        }
+        if (c == '/' && p + 1 < end && p[1] == '*') {
+            p += 2;
+            while (p + 1 < end && !(p[0] == '*' && p[1] == '/'))
+                ++p;
+            p = (p + 1 < end) ? p + 2 : end;
+            continue;
+        }
+        if (c == ';') {
+            found = true;
+            return (size_t) (p - s0);
+        }
+        ++p;
+    }
+    found = false;
+    return s.size();
+}
+
 // Single-pass offset index for streaming: id -> byte offset of its `#id=...;` statement, plus the
 // type-classified id lists. Builds NO value trees — instances are parsed lazily on demand. The
-// native peer of the Python reader's prepare_stream_index (bounded memory: index only).
+// native peer of the Python reader's prepare_stream_index. Two modes: in-memory (scan + serve a
+// caller-owned buffer) and file-backed (mmap to scan with free-behind, then keep the fd so each
+// statement is pread on demand — the file lives in the OS page cache, NOT process RSS).
 class StreamIndex {
 public:
-    std::string_view buf;
     std::vector<long> ids;    // sorted
     std::vector<size_t> offs; // statement-start offset, parallel to ids
     TypeLists lists;
 
-    explicit StreamIndex(std::string_view b) : buf(b) {
-        scan();
+    // In-memory: the caller keeps `b` alive; statement_bytes returns views into it.
+    explicit StreamIndex(std::string_view b) : buf_(b) {
+        scan(b, nullptr);
     }
 
-    // Lazily parse the instance with the given id. Returns false if absent.
-    bool parse(long id, Instance &out) const {
+    // File-backed: mmap to scan (free-behind), munmap, keep the fd for per-statement pread.
+    static StreamIndex from_file(const std::string &path) {
+        StreamIndex si;
+        si.fd_ = ::open(path.c_str(), O_RDONLY);
+        if (si.fd_ < 0)
+            return si;
+        struct stat st;
+        if (::fstat(si.fd_, &st) != 0 || st.st_size == 0) {
+            ::close(si.fd_);
+            si.fd_ = -1;
+            return si;
+        }
+        si.fsize_ = (size_t) st.st_size;
+        void *m = ::mmap(nullptr, si.fsize_, PROT_READ, MAP_PRIVATE, si.fd_, 0);
+        if (m == MAP_FAILED) {
+            ::close(si.fd_);
+            si.fd_ = -1;
+            return si;
+        }
+        ::madvise(m, si.fsize_, MADV_SEQUENTIAL);
+        si.scan(std::string_view((const char *) m, si.fsize_), m); // free-behind during the scan
+        ::munmap(m, si.fsize_);
+        return si;
+    }
+
+    ~StreamIndex() {
+        if (fd_ >= 0)
+            ::close(fd_);
+    }
+    StreamIndex(StreamIndex &&o) noexcept {
+        *this = std::move(o);
+    }
+    StreamIndex &operator=(StreamIndex &&o) noexcept {
+        if (this != &o) {
+            if (fd_ >= 0)
+                ::close(fd_);
+            ids = std::move(o.ids);
+            offs = std::move(o.offs);
+            lists = std::move(o.lists);
+            buf_ = o.buf_;
+            fd_ = o.fd_;
+            fsize_ = o.fsize_;
+            o.fd_ = -1;
+        }
+        return *this;
+    }
+    StreamIndex(const StreamIndex &) = delete;
+    StreamIndex &operator=(const StreamIndex &) = delete;
+
+    bool ok() const {
+        return fd_ >= 0 || !buf_.empty();
+    }
+
+    // The statement text for `id` (no trailing ';'). In-memory mode returns a view into the source
+    // buffer (scratch unused); file mode preads into `scratch` and returns a view into it (the
+    // caller keeps scratch alive while it uses the parsed Instance). Empty if absent.
+    std::string_view statement_bytes(long id, std::string &scratch) const {
         auto lo = std::lower_bound(ids.begin(), ids.end(), id);
         if (lo == ids.end() || *lo != id)
-            return false;
-        return parse_statement(statement_at(offs[lo - ids.begin()]), out);
+            return {};
+        size_t off = offs[lo - ids.begin()];
+        if (fd_ < 0) {
+            bool found = false;
+            return buf_.substr(off, stmt_end_in(buf_.substr(off), found));
+        }
+        return pread_statement(off, scratch);
     }
 
 private:
-    // The `#id=...` text starting at `off`, up to the terminating ';' (string/comment aware).
-    std::string_view statement_at(size_t off) const {
-        const char *p = buf.data() + off, *end = buf.data() + buf.size(), *s0 = p;
-        bool in_str = false;
-        while (p < end) {
-            char c = *p;
-            if (in_str) {
-                if (c == '\'') {
-                    if (p + 1 < end && p[1] == '\'') {
-                        p += 2;
-                        continue;
-                    }
-                    in_str = false;
-                }
-                ++p;
-                continue;
+    StreamIndex() = default;
+
+    // pread the statement at `off` into `scratch`, growing the read until the terminating ';' is
+    // contained (so the string/comment scan runs over one contiguous buffer — no cross-read state).
+    std::string_view pread_statement(size_t off, std::string &scratch) const {
+        size_t chunk = 1u << 16;
+        while (true) {
+            size_t want = std::min(chunk, fsize_ - off);
+            scratch.resize(want);
+            ssize_t r = ::pread(fd_, scratch.data(), want, (off_t) off);
+            if (r <= 0) {
+                scratch.clear();
+                return {};
             }
-            if (c == '\'') {
-                in_str = true;
-                ++p;
-                continue;
+            scratch.resize((size_t) r);
+            bool found = false;
+            size_t len = stmt_end_in(scratch, found);
+            if (found) {
+                scratch.resize(len);
+                return scratch;
             }
-            if (c == '/' && p + 1 < end && p[1] == '*') {
-                p += 2;
-                while (p + 1 < end && !(p[0] == '*' && p[1] == '/'))
-                    ++p;
-                p = (p + 1 < end) ? p + 2 : end;
-                continue;
-            }
-            if (c == ';')
-                break;
-            ++p;
+            if ((size_t) r >= fsize_ - off) // read to EOF without a ';' (last/malformed statement)
+                return scratch;
+            chunk = chunk < (1u << 24) ? chunk * 2 : chunk + (1u << 24);
         }
-        return std::string_view(s0, p - s0);
     }
 
-    void scan() {
+    void scan(std::string_view src, const void *mmap_base) {
         std::vector<std::pair<long, size_t>> index;
-        const char *base = buf.data(), *p = base, *end = base + buf.size();
+        const char *base = src.data(), *p = base, *end = base + src.size();
+        size_t freed = 0;
         while (p < end) {
             p21_detail::skip_ws(p, end);
             if (p >= end)
@@ -205,9 +305,21 @@ private:
                     break;
                 ++p;
             }
-            classify(off, index);
+            classify(src, off, index);
             if (p < end)
                 ++p; // consume ';'
+            // Free-behind (file mode): drop scanned mmap pages so the scan doesn't fault in the
+            // whole file. Forward-only scan, so dropped pages are never re-touched.
+            if (mmap_base) {
+                size_t cur = (size_t) (p - base);
+                if (cur > freed + (32u << 20)) {
+                    size_t up_to = (cur - (1u << 20)) & ~(size_t) 4095; // page-aligned, 1MB margin
+                    if (up_to > freed) {
+                        ::madvise((char *) const_cast<void *>(mmap_base) + freed, up_to - freed, MADV_DONTNEED);
+                        freed = up_to;
+                    }
+                }
+            }
         }
         std::sort(index.begin(), index.end());
         ids.reserve(index.size());
@@ -220,8 +332,8 @@ private:
     }
 
     // Light classify: extract id + type keyword (no arg parse) from the statement at `off`.
-    void classify(size_t off, std::vector<std::pair<long, size_t>> &index) {
-        const char *base = buf.data(), *p = base + off, *end = base + buf.size();
+    void classify(std::string_view src, size_t off, std::vector<std::pair<long, size_t>> &index) {
+        const char *base = src.data(), *p = base + off, *end = base + src.size();
         if (*p != '#')
             return;
         ++p;
@@ -270,6 +382,10 @@ private:
         else if (t == "SI_UNIT")
             lists.units.push_back(id);
     }
+
+    std::string_view buf_; // in-memory mode (empty in file mode)
+    int fd_ = -1;          // file mode (>=0)
+    size_t fsize_ = 0;
 };
 
 class Resolver {
@@ -395,7 +511,14 @@ private:
 
     const std::unordered_map<long, const Instance *> *m_ = nullptr; // full-map mode
     const StreamIndex *idx_ = nullptr;                              // streaming mode
-    std::unordered_map<long, Instance> parse_cache_;                // lazily parsed instances (streaming)
+    // Lazily parsed instances (streaming). Each owns the statement bytes its Instance's string_views
+    // point into (needed in file/pread mode where the source isn't a stable mmap). unordered_map
+    // node stability keeps both alive at a fixed address until cleared.
+    struct Parsed {
+        std::string bytes;
+        Instance inst;
+    };
+    std::unordered_map<long, Parsed> parse_cache_;
     double unit_scale_ = 1.0;
     std::unordered_map<long, std::shared_ptr<ng::Surface>> surf_cache_;
     std::unordered_map<long, std::shared_ptr<ng::Curve>> curve_cache_;
@@ -421,15 +544,24 @@ private:
         if (idx_) {
             auto it = parse_cache_.find(id);
             if (it != parse_cache_.end())
-                return &it->second;
-            Instance tmp;
-            if (!idx_->parse(id, tmp))
+                return &it->second.inst;
+            // pread (file mode) into ONE reusable buffer, then store a right-sized copy per entity —
+            // otherwise each cached entity would retain the (large) initial pread capacity.
+            std::string_view stmt = idx_->statement_bytes(id, pread_scratch_);
+            if (stmt.empty())
                 return nullptr;
-            return &parse_cache_.emplace(id, std::move(tmp)).first->second;
+            Parsed &slot = parse_cache_[id]; // stable node: bytes + inst stay put
+            slot.bytes.assign(stmt.data(), stmt.size());
+            if (!parse_statement(slot.bytes, slot.inst)) {
+                parse_cache_.erase(id);
+                return nullptr;
+            }
+            return &slot.inst; // inst's string_views point into the owned slot.bytes
         }
         auto it = m_->find(id);
         return it == m_->end() ? nullptr : it->second;
     }
+    std::string pread_scratch_; // reusable per-statement pread buffer (file mode)
 
     // A Part-21 boolean enum is .T. / .F.; anything but explicit F is true (matches the readers).
     static bool enum_true(const Value &v) {
@@ -1093,12 +1225,11 @@ inline ng::NgeomDoc read_step_brep(std::string_view buf, std::vector<Instance> &
     return r.build();
 }
 
-// Streaming resolve (bounded memory): build the offset index, then resolve + emit one root at a
-// time, freeing each solid's working set after emit. Memory stays at the index (~12 bytes/instance)
-// plus a single solid's entities — mirrors the Python prepare_stream_index / build_one_solid + the
-// per-worker discipline. `emit(const NgeomRoot&, double unit_scale)`.
-template <class F> inline void stream_step(std::string_view buf, F &&emit) {
-    StreamIndex idx(buf);
+// Streaming resolve (bounded memory): resolve + emit one root at a time, freeing each solid's
+// working set after emit. Memory stays at the index (~12 bytes/instance) plus a single solid's
+// entities — mirrors the Python prepare_stream_index / build_one_solid + the per-worker discipline.
+// `emit(const NgeomRoot&, double unit_scale)`.
+template <class F> inline void stream_step(const StreamIndex &idx, F &&emit) {
     Resolver r(idx);
     r.build_metadata(idx.lists);
     for (long sid : idx.lists.roots) {
@@ -1107,6 +1238,12 @@ template <class F> inline void stream_step(std::string_view buf, F &&emit) {
             emit(root, r.unit_scale());
         r.clear_geom_cache();
     }
+}
+
+// Convenience: stream an in-memory buffer (the caller keeps it alive).
+template <class F> inline void stream_step(std::string_view buf, F &&emit) {
+    StreamIndex idx(buf);
+    stream_step(idx, std::forward<F>(emit));
 }
 
 } // namespace adacpp::step

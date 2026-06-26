@@ -510,25 +510,12 @@ int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_p
     using namespace adacpp::ngeom;
     adacpp::prof::StepProfiler prof("stream_step_to_glb");
 
-    // mmap the input read-only so its pages stay reclaimable (out of anon RSS), unlike reading the
-    // whole 778MB file into a std::string.
-    int fd = ::open(in_path.c_str(), O_RDONLY);
-    if (fd < 0)
+    // File-backed offset index: mmap to scan (freed-behind), then pread each statement on demand so
+    // the file lives in the OS page cache, not process RSS.
+    adacpp::step::StreamIndex idx = adacpp::step::StreamIndex::from_file(in_path);
+    if (!idx.ok())
         return -1;
-    struct stat st;
-    if (::fstat(fd, &st) != 0 || st.st_size == 0) {
-        ::close(fd);
-        return -1;
-    }
-    size_t fsize = (size_t) st.st_size;
-    void *map = ::mmap(nullptr, fsize, PROT_READ, MAP_PRIVATE, fd, 0);
-    if (map == MAP_FAILED) {
-        ::close(fd);
-        return -1;
-    }
-    ::madvise(map, fsize, MADV_SEQUENTIAL);
-    std::string_view buf((const char *) map, fsize);
-    prof.phase("mmap");
+    prof.phase("scan_index");
 
     TessParams tp;
     tp.deflection = deflection;
@@ -541,7 +528,7 @@ int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_p
     if (dir) {
         { // lane scoped so its temp files are removed before we rmdir
             adacpp::glb::GlbSpillWriter lane(dir, 0);
-            adacpp::step::stream_step(buf, [&](const NgeomRoot &root, double) {
+            adacpp::step::stream_step(idx, [&](const NgeomRoot &root, double) {
                 NgeomDoc one;
                 one.roots.push_back(root);
                 TessMesh tm = tessellate_doc(one, tp);
@@ -565,8 +552,6 @@ int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_p
         }
         ::rmdir(dir);
     }
-    ::munmap(map, fsize);
-    ::close(fd);
     prof.note("threads", 1);
     return ok ? n : -1;
 }
