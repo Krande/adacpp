@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "ngeom_bspline.h"
 #include "ngeom_surfaces.h"
 #include "ngeom_tessellate.h"
 #include "step_reader.h"
@@ -193,11 +194,90 @@ static void test_conic_edge() {
     CHECK(inr, "disk vertices within radius 2");
 }
 
+// One face on a simple (non-rational) B_SPLINE_SURFACE_WITH_KNOTS and one on a rational complex
+// record (weights ((1,1),(1,2))) — both a 2x2 degree-1 patch over the unit square.
+static const char *kBSplineSurf =
+    "ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\n"
+    "#1=CARTESIAN_POINT('',(0.,0.,0.));\n"
+    "#2=CARTESIAN_POINT('',(1.,0.,0.));\n"
+    "#3=CARTESIAN_POINT('',(0.,1.,0.));\n"
+    "#4=CARTESIAN_POINT('',(1.,1.,0.));\n"
+    "#10=B_SPLINE_SURFACE_WITH_KNOTS('',1,1,((#1,#2),(#3,#4)),.UNSPECIFIED.,.F.,.F.,.F.,"
+    "(2,2),(2,2),(0.,1.),(0.,1.),.UNSPECIFIED.);\n"
+    "#11=POLY_LOOP('',(#1,#2,#4,#3));\n"
+    "#12=FACE_OUTER_BOUND('',#11,.T.);\n"
+    "#13=ADVANCED_FACE('s1',(#12),#10,.T.);\n"
+    "#20=(BOUNDED_SURFACE()B_SPLINE_SURFACE(1,1,((#1,#2),(#3,#4)),.UNSPECIFIED.,.F.,.F.,.F.)"
+    "B_SPLINE_SURFACE_WITH_KNOTS((2,2),(2,2),(0.,1.),(0.,1.),.UNSPECIFIED.)"
+    "RATIONAL_B_SPLINE_SURFACE(((1.,1.),(1.,2.)))GEOMETRIC_REPRESENTATION_ITEM()REPRESENTATION_ITEM('')SURFACE());\n"
+    "#21=ADVANCED_FACE('s2',(#12),#20,.T.);\n"
+    "#30=CLOSED_SHELL('',(#13,#21));\n"
+    "#40=MANIFOLD_SOLID_BREP('bspl',#30);\n"
+    "ENDSEC;\nEND-ISO-10303-21;\n";
+
+static void test_bspline_surfaces() {
+    std::vector<Instance> store;
+    ng::NgeomDoc doc = read_step_brep(kBSplineSurf, store);
+    CHECK(doc.roots.size() == 1 && doc.roots[0].faces.size() == 2, "bspline solid: 2 faces");
+    if (doc.roots.empty() || doc.roots[0].faces.size() != 2)
+        return;
+    auto *s1 = dynamic_cast<const ng::BSplineSurface *>(doc.roots[0].faces[0]->surface.get());
+    CHECK(s1 && s1->u_degree == 1 && s1->v_degree == 1 && s1->nu == 2 && s1->nv == 2, "simple bspline degree/grid");
+    CHECK(s1 && s1->weights.empty(), "non-rational -> no weights");
+    CHECK(s1 && s1->ctrl.size() == 4 && std::abs(s1->ctrl[3].x - 1.0) < 1e-9 && std::abs(s1->ctrl[3].y - 1.0) < 1e-9,
+          "control grid row-major");
+    auto *s2 = dynamic_cast<const ng::BSplineSurface *>(doc.roots[0].faces[1]->surface.get());
+    CHECK(s2 && s2->weights.size() == 4 && std::abs(s2->weights[3] - 2.0) < 1e-9, "rational complex record weights");
+    // a 2x2 degree-1 patch over the unit square tessellates to triangles
+    ng::TessParams tp;
+    tp.deflection = 0.1;
+    ng::TessMesh m = ng::tessellate_doc(doc, tp);
+    CHECK(m.indices.size() >= 6, "bspline patches tessellate to triangles");
+}
+
+// A planar face whose single boundary edge is a degree-2 B_SPLINE_CURVE_WITH_KNOTS.
+static const char *kBSplineEdge = "ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\n"
+                                  "#1=CARTESIAN_POINT('',(0.,0.,0.));\n"
+                                  "#2=CARTESIAN_POINT('',(0.5,1.,0.));\n"
+                                  "#3=CARTESIAN_POINT('',(1.,0.,0.));\n"
+                                  "#4=VERTEX_POINT('',#1);\n"
+                                  "#5=VERTEX_POINT('',#3);\n"
+                                  "#6=B_SPLINE_CURVE_WITH_KNOTS('',2,(#1,#2,#3),.UNSPECIFIED.,.F.,.F.,"
+                                  "(3,3),(0.,1.),.UNSPECIFIED.);\n"
+                                  "#7=EDGE_CURVE('',#4,#5,#6,.T.);\n"
+                                  "#8=ORIENTED_EDGE('',*,*,#7,.T.);\n"
+                                  "#9=EDGE_LOOP('',(#8));\n"
+                                  "#10=FACE_OUTER_BOUND('',#9,.T.);\n"
+                                  "#11=DIRECTION('',(0.,0.,1.));\n"
+                                  "#12=DIRECTION('',(1.,0.,0.));\n"
+                                  "#13=AXIS2_PLACEMENT_3D('',#1,#11,#12);\n"
+                                  "#14=PLANE('',#13);\n"
+                                  "#15=ADVANCED_FACE('be',(#10),#14,.T.);\n"
+                                  "#16=CLOSED_SHELL('',(#15));\n"
+                                  "#17=MANIFOLD_SOLID_BREP('bedge',#16);\n"
+                                  "ENDSEC;\nEND-ISO-10303-21;\n";
+
+static void test_bspline_edge_curve() {
+    std::vector<Instance> store;
+    ng::NgeomDoc doc = read_step_brep(kBSplineEdge, store);
+    CHECK(doc.roots.size() == 1 && doc.roots[0].faces.size() == 1, "bspline-edge solid: one face");
+    if (doc.roots.empty() || doc.roots[0].faces.empty())
+        return;
+    const ng::LoopN &lp = *doc.roots[0].faces[0]->bounds[0].loop;
+    CHECK(!lp.is_poly && lp.edges.size() == 1, "edge loop with one (bspline) edge");
+    if (!lp.edges.empty()) {
+        auto *bc = dynamic_cast<const ng::BSplineCurve *>(lp.edges[0].geometry.get());
+        CHECK(bc && bc->degree == 2 && bc->ctrl.size() == 3, "edge geometry is a degree-2 bspline, 3 ctrl pts");
+    }
+}
+
 int main() {
     test_resolve_structure();
     test_tessellate();
     test_curved_surfaces_and_polyloop();
     test_conic_edge();
+    test_bspline_surfaces();
+    test_bspline_edge_curve();
     if (g_fail == 0)
         std::printf("step reader: ALL PASS\n");
     else
