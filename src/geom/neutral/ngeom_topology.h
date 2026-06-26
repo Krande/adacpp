@@ -3,6 +3,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
@@ -296,6 +297,10 @@ struct NgeomRoot {
     // NGEOM byte decoder leaves has_color=false (colour travels out-of-band on that path).
     bool has_color = false;
     float cr = 0.5f, cg = 0.5f, cb = 0.5f, ca = 1.0f; // rgba in 0..1 when has_color
+    // Per-instance world placement matrices (column-major, glTF order), from the assembly
+    // transform graph. Empty => a single identity instance (flat/baked files). N entries => the
+    // solid is placed N times. Populated by the native STEP reader only.
+    std::vector<std::array<float, 16>> transforms;
 };
 
 struct NgeomDoc {

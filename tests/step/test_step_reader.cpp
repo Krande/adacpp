@@ -319,6 +319,61 @@ static void test_colour_and_units() {
           "colour rgba from the style tree");
 }
 
+// The triangle solid placed at +10x via a CDSR / SHAPE_REPRESENTATION_RELATIONSHIP /
+// ITEM_DEFINED_TRANSFORMATION assembly chain (item_1 = identity in the child rep, item_2 = +10x in
+// the parent rep -> world = inv(I) @ T(10,0,0)).
+static const char *kAssemblySolid =
+    "ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\n"
+    "#1=CARTESIAN_POINT('',(0.,0.,0.));\n"
+    "#2=CARTESIAN_POINT('',(1.,0.,0.));\n"
+    "#3=CARTESIAN_POINT('',(0.,1.,0.));\n"
+    "#11=VERTEX_POINT('',#1);\n"
+    "#12=VERTEX_POINT('',#2);\n"
+    "#13=VERTEX_POINT('',#3);\n"
+    "#41=EDGE_CURVE('',#11,#12,#11,.T.);\n"
+    "#42=EDGE_CURVE('',#12,#13,#11,.T.);\n"
+    "#43=EDGE_CURVE('',#13,#11,#11,.T.);\n"
+    "#51=ORIENTED_EDGE('',*,*,#41,.T.);\n"
+    "#52=ORIENTED_EDGE('',*,*,#42,.T.);\n"
+    "#53=ORIENTED_EDGE('',*,*,#43,.T.);\n"
+    "#60=EDGE_LOOP('',(#51,#52,#53));\n"
+    "#61=FACE_OUTER_BOUND('',#60,.T.);\n"
+    "#70=AXIS2_PLACEMENT_3D('',#1,$,$);\n"
+    "#71=PLANE('',#70);\n"
+    "#80=ADVANCED_FACE('',(#61),#71,.T.);\n"
+    "#90=CLOSED_SHELL('',(#80));\n"
+    "#100=MANIFOLD_SOLID_BREP('solid',#90);\n"
+    "#200=ADVANCED_BREP_SHAPE_REPRESENTATION('',(#100),$);\n"
+    "#201=SHAPE_REPRESENTATION('child',(),$);\n"
+    "#220=SHAPE_REPRESENTATION('root',(),$);\n"
+    "#202=SHAPE_REPRESENTATION_RELATIONSHIP('','',#200,#201);\n"
+    "#210=CARTESIAN_POINT('',(0.,0.,0.));\n"
+    "#211=AXIS2_PLACEMENT_3D('',#210,$,$);\n"
+    "#212=CARTESIAN_POINT('',(10.,0.,0.));\n"
+    "#213=AXIS2_PLACEMENT_3D('',#212,$,$);\n"
+    "#214=ITEM_DEFINED_TRANSFORMATION('','',#211,#213);\n"
+    "#215=(REPRESENTATION_RELATIONSHIP('','',#201,#220)REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#214)"
+    "SHAPE_REPRESENTATION_RELATIONSHIP());\n"
+    "#216=CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#215,$);\n"
+    "ENDSEC;\nEND-ISO-10303-21;\n";
+
+static void test_assembly_transform() {
+    std::vector<Instance> store;
+    ng::NgeomDoc doc = read_step_brep(kAssemblySolid, store);
+    CHECK(doc.roots.size() == 1 && doc.roots[0].faces.size() == 1, "placed solid resolves (1 face)");
+    if (doc.roots.empty())
+        return;
+    const auto &t = doc.roots[0].transforms;
+    CHECK(t.size() == 1, "one world placement");
+    if (t.size() == 1) {
+        const auto &m = t[0]; // column-major: translation in cols 12..14, rotation identity
+        CHECK(std::abs(m[12] - 10.0f) < 1e-5 && std::abs(m[13]) < 1e-5 && std::abs(m[14]) < 1e-5, "translation = +10x");
+        CHECK(std::abs(m[0] - 1.0f) < 1e-5 && std::abs(m[5] - 1.0f) < 1e-5 && std::abs(m[10] - 1.0f) < 1e-5 &&
+                  std::abs(m[15] - 1.0f) < 1e-5,
+              "rotation block is identity");
+    }
+}
+
 int main() {
     test_resolve_structure();
     test_tessellate();
@@ -327,6 +382,7 @@ int main() {
     test_bspline_surfaces();
     test_bspline_edge_curve();
     test_colour_and_units();
+    test_assembly_transform();
     if (g_fail == 0)
         std::printf("step reader: ALL PASS\n");
     else

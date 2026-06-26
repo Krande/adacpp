@@ -12,12 +12,13 @@
 // B_SPLINE_SURFACE_WITH_KNOTS (+ rational complex records); edge curves CIRCLE / ELLIPSE /
 // B_SPLINE_CURVE_WITH_KNOTS (+ rational) (LINE -> null, straight through endpoints, matching the
 // Python serializer's geom=-1 for Line). Metadata: per-solid colour (STYLED_ITEM -> COLOUR_RGB,
-// BFS style tree) on NgeomRoot, and the file length-unit scale (LENGTH_UNIT/SI_UNIT) on NgeomDoc.
-// Assembly transforms (CDSR/SRR/MAPPED_ITEM world matrices, which also fold in the unit scale)
-// come in the next slice.
+// BFS style tree) + per-instance world placement matrices (CDSR/SRR/ITEM_DEFINED_TRANSFORMATION
+// assembly graph) on NgeomRoot, and the file length-unit scale (LENGTH_UNIT/SI_UNIT) on NgeomDoc.
+// Mixed-unit per-representation scaling (rep_factor) is stubbed at 1.0 (uniform-unit files).
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <deque>
 #include <memory>
@@ -33,6 +34,68 @@
 namespace adacpp::step {
 
 namespace ng = adacpp::ngeom;
+
+// 4x4 homogeneous matrix, column-major (glTF order): index = col*4 + row; columns 0..2 are the x/
+// y/z basis vectors, column 3 is the translation.
+using Mat4 = std::array<double, 16>;
+namespace mat4 {
+inline Mat4 ident() {
+    Mat4 m{};
+    m[0] = m[5] = m[10] = m[15] = 1.0;
+    return m;
+}
+inline Mat4 from_frame(const ng::Frame &f) {
+    Mat4 m{};
+    m[0] = f.x.x;
+    m[1] = f.x.y;
+    m[2] = f.x.z;
+    m[4] = f.y.x;
+    m[5] = f.y.y;
+    m[6] = f.y.z;
+    m[8] = f.z.x;
+    m[9] = f.z.y;
+    m[10] = f.z.z;
+    m[12] = f.o.x;
+    m[13] = f.o.y;
+    m[14] = f.o.z;
+    m[15] = 1.0;
+    return m;
+}
+inline Mat4 mul(const Mat4 &A, const Mat4 &B) { // A*B (math), column-major
+    Mat4 C{};
+    for (int j = 0; j < 4; ++j)
+        for (int i = 0; i < 4; ++i) {
+            double s = 0;
+            for (int k = 0; k < 4; ++k)
+                s += A[k * 4 + i] * B[j * 4 + k];
+            C[j * 4 + i] = s;
+        }
+    return C;
+}
+// Inverse of a rigid transform [R|t] with orthonormal R (axis2 placements): [R^T | -R^T t].
+inline Mat4 rigid_inverse(const Mat4 &M) {
+    Mat4 r{};
+    for (int a = 0; a < 3; ++a)
+        for (int b = 0; b < 3; ++b)
+            r[a * 4 + b] = M[b * 4 + a]; // transpose the 3x3
+    double t[3] = {M[12], M[13], M[14]};
+    for (int i = 0; i < 3; ++i) {
+        double s = 0;
+        for (int j = 0; j < 3; ++j)
+            s += M[i * 4 + j] * t[j];
+        r[12 + i] = -s;
+    }
+    r[15] = 1.0;
+    return r;
+}
+inline bool is_identity(const Mat4 &m, double tol = 1e-12) {
+    Mat4 I = ident();
+    for (int k = 0; k < 16; ++k)
+        if (std::abs(m[k] - I[k]) > tol)
+            return false;
+    return true;
+}
+} // namespace mat4
 
 class Resolver {
 public:
@@ -50,6 +113,7 @@ public:
         std::sort(root_ids.begin(), root_ids.end());
 
         build_colour_map();
+        build_transform_map(root_ids);
         ng::NgeomDoc doc;
         doc.unit_scale = detect_unit_scale();
         doc.roots.reserve(root_ids.size());
@@ -76,6 +140,17 @@ public:
                 root.cb = cit->second.b;
                 root.ca = cit->second.a;
             }
+            // Assembly placement(s): empty => single identity instance.
+            auto xit = xform_map_.find(id);
+            if (xit != xform_map_.end()) {
+                root.transforms.reserve(xit->second.size());
+                for (const Mat4 &m : xit->second) {
+                    std::array<float, 16> f;
+                    for (int k = 0; k < 16; ++k)
+                        f[k] = (float) m[k];
+                    root.transforms.push_back(f);
+                }
+            }
             doc.roots.push_back(std::move(root));
         }
         return doc;
@@ -91,6 +166,12 @@ private:
         float r, g, b, a;
     };
     std::unordered_map<long, RGBA> colour_map_; // STYLED_ITEM geometric-item id -> colour
+
+    struct Edge {
+        long rep_2, i1, i2;
+    };
+    std::unordered_map<long, std::vector<Edge>> edges_;     // rep_1 -> placement edges
+    std::unordered_map<long, std::vector<Mat4>> xform_map_; // solid id -> world matrices (>1 placed)
 
     const Instance *inst(long id) const {
         auto it = m_.find(id);
@@ -585,6 +666,117 @@ private:
             }
         }
         return best;
+    }
+
+    // --- assembly transforms (CDSR / SRR / MAPPED_ITEM-style placement graph) -------------
+    // A port of the Python reader's _build_transform_map / _world_matrices, validated there
+    // against OCC to 1e-9. NOTE: per-representation length scaling (rep_factor, for mixed mm/cm/m
+    // files) is stubbed at 1.0 here — correct for uniform-unit files (the common case); mixed-unit
+    // handling is a follow-up.
+    Mat4 placement_mat4(long id) {
+        return mat4::from_frame(placement(id));
+    }
+
+    // All world matrices reaching `rep_id` (which is rep_1 of edges). Each edge T = inv(M(item_1))
+    // * M(item_2) maps this rep's coords to its parent; recurse to a root rep (no out-edges).
+    std::vector<Mat4> world_matrices(long rep_id, std::unordered_set<long> &on_path) {
+        auto it = edges_.find(rep_id);
+        if (it == edges_.end() || it->second.empty())
+            return {mat4::ident()}; // root rep: its coords are world
+        if (on_path.count(rep_id))
+            return {mat4::ident()}; // cycle guard
+        on_path.insert(rep_id);
+        std::vector<Mat4> mats;
+        for (const Edge &e : it->second) {
+            Mat4 t_edge = mat4::mul(mat4::rigid_inverse(placement_mat4(e.i1)), placement_mat4(e.i2));
+            for (const Mat4 &t_parent : world_matrices(e.rep_2, on_path))
+                mats.push_back(mat4::mul(t_parent, t_edge));
+        }
+        on_path.erase(rep_id);
+        return mats;
+    }
+
+    void build_transform_map(const std::vector<long> &root_ids) {
+        std::unordered_set<long> root_set(root_ids.begin(), root_ids.end());
+        // ABSR items -> solid (geom rep of each solid); collect the ABSR id set.
+        std::unordered_set<long> absr_set;
+        std::unordered_map<long, long> geomrep_of_solid;
+        for (const auto &[id, in] : m_) {
+            if (in->complex || in->type != "ADVANCED_BREP_SHAPE_REPRESENTATION")
+                continue;
+            absr_set.insert(id);
+            if (in->args.size() < 2 || in->args[1].kind != Kind::List)
+                continue;
+            for (const Value &it : in->args[1].items)
+                if (it.is_ref() && root_set.count(it.i))
+                    geomrep_of_solid[it.i] = id;
+        }
+        // Standalone SHAPE_REPRESENTATION_RELATIONSHIP: the non-ABSR side is the placement rep.
+        std::unordered_map<long, long> place_rep_of_geom;
+        for (const auto &[id, in] : m_) {
+            if (in->complex || in->type != "SHAPE_REPRESENTATION_RELATIONSHIP" || in->args.size() < 4)
+                continue;
+            if (!in->args[2].is_ref() || !in->args[3].is_ref())
+                continue;
+            long ra = in->args[2].i, rb = in->args[3].i;
+            if (absr_set.count(ra))
+                place_rep_of_geom.emplace(ra, rb);
+            else if (absr_set.count(rb))
+                place_rep_of_geom.emplace(rb, ra);
+        }
+        // CDSR -> complex rep_rel -> (rep_1, rep_2, IDT) edge.
+        edges_.clear();
+        for (const auto &[id, in] : m_) {
+            if (in->complex || in->type != "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION" || in->args.empty())
+                continue;
+            if (!in->args[0].is_ref())
+                continue;
+            const Instance *rr = inst(in->args[0].i);
+            if (!rr || !rr->complex)
+                continue;
+            const auto *rel = sub(rr, "REPRESENTATION_RELATIONSHIP");
+            const auto *rrt = sub(rr, "REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION");
+            if (!rel || !rrt)
+                continue;
+            std::vector<long> refs; // rep_1, rep_2 = first two refs of REPRESENTATION_RELATIONSHIP
+            for (const Value &v : *rel)
+                if (v.is_ref())
+                    refs.push_back(v.i);
+            if (refs.size() < 2)
+                continue;
+            long idt_id = -1;
+            for (const Value &v : *rrt)
+                if (v.is_ref()) {
+                    idt_id = v.i;
+                    break;
+                }
+            const Instance *idt = idt_id >= 0 ? inst(idt_id) : nullptr;
+            if (!idt || idt->complex || idt->type != "ITEM_DEFINED_TRANSFORMATION" || idt->args.size() < 4)
+                continue;
+            if (!idt->args[2].is_ref() || !idt->args[3].is_ref())
+                continue;
+            edges_[refs[0]].push_back({refs[1], idt->args[2].i, idt->args[3].i});
+        }
+        // Per solid: walk from its placement rep to the root, keep non-trivial placements.
+        for (long sid : root_ids) {
+            auto git = geomrep_of_solid.find(sid);
+            if (git == geomrep_of_solid.end())
+                continue; // flat file -> identity (single instance)
+            long geom_rep = git->second;
+            auto pit = place_rep_of_geom.find(geom_rep);
+            long place_rep = pit != place_rep_of_geom.end() ? pit->second : geom_rep;
+            std::unordered_set<long> on_path;
+            std::vector<Mat4> mats = world_matrices(place_rep, on_path);
+            bool nontrivial = false;
+            for (const Mat4 &m : mats)
+                if (!mat4::is_identity(m)) {
+                    nontrivial = true;
+                    break;
+                }
+            if (!nontrivial && mats.size() <= 1)
+                continue; // pure identity single instance -> leave transforms empty
+            xform_map_[sid] = std::move(mats);
+        }
     }
 };
 
