@@ -19,6 +19,7 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "ngeom_meshopt.h" // EXT_meshopt_compression codecs (vendored meshoptimizer)
@@ -33,6 +34,7 @@ struct GlbSolid {
     std::array<float, 4> color{0.5f, 0.5f, 0.5f, 1.0f};
     std::vector<std::array<float, 16>> transforms;
     std::string id;
+    std::vector<std::pair<int, std::string>> path; // root-first STEP assembly chain (rep_id, name)
 };
 
 namespace glb_detail {
@@ -93,29 +95,64 @@ inline std::string json_escape(const std::string &s) {
     return o;
 }
 
-// Per-solid draw range within a material's merged index buffer (index units), for picking.
+// Per-solid draw range within a material's merged index buffer (index units), for picking. `path` is
+// the solid's root-first STEP assembly chain (rep_id, product_name) — used to build the id_hierarchy
+// tree (empty => the solid is a direct child of the scene root).
 struct PartRange {
     std::string id;
     uint32_t start, length;
+    std::vector<std::pair<int, std::string>> path;
 };
 
-// Build the scenes[0].extras content: id_hierarchy {nid:[name,"*"]} + draw_ranges_node<m> {nid:
-// [start,len]}. Flat hierarchy (every solid a root child) — the assembly tree is a follow-up. node_
-// ids are assigned in (material, then part) order; returns the extras JSON body (no enclosing {}).
+// Build the scenes[0].extras content: id_hierarchy {nid:[name,parent]} (the full STEP product tree —
+// each unique rep_id is one assembly node, each solid a leaf under its deepest path level; parent =
+// "*" for roots) + draw_ranges_node<m> {solid_nid:[start,len]}. Node ids are assigned here so the
+// draw ranges and the hierarchy agree.
 inline std::string build_scene_extras(const std::vector<std::vector<PartRange>> &per_mat) {
-    std::ostringstream hier, ranges;
-    int nid = 0;
+    std::map<int, int> rep_nid; // STEP rep_id -> graph node id (shared assembly nodes)
+    std::ostringstream hier;
+    int next = 0;
+    bool first = true;
+    auto emit = [&](int nid, const std::string &name, int parent) {
+        if (!first)
+            hier << ",";
+        first = false;
+        hier << "\"" << nid << "\":[\"" << json_escape(name) << "\",";
+        if (parent < 0)
+            hier << "\"*\"";
+        else
+            hier << parent; // parent node id (int), matching graph.to_json_hierarchy
+        hier << "]";
+    };
+    std::vector<std::vector<int>> solid_nid(per_mat.size()); // per material/part -> the solid's node id
+    for (size_t m = 0; m < per_mat.size(); ++m) {
+        solid_nid[m].resize(per_mat[m].size());
+        for (size_t k = 0; k < per_mat[m].size(); ++k) {
+            const PartRange &r = per_mat[m][k];
+            int parent = -1; // scene root "*"
+            for (const auto &[rid, nm] : r.path) {
+                auto it = rep_nid.find(rid);
+                if (it == rep_nid.end()) {
+                    int nid = next++;
+                    rep_nid[rid] = nid;
+                    emit(nid, nm, parent);
+                    parent = nid;
+                } else {
+                    parent = it->second;
+                }
+            }
+            int snid = next++;
+            solid_nid[m][k] = snid;
+            emit(snid, r.id, parent);
+        }
+    }
+    std::ostringstream ranges;
     for (size_t m = 0; m < per_mat.size(); ++m) {
         ranges << ",\"draw_ranges_node" << m << "\":{";
         for (size_t k = 0; k < per_mat[m].size(); ++k) {
-            const PartRange &r = per_mat[m][k];
             if (k)
                 ranges << ",";
-            ranges << "\"" << nid << "\":[" << r.start << "," << r.length << "]";
-            if (nid)
-                hier << ",";
-            hier << "\"" << nid << "\":[\"" << json_escape(r.id) << "\",\"*\"]";
-            ++nid;
+            ranges << "\"" << solid_nid[m][k] << "\":[" << per_mat[m][k].start << "," << per_mat[m][k].length << "]";
         }
         ranges << "}";
     }
@@ -386,7 +423,7 @@ inline bool write_glb(const std::string &path, const std::vector<GlbSolid> &soli
                 m.idx_max = std::max(m.idx_max, v);
             }
         }
-        m.parts.push_back({s.id, part_start, (uint32_t) m.idx.size() - part_start});
+        m.parts.push_back({s.id, part_start, (uint32_t) m.idx.size() - part_start, s.path});
     }
     std::vector<MatHeader> hdrs;
     std::vector<const Buf *> bufs;
@@ -438,7 +475,12 @@ public:
         std::ofstream pos, idx;
         uint32_t vert_count = 0, index_count = 0, idx_max = 0;
         float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
-        std::vector<std::pair<std::string, uint32_t>> parts; // (solid id, index_count) in add order
+        struct Part {
+            std::string id;
+            uint32_t index_count;
+            std::vector<std::pair<int, std::string>> path;
+        };
+        std::vector<Part> parts; // per-solid (id, index_count, assembly path) in add order
     };
 
     GlbSpillWriter(std::string dir, int lane) : dir_(std::move(dir)), lane_(lane) {}
@@ -477,7 +519,7 @@ public:
                 ++m.index_count;
             }
         }
-        m.parts.emplace_back(s.id, m.index_count - before);
+        m.parts.push_back({s.id, m.index_count - before, s.path});
     }
     void flush() {
         for (auto &[k, m] : mats_) {
@@ -517,7 +559,7 @@ private:
 // each lane's indices are re-offset by its cumulative vertex base in that material. Streams the lane
 // files into the BIN chunk — never materializes the merged buffers.
 inline bool write_glb_merged(const std::string &path, const std::vector<GlbSpillWriter *> &lanes,
-                             const std::string &model_name = "", bool meshopt = false) {
+                             const std::string &ada_ext = "", bool meshopt = false) {
     using namespace glb_detail;
     for (GlbSpillWriter *l : lanes)
         l->flush();
@@ -559,14 +601,13 @@ inline bool write_glb_merged(const std::string &path, const std::vector<GlbSpill
             auto it = l->mats().find(key);
             if (it == l->mats().end())
                 continue;
-            for (const auto &[id, cnt] : it->second.parts) {
-                parts.push_back({id, off, cnt});
-                off += cnt;
+            for (const auto &part : it->second.parts) {
+                parts.push_back({part.id, off, part.index_count, part.path});
+                off += part.index_count;
             }
         }
         per_mat.push_back(std::move(parts));
     }
-    std::string ada_ext = model_name.empty() ? "" : ("{\"name\":\"" + json_escape(model_name) + "\"}");
     std::string extras = build_scene_extras(per_mat);
     // meshopt: read one material at a time from the spill lanes (positions concatenated, indices
     // re-offset by the cumulative vertex base across lanes — exactly the raw merge, into vectors),

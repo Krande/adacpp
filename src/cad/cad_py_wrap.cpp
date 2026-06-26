@@ -599,7 +599,10 @@ int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_p
                             gs.indices = std::move(tm.indices);
                             gs.color = {rr.cr, rr.cg, rr.cb, rr.ca}; // grey default when !has_color
                             gs.transforms = rr.transforms;
-                            lane.add(gs); // spilled to disk immediately
+                            gs.id = rr.id; // solid name (id_hierarchy leaf name)
+                            if (!rr.instance_paths.empty())
+                                gs.path = rr.instance_paths[0]; // root-first assembly chain
+                            lane.add(gs);                       // spilled to disk immediately
                             nwritten.fetch_add(1, std::memory_order_relaxed);
                         }
                     }
@@ -624,8 +627,12 @@ int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_p
             std::vector<adacpp::glb::GlbSpillWriter *> lane_ptrs;
             for (adacpp::glb::GlbSpillWriter &l : lanes)
                 lane_ptrs.push_back(&l);
-            ok = adacpp::glb::write_glb_merged(out_path, lane_ptrs, std::filesystem::path(in_path).stem().string(),
-                                               meshopt);
+            // ADA_EXT_data must carry the fields the viewer reads (design_objects / simulation_objects
+            // lists etc.) — a partial object makes the viewer crash on `design_objects.length`. A STEP
+            // import has no adapy design/sim objects, so they're empty.
+            const std::string ada_ext =
+                "{\"design_objects\":[],\"simulation_objects\":[],\"version\":\"\",\"assembly_guid\":null}";
+            ok = adacpp::glb::write_glb_merged(out_path, lane_ptrs, ada_ext, meshopt);
             prof.phase(meshopt ? "write_glb_merged(meshopt)" : "write_glb_merged");
         }
         ::rmdir(dir);
