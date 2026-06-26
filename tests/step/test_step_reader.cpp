@@ -58,7 +58,7 @@ static const char *kTriSolid = "ISO-10303-21;\n"
 
 static void test_resolve_structure() {
     std::vector<Instance> store;
-    ng::NgeomDoc doc = read_step_planar(kTriSolid, store);
+    ng::NgeomDoc doc = read_step_brep(kTriSolid, store);
 
     CHECK(doc.roots.size() == 1, "one solid root");
     if (doc.roots.empty())
@@ -85,7 +85,7 @@ static void test_resolve_structure() {
 
 static void test_tessellate() {
     std::vector<Instance> store;
-    ng::NgeomDoc doc = read_step_planar(kTriSolid, store);
+    ng::NgeomDoc doc = read_step_brep(kTriSolid, store);
     ng::TessParams tp;
     tp.deflection = 0.1;
     ng::TessMesh m = ng::tessellate_doc(doc, tp);
@@ -103,9 +103,101 @@ static void test_tessellate() {
     CHECK(inbox, "vertices within the unit triangle bbox");
 }
 
+// Four ADVANCED_FACEs, each on a different analytic surface, sharing one POLY_LOOP bound.
+static const char *kCurvedSolid = "ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\n"
+                                  "#1=CARTESIAN_POINT('',(0.,0.,0.));\n"
+                                  "#2=CARTESIAN_POINT('',(1.,0.,0.));\n"
+                                  "#3=CARTESIAN_POINT('',(1.,1.,0.));\n"
+                                  "#4=CARTESIAN_POINT('',(0.,1.,0.));\n"
+                                  "#5=DIRECTION('',(0.,0.,1.));\n"
+                                  "#6=DIRECTION('',(1.,0.,0.));\n"
+                                  "#7=AXIS2_PLACEMENT_3D('',#1,#5,#6);\n"
+                                  "#10=POLY_LOOP('',(#1,#2,#3,#4));\n"
+                                  "#11=FACE_OUTER_BOUND('',#10,.T.);\n"
+                                  "#20=CYLINDRICAL_SURFACE('',#7,2.);\n"
+                                  "#21=CONICAL_SURFACE('',#7,2.,0.5);\n"
+                                  "#22=SPHERICAL_SURFACE('',#7,3.);\n"
+                                  "#23=TOROIDAL_SURFACE('',#7,5.,1.);\n"
+                                  "#30=ADVANCED_FACE('cyl',(#11),#20,.T.);\n"
+                                  "#31=ADVANCED_FACE('con',(#11),#21,.T.);\n"
+                                  "#32=ADVANCED_FACE('sph',(#11),#22,.T.);\n"
+                                  "#33=ADVANCED_FACE('tor',(#11),#23,.T.);\n"
+                                  "#40=CLOSED_SHELL('',(#30,#31,#32,#33));\n"
+                                  "#50=MANIFOLD_SOLID_BREP('curved',#40);\n"
+                                  "ENDSEC;\nEND-ISO-10303-21;\n";
+
+static void test_curved_surfaces_and_polyloop() {
+    std::vector<Instance> store;
+    ng::NgeomDoc doc = read_step_brep(kCurvedSolid, store);
+    CHECK(doc.roots.size() == 1 && doc.roots[0].faces.size() == 4, "curved solid: 4 faces");
+    if (doc.roots.empty() || doc.roots[0].faces.size() != 4)
+        return;
+    auto &fs = doc.roots[0].faces;
+    auto *cyl = dynamic_cast<const ng::CylinderSurface *>(fs[0]->surface.get());
+    auto *con = dynamic_cast<const ng::ConeSurface *>(fs[1]->surface.get());
+    auto *sph = dynamic_cast<const ng::SphereSurface *>(fs[2]->surface.get());
+    auto *tor = dynamic_cast<const ng::TorusSurface *>(fs[3]->surface.get());
+    CHECK(cyl && std::abs(cyl->r - 2.0) < 1e-9, "cylinder surface + radius");
+    CHECK(con && std::abs(con->r0 - 2.0) < 1e-9 && std::abs(con->semi_angle - 0.5) < 1e-9, "cone surface + params");
+    CHECK(sph && std::abs(sph->r - 3.0) < 1e-9, "sphere surface + radius");
+    CHECK(tor && std::abs(tor->R - 5.0) < 1e-9 && std::abs(tor->r - 1.0) < 1e-9, "torus surface + radii");
+    // POLY_LOOP bound
+    const ng::LoopN &lp = *fs[0]->bounds[0].loop;
+    CHECK(lp.is_poly && lp.polygon.size() == 4, "poly-loop bound with 4 points");
+    if (lp.polygon.size() == 4)
+        CHECK(vclose(lp.polygon[2], 1, 1, 0), "poly-loop point 2");
+}
+
+// A circular disk: a planar face bounded by one full-circle EDGE_CURVE (CIRCLE geometry).
+static const char *kDiskSolid = "ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\n"
+                                "#1=CARTESIAN_POINT('',(0.,0.,0.));\n"
+                                "#2=CARTESIAN_POINT('',(2.,0.,0.));\n"
+                                "#3=VERTEX_POINT('',#2);\n"
+                                "#4=DIRECTION('',(0.,0.,1.));\n"
+                                "#5=DIRECTION('',(1.,0.,0.));\n"
+                                "#6=AXIS2_PLACEMENT_3D('',#1,#4,#5);\n"
+                                "#7=CIRCLE('',#6,2.);\n"
+                                "#8=EDGE_CURVE('',#3,#3,#7,.T.);\n"
+                                "#9=ORIENTED_EDGE('',*,*,#8,.T.);\n"
+                                "#10=EDGE_LOOP('',(#9));\n"
+                                "#11=FACE_OUTER_BOUND('',#10,.T.);\n"
+                                "#12=PLANE('',#6);\n"
+                                "#13=ADVANCED_FACE('disk',(#11),#12,.T.);\n"
+                                "#14=CLOSED_SHELL('',(#13));\n"
+                                "#15=MANIFOLD_SOLID_BREP('disk',#14);\n"
+                                "ENDSEC;\nEND-ISO-10303-21;\n";
+
+static void test_conic_edge() {
+    std::vector<Instance> store;
+    ng::NgeomDoc doc = read_step_brep(kDiskSolid, store);
+    CHECK(doc.roots.size() == 1 && doc.roots[0].faces.size() == 1, "disk: one face");
+    if (doc.roots.empty() || doc.roots[0].faces.empty())
+        return;
+    const ng::LoopN &lp = *doc.roots[0].faces[0]->bounds[0].loop;
+    CHECK(!lp.is_poly && lp.edges.size() == 1, "edge loop with one (circular) edge");
+    if (!lp.edges.empty()) {
+        auto *circ = dynamic_cast<const ng::CircleCurve *>(lp.edges[0].geometry.get());
+        CHECK(circ && std::abs(circ->r - 2.0) < 1e-9, "edge geometry is a circle, r=2");
+    }
+    // tessellate: a disk discretizes to many triangles, all within radius 2
+    ng::TessParams tp;
+    tp.deflection = 0.02;
+    ng::TessMesh m = ng::tessellate_doc(doc, tp);
+    CHECK(m.indices.size() > 3, "disk tessellates to many triangles");
+    bool inr = m.positions.size() >= 9;
+    for (size_t i = 0; i + 2 < m.positions.size(); i += 3) {
+        float x = m.positions[i], y = m.positions[i + 1];
+        if (std::sqrt(x * x + y * y) > 2.0 + 1e-3)
+            inr = false;
+    }
+    CHECK(inr, "disk vertices within radius 2");
+}
+
 int main() {
     test_resolve_structure();
     test_tessellate();
+    test_curved_surfaces_and_polyloop();
+    test_conic_edge();
     if (g_fail == 0)
         std::printf("step reader: ALL PASS\n");
     else

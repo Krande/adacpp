@@ -6,10 +6,11 @@
 // adapy Python serializer + the NGEOM decoder (the parity oracle).
 //
 // Supported now: MANIFOLD_SOLID_BREP / CLOSED_SHELL / OPEN_SHELL / ADVANCED_FACE / FACE_SURFACE /
-// FACE_OUTER_BOUND / FACE_BOUND / EDGE_LOOP / ORIENTED_EDGE / EDGE_CURVE / VERTEX_POINT / PLANE /
-// AXIS2_PLACEMENT_3D / CARTESIAN_POINT / DIRECTION. Edge geometry (LINE) is treated as null —
-// straight edges discretize through their endpoints, matching the Python serializer (geom=-1 for
-// Line). Curved surfaces, B-splines, assembly transforms, colours and units come in later slices.
+// FACE_OUTER_BOUND / FACE_BOUND / EDGE_LOOP / POLY_LOOP / ORIENTED_EDGE / EDGE_CURVE /
+// VERTEX_POINT / AXIS2_PLACEMENT_3D / CARTESIAN_POINT / DIRECTION; surfaces PLANE /
+// CYLINDRICAL_SURFACE / CONICAL_SURFACE / SPHERICAL_SURFACE / TOROIDAL_SURFACE; edge curves
+// CIRCLE / ELLIPSE (LINE -> null, straight through endpoints, matching the Python serializer's
+// geom=-1 for Line). B-splines, assembly transforms, colours and units come in later slices.
 #pragma once
 
 #include <algorithm>
@@ -55,6 +56,7 @@ public:
 private:
     const std::unordered_map<long, const Instance *> &m_;
     std::unordered_map<long, std::shared_ptr<ng::Surface>> surf_cache_;
+    std::unordered_map<long, std::shared_ptr<ng::Curve>> curve_cache_;
     std::unordered_map<long, std::shared_ptr<ng::FaceSurfaceN>> face_cache_;
 
     const Instance *inst(long id) const {
@@ -111,22 +113,51 @@ private:
         return ng::Frame::from_axis_ref(loc, axis, ref);
     }
 
-    // PLANE('',#placement). Other surface types are added in later slices.
+    // Analytic surfaces. Each STEP entity is `(name, #position, <params...>)` where #position is
+    // an AXIS2_PLACEMENT_3D. B-spline surfaces come in a later slice.
     std::shared_ptr<ng::Surface> surface(long id) {
         auto c = surf_cache_.find(id);
         if (c != surf_cache_.end())
             return c->second;
         std::shared_ptr<ng::Surface> s;
         const Instance *in = inst(id);
-        if (in && in->type == "PLANE" && in->args.size() > 1 && in->args[1].is_ref())
-            s = std::make_shared<ng::PlaneSurface>(placement(in->args[1].i));
+        if (in && in->args.size() >= 2 && in->args[1].is_ref()) {
+            ng::Frame fr = placement(in->args[1].i);
+            std::string_view t = in->type;
+            if (t == "PLANE")
+                s = std::make_shared<ng::PlaneSurface>(fr);
+            else if (t == "CYLINDRICAL_SURFACE" && in->args.size() >= 3)
+                s = std::make_shared<ng::CylinderSurface>(fr, in->args[2].as_double());
+            else if (t == "CONICAL_SURFACE" && in->args.size() >= 4)
+                s = std::make_shared<ng::ConeSurface>(fr, in->args[2].as_double(), in->args[3].as_double());
+            else if (t == "SPHERICAL_SURFACE" && in->args.size() >= 3)
+                s = std::make_shared<ng::SphereSurface>(fr, in->args[2].as_double());
+            else if (t == "TOROIDAL_SURFACE" && in->args.size() >= 4)
+                s = std::make_shared<ng::TorusSurface>(fr, in->args[2].as_double(), in->args[3].as_double());
+        }
         surf_cache_[id] = s;
         return s;
     }
 
-    // Planar slice: straight (LINE) edges -> null edge geometry (discretize through endpoints).
-    std::shared_ptr<ng::Curve> edge_geom(long /*id*/) {
-        return nullptr;
+    // Edge geometry. CIRCLE/ELLIPSE resolve to conic curves (arc discretization); LINE (and
+    // anything not yet supported) -> null, so the edge discretizes straight through its endpoints
+    // — matching the Python serializer, which emits geom=-1 for Line. B-splines come later.
+    std::shared_ptr<ng::Curve> curve(long id) {
+        auto c = curve_cache_.find(id);
+        if (c != curve_cache_.end())
+            return c->second;
+        std::shared_ptr<ng::Curve> cv;
+        const Instance *in = inst(id);
+        if (in && in->args.size() >= 2 && in->args[1].is_ref()) {
+            ng::Frame fr = placement(in->args[1].i);
+            std::string_view t = in->type;
+            if (t == "CIRCLE" && in->args.size() >= 3)
+                cv = std::make_shared<ng::CircleCurve>(fr, in->args[2].as_double());
+            else if (t == "ELLIPSE" && in->args.size() >= 4)
+                cv = std::make_shared<ng::EllipseCurve>(fr, in->args[2].as_double(), in->args[3].as_double());
+        }
+        curve_cache_[id] = cv;
+        return cv;
     }
 
     // ORIENTED_EDGE('',*,*,#edge,orient) wrapping EDGE_CURVE('',#v1,#v2,#geom,sense).
@@ -144,7 +175,7 @@ private:
             if (ec->args[2].is_ref())
                 oe.e_end = point(ec->args[2].i);
             if (ec->args[3].is_ref())
-                oe.geometry = edge_geom(ec->args[3].i);
+                oe.geometry = curve(ec->args[3].i);
             oe.same_sense = enum_true(ec->args[4]);
         }
         oe.orientation = orientation;
@@ -159,11 +190,18 @@ private:
         return oe;
     }
 
-    // EDGE_LOOP('',(#oe,...)). POLY_LOOP is added later.
+    // EDGE_LOOP('',(#oe,...)) or POLY_LOOP('',(#pt,...)).
     std::shared_ptr<ng::LoopN> loop(long id) {
         auto lp = std::make_shared<ng::LoopN>();
-        lp->is_poly = false;
         const Instance *in = inst(id);
+        if (in && in->type == "POLY_LOOP" && in->args.size() > 1 && in->args[1].kind == Kind::List) {
+            lp->is_poly = true;
+            for (const Value &p : in->args[1].items)
+                if (p.is_ref())
+                    lp->polygon.push_back(point(p.i));
+            return lp;
+        }
+        lp->is_poly = false;
         if (in && in->type == "EDGE_LOOP" && in->args.size() > 1 && in->args[1].kind == Kind::List)
             for (const Value &e : in->args[1].items)
                 if (e.is_ref())
@@ -217,7 +255,7 @@ private:
 
 // Convenience: parse a whole STEP buffer and resolve it. Holds the parsed instances (their
 // string_views point into `buf`, which the caller must keep alive for the returned doc's strings).
-inline ng::NgeomDoc read_step_planar(std::string_view buf, std::vector<Instance> &store) {
+inline ng::NgeomDoc read_step_brep(std::string_view buf, std::vector<Instance> &store) {
     store.clear();
     scan_instances(buf, [&](const Instance &in) { store.push_back(in); });
     std::unordered_map<long, const Instance *> by_id;
