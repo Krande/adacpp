@@ -23,6 +23,8 @@ tessellate_batch = _cad.tessellate_batch
 tessellate_box = _cad.tessellate_box
 tessellate_stream = _cad.tessellate_stream
 stream_step_to_meshes = _cad.stream_step_to_meshes
+stream_step_to_ngeom = _cad.stream_step_to_ngeom
+StepRootMeta = _cad.StepRootMeta
 ifc_taxonomy_settings = _cad.ifc_taxonomy_settings
 meshopt_simplify_mesh = _cad.meshopt_simplify_mesh
 meshopt_encode_vertex_buffer = _cad.meshopt_encode_vertex_buffer
@@ -122,6 +124,8 @@ __all__ = [
     "tessellate_box",
     "tessellate_stream",
     "stream_step_to_meshes",
+    "stream_step_to_ngeom",
+    "StepRootMeta",
     "meshopt_simplify_mesh",
     "bbox",
     "obb",

@@ -113,6 +113,7 @@ public:
         std::sort(root_ids.begin(), root_ids.end());
 
         build_colour_map();
+        build_product_name_map();
         build_transform_map(root_ids);
         ng::NgeomDoc doc;
         doc.unit_scale = detect_unit_scale();
@@ -151,6 +152,18 @@ public:
                     root.transforms.push_back(f);
                 }
             }
+            // Assembly path(s) for the part hierarchy: root-first (rep_id, product_name) levels.
+            auto pit = path_map_.find(id);
+            if (pit != path_map_.end()) {
+                root.instance_paths.reserve(pit->second.size());
+                for (const Path &path : pit->second) {
+                    std::vector<std::pair<int, std::string>> levels;
+                    levels.reserve(path.size());
+                    for (const auto &[rid, nm] : path)
+                        levels.emplace_back((int) rid, nm);
+                    root.instance_paths.push_back(std::move(levels));
+                }
+            }
             doc.roots.push_back(std::move(root));
         }
         return doc;
@@ -170,8 +183,11 @@ private:
     struct Edge {
         long rep_2, i1, i2;
     };
+    using Path = std::vector<std::pair<long, std::string>>; // root-first (rep_id, product_name) levels
     std::unordered_map<long, std::vector<Edge>> edges_;     // rep_1 -> placement edges
     std::unordered_map<long, std::vector<Mat4>> xform_map_; // solid id -> world matrices (>1 placed)
+    std::unordered_map<long, std::vector<Path>> path_map_;  // solid id -> per-instance assembly paths
+    std::unordered_map<long, std::string> name_of_rep_;     // rep id -> product name
 
     const Instance *inst(long id) const {
         auto it = m_.find(id);
@@ -677,23 +693,53 @@ private:
         return mat4::from_frame(placement(id));
     }
 
-    // All world matrices reaching `rep_id` (which is rep_1 of edges). Each edge T = inv(M(item_1))
-    // * M(item_2) maps this rep's coords to its parent; recurse to a root rep (no out-edges).
-    std::vector<Mat4> world_matrices(long rep_id, std::unordered_set<long> &on_path) {
+    std::pair<long, std::string> path_level(long rep_id) {
+        auto it = name_of_rep_.find(rep_id);
+        return {rep_id, it != name_of_rep_.end() ? it->second : ("asm_" + std::to_string(rep_id))};
+    }
+
+    // rep id -> product name, via SHAPE_DEFINITION_REPRESENTATION -> PRODUCT_DEFINITION_SHAPE ->
+    // PRODUCT_DEFINITION -> ..._FORMATION -> PRODUCT. Mirrors the Python _build_product_name_map.
+    void build_product_name_map() {
+        for (const auto &[id, in] : m_) {
+            if (in->complex || in->type != "SHAPE_DEFINITION_REPRESENTATION" || in->args.size() < 2)
+                continue;
+            if (!in->args[0].is_ref() || !in->args[1].is_ref() || name_of_rep_.count(in->args[1].i))
+                continue;
+            const Instance *pds = inst(in->args[0].i); // PRODUCT_DEFINITION_SHAPE(name, desc, #pd)
+            const Instance *pd =
+                (pds && pds->args.size() > 2 && pds->args[2].is_ref()) ? inst(pds->args[2].i) : nullptr;
+            const Instance *pdf = (pd && pd->args.size() > 2 && pd->args[2].is_ref()) ? inst(pd->args[2].i) : nullptr;
+            const Instance *prod =
+                (pdf && pdf->args.size() > 2 && pdf->args[2].is_ref()) ? inst(pdf->args[2].i) : nullptr;
+            if (prod && prod->args.size() >= 2)
+                for (int k : {1, 0}) // PRODUCT(id, name, ...): prefer name, fall back to id
+                    if (prod->args[k].kind == Kind::Str && !prod->args[k].s.empty()) {
+                        name_of_rep_[in->args[1].i] = unescape(prod->args[k].s);
+                        break;
+                    }
+        }
+    }
+
+    // All (world matrix, assembly path) pairs reaching `rep_id` (which is rep_1 of edges). Each
+    // edge T = inv(M(item_1)) * M(item_2) maps this rep's coords to its parent; recurse to a root
+    // rep (no out-edges). path is root-first; this rep's level is appended after the parent's.
+    std::vector<std::pair<Mat4, Path>> world_matrices(long rep_id, std::unordered_set<long> &on_path) {
         auto it = edges_.find(rep_id);
-        if (it == edges_.end() || it->second.empty())
-            return {mat4::ident()}; // root rep: its coords are world
-        if (on_path.count(rep_id))
-            return {mat4::ident()}; // cycle guard
+        if (it == edges_.end() || it->second.empty() || on_path.count(rep_id))
+            return {{mat4::ident(), Path{path_level(rep_id)}}}; // root rep / cycle guard
         on_path.insert(rep_id);
-        std::vector<Mat4> mats;
+        std::vector<std::pair<Mat4, Path>> out;
         for (const Edge &e : it->second) {
             Mat4 t_edge = mat4::mul(mat4::rigid_inverse(placement_mat4(e.i1)), placement_mat4(e.i2));
-            for (const Mat4 &t_parent : world_matrices(e.rep_2, on_path))
-                mats.push_back(mat4::mul(t_parent, t_edge));
+            for (auto &[t_parent, parent_path] : world_matrices(e.rep_2, on_path)) {
+                Path p = parent_path;
+                p.push_back(path_level(rep_id));
+                out.push_back({mat4::mul(t_parent, t_edge), std::move(p)});
+            }
         }
         on_path.erase(rep_id);
-        return mats;
+        return out;
     }
 
     void build_transform_map(const std::vector<long> &root_ids) {
@@ -766,16 +812,24 @@ private:
             auto pit = place_rep_of_geom.find(geom_rep);
             long place_rep = pit != place_rep_of_geom.end() ? pit->second : geom_rep;
             std::unordered_set<long> on_path;
-            std::vector<Mat4> mats = world_matrices(place_rep, on_path);
+            auto pairs = world_matrices(place_rep, on_path);
+            std::vector<Mat4> mats;
+            std::vector<Path> paths;
+            mats.reserve(pairs.size());
+            paths.reserve(pairs.size());
+            for (auto &[m, p] : pairs) {
+                mats.push_back(m);
+                paths.push_back(std::move(p));
+            }
+            path_map_[sid] = std::move(paths); // always (>=1 path: the solid's own product)
             bool nontrivial = false;
             for (const Mat4 &m : mats)
                 if (!mat4::is_identity(m)) {
                     nontrivial = true;
                     break;
                 }
-            if (!nontrivial && mats.size() <= 1)
-                continue; // pure identity single instance -> leave transforms empty
-            xform_map_[sid] = std::move(mats);
+            if (nontrivial || mats.size() > 1) // skip pure-identity single instance
+                xform_map_[sid] = std::move(mats);
         }
     }
 };

@@ -357,6 +357,11 @@ static const char *kAssemblySolid =
     "#215=(REPRESENTATION_RELATIONSHIP('','',#201,#220)REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#214)"
     "SHAPE_REPRESENTATION_RELATIONSHIP());\n"
     "#216=CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#215,$);\n"
+    "#230=PRODUCT('id1','ChildPart','',());\n"
+    "#231=PRODUCT_DEFINITION_FORMATION('','',#230);\n"
+    "#232=PRODUCT_DEFINITION('design','',#231,$);\n"
+    "#233=PRODUCT_DEFINITION_SHAPE('','',#232);\n"
+    "#234=SHAPE_DEFINITION_REPRESENTATION(#233,#201);\n"
     "ENDSEC;\nEND-ISO-10303-21;\n";
 
 static void test_assembly_transform() {
@@ -373,6 +378,14 @@ static void test_assembly_transform() {
         CHECK(std::abs(m[0] - 1.0f) < 1e-5 && std::abs(m[5] - 1.0f) < 1e-5 && std::abs(m[10] - 1.0f) < 1e-5 &&
                   std::abs(m[15] - 1.0f) < 1e-5,
               "rotation block is identity");
+    }
+    // instance path: root-first (rep_id, product_name) levels; child rep #201 resolves to its
+    // PRODUCT name, the parent root rep #220 has no product -> asm_220.
+    const auto &paths = doc.roots[0].instance_paths;
+    CHECK(paths.size() == 1 && paths[0].size() == 2, "one path, two levels (root rep -> child rep)");
+    if (paths.size() == 1 && paths[0].size() == 2) {
+        CHECK(paths[0][0].first == 220, "root-first: parent rep 220 leads");
+        CHECK(paths[0][1].first == 201 && paths[0][1].second == "ChildPart", "leaf level = child rep w/ PRODUCT name");
     }
 }
 

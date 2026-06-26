@@ -6,6 +6,7 @@
 #include <array>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "ngeom_curves.h"
@@ -301,6 +302,10 @@ struct NgeomRoot {
     // transform graph. Empty => a single identity instance (flat/baked files). N entries => the
     // solid is placed N times. Populated by the native STEP reader only.
     std::vector<std::array<float, 16>> transforms;
+    // Per-instance assembly path: root-first (rep_id, product_name) levels (last level = the
+    // solid's own product), parallel to transforms. Empty => the solid sits directly under the
+    // assembly root. Populated by the native STEP reader for the from_step part hierarchy.
+    std::vector<std::vector<std::pair<int, std::string>>> instance_paths;
 };
 
 struct NgeomDoc {

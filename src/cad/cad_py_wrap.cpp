@@ -8,6 +8,7 @@
 #include "../cadit/occt/step_writer.h"
 #include "../cadit/ifc/ngeom_taxonomy.h"
 #include "../geom/neutral/ngeom_decode.h"
+#include "../geom/neutral/ngeom_encode.h"
 #include "../geom/neutral/ngeom_tessellate.h"
 #include "../geom/neutral/ngeom_meshopt.h"
 #include "../cadit/step/step_reader.h"
@@ -403,6 +404,49 @@ Mesh tessellate_stream_impl(nb::bytes buffer, const std::string &pipeline, doubl
     Mesh mesh(0, std::move(tm.positions), std::move(tm.indices), {}, std::move(tm.normals));
     mesh.group_reference = std::move(groups);
     return mesh;
+}
+
+// Per-root metadata accompanying the NGEOM buffer from stream_step_to_ngeom: the data the
+// from_step hydrate path needs that the geometry buffer does NOT carry (colour, assembly
+// placement matrices, and the assembly path for the part hierarchy). Parallel to the buffer's
+// roots (same order).
+struct StepRootMeta {
+    std::string id;
+    bool has_color = false;
+    std::array<float, 4> color{0.5f, 0.5f, 0.5f, 1.0f};
+    std::vector<std::array<float, 16>> transforms;                        // per-instance world matrices
+    std::vector<std::vector<std::pair<int, std::string>>> instance_paths; // per-instance (rep_id, name) levels
+};
+
+// Native STEP -> NGEOM buffer + per-root metadata. Reads the .stp with the native C++ reader,
+// re-encodes the resolved neutral records to one NGEOM buffer (decodable by the adapy Python
+// deserializer into ada.geom.Geometry), and returns the per-root colour / transforms / assembly
+// paths alongside. The geometry sibling of stream_step_to_meshes for the from_step hydrate path.
+std::pair<nb::bytes, std::vector<StepRootMeta>> stream_step_to_ngeom_impl(const std::string &path) {
+    using namespace adacpp::ngeom;
+    std::ifstream f(path, std::ios::binary);
+    if (!f)
+        return {nb::bytes("", 0), {}};
+    std::stringstream ss;
+    ss << f.rdbuf();
+    std::string src = ss.str();
+
+    std::vector<adacpp::step::Instance> store;
+    NgeomDoc doc = adacpp::step::read_step_brep(src, store);
+    std::vector<uint8_t> buf = encode(doc);
+
+    std::vector<StepRootMeta> metas;
+    metas.reserve(doc.roots.size());
+    for (const NgeomRoot &r : doc.roots) {
+        StepRootMeta m;
+        m.id = r.id;
+        m.has_color = r.has_color;
+        m.color = {r.cr, r.cg, r.cb, r.ca};
+        m.transforms = r.transforms;
+        m.instance_paths = r.instance_paths;
+        metas.push_back(std::move(m));
+    }
+    return {nb::bytes(reinterpret_cast<const char *>(buf.data()), buf.size()), std::move(metas)};
 }
 
 // Native STEP -> Mesh: read the .stp file and resolve it to neutral records with the native C++
@@ -2382,6 +2426,13 @@ void cad_module(nb::module_ &m) {
         .def_ro("color", &Mesh::color)
         .def_ro("groups", &Mesh::group_reference);
 
+    nb::class_<StepRootMeta>(m, "StepRootMeta")
+        .def_ro("id", &StepRootMeta::id)
+        .def_ro("has_color", &StepRootMeta::has_color)
+        .def_ro("color", &StepRootMeta::color)
+        .def_ro("transforms", &StepRootMeta::transforms)
+        .def_ro("instance_paths", &StepRootMeta::instance_paths);
+
     nb::class_<PcurveData>(m, "PcurveData")
         .def_ro("has_pcurve", &PcurveData::has_pcurve)
         .def_ro("degree", &PcurveData::degree)
@@ -2449,6 +2500,14 @@ void cad_module(nb::module_ &m) {
           "solid into ONE combined Mesh with a GroupReference per root (node_id = root index). The "
           "fully-native counterpart of tessellate_stream. pipeline: 'libtess2' is the only kernel "
           "wired for this path. angular_deg in degrees.");
+
+    m.def("stream_step_to_ngeom", &stream_step_to_ngeom_impl, "path"_a,
+          "Read a STEP file with the native C++ reader (no OCC, no Python) and return "
+          "(ngeom_buffer, [StepRootMeta]): the resolved geometry re-encoded to ONE NGEOM buffer "
+          "(decode with the adapy deserializer into ada.geom.Geometry) plus per-root metadata — "
+          "id, colour, per-instance world transforms, and assembly paths — parallel to the "
+          "buffer's roots. The geometry sibling of stream_step_to_meshes for the from_step "
+          "hydrate path (ada.geom.Geometry + assembly part hierarchy).");
 
     m.def(
         "ifc_taxonomy_settings",
