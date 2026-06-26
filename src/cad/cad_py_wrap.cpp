@@ -9,6 +9,7 @@
 #include "../cadit/ifc/ngeom_taxonomy.h"
 #include "../geom/neutral/ngeom_decode.h"
 #include "../geom/neutral/ngeom_encode.h"
+#include "../geom/neutral/ngeom_glb.h"
 #include "../geom/neutral/ngeom_tessellate.h"
 #include "../geom/neutral/ngeom_meshopt.h"
 #include "../cadit/step/step_reader.h"
@@ -449,10 +450,10 @@ std::pair<nb::bytes, std::vector<StepRootMeta>> stream_step_to_ngeom_impl(const 
     return {nb::bytes(reinterpret_cast<const char *>(buf.data()), buf.size()), std::move(metas)};
 }
 
-// Native STEP -> Mesh: read the .stp file and resolve it to neutral records with the native C++
-// reader (no OCC, no Python), then tessellate every solid into ONE combined Mesh with a
-// GroupReference per root (node_id = root index). The fully-native counterpart of
-// tessellate_stream (which decodes an NGEOM buffer produced by the adapy Python serializer).
+// Native STEP -> Mesh: stream the .stp with the native C++ reader (offset index + per-solid lazy
+// resolve, no OCC/Python), tessellate each solid as it streams, and append into ONE combined Mesh
+// with a GroupReference per root. Memory stays bounded on the parse side (the index + a single
+// solid), unlike the naive full-parse. The fully-native counterpart of tessellate_stream.
 Mesh stream_step_to_meshes_impl(const std::string &path, const std::string &pipeline, double deflection,
                                 double angular_deg) {
     using namespace adacpp::ngeom;
@@ -465,24 +466,64 @@ Mesh stream_step_to_meshes_impl(const std::string &path, const std::string &pipe
     ss << f.rdbuf();
     std::string buf = ss.str();
 
-    std::vector<adacpp::step::Instance> store;
-    NgeomDoc doc = adacpp::step::read_step_brep(buf, store);
+    TessParams tp;
+    tp.deflection = deflection;
+    tp.max_angle = angular_deg * 3.14159265358979323846 / 180.0;
+
+    Mesh out(0, {}, {});
+    std::vector<GroupReference> groups;
+    adacpp::step::stream_step(buf, [&](const NgeomRoot &root, double) {
+        NgeomDoc one;
+        one.roots.push_back(root); // shares geometry shared_ptrs
+        TessMesh tm = tessellate_doc(one, tp);
+        if (tm.indices.empty())
+            return;
+        uint32_t vstart = (uint32_t) (out.positions.size() / 3);
+        uint32_t istart = (uint32_t) out.indices.size();
+        out.positions.insert(out.positions.end(), tm.positions.begin(), tm.positions.end());
+        out.normals.insert(out.normals.end(), tm.normals.begin(), tm.normals.end());
+        for (uint32_t ix : tm.indices)
+            out.indices.push_back(vstart + ix);
+        groups.emplace_back((int) groups.size(), (int) istart, (int) tm.indices.size(), (int) vstart,
+                            (int) (tm.positions.size() / 3));
+    });
+    out.group_reference = std::move(groups);
+    return out;
+}
+
+// Native STEP -> GLB file: stream the .stp, tessellate each solid, bake its world transform(s) and
+// colour, and write a merge-by-colour GLB matching the adapy viewer's structure. The parse is
+// bounded (offset index + per-solid); returns the number of solids written, or -1 on I/O error.
+int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_path, double deflection,
+                            double angular_deg) {
+    using namespace adacpp::ngeom;
+    std::ifstream f(in_path, std::ios::binary);
+    if (!f)
+        return -1;
+    std::stringstream ss;
+    ss << f.rdbuf();
+    std::string buf = ss.str();
 
     TessParams tp;
     tp.deflection = deflection;
     tp.max_angle = angular_deg * 3.14159265358979323846 / 180.0;
-    TessMesh tm = tessellate_doc(doc, tp);
 
-    std::vector<GroupReference> groups;
-    groups.reserve(tm.groups.size());
-    for (size_t i = 0; i < tm.groups.size(); ++i) {
-        const auto &g = tm.groups[i];
-        groups.emplace_back((int) i, (int) g.first_index, (int) g.index_count, (int) g.first_vertex,
-                            (int) g.vertex_count);
-    }
-    Mesh mesh(0, std::move(tm.positions), std::move(tm.indices), {}, std::move(tm.normals));
-    mesh.group_reference = std::move(groups);
-    return mesh;
+    std::vector<adacpp::glb::GlbSolid> solids;
+    adacpp::step::stream_step(buf, [&](const NgeomRoot &root, double) {
+        NgeomDoc one;
+        one.roots.push_back(root);
+        TessMesh tm = tessellate_doc(one, tp);
+        if (tm.indices.empty())
+            return;
+        adacpp::glb::GlbSolid gs;
+        gs.positions = std::move(tm.positions);
+        gs.indices = std::move(tm.indices);
+        gs.color = {root.cr, root.cg, root.cb, root.ca}; // grey default when !has_color
+        gs.transforms = root.transforms;
+        gs.id = root.id;
+        solids.push_back(std::move(gs));
+    });
+    return adacpp::glb::write_glb(out_path, solids) ? (int) solids.size() : -1;
 }
 
 // ----------------------------------------------------------------------------
@@ -2500,6 +2541,13 @@ void cad_module(nb::module_ &m) {
           "solid into ONE combined Mesh with a GroupReference per root (node_id = root index). The "
           "fully-native counterpart of tessellate_stream. pipeline: 'libtess2' is the only kernel "
           "wired for this path. angular_deg in degrees.");
+
+    m.def("stream_step_to_glb", &stream_step_to_glb_impl, "in_path"_a, "out_path"_a, "deflection"_a = 0.0,
+          "angular_deg"_a = 20.0,
+          "Native STEP -> GLB file: stream the .stp with the native reader (offset index + per-solid "
+          "lazy resolve, bounded parse memory), tessellate each solid, bake its world transform(s) + "
+          "colour, and write a merge-by-colour GLB matching the adapy viewer's structure. Returns the "
+          "number of solids written (-1 on I/O error). angular_deg in degrees.");
 
     m.def("stream_step_to_ngeom", &stream_step_to_ngeom_impl, "path"_a,
           "Read a STEP file with the native C++ reader (no OCC, no Python) and return "
