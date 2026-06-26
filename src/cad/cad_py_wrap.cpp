@@ -9,6 +9,7 @@
 #include "../cadit/ifc/ngeom_taxonomy.h"
 #include "../geom/neutral/ngeom_decode.h"
 #include "../geom/neutral/ngeom_encode.h"
+#include "../geom/neutral/ada_ext_schema.h" // GENERATED from the adapy ADA_EXT_data JSON schema
 #include "../geom/neutral/ngeom_glb.h"
 #include "../geom/neutral/ngeom_profile.h"
 #include "../geom/neutral/ngeom_tessellate.h"
@@ -647,11 +648,11 @@ int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_p
             std::vector<adacpp::glb::GlbSpillWriter *> lane_ptrs;
             for (adacpp::glb::GlbSpillWriter &l : lanes)
                 lane_ptrs.push_back(&l);
-            // ADA_EXT_data must carry the fields the viewer reads (design_objects / simulation_objects
-            // lists etc.) — a partial object makes the viewer crash on `design_objects.length`. A STEP
-            // import has no adapy design/sim objects, so they're empty.
-            const std::string ada_ext =
-                "{\"design_objects\":[],\"simulation_objects\":[],\"version\":\"\",\"assembly_guid\":null}";
+            // ADA_EXT_data is produced from the schema-generated struct (ada_ext_schema.h) so it always
+            // carries every field the viewer reads (design_objects / simulation_objects lists, version,
+            // assembly_guid) — a partial object crashes the viewer on `design_objects.length`. Default =
+            // a STEP import: empty design/sim arrays, the schema version, null assembly_guid.
+            const std::string ada_ext = adacpp::ada_ext::AdaDesignAndAnalysisExtension{}.to_json();
             ok = adacpp::glb::write_glb_merged(out_path, lane_ptrs, ada_ext, meshopt);
             prof.phase(meshopt ? "write_glb_merged(meshopt)" : "write_glb_merged");
         }
