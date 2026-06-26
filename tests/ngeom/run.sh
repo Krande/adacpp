@@ -18,15 +18,20 @@ for t in test_analytic test_bspline test_decode; do
     g++ -std=c++20 -O2 -Wall $INC "tests/ngeom/$t.cpp" -o "$obj/$t"
     "$obj/$t"
 done
-# STEP reader suites (Part-21 tokenizer — header-only, no OCC/libtess2)
+# STEP Part-21 tokenizer — header-only, no OCC/libtess2
 for t in test_step_part21; do
     g++ -std=c++20 -O2 -Wall -I src/cadit/step "tests/step/$t.cpp" -o "$obj/$t"
     "$obj/$t"
 done
 
-# tessellator suite (needs libtess2 objects + the .cpp)
-g++ -std=c++20 -O2 -Wall $INC tests/ngeom/test_tessellate.cpp \
-    src/geom/neutral/ngeom_tessellate.cpp "$obj"/*.o -o "$obj/test_tessellate"
+# tessellation-linked suites: libtess2 objects + the tessellator + the boolean stub
+# (ngeom_tessellate.cpp references mesh_boolean; ngeom_boolean.cpp without ADACPP_HAVE_MANIFOLD
+# compiles the no-op stub, so these link OCC/Manifold-free).
+TESS_LINK="src/geom/neutral/ngeom_tessellate.cpp src/geom/neutral/ngeom_boolean.cpp"
+g++ -std=c++20 -O2 -Wall $INC tests/ngeom/test_tessellate.cpp $TESS_LINK "$obj"/*.o -o "$obj/test_tessellate"
 "$obj/test_tessellate"
+g++ -std=c++20 -O2 -Wall $INC -I src/cadit/step tests/step/test_step_reader.cpp $TESS_LINK "$obj"/*.o \
+    -o "$obj/test_step_reader"
+"$obj/test_step_reader"
 
 echo "ngeom: all suites passed"
