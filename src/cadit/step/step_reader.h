@@ -821,6 +821,12 @@ private:
             std::string_view t = in->type;
             if (t == "B_SPLINE_CURVE_WITH_KNOTS" && in->args.size() >= 8)
                 cv = build_bspline_curve(in->args[1].i, in->args[2], in->args[6], in->args[7], nullptr);
+            else if ((t == "SURFACE_CURVE" || t == "SEAM_CURVE" || t == "INTERSECTION_CURVE") && in->args.size() >= 2 &&
+                     in->args[1].is_ref())
+                // Curve-on-surface wrapper: ('',#curve_3d,(#pcurve,...),master). Unwrap to the 3D
+                // curve (arg1). Exporters like OCC wrap CIRCLE/LINE in these; without unwrapping the
+                // edge geometry is null and a closed (full-circle) edge collapses to a point.
+                cv = curve(in->args[1].i);
             else if (in->args.size() >= 2 && in->args[1].is_ref()) {
                 ng::Frame fr = placement(in->args[1].i);
                 if (t == "CIRCLE" && in->args.size() >= 3)
