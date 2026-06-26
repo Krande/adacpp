@@ -61,11 +61,73 @@ struct MatHeader {
     float lo[3] = {0, 0, 0}, hi[3] = {0, 0, 0};
 };
 
-// Build the glTF JSON + GLB framing for the given material headers and stream the BIN via
-// `write_bin(out)`, which must write exactly [indices(padded) + positions(padded)] per material in
-// order. The caller supplies the bytes (from RAM buffers or spilled files).
+inline std::string json_escape(const std::string &s) {
+    std::string o;
+    o.reserve(s.size() + 2);
+    for (char c : s) {
+        switch (c) {
+        case '"':
+            o += "\\\"";
+            break;
+        case '\\':
+            o += "\\\\";
+            break;
+        case '\n':
+            o += "\\n";
+            break;
+        case '\r':
+            o += "\\r";
+            break;
+        case '\t':
+            o += "\\t";
+            break;
+        default:
+            if ((unsigned char) c < 0x20)
+                o += ' ';
+            else
+                o += c;
+        }
+    }
+    return o;
+}
+
+// Per-solid draw range within a material's merged index buffer (index units), for picking.
+struct PartRange {
+    std::string id;
+    uint32_t start, length;
+};
+
+// Build the scenes[0].extras content: id_hierarchy {nid:[name,"*"]} + draw_ranges_node<m> {nid:
+// [start,len]}. Flat hierarchy (every solid a root child) — the assembly tree is a follow-up. node_
+// ids are assigned in (material, then part) order; returns the extras JSON body (no enclosing {}).
+inline std::string build_scene_extras(const std::vector<std::vector<PartRange>> &per_mat) {
+    std::ostringstream hier, ranges;
+    int nid = 0;
+    for (size_t m = 0; m < per_mat.size(); ++m) {
+        ranges << ",\"draw_ranges_node" << m << "\":{";
+        for (size_t k = 0; k < per_mat[m].size(); ++k) {
+            const PartRange &r = per_mat[m][k];
+            if (k)
+                ranges << ",";
+            ranges << "\"" << nid << "\":[" << r.start << "," << r.length << "]";
+            if (nid)
+                hier << ",";
+            hier << "\"" << nid << "\":[\"" << json_escape(r.id) << "\",\"*\"]";
+            ++nid;
+        }
+        ranges << "}";
+    }
+    std::ostringstream e;
+    e << "\"id_hierarchy\":{" << hier.str() << "}" << ranges.str();
+    return e.str();
+}
+
+// Build the glTF JSON + GLB framing. `write_bin(out)` writes [indices(padded)+positions(padded)] per
+// material in order. `scene_extras` is the scenes[0].extras body (id_hierarchy + draw_ranges, may be
+// empty); `ada_ext` is the ADA_EXT_data extension body (may be empty -> extension omitted).
 template <class BinWriter>
-inline bool glb_write_framed(const std::string &path, const std::vector<MatHeader> &mats, BinWriter &&write_bin) {
+inline bool glb_write_framed(const std::string &path, const std::vector<MatHeader> &mats,
+                             const std::string &scene_extras, const std::string &ada_ext, BinWriter &&write_bin) {
     std::ostringstream bv, acc, meshes, materials, nodes;
     uint32_t bin_off = 0;
     for (size_t i = 0; i < mats.size(); ++i) {
@@ -80,8 +142,9 @@ inline bool glb_write_framed(const std::string &path, const std::vector<MatHeade
             << ",\"type\":\"VEC3\",\"min\":[" << fnum(m.lo[0]) << "," << fnum(m.lo[1]) << "," << fnum(m.lo[2])
             << "],\"max\":[" << fnum(m.hi[0]) << "," << fnum(m.hi[1]) << "," << fnum(m.hi[2]) << "]}";
         bin_off += pos_bytes + pad4(pos_bytes);
-        meshes << (i ? "," : "") << "{\"primitives\":[{\"attributes\":{\"POSITION\":" << i * 2 + 1
-               << "},\"indices\":" << i * 2 << ",\"mode\":4,\"material\":" << i << "}]}";
+        meshes << (i ? "," : "") << "{\"name\":\"node" << i
+               << "\",\"primitives\":[{\"attributes\":{\"POSITION\":" << i * 2 + 1 << "},\"indices\":" << i * 2
+               << ",\"mode\":4,\"material\":" << i << "}]}";
         materials << (i ? "," : "") << "{\"pbrMetallicRoughness\":{\"baseColorFactor\":[" << fnum(m.color[0]) << ","
                   << fnum(m.color[1]) << "," << fnum(m.color[2]) << "," << fnum(m.color[3])
                   << "],\"metallicFactor\":0.1,\"roughnessFactor\":0.7},\"doubleSided\":true"
@@ -97,14 +160,17 @@ inline bool glb_write_framed(const std::string &path, const std::vector<MatHeade
     }
     nodes << "}";
     for (size_t i = 0; i < mats.size(); ++i)
-        nodes << ",{\"mesh\":" << i << "}";
+        nodes << ",{\"name\":\"node" << i << "\",\"mesh\":" << i << "}";
 
     std::ostringstream js;
     js << "{\"asset\":{\"version\":\"2.0\",\"generator\":\"adacpp-native-glb\"},\"scene\":0,"
-       << "\"scenes\":[{\"nodes\":[0],\"extras\":{}}],\"nodes\":[" << nodes.str() << "],"
+       << "\"scenes\":[{\"nodes\":[0],\"extras\":{" << scene_extras << "}}],\"nodes\":[" << nodes.str() << "],"
        << "\"buffers\":[{\"byteLength\":" << bin_len << "}],\"bufferViews\":[" << bv.str() << "],"
        << "\"accessors\":[" << acc.str() << "],\"meshes\":[" << meshes.str() << "],\"materials\":[" << materials.str()
-       << "]}";
+       << "]";
+    if (!ada_ext.empty())
+        js << ",\"extensionsUsed\":[\"ADA_EXT_data\"],\"extensions\":{\"ADA_EXT_data\":" << ada_ext << "}";
+    js << "}";
     std::string json = js.str();
     json.append(pad4((uint32_t) json.size()), ' ');
     uint32_t json_len = (uint32_t) json.size();
@@ -142,6 +208,7 @@ inline bool write_glb(const std::string &path, const std::vector<GlbSolid> &soli
         std::vector<uint32_t> idx;
         uint32_t idx_max = 0;
         float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+        std::vector<PartRange> parts; // per-solid index ranges (picking)
     };
     std::map<std::array<int, 4>, Buf> mats;
     for (const GlbSolid &s : solids) {
@@ -149,6 +216,7 @@ inline bool write_glb(const std::string &path, const std::vector<GlbSolid> &soli
             continue;
         Buf &m = mats[colour_key(s.color)];
         m.color = s.color;
+        uint32_t part_start = (uint32_t) m.idx.size();
         size_t ninst = s.transforms.empty() ? 1 : s.transforms.size();
         for (size_t t = 0; t < ninst; ++t) {
             const float *M = s.transforms.empty() ? IDENT : s.transforms[t].data();
@@ -168,9 +236,11 @@ inline bool write_glb(const std::string &path, const std::vector<GlbSolid> &soli
                 m.idx_max = std::max(m.idx_max, v);
             }
         }
+        m.parts.push_back({s.id, part_start, (uint32_t) m.idx.size() - part_start});
     }
     std::vector<MatHeader> hdrs;
     std::vector<const Buf *> bufs;
+    std::vector<std::vector<PartRange>> per_mat;
     for (const auto &[k, m] : mats)
         if (!m.idx.empty()) {
             MatHeader h;
@@ -184,9 +254,10 @@ inline bool write_glb(const std::string &path, const std::vector<GlbSolid> &soli
             }
             hdrs.push_back(h);
             bufs.push_back(&m);
+            per_mat.push_back(m.parts);
         }
     static const char z[4] = {0, 0, 0, 0};
-    return glb_write_framed(path, hdrs, [&](std::ofstream &out) {
+    return glb_write_framed(path, hdrs, build_scene_extras(per_mat), "", [&](std::ofstream &out) {
         for (const Buf *b : bufs) {
             uint32_t ib = (uint32_t) b->idx.size() * 4, pb = (uint32_t) b->pos.size() * 4;
             out.write(reinterpret_cast<const char *>(b->idx.data()), ib);
@@ -208,6 +279,7 @@ public:
         std::ofstream pos, idx;
         uint32_t vert_count = 0, index_count = 0, idx_max = 0;
         float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+        std::vector<std::pair<std::string, uint32_t>> parts; // (solid id, index_count) in add order
     };
 
     GlbSpillWriter(std::string dir, int lane) : dir_(std::move(dir)), lane_(lane) {}
@@ -224,6 +296,7 @@ public:
         if (m.pos_path.empty())
             open(m, key);
         m.color = s.color;
+        uint32_t before = m.index_count;
         size_t ninst = s.transforms.empty() ? 1 : s.transforms.size();
         for (size_t t = 0; t < ninst; ++t) {
             const float *M = s.transforms.empty() ? IDENT : s.transforms[t].data();
@@ -245,6 +318,7 @@ public:
                 ++m.index_count;
             }
         }
+        m.parts.emplace_back(s.id, m.index_count - before);
     }
     void flush() {
         for (auto &[k, m] : mats_) {
@@ -283,7 +357,8 @@ private:
 // Merge N lanes (one per worker) into a GLB. Per material: positions are concatenated across lanes;
 // each lane's indices are re-offset by its cumulative vertex base in that material. Streams the lane
 // files into the BIN chunk — never materializes the merged buffers.
-inline bool write_glb_merged(const std::string &path, const std::vector<GlbSpillWriter *> &lanes) {
+inline bool write_glb_merged(const std::string &path, const std::vector<GlbSpillWriter *> &lanes,
+                             const std::string &model_name = "") {
     using namespace glb_detail;
     for (GlbSpillWriter *l : lanes)
         l->flush();
@@ -314,8 +389,27 @@ inline bool write_glb_merged(const std::string &path, const std::vector<GlbSpill
             keys.push_back(key);
             hdrs.push_back(h);
         }
+    // Per-solid draw ranges: index offset accumulates across lanes (same order as the BIN concat),
+    // so each solid's [start,length] addresses the material's merged index buffer (picking).
+    std::vector<std::vector<PartRange>> per_mat;
+    per_mat.reserve(keys.size());
+    for (const std::array<int, 4> &key : keys) {
+        std::vector<PartRange> parts;
+        uint32_t off = 0;
+        for (GlbSpillWriter *l : lanes) {
+            auto it = l->mats().find(key);
+            if (it == l->mats().end())
+                continue;
+            for (const auto &[id, cnt] : it->second.parts) {
+                parts.push_back({id, off, cnt});
+                off += cnt;
+            }
+        }
+        per_mat.push_back(std::move(parts));
+    }
+    std::string ada_ext = model_name.empty() ? "" : ("{\"name\":\"" + json_escape(model_name) + "\"}");
     static const char z[4] = {0, 0, 0, 0};
-    return glb_write_framed(path, hdrs, [&](std::ofstream &out) {
+    return glb_write_framed(path, hdrs, build_scene_extras(per_mat), ada_ext, [&](std::ofstream &out) {
         for (const std::array<int, 4> &key : keys) {
             // indices: each lane re-offset by the cumulative vertex base, padded once at the end
             uint32_t base = 0, idx_bytes = 0;

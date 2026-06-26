@@ -624,7 +624,7 @@ int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_p
             std::vector<adacpp::glb::GlbSpillWriter *> lane_ptrs;
             for (adacpp::glb::GlbSpillWriter &l : lanes)
                 lane_ptrs.push_back(&l);
-            ok = adacpp::glb::write_glb_merged(out_path, lane_ptrs);
+            ok = adacpp::glb::write_glb_merged(out_path, lane_ptrs, std::filesystem::path(in_path).stem().string());
             prof.phase("write_glb_merged");
         }
         ::rmdir(dir);
