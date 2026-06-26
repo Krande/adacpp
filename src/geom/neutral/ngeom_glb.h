@@ -43,16 +43,21 @@ struct GlbSolid {
 };
 
 // Per-instance pickable-leaf name + parent path (the writer emits one per world placement). gid is the
-// solid's product name (its own name as fallback); placements after the first are gid/k+1. The parent
-// path drops the solid's own (last) level so the leaf itself IS the product node (Python collapse_leaf).
+// solid's product name (its own name as fallback); placements after the first are gid/k+1.
 inline std::string instance_leaf_name(const GlbSolid &s, size_t t) {
     const std::string &gid = s.product_name.empty() ? s.id : s.product_name;
     return t == 0 ? gid : gid + "/" + std::to_string(t + 1);
 }
+// Collapse the solid's own (last) product level into the leaf ONLY for a single-placement solid (Python
+// collapse_leaf, gated on n_inst==1): the leaf then IS the product node. A multi-placement solid keeps
+// the full path so its product becomes a group node holding the gid / gid/k+1 instance leaves.
 inline std::vector<std::pair<int, std::string>> instance_parent_path(const GlbSolid &s, size_t t) {
-    if (t < s.instance_paths.size() && s.instance_paths[t].size() > 1)
-        return {s.instance_paths[t].begin(), s.instance_paths[t].end() - 1};
-    return {};
+    if (t >= s.instance_paths.size() || s.instance_paths[t].empty())
+        return {};
+    const auto &p = s.instance_paths[t];
+    size_t ninst = s.transforms.empty() ? 1 : s.transforms.size();
+    size_t keep = (ninst == 1) ? p.size() - 1 : p.size();
+    return {p.begin(), p.begin() + keep};
 }
 
 namespace glb_detail {
@@ -146,12 +151,16 @@ inline std::string build_scene_extras(const std::vector<std::vector<PartRange>> 
             hier << parent; // parent node id (int), matching graph.to_json_hierarchy
         hier << "]";
     };
+    // Synthetic root node (matches the Python GraphStore root: node id 0, name "root", parent "*").
+    // Everything hangs under it, so the native tree depth lines up with Python's 1:1.
+    const int root_nid = next++;
+    emit(root_nid, "root", -1);
     std::vector<std::vector<int>> solid_nid(per_mat.size()); // per material/part -> the solid's node id
     for (size_t m = 0; m < per_mat.size(); ++m) {
         solid_nid[m].resize(per_mat[m].size());
         for (size_t k = 0; k < per_mat[m].size(); ++k) {
             const PartRange &r = per_mat[m][k];
-            int parent = -1; // scene root "*"
+            int parent = root_nid; // under the synthetic root
             std::vector<int> prefix;
             for (const auto &[rid, nm] : r.path) {
                 prefix.push_back(rid);
