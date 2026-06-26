@@ -249,6 +249,9 @@ Tess2Out run_tess2(const std::vector<std::vector<Uv>> &loops_uv, double su, doub
             continue;
         out.tris.push_back({(uint32_t) p[0], (uint32_t) p[1], (uint32_t) p[2]});
     }
+    tessDeleteTess(t); // free the tessellator on the success path too (verts/tris are already copied
+                       // out above) — otherwise every successful face leaks its libtess2 buckets,
+                       // which accumulates to GBs over a whole model in a single long-lived process.
     // Rust returns Some(verts,tris) whenever tessellate succeeded + ne>0, even if every triangle
     // was UNDEF-filtered (caller then emits nothing rather than retrying shrunk holes). Match it.
     out.ok = true;

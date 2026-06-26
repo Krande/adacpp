@@ -39,6 +39,7 @@
 #include <vector>
 
 #include <fcntl.h>
+#include <malloc.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -553,7 +554,10 @@ int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_p
                 gs.color = {root.cr, root.cg, root.cb, root.ca}; // grey default when !has_color
                 gs.transforms = root.transforms;
                 lane.add(gs); // spilled to disk immediately; gs freed after
-                ++n;
+                // Return per-solid tessellation/parse churn to the OS — glibc malloc otherwise
+                // retains the high-water arena, so RSS would never fall back between solids.
+                if (++n % 128 == 0)
+                    ::malloc_trim(0);
             });
             prof.phase("stream(resolve+tess+spill)");
             ok = adacpp::glb::write_glb_merged(out_path, {&lane});
