@@ -27,6 +27,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <deque>
 #include <tuple>
 #include <filesystem>
 #include <fstream>
@@ -35,6 +36,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -504,9 +506,12 @@ Mesh stream_step_to_meshes_impl(const std::string &path, const std::string &pipe
 
 // Native STEP -> GLB file: stream the .stp, tessellate each solid, bake its world transform(s) and
 // colour, and write a merge-by-colour GLB matching the adapy viewer's structure. The parse is
-// bounded (offset index + per-solid); returns the number of solids written, or -1 on I/O error.
+// bounded (offset index + per-statement pread), and tessellation runs across `num_threads` worker
+// threads (0 = auto = hardware_concurrency), each owning a spill lane joined at the end — so memory
+// stays bounded and the per-solid tessellation (the wall-time dominator) parallelizes. Returns the
+// number of solids written, or -1 on I/O error.
 int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_path, double deflection,
-                            double angular_deg) {
+                            double angular_deg, int num_threads) {
     using namespace adacpp::ngeom;
     adacpp::prof::StepProfiler prof("stream_step_to_glb");
 
@@ -521,39 +526,77 @@ int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_p
     tp.deflection = deflection;
     tp.max_angle = angular_deg * 3.14159265358979323846 / 180.0;
 
+    // Metadata (colour/transform/path maps) once; workers copy these read-only maps.
+    adacpp::step::Resolver master(idx);
+    master.build_metadata(idx.lists);
+    prof.phase("metadata");
+
+    unsigned hw = std::thread::hardware_concurrency();
+    int nthreads = num_threads > 0 ? num_threads : (int) (hw > 1 ? hw : 1);
+    const std::vector<long> &roots = idx.lists.roots;
+
     char tmpl[] = "/tmp/adacpp_glb_XXXXXX";
     char *dir = ::mkdtemp(tmpl); // unique spill dir (removed after assembly)
     bool ok = false;
-    int n = 0;
+    std::atomic<int> nwritten{0};
     if (dir) {
-        { // lane scoped so its temp files are removed before we rmdir
-            adacpp::glb::GlbSpillWriter lane(dir, 0);
-            adacpp::step::stream_step(idx, [&](const NgeomRoot &root, double) {
-                NgeomDoc one;
-                one.roots.push_back(root);
-                TessMesh tm = tessellate_doc(one, tp);
-                if (tm.indices.empty())
-                    return;
-                prof.solid(tm.indices.size() / 3);
-                adacpp::glb::GlbSolid gs;
-                gs.positions = std::move(tm.positions);
-                gs.indices = std::move(tm.indices);
-                gs.color = {root.cr, root.cg, root.cb, root.ca}; // grey default when !has_color
-                gs.transforms = root.transforms;
-                lane.add(gs); // spilled to disk immediately; gs freed after
-                // Return per-solid tessellation/parse churn to the OS — glibc malloc otherwise
-                // retains the high-water arena, so RSS would never fall back between solids.
-                if (++n % 128 == 0)
-                    ::malloc_trim(0);
-            });
+        { // lanes scoped so their temp files are removed before we rmdir
+            std::deque<adacpp::glb::GlbSpillWriter> lanes;
+            for (int t = 0; t < nthreads; ++t)
+                lanes.emplace_back(dir, t);
+            std::atomic<size_t> next{0};
+            // Each worker pulls roots off a shared counter (dynamic balancing handles the dense-solid
+            // long tail), resolving with its OWN caches + a copy of the shared metadata, into its lane.
+            auto worker = [&](int t) {
+                adacpp::step::Resolver r(idx);
+                r.copy_metadata_from(master);
+                adacpp::glb::GlbSpillWriter &lane = lanes[t];
+                int local = 0;
+                for (;;) {
+                    size_t i = next.fetch_add(1, std::memory_order_relaxed);
+                    if (i >= roots.size())
+                        break;
+                    NgeomRoot root = r.resolve_root(roots[i]);
+                    if (!root.id.empty()) {
+                        NgeomDoc one;
+                        one.roots.push_back(std::move(root));
+                        TessMesh tm = tessellate_doc(one, tp);
+                        if (!tm.indices.empty()) {
+                            prof.solid(tm.indices.size() / 3);
+                            const NgeomRoot &rr = one.roots[0];
+                            adacpp::glb::GlbSolid gs;
+                            gs.positions = std::move(tm.positions);
+                            gs.indices = std::move(tm.indices);
+                            gs.color = {rr.cr, rr.cg, rr.cb, rr.ca}; // grey default when !has_color
+                            gs.transforms = rr.transforms;
+                            lane.add(gs); // spilled to disk immediately
+                            nwritten.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    }
+                    r.clear_geom_cache();
+                    if (++local % 128 == 0)
+                        ::malloc_trim(0); // return per-solid churn to the OS
+                }
+            };
+            std::vector<std::thread> pool;
+            pool.reserve(nthreads - 1);
+            for (int t = 1; t < nthreads; ++t)
+                pool.emplace_back(worker, t);
+            worker(0); // this thread runs lane 0
+            for (std::thread &th : pool)
+                th.join();
             prof.phase("stream(resolve+tess+spill)");
-            ok = adacpp::glb::write_glb_merged(out_path, {&lane});
+
+            std::vector<adacpp::glb::GlbSpillWriter *> lane_ptrs;
+            for (adacpp::glb::GlbSpillWriter &l : lanes)
+                lane_ptrs.push_back(&l);
+            ok = adacpp::glb::write_glb_merged(out_path, lane_ptrs);
             prof.phase("write_glb_merged");
         }
         ::rmdir(dir);
     }
-    prof.note("threads", 1);
-    return ok ? n : -1;
+    prof.note("threads", nthreads);
+    return ok ? nwritten.load() : -1;
 }
 
 // ----------------------------------------------------------------------------
@@ -2573,9 +2616,10 @@ void cad_module(nb::module_ &m) {
           "wired for this path. angular_deg in degrees.");
 
     m.def("stream_step_to_glb", &stream_step_to_glb_impl, "in_path"_a, "out_path"_a, "deflection"_a = 0.0,
-          "angular_deg"_a = 20.0,
-          "Native STEP -> GLB file: stream the .stp with the native reader (offset index + per-solid "
-          "lazy resolve, bounded parse memory), tessellate each solid, bake its world transform(s) + "
+          "angular_deg"_a = 20.0, "num_threads"_a = 0,
+          "Native STEP -> GLB file: stream the .stp with the native reader (offset index + per-statement "
+          "pread, bounded memory), tessellate each solid across num_threads worker threads (0 = auto = "
+          "hardware_concurrency), each owning a spill lane joined at the end, bake world transform(s) + "
           "colour, and write a merge-by-colour GLB matching the adapy viewer's structure. Returns the "
           "number of solids written (-1 on I/O error). angular_deg in degrees.");
 

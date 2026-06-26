@@ -94,6 +94,24 @@ int main() {
     std::remove(ramp.c_str());
     std::remove(spillp.c_str());
 
+    // Two SAME-colour solids split across two lanes (the threading case): the merge must concat
+    // their verts and re-offset lane 1's indices by lane 0's vertex count — yielding the same GLB as
+    // the in-RAM writer with both solids in the same order.
+    GlbSolid triA = tri, triB = tri; // both red
+    for (size_t i = 0; i < triB.positions.size(); i += 3)
+        triB.positions[i] += 5.0f; // shift B in x so its verts differ
+    write_glb(ramp, {triA, triB}); // in-RAM: one red material, indices 0,1,2, 3,4,5
+    {
+        GlbSpillWriter l0("/tmp", 0), l1("/tmp", 1);
+        l0.add(triA);
+        l1.add(triB);
+        write_glb_merged(spillp, {&l0, &l1});
+    }
+    std::vector<uint8_t> ra2 = rd(ramp), sp2 = rd(spillp);
+    CHECK(!ra2.empty() && ra2 == sp2, "two-lane merge byte-identical to in-RAM (index re-offset)");
+    std::remove(ramp.c_str());
+    std::remove(spillp.c_str());
+
     if (g_fail == 0)
         std::printf("ngeom glb: ALL PASS\n");
     else

@@ -421,6 +421,17 @@ public:
         clear_geom_cache();
     }
 
+    // Copy the already-built, read-only metadata maps from a master resolver so worker threads can
+    // resolve+tessellate in parallel without each rebuilding (and re-reading) the metadata. Each
+    // worker keeps its OWN per-solid caches; only these resolve-time maps are shared (by copy).
+    void copy_metadata_from(const Resolver &src) {
+        colour_map_ = src.colour_map_;
+        xform_map_ = src.xform_map_;
+        path_map_ = src.path_map_;
+        name_of_rep_ = src.name_of_rep_;
+        unit_scale_ = src.unit_scale_;
+    }
+
     // Resolve one root solid -> NgeomRoot (geometry + colour + per-instance transforms + paths).
     ng::NgeomRoot resolve_root(long sid) {
         ng::NgeomRoot root;

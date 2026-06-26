@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -53,6 +54,7 @@ public:
     void solid(size_t tris) {
         if (!on_)
             return;
+        std::lock_guard<std::mutex> lk(mu_); // called from worker threads
         ++n_solids_;
         total_tris_ += tris;
         if (tris > max_tris_)
@@ -93,6 +95,7 @@ private:
     std::vector<Phase> phases_;
     size_t n_solids_ = 0, total_tris_ = 0, max_tris_ = 0;
     std::vector<std::pair<const char *, double>> notes_;
+    std::mutex mu_;
 };
 
 } // namespace adacpp::prof
