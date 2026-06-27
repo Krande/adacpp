@@ -68,15 +68,22 @@ jobs:
         # skipped (links the prebuilt base); otherwise OCCT builds inline (~30 min).
         run: pixi run -e wasm pack-wheel-pyodide
 
-      - name: Stage /out (wheel + manifest + sha)
+      - name: Build the no-pyodide STEP->GLB wasm module
+        # Standalone embind module (no OCCT, no pyodide) for the viewer's in-browser STEP->GLB.
+        # OCC-free -> a quick emcc build, independent of the OCCT cross-compile above.
+        run: pixi run -e wasm wbuild-stepglb
+
+      - name: Stage /out (wheel + manifest + sha + step-glb wasm)
         run: |
-          mkdir -p out
+          mkdir -p out out/wasm
           cp dist/ada_cpp-*.whl out/
+          cp build-wasm-stepglb/wasm_output/adacpp_step_glb.js out/wasm/
+          cp build-wasm-stepglb/wasm_output/adacpp_step_glb.wasm out/wasm/
           cd out
           wheel=$(ls ada_cpp-*.whl)
           printf '{"adacpp":"%s"}\n' "$wheel" > manifest.json
           printf '%s\n' "${GITHUB_SHA}" > adacpp.sha
-          echo "Staged $wheel"
+          echo "Staged $wheel + out/wasm/ (adacpp_step_glb.js + .wasm)"
 
       - uses: docker/setup-buildx-action@v3
 
