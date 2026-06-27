@@ -26,6 +26,7 @@ stream_step_to_meshes = _cad.stream_step_to_meshes
 stream_step_to_glb = _cad.stream_step_to_glb
 stream_step_to_ngeom = _cad.stream_step_to_ngeom
 StepRootMeta = _cad.StepRootMeta
+StepNgeomStream = _cad.StepNgeomStream
 ifc_taxonomy_settings = _cad.ifc_taxonomy_settings
 meshopt_simplify_mesh = _cad.meshopt_simplify_mesh
 meshopt_encode_vertex_buffer = _cad.meshopt_encode_vertex_buffer
@@ -128,6 +129,7 @@ __all__ = [
     "stream_step_to_glb",
     "stream_step_to_ngeom",
     "StepRootMeta",
+    "StepNgeomStream",
     "meshopt_simplify_mesh",
     "bbox",
     "obb",

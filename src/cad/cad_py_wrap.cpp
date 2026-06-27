@@ -461,6 +461,49 @@ std::pair<nb::bytes, std::vector<StepRootMeta>> stream_step_to_ngeom_impl(const 
     return {nb::bytes(reinterpret_cast<const char *>(buf.data()), buf.size()), std::move(metas)};
 }
 
+// Streaming NGEOM emitter for the from_step hydrate path: resolve + encode ONE solid per __next__,
+// freeing each solid's working set after — so memory stays at the offset index (~12 B/instance) plus
+// a single solid, NOT the whole parsed model (stream_step_to_ngeom full-parses + OOMs on large files).
+// Python-iterable: each item is (one-root NGEOM buffer, StepRootMeta). The index + resolver live on the
+// heap so the resolver's index pointer stays valid even if Python moves the object.
+class StepNgeomStream {
+public:
+    explicit StepNgeomStream(const std::string &path) {
+        idx_ = std::make_unique<adacpp::step::StreamIndex>(adacpp::step::StreamIndex::from_file(path));
+        r_ = std::make_unique<adacpp::step::Resolver>(*idx_);
+        r_->build_metadata(idx_->lists);
+    }
+    nb::tuple next() {
+        using namespace adacpp::ngeom;
+        const auto &roots = idx_->lists.roots;
+        while (cursor_ < roots.size()) {
+            NgeomRoot root = r_->resolve_root(roots[cursor_++]);
+            if (root.id.empty()) {
+                r_->clear_geom_cache();
+                continue;
+            }
+            StepRootMeta m;
+            m.id = root.id;
+            m.has_color = root.has_color;
+            m.color = {root.cr, root.cg, root.cb, root.ca};
+            m.transforms = root.transforms;
+            m.instance_paths = root.instance_paths;
+            NgeomDoc one;
+            one.roots.push_back(std::move(root));
+            std::vector<uint8_t> buf = encode(one);
+            r_->clear_geom_cache();
+            return nb::make_tuple(nb::bytes(reinterpret_cast<const char *>(buf.data()), buf.size()), std::move(m));
+        }
+        PyErr_SetNone(PyExc_StopIteration);
+        throw nb::python_error();
+    }
+
+private:
+    std::unique_ptr<adacpp::step::StreamIndex> idx_;
+    std::unique_ptr<adacpp::step::Resolver> r_;
+    size_t cursor_ = 0;
+};
+
 // Native STEP -> Mesh: stream the .stp with the native C++ reader (offset index + per-solid lazy
 // resolve, no OCC/Python), tessellate each solid as it streams, and append into ONE combined Mesh
 // with a GroupReference per root. Memory stays bounded on the parse side (the index + a single
@@ -2694,6 +2737,14 @@ void cad_module(nb::module_ &m) {
           "id, colour, per-instance world transforms, and assembly paths — parallel to the "
           "buffer's roots. The geometry sibling of stream_step_to_meshes for the from_step "
           "hydrate path (ada.geom.Geometry + assembly part hierarchy).");
+
+    nb::class_<StepNgeomStream>(m, "StepNgeomStream")
+        .def(nb::init<const std::string &>(), "path"_a,
+             "Streaming NGEOM emitter: iterate to get (one-solid NGEOM buffer, StepRootMeta) per solid, "
+             "with bounded memory (offset index + one solid) — the from_step hydrate path's large-file "
+             "counterpart to stream_step_to_ngeom (which full-parses).")
+        .def("__iter__", [](nb::object self) { return self; })
+        .def("__next__", &StepNgeomStream::next);
 
     m.def(
         "ifc_taxonomy_settings",
