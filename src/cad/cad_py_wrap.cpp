@@ -12,6 +12,7 @@
 #include "../geom/neutral/ada_ext_schema.h" // GENERATED from the adapy ADA_EXT_data JSON schema
 #include "../geom/neutral/ngeom_glb.h"
 #include "../geom/neutral/ngeom_profile.h"
+#include "step_to_glb_st.h" // single-threaded, mmap-free STEP->GLB core (wasm/OPFS + native oracle)
 #include "../geom/neutral/ngeom_tessellate.h"
 #include "../geom/neutral/ngeom_meshopt.h"
 #include "../cadit/step/step_reader.h"
@@ -723,6 +724,19 @@ int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_p
     }
     prof.note("threads", nthreads);
     return ok ? nwritten.load() : -1;
+}
+
+// Single-threaded, mmap-free STEP -> GLB (the wasm/OPFS core, exercised natively here as a parity
+// oracle). Creates a temp spill dir, runs step_to_glb_single, returns the triangle count.
+long stream_step_to_glb_st_impl(const std::string &in_path, const std::string &out_path, double deflection,
+                                double angular_deg, bool meshopt) {
+    char tmpl[] = "/tmp/adacpp_glbst_XXXXXX";
+    char *dir = ::mkdtemp(tmpl);
+    if (!dir)
+        return -1;
+    long n = adacpp::step_to_glb_single(in_path, out_path, dir, deflection, angular_deg, meshopt);
+    ::rmdir(dir);
+    return n;
 }
 
 // ----------------------------------------------------------------------------
@@ -2749,6 +2763,12 @@ void cad_module(nb::module_ &m) {
           "colour, and write a merge-by-colour GLB matching the adapy viewer's structure. meshopt=true "
           "(default) bakes EXT_meshopt_compression inline (no Python re-pack). Returns the number of "
           "solids written (-1 on I/O error). angular_deg in degrees.");
+
+    m.def("stream_step_to_glb_st", &stream_step_to_glb_st_impl, "in_path"_a, "out_path"_a, "deflection"_a = 2.0,
+          "angular_deg"_a = 20.0, "meshopt"_a = false,
+          "Single-threaded, mmap-free STEP -> GLB (the no-pyodide wasm/OPFS core, callable natively as a "
+          "parity oracle): from_file_pread scan + serial resolve/tessellate/spill + merge, NO std::thread "
+          "and NO mmap. Returns the triangle count (-1 on I/O error).");
 
     m.def("stream_step_to_ngeom", &stream_step_to_ngeom_impl, "path"_a,
           "Read a STEP file with the native C++ reader (no OCC, no Python) and return "

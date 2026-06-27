@@ -10,6 +10,11 @@
 #include <cctype>
 #include <charconv>
 #include <cstdint>
+#if defined(__EMSCRIPTEN__)
+#include <cerrno> // strtod fallback (emscripten libc++ deletes floating-point std::from_chars)
+#include <cstdlib>
+#include <cstring>
+#endif
 #include <string>
 #include <string_view>
 #include <utility>
@@ -110,12 +115,31 @@ inline Value classify_scalar(std::string_view tok) {
         return v;
     }
     double dv = 0.0;
+#if defined(__EMSCRIPTEN__)
+    // emscripten libc++ deletes floating-point std::from_chars; parse via strtod on a NUL-terminated
+    // copy (STEP reals are short, always C-locale '.'). endp==end keeps the "fully consumed" semantics.
+    const size_t nlen = (size_t) (ne - nb);
+    char tmp[64];
+    if (nlen < sizeof(tmp)) {
+        std::memcpy(tmp, nb, nlen);
+        tmp[nlen] = '\0';
+        char *endp = nullptr;
+        errno = 0;
+        dv = std::strtod(tmp, &endp);
+        if (errno == 0 && endp == tmp + nlen) {
+            v.kind = Kind::Real;
+            v.r = dv;
+            return v;
+        }
+    }
+#else
     auto [pd, ecd] = std::from_chars(nb, ne, dv);
     if (ecd == std::errc() && pd == ne) {
         v.kind = Kind::Real;
         v.r = dv;
         return v;
     }
+#endif
     v.kind = Kind::Keyword;
     v.s = tok;
     return v;

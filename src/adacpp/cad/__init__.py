@@ -24,6 +24,7 @@ tessellate_box = _cad.tessellate_box
 tessellate_stream = _cad.tessellate_stream
 stream_step_to_meshes = _cad.stream_step_to_meshes
 stream_step_to_glb = _cad.stream_step_to_glb
+stream_step_to_glb_st = _cad.stream_step_to_glb_st
 stream_step_to_ngeom = _cad.stream_step_to_ngeom
 StepRootMeta = _cad.StepRootMeta
 StepNgeomStream = _cad.StepNgeomStream
@@ -128,6 +129,7 @@ __all__ = [
     "tessellate_stream",
     "stream_step_to_meshes",
     "stream_step_to_glb",
+    "stream_step_to_glb_st",
     "stream_step_to_ngeom",
     "StepRootMeta",
     "StepNgeomStream",

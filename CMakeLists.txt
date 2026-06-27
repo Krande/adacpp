@@ -10,6 +10,7 @@ if(POLICY CMP0167)
 endif()
 
 OPTION(BUILD_WASM "Build the project for WebAssembly" OFF)
+OPTION(BUILD_STEP_GLB_WASM "Build ONLY the OCC-free STEP->GLB wasm module (embind, no OCCT/pyodide/Python)" OFF)
 OPTION(BUILD_PYTHON "Build the project for Python" ON)
 OPTION(BUILD_STP2GLB "Build the STP2GLB executable" ON)
 OPTION(BUILD_STP2GLB_TESTING "Build the testing tree." OFF)
@@ -139,7 +140,10 @@ if (BUILD_WASM)
     # Cross-compile a minimal OCCT to wasm via FetchContent. Sets WASM_OCCT_TARGETS
     # for the nanobind module / executables to link against. First spike is
     # FoundationClasses only; module set widens as features land.
-    include(cmake/wasm_occt.cmake)
+    # Skipped for the OCC-free STEP->GLB module — it needs no OCCT, so we avoid the heavy cross-build.
+    if (NOT BUILD_STEP_GLB_WASM)
+        include(cmake/wasm_occt.cmake)
+    endif ()
 endif ()
 
 if (BUILD_PYTHON)

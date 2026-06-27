@@ -81,6 +81,7 @@ lint = { cmd = "isort . && black . --config pyproject.toml && ruff check . --fix
 [feature.wasm.tasks]
 clean = { cmd = "rm -rf build-wasm && mkdir -p build-wasm" }
 wbuild = { cmd = "emcmake cmake . -B build-wasm -G Ninja -DBUILD_WASM=ON -DBUILD_PYTHON=OFF -DBUILD_TESTS=OFF -DBUILD_STP2GLB=OFF && cmake --build build-wasm", depends-on = ["clean"] }
+wbuild-stepglb = { cmd = "emcmake cmake . -B build-wasm-stepglb -G Ninja -DBUILD_WASM=ON -DBUILD_STEP_GLB_WASM=ON -DBUILD_PYTHON=OFF -DBUILD_TESTS=OFF -DBUILD_STP2GLB=OFF && cmake --build build-wasm-stepglb", description = "Build the OCC-free no-pyodide STEP->GLB embind wasm module (adacpp_step_glb.js + .wasm)" }
 xbuildenv-install = { cmd = "pyodide xbuildenv install 0.29.4", description = "Install the pyodide cross-build environment (Python 3.13 + emscripten 4.0.9)" }
 build-occt-wasm = { cmd = "emcmake cmake --preset wasm-pyodide -DPython_INCLUDE_DIR=\"$(pyodide config get python_include_dir)\" && cmake --build build/wasm-pyodide --target occt_external", description = "Cross-build + install ONLY the OCCT-wasm toolkits → build/wasm-pyodide/_deps/occt-install (the reusable base-image input)" }
 wbuild-pyodide = { cmd = "emcmake cmake --preset wasm-pyodide -DPython_INCLUDE_DIR=\"$(pyodide config get python_include_dir)\" && cmake --build build/wasm-pyodide", description = "Build the adacpp nanobind module for pyodide" }
