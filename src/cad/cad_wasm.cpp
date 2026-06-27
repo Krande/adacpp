@@ -16,6 +16,7 @@
 #include <string>
 
 #include <emscripten/bind.h>
+#include <emscripten/wasmfs.h>
 
 #include "step_to_glb_st.h"
 
@@ -28,8 +29,20 @@ long step_to_glb(const std::string &in_path, const std::string &out_path, const 
     return adacpp::step_to_glb_single(in_path, out_path, spill_dir, deflection, angular_deg, meshopt);
 }
 
+// Mount the browser's Origin Private File System (OPFS) at `mount_point`, so the STEP, the GLB and the
+// spill lanes live in OPFS — the STEP streams through pread (bounded RSS) instead of the wasm heap.
+// MUST be called from a Web Worker (OPFS sync access handles are worker-only). Returns 0 on success,
+// non-zero if OPFS is unavailable; the caller then falls back to the in-heap WASMFS default.
+int mount_opfs(const std::string &mount_point) {
+    backend_t opfs = wasmfs_create_opfs_backend();
+    if (!opfs)
+        return -1;
+    return wasmfs_create_directory(mount_point.c_str(), 0777, opfs);
+}
+
 } // namespace
 
 EMSCRIPTEN_BINDINGS(adacpp_step_glb) {
     emscripten::function("stepToGlb", &step_to_glb);
+    emscripten::function("mountOpfs", &mount_opfs);
 }
