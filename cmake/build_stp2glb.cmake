@@ -1,30 +1,29 @@
-# Get .h files from src/stp2glb/core
-file(GLOB_RECURSE CORE_HEADERS src/stp2glb/core/*.h)
-
-# Get .cpp files from src/stp2glb/core
-file(GLOB_RECURSE CORE_SOURCES src/stp2glb/core/*.cpp)
-
-# Install the C++ executable
-set(SOURCES
-        src/geom/Color.cpp
+# Standalone OCC-free STP2GLB executable. Builds from the native threaded streaming STEP->GLB
+# pipeline (header-only reader + neutral geom layer) — NO OCCT, NO nanobind, NO Python. The same
+# OCC-free source set as the wasm step-glb target (ngeom tessellate/boolean/meshopt + vendored
+# libtess2/meshopt), linking manifold + Threads + the C++ stdlib only.
+set(STP2GLB_SOURCES
         src/stp2glb/main.cpp
-        src/stp2glb/config_utils.cpp
-        ${CORE_SOURCES}
-
+        src/geom/neutral/ngeom_tessellate.cpp
+        src/geom/neutral/ngeom_boolean.cpp
+        src/geom/neutral/ngeom_meshopt.cpp
+        ${LIBTESS2_SOURCES}
+        ${MESHOPT_SOURCES}
 )
-set(HEADERS
-        src/geom/Color.h
-        src/stp2glb/config_structs.h
-        src/stp2glb/config_utils.h
-        ${CORE_HEADERS}
+set(STP2GLB_HEADERS
+        src/cad/step_to_glb_stream.h
 )
 
-add_executable(STP2GLB ${SOURCES} ${HEADERS})
+add_executable(STP2GLB ${STP2GLB_SOURCES} ${STP2GLB_HEADERS})
 
 set_target_properties(STP2GLB PROPERTIES
         INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/bin"
 )
-target_link_libraries(STP2GLB ${ADA_CPP_LINK_LIBS} Threads::Threads)
+# OCC-free: link only manifold (mesh-boolean for the libtess2 path), pthreads, and the C++ stdlib.
+# Deliberately NOT ${ADA_CPP_LINK_LIBS} (which pulls in OCCT) and NOT the src/stp2glb/core/* OCCT path.
+target_link_libraries(STP2GLB PRIVATE manifold Threads::Threads)
+# libtess2 / meshopt include dirs are already on the global include path (top-level CMakeLists);
+# CLI11 (CLI/CLI.hpp) comes from the conda/pixi env include dir.
 
 # install to executable into the bin dir
 # If EXE_BIN_DIR is not set, use root bin dir
