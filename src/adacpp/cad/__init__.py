@@ -27,6 +27,7 @@ stream_step_to_glb = _cad.stream_step_to_glb
 stream_step_to_ngeom = _cad.stream_step_to_ngeom
 StepRootMeta = _cad.StepRootMeta
 StepNgeomStream = _cad.StepNgeomStream
+_step_index_parity = _cad._step_index_parity
 ifc_taxonomy_settings = _cad.ifc_taxonomy_settings
 meshopt_simplify_mesh = _cad.meshopt_simplify_mesh
 meshopt_encode_vertex_buffer = _cad.meshopt_encode_vertex_buffer

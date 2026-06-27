@@ -173,6 +173,25 @@ public:
         scan(b, nullptr);
     }
 
+    // File-backed, pread-only (NO mmap): for environments where mmap can't lazily page a large file
+    // (wasm/OPFS — mmap would force the whole file into the heap). Scans the offset index by preading
+    // chunks into a sliding buffer; the fd is kept for the same per-statement pread used by from_file.
+    static StreamIndex from_file_pread(const std::string &path) {
+        StreamIndex si;
+        si.fd_ = ::open(path.c_str(), O_RDONLY);
+        if (si.fd_ < 0)
+            return si;
+        struct stat st;
+        if (::fstat(si.fd_, &st) != 0 || st.st_size == 0) {
+            ::close(si.fd_);
+            si.fd_ = -1;
+            return si;
+        }
+        si.fsize_ = (size_t) st.st_size;
+        si.scan_pread();
+        return si;
+    }
+
     // File-backed: mmap to scan (free-behind), munmap, keep the fd for per-statement pread.
     static StreamIndex from_file(const std::string &path) {
         StreamIndex si;
@@ -308,7 +327,7 @@ private:
                     break;
                 ++p;
             }
-            classify(src, off, index);
+            classify(src, off, off, index);
             if (p < end)
                 ++p; // consume ';'
             // Free-behind (file mode): drop scanned mmap pages so the scan doesn't fault in the
@@ -334,8 +353,142 @@ private:
         std::sort(lists.roots.begin(), lists.roots.end()); // deterministic output order
     }
 
-    // Light classify: extract id + type keyword (no arg parse) from the statement at `off`.
-    void classify(std::string_view src, size_t off, std::vector<std::pair<long, size_t>> &index) {
+    // pread-based variant of scan() (NO mmap): reads the file in chunks into a sliding window and
+    // classifies each statement from its start, so the offset index is built with bounded memory and
+    // no address-space mapping (wasm/OPFS-safe — mmap there would force the whole file into the heap).
+    // String/comment state is carried across chunk boundaries; produces the same ids/offs/lists as scan().
+    void scan_pread() {
+        std::vector<std::pair<long, size_t>> index;
+        const size_t CHUNK = 4u << 20;
+        std::string buf; // sliding window: buf[i] is file offset (base + i)
+        size_t base = 0, pos = 0;
+        bool eof = false;
+        auto refill = [&]() -> bool { // append one chunk; false at EOF
+            if (eof)
+                return false;
+            size_t old = buf.size();
+            buf.resize(old + CHUNK);
+            ssize_t r = ::pread(fd_, buf.data() + old, CHUNK, (off_t) (base + old));
+            if (r <= 0) {
+                buf.resize(old);
+                eof = true;
+                return false;
+            }
+            buf.resize(old + (size_t) r);
+            if ((size_t) r < CHUNK)
+                eof = true;
+            return true;
+        };
+        refill();
+        while (true) {
+            // Amortized compaction: drop the fully-scanned prefix only once it exceeds a chunk, so the
+            // erase is O(file/CHUNK) total — NOT per statement (that erase-from-front is O(N^2)).
+            if (pos > CHUNK) {
+                buf.erase(0, pos);
+                base += pos;
+                pos = 0;
+            }
+            { // advance to the next statement start
+                const char *b = buf.data(), *p = b + pos, *e = b + buf.size();
+                p21_detail::skip_ws(p, e);
+                pos = (size_t) (p - b);
+            }
+            if (pos >= buf.size()) {
+                if (!refill())
+                    break;
+                continue;
+            }
+            // scan to the terminating ';' (string/comment aware) with `pos` as the single advancing
+            // cursor; refill across chunk boundaries, carrying in_str/in_comment + never splitting a
+            // 2-char token ('' escape, /* */).
+            const size_t stmt_start = pos;
+            bool in_str = false, in_comment = false, found = false;
+            while (!found) {
+                const char *b = buf.data();
+                bool need_more = false;
+                while (pos < buf.size()) {
+                    char c = b[pos];
+                    if (in_comment) {
+                        if (c == '*') {
+                            if (pos + 1 >= buf.size() && !eof) {
+                                need_more = true;
+                                break;
+                            }
+                            if (pos + 1 < buf.size() && b[pos + 1] == '/') {
+                                in_comment = false;
+                                pos += 2;
+                                continue;
+                            }
+                        }
+                        ++pos;
+                        continue;
+                    }
+                    if (in_str) {
+                        if (c == '\'') {
+                            if (pos + 1 >= buf.size() && !eof) {
+                                need_more = true;
+                                break;
+                            }
+                            if (pos + 1 < buf.size() && b[pos + 1] == '\'') {
+                                pos += 2;
+                                continue;
+                            }
+                            in_str = false;
+                        }
+                        ++pos;
+                        continue;
+                    }
+                    if (c == '\'') {
+                        in_str = true;
+                        ++pos;
+                        continue;
+                    }
+                    if (c == '/') {
+                        if (pos + 1 >= buf.size() && !eof) {
+                            need_more = true;
+                            break;
+                        }
+                        if (pos + 1 < buf.size() && b[pos + 1] == '*') {
+                            in_comment = true;
+                            pos += 2;
+                            continue;
+                        }
+                        ++pos;
+                        continue;
+                    }
+                    if (c == ';') {
+                        found = true;
+                        break;
+                    }
+                    ++pos;
+                }
+                if (found)
+                    break;
+                if (need_more || !eof) {
+                    if (!refill() && pos >= buf.size())
+                        break; // EOF without ';' (last/malformed statement)
+                    continue;
+                }
+                break; // eof, no ';'
+            }
+            classify(std::string_view(buf.data(), buf.size()), stmt_start, base + stmt_start, index);
+            if (pos < buf.size())
+                ++pos; // consume ';'
+        }
+        std::sort(index.begin(), index.end());
+        ids.reserve(index.size());
+        offs.reserve(index.size());
+        for (auto &[id, o] : index) {
+            ids.push_back(id);
+            offs.push_back(o);
+        }
+        std::sort(lists.roots.begin(), lists.roots.end());
+    }
+
+    // Light classify: extract id + type keyword (no arg parse) from the statement at `off` in `src`.
+    // `rec_off` is the FILE offset recorded in the index — equal to `off` for the whole-file mmap scan,
+    // but base+off for the sliding-window pread scan (where `off` is window-relative).
+    void classify(std::string_view src, size_t off, size_t rec_off, std::vector<std::pair<long, size_t>> &index) {
         const char *base = src.data(), *p = base + off, *end = base + src.size();
         if (*p != '#')
             return;
@@ -348,7 +501,7 @@ private:
         }
         if (!any)
             return;
-        index.emplace_back(id, off);
+        index.emplace_back(id, rec_off);
         p21_detail::skip_ws(p, end);
         if (p >= end || *p != '=')
             return;

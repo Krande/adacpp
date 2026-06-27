@@ -461,6 +461,26 @@ std::pair<nb::bytes, std::vector<StepRootMeta>> stream_step_to_ngeom_impl(const 
     return {nb::bytes(reinterpret_cast<const char *>(buf.data()), buf.size()), std::move(metas)};
 }
 
+// Debug/parity hook: build the offset index both ways (mmap scan vs the wasm-safe pread scan) and
+// report whether they are identical. Used to validate from_file_pread before it backs the wasm path.
+nb::dict step_index_parity_impl(const std::string &path) {
+    auto a = adacpp::step::StreamIndex::from_file(path);
+    auto b = adacpp::step::StreamIndex::from_file_pread(path);
+    nb::dict d;
+    d["n_mmap"] = (long) a.ids.size();
+    d["n_pread"] = (long) b.ids.size();
+    d["ids_match"] = (a.ids == b.ids);
+    d["offs_match"] = (a.offs == b.offs);
+    d["roots_match"] = (a.lists.roots == b.lists.roots);
+    d["units_match"] = (a.lists.units == b.lists.units);
+    d["styled_match"] = (a.lists.styled == b.lists.styled);
+    d["absr_match"] = (a.lists.absr == b.lists.absr);
+    d["srr_match"] = (a.lists.srr == b.lists.srr);
+    d["cdsr_match"] = (a.lists.cdsr == b.lists.cdsr);
+    d["sdr_match"] = (a.lists.sdr == b.lists.sdr);
+    return d;
+}
+
 // Streaming NGEOM emitter for the from_step hydrate path: resolve + encode ONE solid per __next__,
 // freeing each solid's working set after — so memory stays at the offset index (~12 B/instance) plus
 // a single solid, NOT the whole parsed model (stream_step_to_ngeom full-parses + OOMs on large files).
@@ -2745,6 +2765,10 @@ void cad_module(nb::module_ &m) {
              "counterpart to stream_step_to_ngeom (which full-parses).")
         .def("__iter__", [](nb::object self) { return self; })
         .def("__next__", &StepNgeomStream::next);
+
+    m.def("_step_index_parity", &step_index_parity_impl, "path"_a,
+          "Debug: build the STEP offset index via mmap scan and via the wasm-safe pread scan, returning "
+          "a dict of per-field equality (ids/offs/roots/units/styled/absr/srr/cdsr/sdr).");
 
     m.def(
         "ifc_taxonomy_settings",
