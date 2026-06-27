@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <deque>
+#include <filesystem>
 #include <string>
 #include <thread>
 #include <utility>
@@ -31,8 +32,13 @@
 
 namespace adacpp {
 
+// `spill_dir` controls where each lane's per-material GLB chunks are spilled to disk:
+//   - empty  => a private mkdtemp dir under /tmp is created and removed once assembly is done.
+//   - set    => that directory is used (created if missing) and is NOT removed afterwards, so a
+//               caller can inspect the intermediate spill files. The lane temp files inside it are
+//               still cleaned up by GlbSpillWriter's destructor; only the user-supplied dir survives.
 inline long stream_step_to_glb(const std::string &in_path, const std::string &out_path, double deflection,
-                               double angular_deg, int num_threads, bool meshopt) {
+                               double angular_deg, int num_threads, bool meshopt, const std::string &spill_dir = "") {
     using namespace adacpp::ngeom;
     adacpp::prof::StepProfiler prof("stream_step_to_glb");
 
@@ -71,15 +77,29 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
         prof.phase("lpt_order");
     }
 
+    // Resolve the spill directory: a private mkdtemp dir (auto-removed) when no spill_dir was given,
+    // otherwise the caller's directory (created if missing, left in place afterwards).
+    std::string spill;
+    bool remove_after = false;
     char tmpl[] = "/tmp/adacpp_glb_XXXXXX";
-    char *dir = ::mkdtemp(tmpl); // unique spill dir (removed after assembly)
+    if (spill_dir.empty()) {
+        if (char *dir = ::mkdtemp(tmpl)) { // unique spill dir (removed after assembly)
+            spill = dir;
+            remove_after = true;
+        }
+    } else {
+        std::error_code ec;
+        std::filesystem::create_directories(spill_dir, ec);
+        if (std::filesystem::is_directory(spill_dir, ec))
+            spill = spill_dir; // user-supplied: use as-is, do NOT remove
+    }
     bool ok = false;
     std::atomic<int> nwritten{0};
-    if (dir) {
-        { // lanes scoped so their temp files are removed before we rmdir
+    if (!spill.empty()) {
+        { // lanes scoped so their temp files are removed before we (maybe) rmdir
             std::deque<adacpp::glb::GlbSpillWriter> lanes;
             for (int t = 0; t < nthreads; ++t)
-                lanes.emplace_back(dir, t);
+                lanes.emplace_back(spill, t);
             std::atomic<size_t> next{0};
             // Each worker pulls roots off a shared counter (dynamic balancing handles the dense-solid
             // long tail), resolving with its OWN caches + a copy of the shared metadata, into its lane.
@@ -175,7 +195,8 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
             ok = adacpp::glb::write_glb_merged(out_path, lane_ptrs, ada_ext, meshopt);
             prof.phase(meshopt ? "write_glb_merged(meshopt)" : "write_glb_merged");
         }
-        ::rmdir(dir);
+        if (remove_after)
+            ::rmdir(spill.c_str());
     }
     prof.note("threads", nthreads);
     return ok ? nwritten.load() : -1;

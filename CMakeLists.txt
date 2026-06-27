@@ -11,10 +11,18 @@ endif()
 
 OPTION(BUILD_WASM "Build the project for WebAssembly" OFF)
 OPTION(BUILD_STEP_GLB_WASM "Build ONLY the OCC-free STEP->GLB wasm module (embind, no OCCT/pyodide/Python)" OFF)
+OPTION(BUILD_STP2GLB_STANDALONE "Build ONLY the OCC-free STP2GLB CLI — skip OCCT/CGAL/gmsh/IFC/Python" OFF)
 OPTION(BUILD_PYTHON "Build the project for Python" ON)
 OPTION(BUILD_STP2GLB "Build the STP2GLB executable" ON)
 OPTION(BUILD_STP2GLB_TESTING "Build the testing tree." OFF)
 OPTION(BUILD_DEBUG_TESTS "Build the testing tree used primarily for debugging." OFF)
+
+# Standalone OCC-free STP2GLB CLI: never compile the Python module (mirrors how BUILD_STEP_GLB_WASM
+# narrows the build). Forced here so the option is self-sufficient — the heavy native deps and the
+# python module are both skipped below regardless of how the caller set BUILD_PYTHON.
+if (BUILD_STP2GLB_STANDALONE)
+    set(BUILD_PYTHON OFF CACHE BOOL "Disabled by BUILD_STP2GLB_STANDALONE" FORCE)
+endif ()
 
 if (DEFINED TINY_INCLUDE_DIR)
     include_directories(${TINY_INCLUDE_DIR})
@@ -166,15 +174,23 @@ if (BUILD_PYTHON)
 endif ()
 
 if (NOT BUILD_WASM)
-    include(cmake/pre_checks.cmake)
-    # Add dependencies
-    include(cmake/deps_cgal.cmake)
-    include(cmake/deps_occ.cmake)
-    include(cmake/deps_gmsh.cmake)
-    include(cmake/deps_ifc.cmake)
+    if (BUILD_STP2GLB_STANDALONE)
+        # OCC-free CLI only: skip the heavy native deps (OCCT/CGAL/gmsh/IFC) and pre_checks entirely,
+        # the same way BUILD_STEP_GLB_WASM short-circuits the OCCT cross-build. Only Threads is needed
+        # to link the CLI (manifold + libtess2 + meshopt are pulled in unconditionally above/below).
+        message(STATUS "BUILD_STP2GLB_STANDALONE: skipping OCCT/CGAL/gmsh/IFC/Python — building the OCC-free CLI only")
+        find_package(Threads REQUIRED)
+    else ()
+        include(cmake/pre_checks.cmake)
+        # Add dependencies
+        include(cmake/deps_cgal.cmake)
+        include(cmake/deps_occ.cmake)
+        include(cmake/deps_gmsh.cmake)
+        include(cmake/deps_ifc.cmake)
 
-    # Find Threads package for pthread support on Linux
-    find_package(Threads REQUIRED)
+        # Find Threads package for pthread support on Linux
+        find_package(Threads REQUIRED)
+    endif ()
 endif ()
 
 # Manifold mesh-boolean (CSG) for the OCC-free libtess2 path (ngeom_boolean.cpp) — native AND

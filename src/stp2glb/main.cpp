@@ -3,6 +3,7 @@
 // `stream_step_to_glb` binding use. No OCCT, no nanobind, no Python: self-contained.
 
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -19,8 +20,11 @@ int main(int argc, char *argv[]) {
     std::string glb_file;
     double deflection = 2.0;
     double angular_deg = 20.0;
-    int num_threads = 0; // 0 = all hardware cores
-    bool meshopt = true; // EXT_meshopt_compression baked inline by default
+    int num_threads = 0;   // 0 = all hardware cores
+    bool meshopt = true;   // EXT_meshopt_compression baked inline by default
+    bool profile = false;  // enable the env-gated StepProfiler instrumentation
+    bool quiet = false;    // suppress the param echo + progress; keep errors + the final result line
+    std::string spill_dir; // empty => private auto-removed mkdtemp spill dir
 
     app.add_option("--stp", stp_file, "STEP input filepath")->required();
     app.add_option("--glb", glb_file, "GLB output filepath")->required();
@@ -29,25 +33,43 @@ int main(int argc, char *argv[]) {
     app.add_option("--angular-deg", angular_deg, "Angular deflection (degrees)")->default_val(20.0);
     app.add_option("--num-threads", num_threads, "Worker threads (0 = all hardware cores)")->default_val(0);
     app.add_flag("--meshopt,!--no-meshopt", meshopt, "Bake EXT_meshopt_compression inline (default ON)");
+    app.add_flag("--profile", profile, "Print [STEPPROF] phase/memory/per-solid timing to stderr (StepProfiler)");
+    app.add_flag("--quiet", quiet, "Suppress the param echo + progress; keep errors and the final result line");
+    app.add_option("--spill-dir", spill_dir,
+                   "Directory for the per-lane GLB spill files (created if missing, left in place); "
+                   "default = a private auto-removed /tmp dir");
 
     CLI11_PARSE(app, argc, argv);
+
+    // The profiler reads these env vars in its constructor (ngeom_profile.h). Set them BEFORE calling
+    // the engine so StepProfiler picks them up. --profile turns on both the phase summary and the
+    // per-solid timing breakdown.
+    if (profile) {
+        ::setenv("ADACPP_STEP_PROFILE", "1", 1);
+        ::setenv("ADACPP_STEP_SOLID_TIMING", "1", 1);
+    }
 
     const unsigned hw = std::thread::hardware_concurrency();
     const int resolved_threads = num_threads > 0 ? num_threads : (int) (hw > 1 ? hw : 1);
 
-    std::cout << "STP2GLB Converter (OCC-free native streaming)\n";
-    std::cout << "STP File:           " << stp_file << "\n";
-    std::cout << "GLB File:           " << glb_file << "\n";
-    std::cout << "Linear Deflection:  " << deflection << "\n";
-    std::cout << "Angular Deflection: " << angular_deg << " deg\n";
-    std::cout << "Threads:            " << resolved_threads << (num_threads == 0 ? " (auto)" : "") << "\n";
-    std::cout << "Meshopt:            " << (meshopt ? "on" : "off") << "\n\n";
-    std::cout << "Starting conversion...\n";
+    if (!quiet) {
+        std::cout << "STP2GLB Converter (OCC-free native streaming)\n";
+        std::cout << "STP File:           " << stp_file << "\n";
+        std::cout << "GLB File:           " << glb_file << "\n";
+        std::cout << "Linear Deflection:  " << deflection << "\n";
+        std::cout << "Angular Deflection: " << angular_deg << " deg\n";
+        std::cout << "Threads:            " << resolved_threads << (num_threads == 0 ? " (auto)" : "") << "\n";
+        std::cout << "Meshopt:            " << (meshopt ? "on" : "off") << "\n";
+        if (!spill_dir.empty())
+            std::cout << "Spill dir:          " << spill_dir << "\n";
+        std::cout << "\nStarting conversion...\n";
+    }
 
     const auto start = std::chrono::high_resolution_clock::now();
     long nsolids = -1;
     try {
-        nsolids = adacpp::stream_step_to_glb(stp_file, glb_file, deflection, angular_deg, num_threads, meshopt);
+        nsolids =
+            adacpp::stream_step_to_glb(stp_file, glb_file, deflection, angular_deg, num_threads, meshopt, spill_dir);
     } catch (const std::exception &ex) {
         std::cerr << "Error: " << ex.what() << "\n";
         return 1;
@@ -65,9 +87,15 @@ int main(int argc, char *argv[]) {
     if (std::filesystem::exists(glb_file, ec))
         out_size = std::filesystem::file_size(glb_file, ec);
 
-    std::cout << "Solids written:     " << nsolids << "\n";
-    std::cout << "Output size:        " << out_size << " bytes\n";
-    std::cout << "Converted in:       " << std::fixed << std::setprecision(2) << seconds << " seconds\n";
+    if (quiet) {
+        // One-line result: solids, output size, wall time.
+        std::cout << glb_file << "  solids=" << nsolids << "  bytes=" << out_size << "  " << std::fixed
+                  << std::setprecision(2) << seconds << "s\n";
+    } else {
+        std::cout << "Solids written:     " << nsolids << "\n";
+        std::cout << "Output size:        " << out_size << " bytes\n";
+        std::cout << "Converted in:       " << std::fixed << std::setprecision(2) << seconds << " seconds\n";
+    }
 
     return 0;
 }

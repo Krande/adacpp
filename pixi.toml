@@ -9,6 +9,9 @@ common = { features = ["common"], no-default-feature = true }
 wasm = { features = ["wasm", "common"], no-default-feature = true }
 conda = { features = ["conda"], no-default-feature = true }
 test = { features = ["test", "common"], no-default-feature = true }
+# Lean env for the standalone OCC-free STP2GLB CLI — only the build toolchain + CLI11 + git
+# (manifold FetchContent). NO occt/cgal/gmsh/ifcopenshell/python-dev.
+stp2glb = { features = ["stp2glb"], no-default-feature = true }
 
 [feature.conda.dependencies]
 rattler-build = "*"
@@ -150,6 +153,24 @@ stp2glb = { cmd = "STP2GLB", description = "Run the C++ tests" }
 [feature.test.target.win-64.activation.env]
 STP2GLB_EXE_DIR = "%CONDA_PREFIX%/Library/bin"
 SP_DIR = "%CONDA_PREFIX%/Lib/site-packages"
+
+[feature.stp2glb.dependencies]
+# Standalone OCC-free STP2GLB CLI build deps ONLY — no occt/cgal/gmsh/ifcopenshell/python-dev.
+cmake = "==3.30.3"
+ninja = "*"
+cxx-compiler = "*"
+cli11 = "*"
+# cmake FetchContent clones manifold (deps_manifold.cmake) at configure time; needs git on PATH.
+git = "*"
+
+[feature.stp2glb.target.linux-64.dependencies]
+gxx = "*"
+
+[feature.stp2glb.tasks]
+# Configure with BUILD_STP2GLB_STANDALONE=ON (skips OCCT/CGAL/gmsh/IFC/Python) and build only the
+# STP2GLB target. TINY_INCLUDE_DIR puts $CONDA_PREFIX/include (where CLI/CLI.hpp lives) on the include
+# path; CMAKE_PREFIX_PATH lets find_package(Threads) + manifold resolve against the lean env.
+build-stp2glb = { cmd = "cmake -S . -B build-stp2glb -G Ninja -DBUILD_STP2GLB_STANDALONE=ON -DBUILD_PYTHON=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DTINY_INCLUDE_DIR=$CONDA_PREFIX/include && cmake --build build-stp2glb --target STP2GLB && echo \"STP2GLB -> $PIXI_PROJECT_ROOT/build-stp2glb/STP2GLB\"", description = "Build ONLY the OCC-free standalone STP2GLB CLI (no OCCT/CGAL/gmsh/IFC/Python)" }
 
 [feature.test.target.linux-64.activation.env]
 STP2GLB_EXE_DIR = "$CONDA_PREFIX/bin"
