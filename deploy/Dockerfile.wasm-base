@@ -14,6 +14,7 @@
 #   manifest.json   {"adacpp": "<wheel filename>"}
 #   adacpp.sha      the resolved adacpp commit
 #   wasm/adacpp_step_glb.{js,wasm}   no-pyodide STEP->GLB embind module (viewer in-browser convert)
+#   wasm/adacpp_glb_diff.{js,wasm}   no-pyodide GLB-diff embind module (viewer in-browser diff utility)
 #
 # busybox (not scratch) so `docker create` + `docker cp` work for consumers
 # that extract /out/ without a running command.
