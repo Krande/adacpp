@@ -123,37 +123,52 @@ inline std::string _match_key(const ElementSummary &e, Mode mode, double tol) {
     }
 }
 
+// Multi-match: group ref by key, consume one ref element per matching scene element (so N instances
+// of a shared product name match N ref instances). Returns a per-key bucket of unused ref indices.
+struct _Buckets {
+    std::unordered_map<std::string, std::vector<size_t>> by_key;
+    std::unordered_map<std::string, size_t> cursor; // next unused index within a key's vector
+
+    explicit _Buckets(const std::vector<ElementSummary> &ref, Mode mode, double tol) {
+        for (size_t i = 0; i < ref.size(); ++i)
+            by_key[_match_key(ref[i], mode, tol)].push_back(i);
+    }
+    // pop the next unused ref index for ``key``, or SIZE_MAX if none left.
+    size_t take(const std::string &key) {
+        auto it = by_key.find(key);
+        if (it == by_key.end())
+            return SIZE_MAX;
+        size_t &cur = cursor[key];
+        return cur < it->second.size() ? it->second[cur++] : SIZE_MAX;
+    }
+};
+
 // Match scene vs ref into a DiffResult. NameThenCentroid: name first, then centroid for the leftovers.
 inline DiffResult diff_summaries(const std::vector<ElementSummary> &scene,
                                  const std::vector<ElementSummary> &ref, Mode mode, double tol) {
     DiffResult r;
     const bool check_props = (mode == Mode::ByProperty);
-
-    std::unordered_map<std::string, size_t> ref_by_key;
-    ref_by_key.reserve(ref.size() * 2);
-    for (size_t i = 0; i < ref.size(); ++i)
-        ref_by_key.emplace(_match_key(ref[i], mode, tol), i);
-
     std::vector<char> ref_used(ref.size(), 0);
     std::vector<size_t> scene_unmatched;
 
-    for (const auto &e : scene) {
-        auto it = ref_by_key.find(_match_key(e, mode, tol));
-        if (it == ref_by_key.end()) {
+    _Buckets ref_buckets(ref, mode, tol);
+    for (size_t si = 0; si < scene.size(); ++si) {
+        size_t ri = ref_buckets.take(_match_key(scene[si], mode, tol));
+        if (ri == SIZE_MAX) {
             if (mode == Mode::NameThenCentroid) {
-                scene_unmatched.push_back(&e - scene.data());
+                scene_unmatched.push_back(si);
                 continue;
             }
-            r.ops.push_back({e.node_id, Status::Added});
-            r.added_node_ids.push_back(e.node_id);
+            r.ops.push_back({scene[si].node_id, Status::Added});
+            r.added_node_ids.push_back(scene[si].node_id);
             ++r.n_added;
         } else {
-            ref_used[it->second] = 1;
-            if (check_props && scene[&e - scene.data()].meta_sig != ref[it->second].meta_sig) {
-                r.ops.push_back({e.node_id, Status::Modified});
+            ref_used[ri] = 1;
+            if (check_props && scene[si].meta_sig != ref[ri].meta_sig) {
+                r.ops.push_back({scene[si].node_id, Status::Modified});
                 ++r.n_modified;
             } else {
-                r.ops.push_back({e.node_id, Status::Unchanged});
+                r.ops.push_back({scene[si].node_id, Status::Unchanged});
                 ++r.n_unchanged;
             }
         }
@@ -161,14 +176,18 @@ inline DiffResult diff_summaries(const std::vector<ElementSummary> &scene,
 
     if (mode == Mode::NameThenCentroid && !scene_unmatched.empty()) {
         // second pass: centroid-match the leftovers against still-unused ref elements
-        std::unordered_map<std::string, size_t> ref_cent;
+        std::vector<ElementSummary> ref_left;
+        std::vector<size_t> ref_left_idx;
         for (size_t i = 0; i < ref.size(); ++i)
-            if (!ref_used[i])
-                ref_cent.emplace(_centroid_key(ref[i].centroid, tol), i);
+            if (!ref_used[i]) {
+                ref_left.push_back(ref[i]);
+                ref_left_idx.push_back(i);
+            }
+        _Buckets cent(ref_left, Mode::ByCentroid, tol);
         for (size_t si : scene_unmatched) {
-            auto it = ref_cent.find(_centroid_key(scene[si].centroid, tol));
-            if (it != ref_cent.end() && !ref_used[it->second]) {
-                ref_used[it->second] = 1;
+            size_t li = cent.take(_centroid_key(scene[si].centroid, tol));
+            if (li != SIZE_MAX) {
+                ref_used[ref_left_idx[li]] = 1;
                 r.ops.push_back({scene[si].node_id, Status::Unchanged});
                 ++r.n_unchanged;
             } else {
