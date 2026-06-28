@@ -13,7 +13,8 @@
 #include "../geom/neutral/ngeom_glb.h"
 #include "../geom/neutral/ngeom_profile.h"
 #include "step_to_glb_st.h"     // single-threaded, mmap-free STEP->GLB core (wasm/OPFS + native oracle)
-#include "step_to_glb_stream.h" // threaded OCC-free STEP->GLB core (shared with the STP2GLB CLI)
+#include "step_to_glb_stream.h"  // threaded OCC-free STEP->GLB core (shared with the STP2GLB CLI)
+#include "step_to_mesh_stream.h" // threaded OCC-free STEP->STL/OBJ core (parallel, baked, streaming)
 #include "../geom/neutral/ngeom_tessellate.h"
 #include "../geom/neutral/ngeom_meshopt.h"
 #include "../cadit/step/step_reader.h"
@@ -578,6 +579,15 @@ Mesh stream_step_to_meshes_impl(const std::string &path, const std::string &pipe
 int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_path, double deflection,
                             double angular_deg, int num_threads, bool meshopt) {
     return (int) adacpp::stream_step_to_glb(in_path, out_path, deflection, angular_deg, num_threads, meshopt);
+}
+
+// Threaded OCC-free STEP -> STL / OBJ (same reader + parallel tessellation as the GLB core, but bakes
+// world placements and streams triangles to a binary STL or Wavefront OBJ). Returns the triangle
+// count, or -1 on error. `fmt` is "stl" or "obj".
+long stream_step_to_mesh_impl(const std::string &in_path, const std::string &out_path, const std::string &fmt,
+                              double deflection, double angular_deg, int num_threads) {
+    adacpp::MeshFormat mf = (fmt == "obj" || fmt == "OBJ") ? adacpp::MeshFormat::OBJ : adacpp::MeshFormat::STL;
+    return adacpp::stream_step_to_mesh(in_path, out_path, mf, deflection, angular_deg, num_threads);
 }
 
 // Single-threaded, mmap-free STEP -> GLB (the wasm/OPFS core, exercised natively here as a parity
@@ -2617,6 +2627,13 @@ void cad_module(nb::module_ &m) {
           "colour, and write a merge-by-colour GLB matching the adapy viewer's structure. meshopt=true "
           "(default) bakes EXT_meshopt_compression inline (no Python re-pack). Returns the number of "
           "solids written (-1 on I/O error). angular_deg in degrees.");
+
+    m.def("stream_step_to_mesh", &stream_step_to_mesh_impl, "in_path"_a, "out_path"_a, "fmt"_a, "deflection"_a = 2.0,
+          "angular_deg"_a = 20.0, "num_threads"_a = 0,
+          "Native STEP -> STL/OBJ file: the SAME native reader + parallel tessellation as "
+          "stream_step_to_glb, but bakes each instance's world placement and streams triangles straight "
+          "to a binary STL (fmt='stl') or Wavefront OBJ (fmt='obj'). Bounded memory; no Python round-trip. "
+          "Returns the triangle count (-1 on I/O error). angular_deg in degrees.");
 
     m.def("stream_step_to_glb_st", &stream_step_to_glb_st_impl, "in_path"_a, "out_path"_a, "deflection"_a = 2.0,
           "angular_deg"_a = 20.0, "meshopt"_a = false,
