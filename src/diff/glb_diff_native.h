@@ -1,22 +1,32 @@
 #pragma once
-// Native (non-wasm) GLB reader for the diff core: fold per-element ElementSummary records from a GLB
-// using the vendored tinygltf (only in the OCC/native build), WITHOUT retaining whole-model geometry
-// — one streaming-ish pass keeps only the KB-scale summary table. Handles EXT_meshopt_compression
-// (the viewer/crane format). Keeps glb_diff.h portable — the wasm target supplies an equivalent
-// summary list from a tinygltf-free reader and reuses the same portable diff logic.
+// Streaming GLB summariser for the diff core. NO tinygltf, NO whole-model load: parse only the small
+// glTF JSON (nlohmann), mmap the BIN chunk (file-backed — the multi-GB GLB never enters RSS), and
+// decode ONE mesh node at a time (the native GLB is merged-by-material → one node per material), so
+// peak RSS is the largest single material chunk + the KB-scale summary table, independent of file
+// size. EXT_meshopt_compression is decoded per-bufferView. The buffer-pointer core
+// (`summarize_glb_buf`) is portable (nlohmann + meshopt only) so the wasm target reuses it with a
+// fetched/streamed buffer instead of an mmap.
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
-#include <tiny_gltf.h>
+#ifndef __EMSCRIPTEN__
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
+#include <json.hpp>
 
 #include "../geom/neutral/ngeom_meshopt.h" // EXT_meshopt_compression decode
 #include "glb_diff.h"
@@ -24,313 +34,212 @@
 namespace adacpp {
 namespace gdiff {
 
+using njson = nlohmann::json;
+
 inline uint32_t pad4(uint32_t n) {
     return (4 - (n & 3u)) & 3u;
 }
 
-// tinygltf rejects a meshopt GLB: the EXT_meshopt_compression fallback buffer declares the DECODED
-// size, which exceeds the stored BIN bytes. Clamp every JSON ``byteLength`` that exceeds the BIN
-// chunk size down to it so tinygltf loads (only the fallback buffer's exceeds it; meshopt
-// bufferViews are read via their extension's count/stride, not byteLength, so clamping is safe).
-inline std::string patch_buffer_bytelength(const std::string &glb) {
-    const unsigned char *d = (const unsigned char *) glb.data();
-    if (glb.size() < 20 || std::memcmp(d, "glTF", 4) != 0)
-        return glb;
-    uint32_t json_len;
-    std::memcpy(&json_len, d + 12, 4);
-    size_t json_end = 20 + json_len;
-    if (json_end + 8 > glb.size())
-        return glb;
-    uint32_t bin_len;
-    std::memcpy(&bin_len, d + json_end, 4); // following chunk header = BIN length
-    std::string json(glb.begin() + 20, glb.begin() + json_end);
-
-    const std::string key = "\"byteLength\"";
-    std::string nj;
-    nj.reserve(json.size());
-    bool changed = false;
-    size_t i = 0;
-    while (i < json.size()) {
-        size_t k = json.find(key, i);
-        if (k == std::string::npos) {
-            nj.append(json, i, json.size() - i);
-            break;
-        }
-        size_t ns = json.find(':', k) + 1;
-        while (ns < json.size() && json[ns] == ' ')
-            ++ns;
-        size_t ne = ns;
-        while (ne < json.size() && json[ne] >= '0' && json[ne] <= '9')
-            ++ne;
-        size_t val = 0;
-        for (size_t j = ns; j < ne; ++j)
-            val = val * 10 + (json[j] - '0');
-        nj.append(json, i, ns - i); // through the key, colon, and any spaces
-        if (val > bin_len) {
-            nj += std::to_string((unsigned) bin_len);
-            changed = true;
-        } else {
-            nj.append(json, ns, ne - ns);
-        }
-        i = ne;
-    }
-    if (!changed)
-        return glb; // uncompressed GLB — nothing to patch
-
-    nj.append(pad4((uint32_t) nj.size()), ' ');
-    const char *bin = glb.data() + json_end + 8;
-    uint32_t njl = (uint32_t) nj.size();
-    uint32_t total = 12 + 8 + njl + 8 + bin_len;
-    std::string out;
-    out.reserve(total);
-    auto u32 = [&](uint32_t v) { out.append((const char *) &v, 4); };
-    out.append("glTF", 4);
-    u32(2);
-    u32(total);
-    u32(njl);
-    u32(0x4E4F534Au); // "JSON"
-    out.append(nj);
-    u32(bin_len);
-    u32(0x004E4942u); // "BIN\0"
-    out.append(bin, bin_len);
-    return out;
-}
-
-// Decoded-bufferView cache: a bufferView with EXT_meshopt_compression is decoded once (the viewer's
-// crane GLBs are meshopt-compressed); raw bufferViews are read in place. ``stride`` is the element
-// byte-stride to walk with.
-using BvCache = std::unordered_map<int, std::vector<unsigned char>>;
-struct BvView {
-    const unsigned char *data;
-    size_t stride;
-};
-
-// ``bin`` is the GLB's embedded BIN chunk (we read buffer data directly from it rather than
-// model.buffers[].data: a meshopt no-fallback GLB declares the buffer's DECODED byteLength, which
-// exceeds the stored bytes, so tinygltf refuses to populate buffers — but it parses the JSON fine).
-inline BvView resolve_bufferview(const tinygltf::Model &m, int bv_idx, size_t elem_size, BvCache &cache,
-                                 const unsigned char *bin) {
-    const tinygltf::BufferView &bv = m.bufferViews[bv_idx];
-    auto eit = bv.extensions.find("EXT_meshopt_compression");
-    if (eit != bv.extensions.end()) {
-        const tinygltf::Value &e = eit->second;
-        size_t bo = (size_t) e.Get("byteOffset").GetNumberAsInt();
-        size_t bl = (size_t) e.Get("byteLength").GetNumberAsInt();
-        size_t cnt = (size_t) e.Get("count").GetNumberAsInt();
-        size_t stride = (size_t) e.Get("byteStride").GetNumberAsInt();
-        std::string mode = e.Has("mode") ? e.Get("mode").Get<std::string>() : std::string("ATTRIBUTES");
-        auto cit = cache.find(bv_idx);
-        if (cit == cache.end()) {
-            const unsigned char *enc = bin + bo;
-            std::vector<unsigned char> dec = (mode == "ATTRIBUTES")
-                                                 ? ::ngeom::meshopt_decode_vertices(enc, bl, cnt, stride)
-                                                 : ::ngeom::meshopt_decode_indices(enc, bl, cnt, stride);
-            cit = cache.emplace(bv_idx, std::move(dec)).first;
-        }
-        return {cit->second.data(), stride};
-    }
-    return {bin + bv.byteOffset, bv.byteStride ? (size_t) bv.byteStride : elem_size};
-}
-
-// hash the MODIFIED-relevant metadata fields (section/material/thickness/type), order-stable.
-inline uint64_t meta_signature(const tinygltf::Value &m) {
-    if (!m.IsObject())
+// hash of {type, section.name, material.name, thickness} for the MODIFIED test.
+inline uint64_t meta_signature(const njson &m) {
+    if (!m.is_object())
         return 0;
     std::string s;
-    for (const char *k : {"type", "section", "material", "thickness"}) {
-        if (m.Has(k)) {
-            const tinygltf::Value &v = m.Get(k);
-            s += k;
-            s += "=";
-            if (v.IsString())
-                s += v.Get<std::string>();
-            else if (v.IsNumber())
-                s += std::to_string(v.GetNumberAsDouble());
-            s += ";";
-        }
-    }
+    auto add = [&](const char *k, const njson &v) {
+        s += k;
+        s += '=';
+        if (v.is_string())
+            s += v.get<std::string>();
+        else if (v.is_number())
+            s += std::to_string(v.get<double>());
+        else if (v.is_object() && v.contains("name") && v["name"].is_string())
+            s += v["name"].get<std::string>();
+        s += ';';
+    };
+    for (const char *k : {"type", "section", "material", "thickness"})
+        if (m.contains(k))
+            add(k, m[k]);
     return std::hash<std::string>{}(s);
 }
 
-// Read a float vec accessor (POSITION) into a flat buffer; decodes meshopt if present.
-inline void read_accessor_floats(const tinygltf::Model &model, int acc_idx, std::vector<float> &out, int &ncomp,
-                                 BvCache &cache, const unsigned char *bin) {
-    const tinygltf::Accessor &acc = model.accessors[acc_idx];
-    ncomp = (acc.type == TINYGLTF_TYPE_VEC3) ? 3 : (acc.type == TINYGLTF_TYPE_VEC2 ? 2 : 1);
-    BvView v = resolve_bufferview(model, acc.bufferView, (size_t) ncomp * 4, cache, bin);
-    const unsigned char *base = v.data + acc.byteOffset;
-    out.resize(acc.count * (size_t) ncomp);
-    for (size_t i = 0; i < acc.count; ++i)
-        std::memcpy(&out[i * ncomp], base + i * v.stride, (size_t) ncomp * 4);
-}
-
-inline void read_accessor_indices(const tinygltf::Model &model, int acc_idx, std::vector<uint32_t> &out,
-                                  BvCache &cache, const unsigned char *bin) {
-    const tinygltf::Accessor &acc = model.accessors[acc_idx];
-    const size_t isz = (acc.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT) ? 4 : 2;
-    BvView v = resolve_bufferview(model, acc.bufferView, isz, cache, bin);
-    const unsigned char *base = v.data + acc.byteOffset;
-    out.resize(acc.count);
-    for (size_t i = 0; i < acc.count; ++i) {
-        if (isz == 4) {
-            uint32_t x;
-            std::memcpy(&x, base + i * v.stride, 4);
-            out[i] = x;
-        } else {
-            uint16_t x;
-            std::memcpy(&x, base + i * v.stride, 2);
-            out[i] = x;
-        }
+// Resolve an accessor to a contiguous byte source + element stride. meshopt bufferViews are decoded
+// into ``owned`` (whole bufferView, atomic); raw bufferViews point straight into the mmap'd BIN.
+inline void resolve_accessor(const njson &acc, const njson &bvs, const unsigned char *bin, size_t elem,
+                             std::vector<unsigned char> &owned, const unsigned char *&base, size_t &stride) {
+    const njson &bv = bvs[acc.at("bufferView").get<int>()];
+    size_t acc_off = acc.value("byteOffset", (size_t) 0);
+    auto ext = bv.find("extensions");
+    if (ext != bv.end() && ext->contains("EXT_meshopt_compression")) {
+        const njson &e = (*ext)["EXT_meshopt_compression"];
+        size_t bo = e.at("byteOffset").get<size_t>();
+        size_t bl = e.at("byteLength").get<size_t>();
+        size_t cnt = e.at("count").get<size_t>();
+        stride = e.at("byteStride").get<size_t>();
+        std::string mode = e.value("mode", std::string("ATTRIBUTES"));
+        owned = (mode == "ATTRIBUTES") ? ::ngeom::meshopt_decode_vertices(bin + bo, bl, cnt, stride)
+                                       : ::ngeom::meshopt_decode_indices(bin + bo, bl, cnt, stride);
+        base = owned.data() + acc_off;
+    } else {
+        stride = (bv.contains("byteStride") && !bv["byteStride"].is_null()) ? bv["byteStride"].get<size_t>() : elem;
+        base = bin + bv.value("byteOffset", (size_t) 0) + acc_off;
     }
 }
 
-// Parse a GLB, fold a per-element ElementSummary (centroid/area/bbox) WITHOUT retaining geometry. If
-// ``keep`` is non-null, also append the world triangles of elements whose node_id is in ``keep`` to
-// ``keep_tris`` (used for the removed overlay) — so a full diff never holds all the geometry, only a
-// tiny summary table + (optionally) the small removed set.
-inline std::vector<ElementSummary> summarize_glb(const std::string &glb,
-                                                 const std::unordered_set<std::string> *keep = nullptr,
-                                                 std::vector<float> *keep_tris = nullptr) {
+// Summarise a GLB from an in-memory buffer (portable: native mmap or wasm fetched bytes). Folds one
+// ElementSummary per draw-range; if ``keep`` is set, also gathers world-tris for those node_ids.
+inline std::vector<ElementSummary> summarize_glb_buf(const unsigned char *data, size_t size,
+                                                     const std::unordered_set<std::string> *keep = nullptr,
+                                                     std::vector<float> *keep_tris = nullptr) {
     std::vector<ElementSummary> out;
-    tinygltf::Model model;
-    tinygltf::TinyGLTF loader;
-    std::string err, warn;
-    // Ignore the bool: a meshopt no-fallback GLB fails buffer-load (decoded byteLength > stored
-    // bytes) but the JSON (scenes/nodes/meshes/accessors/bufferViews/extensions) is parsed first.
-    std::string patched = patch_buffer_bytelength(glb);
-    bool ok = loader.LoadBinaryFromMemory(&model, &err, &warn, (const unsigned char *) patched.data(), patched.size());
-    if (!ok || model.scenes.empty() || model.bufferViews.empty() || model.buffers.empty())
+    if (size < 20 || std::memcmp(data, "glTF", 4) != 0)
         return out;
-    const unsigned char *bin = model.buffers[0].data.data();
-    patched = std::string(); // free the ~model-sized patched copy; bin lives in model.buffers
-    const tinygltf::Scene &scene = model.scenes[model.defaultScene >= 0 ? model.defaultScene : 0];
-    const tinygltf::Value &extras = scene.extras;
-    if (!extras.IsObject())
+    uint32_t json_len;
+    std::memcpy(&json_len, data + 12, 4);
+    if ((size_t) 20 + json_len + 8 > size)
         return out;
+    const unsigned char *bin = data + 20 + json_len + 8; // skip the BIN chunk's 8-byte header
 
-    // id_hierarchy[node_id] = [name, parent]
-    std::unordered_map<std::string, std::string> name_of;
-    if (extras.Has("id_hierarchy")) {
-        const tinygltf::Value &ih = extras.Get("id_hierarchy");
-        for (const std::string &nid : ih.Keys()) {
-            const tinygltf::Value &arr = ih.Get(nid);
-            if (arr.IsArray() && arr.ArrayLen() >= 1 && arr.Get(0).IsString())
-                name_of[nid] = arr.Get(0).Get<std::string>();
-        }
+    njson j;
+    try {
+        j = njson::parse(data + 20, data + 20 + json_len);
+    } catch (...) {
+        return out;
     }
+    if (!j.contains("scenes") || !j.contains("bufferViews") || !j.contains("accessors") || !j.contains("nodes") ||
+        !j.contains("meshes"))
+        return out;
 
-    // ADA_EXT_data: object_guids {name:guid}, object_metadata {name:{...}}
+    const njson &accessors = j["accessors"];
+    const njson &bufferViews = j["bufferViews"];
+    const njson &nodes = j["nodes"];
+    const njson &meshes = j["meshes"];
+    const njson &scene0 = j["scenes"][j.value("scene", 0)];
+    if (!scene0.contains("extras"))
+        return out;
+    const njson &extras = scene0["extras"];
+
+    // name_of from id_hierarchy[node_id] = [name, parent]
+    std::unordered_map<std::string, std::string> name_of;
+    if (extras.contains("id_hierarchy"))
+        for (auto it = extras["id_hierarchy"].begin(); it != extras["id_hierarchy"].end(); ++it)
+            if (it.value().is_array() && !it.value().empty() && it.value()[0].is_string())
+                name_of[it.key()] = it.value()[0].get<std::string>();
+
+    // guid / etype / meta from extensions.ADA_EXT_data.{design,simulation}_objects
     std::unordered_map<std::string, std::string> guid_of, etype_of;
     std::unordered_map<std::string, uint64_t> meta_of;
-    auto ext_it = model.extensions.find("ADA_EXT_data");
-    if (ext_it != model.extensions.end() && ext_it->second.IsObject()) {
-        for (const char *grp : {"design_objects", "simulation_objects"}) {
-            if (!ext_it->second.Has(grp))
+    if (j.contains("extensions") && j["extensions"].contains("ADA_EXT_data")) {
+        const njson &ext = j["extensions"]["ADA_EXT_data"];
+        for (const char *key : {"design_objects", "simulation_objects"}) {
+            if (!ext.contains(key))
                 continue;
-            const tinygltf::Value &lst = ext_it->second.Get(grp);
-            if (!lst.IsArray())
-                continue;
-            for (int i = 0; i < lst.ArrayLen(); ++i) {
-                const tinygltf::Value &obj = lst.Get(i);
-                if (obj.Has("object_guids")) {
-                    const tinygltf::Value &g = obj.Get("object_guids");
-                    for (const std::string &nm : g.Keys())
-                        if (g.Get(nm).IsString())
-                            guid_of[nm] = g.Get(nm).Get<std::string>();
-                }
-                if (obj.Has("object_metadata")) {
-                    const tinygltf::Value &md = obj.Get("object_metadata");
-                    for (const std::string &nm : md.Keys()) {
-                        const tinygltf::Value &m = md.Get(nm);
-                        meta_of[nm] = meta_signature(m);
-                        if (m.IsObject() && m.Has("type") && m.Get("type").IsString())
-                            etype_of[nm] = m.Get("type").Get<std::string>();
+            for (const njson &obj : ext[key]) {
+                if (obj.contains("object_guids"))
+                    for (auto it = obj["object_guids"].begin(); it != obj["object_guids"].end(); ++it)
+                        if (it.value().is_string())
+                            guid_of[it.key()] = it.value().get<std::string>();
+                if (obj.contains("object_metadata"))
+                    for (auto it = obj["object_metadata"].begin(); it != obj["object_metadata"].end(); ++it) {
+                        meta_of[it.key()] = meta_signature(it.value());
+                        if (it.value().is_object() && it.value().contains("type") && it.value()["type"].is_string())
+                            etype_of[it.key()] = it.value()["type"].get<std::string>();
                     }
-                }
             }
         }
     }
 
-    // node name -> (positions, indices). meshopt bufferViews decoded once via the cache.
-    BvCache bv_cache;
-    std::unordered_map<std::string, std::pair<std::vector<float>, std::vector<uint32_t>>> node_geo;
-    for (const tinygltf::Node &node : model.nodes) {
-        if (node.mesh < 0)
-            continue;
-        const tinygltf::Primitive &prim = model.meshes[node.mesh].primitives[0];
-        auto pit = prim.attributes.find("POSITION");
-        if (pit == prim.attributes.end() || prim.indices < 0)
-            continue;
-        std::vector<float> pos;
-        int nc = 0;
-        read_accessor_floats(model, pit->second, pos, nc, bv_cache, bin);
-        std::vector<uint32_t> idx;
-        read_accessor_indices(model, prim.indices, idx, bv_cache, bin);
-        node_geo[node.name] = {std::move(pos), std::move(idx)};
-    }
+    // node name -> index, to resolve draw_ranges_<nodeName>
+    std::unordered_map<std::string, int> node_idx;
+    for (size_t i = 0; i < nodes.size(); ++i)
+        if (nodes[i].contains("name") && nodes[i]["name"].is_string())
+            node_idx[nodes[i]["name"].get<std::string>()] = (int) i;
 
-    // draw_ranges_<node> = {node_id: [start, count]} -> one ElementSummary per node_id, folded
-    // inline (no per-element geometry retained). Overlay tris only for node_ids in `keep`.
-    for (const std::string &key : extras.Keys()) {
+    // One node (= one material chunk) decoded at a time, folded, then freed.
+    for (auto kit = extras.begin(); kit != extras.end(); ++kit) {
+        const std::string &key = kit.key();
         if (key.rfind("draw_ranges_", 0) != 0)
             continue;
-        std::string node_name = key.substr(std::string("draw_ranges_").size());
-        auto git = node_geo.find(node_name);
-        if (git == node_geo.end())
+        auto nit = node_idx.find(key.substr(std::string("draw_ranges_").size()));
+        if (nit == node_idx.end())
             continue;
-        const std::vector<float> &pos = git->second.first;
-        const std::vector<uint32_t> &idx = git->second.second;
-        const tinygltf::Value &ranges = extras.Get(key);
-        for (const std::string &nid : ranges.Keys()) {
-            const tinygltf::Value &rng = ranges.Get(nid);
-            if (!rng.IsArray() || rng.ArrayLen() < 2)
+        const njson &node = nodes[nit->second];
+        if (!node.contains("mesh"))
+            continue;
+        const njson &prim = meshes[node["mesh"].get<int>()]["primitives"][0];
+        if (!prim.contains("indices") || !prim["attributes"].contains("POSITION"))
+            continue;
+
+        std::vector<unsigned char> pos_owned, idx_owned;
+        const unsigned char *pos_base = nullptr, *idx_base = nullptr;
+        size_t pos_stride = 0, idx_stride = 0;
+        const njson &iacc = accessors[prim["indices"].get<int>()];
+        const size_t isz = (iacc.value("componentType", 5125) == 5125) ? 4 : 2;
+        resolve_accessor(accessors[prim["attributes"]["POSITION"].get<int>()], bufferViews, bin, 12, pos_owned,
+                         pos_base, pos_stride);
+        resolve_accessor(iacc, bufferViews, bin, isz, idx_owned, idx_base, idx_stride);
+        const size_t idx_count = iacc.at("count").get<size_t>();
+
+        auto read_idx = [&](size_t i) -> uint32_t {
+            if (isz == 4) {
+                uint32_t v;
+                std::memcpy(&v, idx_base + i * idx_stride, 4);
+                return v;
+            }
+            uint16_t v;
+            std::memcpy(&v, idx_base + i * idx_stride, 2);
+            return v;
+        };
+        auto read_pos = [&](uint32_t vi, float o[3]) { std::memcpy(o, pos_base + (size_t) vi * pos_stride, 12); };
+
+        for (auto rit = kit.value().begin(); rit != kit.value().end(); ++rit) {
+            const njson &rng = rit.value();
+            if (!rng.is_array() || rng.size() < 2)
                 continue;
-            size_t start = (size_t) rng.Get(0).GetNumberAsInt();
-            size_t count = (size_t) rng.Get(1).GetNumberAsInt();
-            if (count == 0 || start + count > idx.size())
+            size_t start = rng[0].get<size_t>(), count = rng[1].get<size_t>();
+            if (count == 0 || start + count > idx_count)
                 continue;
+
             ElementSummary s;
-            s.node_id = nid;
-            auto nit = name_of.find(nid);
-            s.name = (nit != name_of.end()) ? nit->second : nid;
-            auto git2 = guid_of.find(s.name);
-            if (git2 != guid_of.end())
-                s.guid = git2->second;
-            auto eit = etype_of.find(s.name);
-            if (eit != etype_of.end())
-                s.etype = eit->second;
-            auto mit = meta_of.find(s.name);
-            if (mit != meta_of.end())
-                s.meta_sig = mit->second;
-            // fold centroid / area / bbox over the element's triangles (no tris vector)
+            s.node_id = rit.key();
+            auto nameit = name_of.find(s.node_id);
+            s.name = (nameit != name_of.end()) ? nameit->second : s.node_id;
+            auto g = guid_of.find(s.name);
+            if (g != guid_of.end())
+                s.guid = g->second;
+            auto e = etype_of.find(s.name);
+            if (e != etype_of.end())
+                s.etype = e->second;
+            auto mt = meta_of.find(s.name);
+            if (mt != meta_of.end())
+                s.meta_sig = mt->second;
+
             const size_t ntri = count / 3;
             s.tri_count = (uint32_t) ntri;
             double cx = 0, cy = 0, cz = 0, area = 0;
             std::array<double, 3> mn{1e300, 1e300, 1e300}, mx{-1e300, -1e300, -1e300};
-            const bool want = keep && keep_tris && keep->count(nid);
+            const bool want = keep && keep_tris && keep->count(s.node_id);
             for (size_t t = 0; t < ntri; ++t) {
-                const float *v[3];
-                for (int j = 0; j < 3; ++j)
-                    v[j] = &pos[3 * idx[start + 3 * t + j]];
-                for (int j = 0; j < 3; ++j) {
-                    cx += v[j][0];
-                    cy += v[j][1];
-                    cz += v[j][2];
-                    for (int k = 0; k < 3; ++k) {
-                        mn[k] = std::min(mn[k], (double) v[j][k]);
-                        mx[k] = std::max(mx[k], (double) v[j][k]);
+                float v[3][3];
+                for (int k = 0; k < 3; ++k)
+                    read_pos(read_idx(start + 3 * t + k), v[k]);
+                for (int k = 0; k < 3; ++k) {
+                    cx += v[k][0];
+                    cy += v[k][1];
+                    cz += v[k][2];
+                    for (int d = 0; d < 3; ++d) {
+                        mn[d] = std::min(mn[d], (double) v[k][d]);
+                        mx[d] = std::max(mx[d], (double) v[k][d]);
+                    }
+                    if (want) {
+                        keep_tris->push_back(v[k][0]);
+                        keep_tris->push_back(v[k][1]);
+                        keep_tris->push_back(v[k][2]);
                     }
                 }
                 double ux = v[1][0] - v[0][0], uy = v[1][1] - v[0][1], uz = v[1][2] - v[0][2];
                 double wx = v[2][0] - v[0][0], wy = v[2][1] - v[0][1], wz = v[2][2] - v[0][2];
                 double nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx;
                 area += 0.5 * std::sqrt(nx * nx + ny * ny + nz * nz);
-                if (want)
-                    for (int j = 0; j < 3; ++j) {
-                        keep_tris->push_back(v[j][0]);
-                        keep_tris->push_back(v[j][1]);
-                        keep_tris->push_back(v[j][2]);
-                    }
             }
             if (ntri) {
                 const double nv = (double) (ntri * 3);
@@ -341,9 +250,42 @@ inline std::vector<ElementSummary> summarize_glb(const std::string &glb,
             }
             out.push_back(std::move(s));
         }
+        // Drop the BIN pages touched for this node from RSS before the next one, so resident memory
+        // stays bounded by the LARGEST single node — not the (multi-GB) file. Decoded temps free as
+        // pos_owned/idx_owned leave scope. (no-op on wasm, where ``data`` is a JS buffer not an mmap)
+#ifndef __EMSCRIPTEN__
+        ::madvise(const_cast<unsigned char *>(data), size, MADV_DONTNEED);
+#endif
     }
     return out;
 }
+
+#ifndef __EMSCRIPTEN__
+// Native wrapper: mmap the GLB so the file stays page-cache/file-backed (out of the RSS the worker
+// cap measures) and the encoded bytes are dropped after the scan.
+inline std::vector<ElementSummary> summarize_glb_file(const std::string &path,
+                                                      const std::unordered_set<std::string> *keep = nullptr,
+                                                      std::vector<float> *keep_tris = nullptr) {
+    int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0)
+        return {};
+    struct stat st;
+    if (::fstat(fd, &st) != 0 || st.st_size <= 0) {
+        ::close(fd);
+        return {};
+    }
+    size_t sz = (size_t) st.st_size;
+    void *m = ::mmap(nullptr, sz, PROT_READ, MAP_PRIVATE, fd, 0);
+    ::close(fd);
+    if (m == MAP_FAILED)
+        return {};
+    ::madvise(m, sz, MADV_SEQUENTIAL);
+    auto out = summarize_glb_buf((const unsigned char *) m, sz, keep, keep_tris);
+    ::madvise(m, sz, MADV_DONTNEED);
+    ::munmap(m, sz);
+    return out;
+}
+#endif // __EMSCRIPTEN__
 
 // Minimal single-colour GLB from a flat triangle-soup (9 floats per tri, unshared verts). For the
 // removed overlay. rgba packed 0xRRGGBBAA.
@@ -353,7 +295,6 @@ inline std::string write_overlay_glb(const std::vector<float> &pos, uint32_t rgb
     for (uint32_t i = 0; i < nverts; ++i)
         idx[i] = i;
 
-    // bbox for the accessor min/max (required for POSITION)
     float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
     for (uint32_t i = 0; i < nverts; ++i)
         for (int k = 0; k < 3; ++k) {
@@ -386,27 +327,24 @@ inline std::string write_overlay_glb(const std::vector<float> &pos, uint32_t rgb
     std::string json = js.str();
     json.append(pad4((uint32_t) json.size()), ' ');
 
-    std::string bin;
-    bin.resize(pos_bytes + idx_bytes);
-    std::memcpy(&bin[0], pos.data(), pos_bytes);
-    std::memcpy(&bin[pos_bytes], idx.data(), idx_bytes);
-    bin.append(pad4((uint32_t) bin.size()), '\0');
-
-    const uint32_t json_len = (uint32_t) json.size(), bin_len = (uint32_t) bin.size();
-    const uint32_t total = 12 + 8 + json_len + 8 + bin_len;
-    std::string glb;
-    glb.reserve(total);
-    auto u32 = [&](uint32_t v) { glb.append((const char *) &v, 4); };
-    glb.append("glTF", 4);
+    const uint32_t bin_len = (uint32_t) (pos_bytes + idx_bytes);
+    const uint32_t total = 12 + 8 + (uint32_t) json.size() + 8 + bin_len;
+    std::string out;
+    out.reserve(total);
+    auto u32 = [&](uint32_t v) { out.append((const char *) &v, 4); };
+    out.append("glTF", 4);
     u32(2);
     u32(total);
-    u32(json_len);
-    u32(0x4E4F534A); // "JSON"
-    glb.append(json);
+    u32((uint32_t) json.size());
+    u32(0x4E4F534Au); // "JSON"
+    out.append(json);
     u32(bin_len);
-    u32(0x004E4942); // "BIN\0"
-    glb.append(bin);
-    return glb;
+    u32(0x004E4942u); // "BIN\0"
+    if (!pos.empty())
+        out.append((const char *) pos.data(), pos_bytes);
+    if (!idx.empty())
+        out.append((const char *) idx.data(), idx_bytes);
+    return out;
 }
 
 } // namespace gdiff

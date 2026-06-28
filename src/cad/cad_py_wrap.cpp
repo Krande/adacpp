@@ -596,17 +596,10 @@ long stream_step_to_mesh_impl(const std::string &in_path, const std::string &out
 // node_id (== frontend rangeId) + a removed-overlay GLB (ref-only geometry). One model parsed at a
 // time (never both full models resident). Returns {ops:[(node_id,status)], removed:[…], added:[…],
 // counts:{…}, overlay:bytes}. status: 0=unchanged 1=added 2=removed 3=modified.
-static std::string _read_file_bytes(const std::string &path) {
-    std::ifstream f(path, std::ios::binary);
-    std::ostringstream ss;
-    ss << f.rdbuf();
-    return ss.str();
-}
-
-// Path-based so the big GLBs never round-trip through Python bytes (a 100s-of-MB copy each on the
-// crane). Memory model: ONE model resident at a time — read+summarise scene, free it, read+summarise
-// ref, free it; only the KB-scale summary tables survive to match. The removed overlay re-reads the
-// ref and keeps ONLY the removed elements' triangles.
+// Path-based + mmap'd so the multi-GB GLBs never enter RSS (file stays page-cache-backed) and never
+// round-trip through Python bytes. Memory model: summarise scene then ref, ONE mesh node decoded at a
+// time (peak = largest material chunk), only the KB-scale summary tables survive to match. The
+// removed overlay re-scans the ref and keeps ONLY the removed elements' triangles.
 nb::dict glb_diff_impl(const std::string &scene_path, const std::string &ref_path, const std::string &mode_s,
                        double tol, uint32_t overlay_rgba) {
     using namespace adacpp::gdiff;
@@ -620,25 +613,17 @@ nb::dict glb_diff_impl(const std::string &scene_path, const std::string &ref_pat
     else if (mode_s == "byProperty")
         mode = Mode::ByProperty;
 
-    std::vector<ElementSummary> ss, rs;
-    {
-        std::string s = _read_file_bytes(scene_path);
-        ss = summarize_glb(s);
-    }
-    {
-        std::string r = _read_file_bytes(ref_path);
-        rs = summarize_glb(r);
-    }
+    std::vector<ElementSummary> ss = summarize_glb_file(scene_path);
+    std::vector<ElementSummary> rs = summarize_glb_file(ref_path);
 
     DiffResult res = diff_summaries(ss, rs, mode, tol);
 
-    // overlay: re-read ref, gather ONLY the removed elements' triangles (bounded by the removed set).
+    // overlay: re-scan ref, gather ONLY the removed elements' triangles (bounded by the removed set).
     std::string overlay;
     if (!res.removed_node_ids.empty()) {
         std::unordered_set<std::string> keep(res.removed_node_ids.begin(), res.removed_node_ids.end());
         std::vector<float> tris;
-        std::string r = _read_file_bytes(ref_path);
-        summarize_glb(r, &keep, &tris);
+        summarize_glb_file(ref_path, &keep, &tris);
         overlay = write_overlay_glb(tris, overlay_rgba);
     }
 
