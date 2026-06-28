@@ -1,14 +1,19 @@
 #pragma once
-// Native (non-wasm) GLB reader for the diff core: parse a GLB into per-element ParsedElement records
-// using the vendored tinygltf (only in the OCC/native build). Keeps glb_diff.h portable — the wasm
-// target supplies its own ParsedElement list from a tinygltf-free reader and reuses the same
-// portable diff logic. v1: uncompressed GLBs (the diff contract).
+// Native (non-wasm) GLB reader for the diff core: fold per-element ElementSummary records from a GLB
+// using the vendored tinygltf (only in the OCC/native build), WITHOUT retaining whole-model geometry
+// — one streaming-ish pass keeps only the KB-scale summary table. Handles EXT_meshopt_compression
+// (the viewer/crane format). Keeps glb_diff.h portable — the wasm target supplies an equivalent
+// summary list from a tinygltf-free reader and reuses the same portable diff logic.
 
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <tiny_gltf.h>
@@ -179,9 +184,14 @@ inline void read_accessor_indices(const tinygltf::Model &model, int acc_idx, std
     }
 }
 
-// Parse a GLB into per-element ParsedElement records (mirrors adapy diff.py parse_elements).
-inline std::vector<ParsedElement> parse_glb_elements(const std::string &glb) {
-    std::vector<ParsedElement> out;
+// Parse a GLB, fold a per-element ElementSummary (centroid/area/bbox) WITHOUT retaining geometry. If
+// ``keep`` is non-null, also append the world triangles of elements whose node_id is in ``keep`` to
+// ``keep_tris`` (used for the removed overlay) — so a full diff never holds all the geometry, only a
+// tiny summary table + (optionally) the small removed set.
+inline std::vector<ElementSummary> summarize_glb(const std::string &glb,
+                                                 const std::unordered_set<std::string> *keep = nullptr,
+                                                 std::vector<float> *keep_tris = nullptr) {
+    std::vector<ElementSummary> out;
     tinygltf::Model model;
     tinygltf::TinyGLTF loader;
     std::string err, warn;
@@ -192,6 +202,7 @@ inline std::vector<ParsedElement> parse_glb_elements(const std::string &glb) {
     if (!ok || model.scenes.empty() || model.bufferViews.empty() || model.buffers.empty())
         return out;
     const unsigned char *bin = model.buffers[0].data.data();
+    patched = std::string(); // free the ~model-sized patched copy; bin lives in model.buffers
     const tinygltf::Scene &scene = model.scenes[model.defaultScene >= 0 ? model.defaultScene : 0];
     const tinygltf::Value &extras = scene.extras;
     if (!extras.IsObject())
@@ -258,7 +269,8 @@ inline std::vector<ParsedElement> parse_glb_elements(const std::string &glb) {
         node_geo[node.name] = {std::move(pos), std::move(idx)};
     }
 
-    // draw_ranges_<node> = {node_id: [start, count]}  -> one ParsedElement per node_id
+    // draw_ranges_<node> = {node_id: [start, count]} -> one ElementSummary per node_id, folded
+    // inline (no per-element geometry retained). Overlay tris only for node_ids in `keep`.
     for (const std::string &key : extras.Keys()) {
         if (key.rfind("draw_ranges_", 0) != 0)
             continue;
@@ -277,38 +289,65 @@ inline std::vector<ParsedElement> parse_glb_elements(const std::string &glb) {
             size_t count = (size_t) rng.Get(1).GetNumberAsInt();
             if (count == 0 || start + count > idx.size())
                 continue;
-            ParsedElement e;
-            e.node_id = nid;
+            ElementSummary s;
+            s.node_id = nid;
             auto nit = name_of.find(nid);
-            e.name = (nit != name_of.end()) ? nit->second : nid;
-            auto git2 = guid_of.find(e.name);
+            s.name = (nit != name_of.end()) ? nit->second : nid;
+            auto git2 = guid_of.find(s.name);
             if (git2 != guid_of.end())
-                e.guid = git2->second;
-            auto eit = etype_of.find(e.name);
+                s.guid = git2->second;
+            auto eit = etype_of.find(s.name);
             if (eit != etype_of.end())
-                e.etype = eit->second;
-            auto mit = meta_of.find(e.name);
+                s.etype = eit->second;
+            auto mit = meta_of.find(s.name);
             if (mit != meta_of.end())
-                e.meta_sig = mit->second;
-            e.tris.reserve(count * 3);
-            for (size_t i = 0; i < count; ++i) {
-                uint32_t vi = idx[start + i];
-                e.tris.push_back(pos[3 * vi]);
-                e.tris.push_back(pos[3 * vi + 1]);
-                e.tris.push_back(pos[3 * vi + 2]);
+                s.meta_sig = mit->second;
+            // fold centroid / area / bbox over the element's triangles (no tris vector)
+            const size_t ntri = count / 3;
+            s.tri_count = (uint32_t) ntri;
+            double cx = 0, cy = 0, cz = 0, area = 0;
+            std::array<double, 3> mn{1e300, 1e300, 1e300}, mx{-1e300, -1e300, -1e300};
+            const bool want = keep && keep_tris && keep->count(nid);
+            for (size_t t = 0; t < ntri; ++t) {
+                const float *v[3];
+                for (int j = 0; j < 3; ++j)
+                    v[j] = &pos[3 * idx[start + 3 * t + j]];
+                for (int j = 0; j < 3; ++j) {
+                    cx += v[j][0];
+                    cy += v[j][1];
+                    cz += v[j][2];
+                    for (int k = 0; k < 3; ++k) {
+                        mn[k] = std::min(mn[k], (double) v[j][k]);
+                        mx[k] = std::max(mx[k], (double) v[j][k]);
+                    }
+                }
+                double ux = v[1][0] - v[0][0], uy = v[1][1] - v[0][1], uz = v[1][2] - v[0][2];
+                double wx = v[2][0] - v[0][0], wy = v[2][1] - v[0][1], wz = v[2][2] - v[0][2];
+                double nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx;
+                area += 0.5 * std::sqrt(nx * nx + ny * ny + nz * nz);
+                if (want)
+                    for (int j = 0; j < 3; ++j) {
+                        keep_tris->push_back(v[j][0]);
+                        keep_tris->push_back(v[j][1]);
+                        keep_tris->push_back(v[j][2]);
+                    }
             }
-            out.push_back(std::move(e));
+            if (ntri) {
+                const double nv = (double) (ntri * 3);
+                s.centroid = {cx / nv, cy / nv, cz / nv};
+                s.bbox_min = mn;
+                s.bbox_max = mx;
+                s.area = area;
+            }
+            out.push_back(std::move(s));
         }
     }
     return out;
 }
 
-// Minimal single-colour GLB from a set of elements' triangles (unshared verts). For the removed
-// overlay. rgba packed 0xRRGGBBAA.
-inline std::string write_overlay_glb(const std::vector<const ParsedElement *> &elems, uint32_t rgba) {
-    std::vector<float> pos;
-    for (const ParsedElement *e : elems)
-        pos.insert(pos.end(), e->tris.begin(), e->tris.end());
+// Minimal single-colour GLB from a flat triangle-soup (9 floats per tri, unshared verts). For the
+// removed overlay. rgba packed 0xRRGGBBAA.
+inline std::string write_overlay_glb(const std::vector<float> &pos, uint32_t rgba) {
     const uint32_t nverts = (uint32_t) (pos.size() / 3);
     std::vector<uint32_t> idx(nverts);
     for (uint32_t i = 0; i < nverts; ++i)

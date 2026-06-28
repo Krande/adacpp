@@ -596,8 +596,19 @@ long stream_step_to_mesh_impl(const std::string &in_path, const std::string &out
 // node_id (== frontend rangeId) + a removed-overlay GLB (ref-only geometry). One model parsed at a
 // time (never both full models resident). Returns {ops:[(node_id,status)], removed:[…], added:[…],
 // counts:{…}, overlay:bytes}. status: 0=unchanged 1=added 2=removed 3=modified.
-nb::dict glb_diff_impl(nb::bytes scene_b, nb::bytes ref_b, const std::string &mode_s, double tol,
-                       uint32_t overlay_rgba) {
+static std::string _read_file_bytes(const std::string &path) {
+    std::ifstream f(path, std::ios::binary);
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+}
+
+// Path-based so the big GLBs never round-trip through Python bytes (a 100s-of-MB copy each on the
+// crane). Memory model: ONE model resident at a time — read+summarise scene, free it, read+summarise
+// ref, free it; only the KB-scale summary tables survive to match. The removed overlay re-reads the
+// ref and keeps ONLY the removed elements' triangles.
+nb::dict glb_diff_impl(const std::string &scene_path, const std::string &ref_path, const std::string &mode_s,
+                       double tol, uint32_t overlay_rgba) {
     using namespace adacpp::gdiff;
     Mode mode = Mode::NameThenCentroid;
     if (mode_s == "byName")
@@ -609,33 +620,27 @@ nb::dict glb_diff_impl(nb::bytes scene_b, nb::bytes ref_b, const std::string &mo
     else if (mode_s == "byProperty")
         mode = Mode::ByProperty;
 
-    // scene: parse -> summarise -> drop geometry (only the summary table is needed to match).
-    std::vector<ElementSummary> ss;
+    std::vector<ElementSummary> ss, rs;
     {
-        std::vector<ParsedElement> el = parse_glb_elements(std::string(scene_b.c_str(), scene_b.size()));
-        ss.reserve(el.size());
-        for (const ParsedElement &e : el)
-            ss.push_back(summarize_one(e));
+        std::string s = _read_file_bytes(scene_path);
+        ss = summarize_glb(s);
     }
-    // ref: keep the parsed elements alive — needed to extract the removed overlay geometry.
-    std::vector<ParsedElement> ref_el = parse_glb_elements(std::string(ref_b.c_str(), ref_b.size()));
-    std::vector<ElementSummary> rs;
-    rs.reserve(ref_el.size());
-    for (const ParsedElement &e : ref_el)
-        rs.push_back(summarize_one(e));
+    {
+        std::string r = _read_file_bytes(ref_path);
+        rs = summarize_glb(r);
+    }
 
     DiffResult res = diff_summaries(ss, rs, mode, tol);
 
-    std::unordered_map<std::string, const ParsedElement *> ref_by_id;
-    for (const ParsedElement &e : ref_el)
-        ref_by_id[e.node_id] = &e;
-    std::vector<const ParsedElement *> removed;
-    for (const std::string &id : res.removed_node_ids) {
-        auto it = ref_by_id.find(id);
-        if (it != ref_by_id.end())
-            removed.push_back(it->second);
+    // overlay: re-read ref, gather ONLY the removed elements' triangles (bounded by the removed set).
+    std::string overlay;
+    if (!res.removed_node_ids.empty()) {
+        std::unordered_set<std::string> keep(res.removed_node_ids.begin(), res.removed_node_ids.end());
+        std::vector<float> tris;
+        std::string r = _read_file_bytes(ref_path);
+        summarize_glb(r, &keep, &tris);
+        overlay = write_overlay_glb(tris, overlay_rgba);
     }
-    std::string overlay = write_overlay_glb(removed, overlay_rgba);
 
     nb::dict d;
     nb::list ops;
@@ -2704,12 +2709,14 @@ void cad_module(nb::module_ &m) {
           "to a binary STL (fmt='stl') or Wavefront OBJ (fmt='obj'). Bounded memory; no Python round-trip. "
           "Returns the triangle count (-1 on I/O error). angular_deg in degrees.");
 
-    m.def("glb_diff", &glb_diff_impl, "scene"_a, "ref"_a, "mode"_a = "nameThenCentroid", "tol"_a = 1e-3,
+    m.def("glb_diff", &glb_diff_impl, "scene_path"_a, "ref_path"_a, "mode"_a = "nameThenCentroid", "tol"_a = 1e-3,
           "overlay_rgba"_a = 0xD50000FFu,
-          "Diff two GLBs: parse each into per-element summaries (one model at a time, never both), match "
-          "by mode ('byName'|'byGuid'|'byCentroid'|'byProperty'|'nameThenCentroid'), and return "
+          "Diff two GLB FILES (paths, so big GLBs never copy through Python bytes): summarise each one "
+          "model at a time (never both, geometry not retained), match by mode "
+          "('byName'|'byGuid'|'byCentroid'|'byProperty'|'nameThenCentroid'), and return "
           "{ops:[(node_id,status)], removed:[node_id], added:[node_id], counts:{...}, overlay:bytes}. "
-          "status 0=unchanged 1=added 2=removed 3=modified; overlay is a red GLB of the ref-only geometry.");
+          "status 0=unchanged 1=added 2=removed 3=modified; overlay is a red GLB of the ref-only geometry. "
+          "Handles EXT_meshopt_compression (the viewer GLB format).");
 
     m.def("stream_step_to_glb_st", &stream_step_to_glb_st_impl, "in_path"_a, "out_path"_a, "deflection"_a = 2.0,
           "angular_deg"_a = 20.0, "meshopt"_a = false,

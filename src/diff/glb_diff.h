@@ -5,12 +5,9 @@
 // to the ref (for an overlay GLB). Peak memory is one model at a time (never both), and only the
 // per-element SUMMARY (centroid/area/bbox), not whole geometry, is retained for matching.
 //
-// Portability: the GLB -> arrays parse (`parse_glb`) is the only native-specific part (tinygltf,
-// non-wasm build); the diff logic (`summarize` / `diff_summaries` / `collect_overlay_tris`) is plain
-// portable C++ so the wasm target can swap in a tinygltf-free reader + feed the same arrays.
-//
-// v1 targets UNCOMPRESSED GLBs — the diff contract (adapy diff.py reads raw accessors; the worker
-// applies meshopt compression only AFTER conversion). EXT_meshopt_compression decode is a follow-up.
+// Portability: the GLB -> ElementSummary fold (`summarize_glb` in glb_diff_native.h) is the only
+// native-specific part (tinygltf, non-wasm build); the diff logic (`diff_summaries`) here is plain
+// portable C++ so the wasm target can swap in a tinygltf-free reader and feed the same summaries.
 
 #include <algorithm>
 #include <array>
@@ -51,57 +48,7 @@ struct DiffResult {
     uint32_t n_added = 0, n_removed = 0, n_modified = 0, n_unchanged = 0;
 };
 
-// ── parsed GLB geometry + identity (filled by the native tinygltf parser below; the wasm target
-// supplies an equivalent struct from its own reader) ─────────────────────────────────────────────
-struct ParsedElement {
-    std::string node_id, name, guid, etype;
-    uint64_t meta_sig = 0;
-    // the element's triangle vertices in world space (3 floats * 3 verts per tri), already gathered
-    // from its draw range — used for summary + overlay. Held transiently per model.
-    std::vector<float> tris; // size = 9 * tri_count
-};
-
 // ── portable diff logic ──────────────────────────────────────────────────────────────────────────
-inline ElementSummary summarize_one(const ParsedElement &e) {
-    ElementSummary s;
-    s.node_id = e.node_id;
-    s.name = e.name;
-    s.guid = e.guid;
-    s.etype = e.etype;
-    s.meta_sig = e.meta_sig;
-    const size_t ntri = e.tris.size() / 9;
-    s.tri_count = (uint32_t) ntri;
-    if (ntri == 0)
-        return s;
-    double cx = 0, cy = 0, cz = 0, area = 0;
-    std::array<double, 3> mn{1e300, 1e300, 1e300}, mx{-1e300, -1e300, -1e300};
-    const float *p = e.tris.data();
-    for (size_t t = 0; t < ntri; ++t) {
-        const float *a = p + 9 * t, *b = a + 3, *c = a + 6;
-        for (int v = 0; v < 3; ++v) {
-            const float *q = a + 3 * v;
-            for (int k = 0; k < 3; ++k) {
-                cx += (k == 0) ? q[0] : 0;
-                cy += (k == 1) ? q[1] : 0;
-                cz += (k == 2) ? q[2] : 0;
-                mn[k] = std::min(mn[k], (double) q[k]);
-                mx[k] = std::max(mx[k], (double) q[k]);
-            }
-        }
-        // triangle area = 0.5 * |(b-a) x (c-a)|
-        double ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
-        double vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
-        double nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
-        area += 0.5 * std::sqrt(nx * nx + ny * ny + nz * nz);
-    }
-    const double nv = (double) (ntri * 3);
-    s.centroid = {cx / nv, cy / nv, cz / nv};
-    s.bbox_min = mn;
-    s.bbox_max = mx;
-    s.area = area;
-    return s;
-}
-
 inline std::string _centroid_key(const std::array<double, 3> &c, double tol) {
     if (tol <= 0)
         tol = 1e-6;
