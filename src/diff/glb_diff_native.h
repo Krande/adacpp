@@ -11,8 +11,9 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
-#include <functional>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -27,14 +28,20 @@
 #endif
 
 #include <json.hpp>
+#include <meshoptimizer.h> // raw decode-into-buffer (decode straight into a disk-backed mmap)
 
-#include "../geom/neutral/ngeom_meshopt.h" // EXT_meshopt_compression decode
+#include "../geom/neutral/ngeom_meshopt.h" // EXT_meshopt_compression decode (RAM fallback / wasm)
 #include "glb_diff.h"
 
 namespace adacpp {
 namespace gdiff {
 
 using njson = nlohmann::json;
+
+// Only spill a meshopt-decoded bufferView to disk when it exceeds this — small/common nodes decode in
+// RAM (fast); a single huge (>1 GiB) material chunk goes disk-backed so it can't blow RSS. Tuned so
+// the disk path's msync+page-fault overhead is only paid when RAM decode would actually be dangerous.
+constexpr size_t kDiskDecodeThreshold = 1ull << 30; // 1 GiB
 
 inline uint32_t pad4(uint32_t n) {
     return (4 - (n & 3u)) & 3u;
@@ -62,10 +69,66 @@ inline uint64_t meta_signature(const njson &m) {
     return std::hash<std::string>{}(s);
 }
 
-// Resolve an accessor to a contiguous byte source + element stride. meshopt bufferViews are decoded
-// into ``owned`` (whole bufferView, atomic); raw bufferViews point straight into the mmap'd BIN.
-inline void resolve_accessor(const njson &acc, const njson &bvs, const unsigned char *bin, size_t elem,
-                             std::vector<unsigned char> &owned, const unsigned char *&base, size_t &stride) {
+// A readable byte source + element stride. ``owner`` keeps the backing alive: a disk-backed mmap
+// (DiskBuf) or a RAM vector for a meshopt-decoded bufferView, or null when ``ptr`` points straight
+// into the input mmap (raw bufferView).
+struct ByteView {
+    const unsigned char *ptr = nullptr;
+    size_t stride = 0;
+    std::shared_ptr<void> owner;
+};
+
+#ifndef __EMSCRIPTEN__
+// A decoded bufferView living in an unlinked temp file, mmap'd. The decode writes the whole buffer,
+// but it's FILE-backed so the kernel writes dirty pages back to disk (RSS stays bounded by the dirty
+// limit, not the buffer size) — this is what lets a single >2 GB material node be summarised without
+// holding it in RAM. Reads during folding page-fault from disk; pages are reclaimable under pressure.
+struct DiskBuf {
+    void *m = nullptr;
+    size_t size = 0;
+    int fd = -1;
+    ~DiskBuf() {
+        if (m && m != MAP_FAILED)
+            ::munmap(m, size);
+        if (fd >= 0)
+            ::close(fd);
+    }
+};
+
+inline std::shared_ptr<DiskBuf> decode_to_disk(const unsigned char *enc, size_t enc_size, size_t count,
+                                               size_t stride, bool is_index) {
+    size_t dsize = count * stride;
+    if (dsize == 0)
+        return nullptr;
+    char tmpl[] = "/tmp/adacpp_diffdec_XXXXXX";
+    int fd = ::mkstemp(tmpl);
+    if (fd < 0)
+        return nullptr;
+    ::unlink(tmpl); // disk space freed on close; no path left behind
+    auto db = std::make_shared<DiskBuf>();
+    db->fd = fd;
+    if (::ftruncate(fd, (off_t) dsize) != 0)
+        return nullptr;
+    void *m = ::mmap(nullptr, dsize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (m == MAP_FAILED)
+        return nullptr;
+    db->m = m;
+    db->size = dsize;
+    int rc = is_index ? ::meshopt_decodeIndexSequence(m, count, stride, enc, enc_size)
+                      : ::meshopt_decodeVertexBuffer(m, count, stride, enc, enc_size);
+    if (rc != 0)
+        return nullptr;
+    ::msync(m, dsize, MS_SYNC);       // force decoded bytes out to the temp file
+    ::madvise(m, dsize, MADV_DONTNEED); // drop them from RSS; folding re-faults what it touches
+    return db;
+}
+#endif
+
+// Resolve an accessor to a ByteView. meshopt bufferViews are decoded — disk-backed when ``disk`` (so
+// a huge node never sits in RAM), else into a RAM vector (small models / wasm). Raw bufferViews point
+// straight into the mmap'd BIN.
+inline ByteView resolve_accessor(const njson &acc, const njson &bvs, const unsigned char *bin, size_t elem,
+                                 bool disk) {
     const njson &bv = bvs[acc.at("bufferView").get<int>()];
     size_t acc_off = acc.value("byteOffset", (size_t) 0);
     auto ext = bv.find("extensions");
@@ -74,22 +137,30 @@ inline void resolve_accessor(const njson &acc, const njson &bvs, const unsigned 
         size_t bo = e.at("byteOffset").get<size_t>();
         size_t bl = e.at("byteLength").get<size_t>();
         size_t cnt = e.at("count").get<size_t>();
-        stride = e.at("byteStride").get<size_t>();
-        std::string mode = e.value("mode", std::string("ATTRIBUTES"));
-        owned = (mode == "ATTRIBUTES") ? ::ngeom::meshopt_decode_vertices(bin + bo, bl, cnt, stride)
-                                       : ::ngeom::meshopt_decode_indices(bin + bo, bl, cnt, stride);
-        base = owned.data() + acc_off;
-    } else {
-        stride = (bv.contains("byteStride") && !bv["byteStride"].is_null()) ? bv["byteStride"].get<size_t>() : elem;
-        base = bin + bv.value("byteOffset", (size_t) 0) + acc_off;
+        size_t stride = e.at("byteStride").get<size_t>();
+        bool is_index = e.value("mode", std::string("ATTRIBUTES")) != "ATTRIBUTES";
+#ifndef __EMSCRIPTEN__
+        // Disk-spill only the huge nodes; everything else decodes in RAM (no msync/page-fault cost).
+        if (disk && cnt * stride > kDiskDecodeThreshold) {
+            if (auto db = decode_to_disk(bin + bo, bl, cnt, stride, is_index))
+                return {(const unsigned char *) db->m + acc_off, stride, db};
+            // decode_to_disk failed (no /tmp etc.) -> fall through to RAM
+        }
+#endif
+        auto vec = std::make_shared<std::vector<unsigned char>>(
+            is_index ? ::ngeom::meshopt_decode_indices(bin + bo, bl, cnt, stride)
+                     : ::ngeom::meshopt_decode_vertices(bin + bo, bl, cnt, stride));
+        return {vec->data() + acc_off, stride, vec};
     }
+    size_t stride = (bv.contains("byteStride") && !bv["byteStride"].is_null()) ? bv["byteStride"].get<size_t>() : elem;
+    return {bin + bv.value("byteOffset", (size_t) 0) + acc_off, stride, nullptr};
 }
 
 // Summarise a GLB from an in-memory buffer (portable: native mmap or wasm fetched bytes). Folds one
 // ElementSummary per draw-range; if ``keep`` is set, also gathers world-tris for those node_ids.
 inline std::vector<ElementSummary> summarize_glb_buf(const unsigned char *data, size_t size,
                                                      const std::unordered_set<std::string> *keep = nullptr,
-                                                     std::vector<float> *keep_tris = nullptr) {
+                                                     std::vector<float> *keep_tris = nullptr, bool disk = false) {
     std::vector<ElementSummary> out;
     if (size < 20 || std::memcmp(data, "glTF", 4) != 0)
         return out;
@@ -169,27 +240,24 @@ inline std::vector<ElementSummary> summarize_glb_buf(const unsigned char *data, 
         if (!prim.contains("indices") || !prim["attributes"].contains("POSITION"))
             continue;
 
-        std::vector<unsigned char> pos_owned, idx_owned;
-        const unsigned char *pos_base = nullptr, *idx_base = nullptr;
-        size_t pos_stride = 0, idx_stride = 0;
         const njson &iacc = accessors[prim["indices"].get<int>()];
         const size_t isz = (iacc.value("componentType", 5125) == 5125) ? 4 : 2;
-        resolve_accessor(accessors[prim["attributes"]["POSITION"].get<int>()], bufferViews, bin, 12, pos_owned,
-                         pos_base, pos_stride);
-        resolve_accessor(iacc, bufferViews, bin, isz, idx_owned, idx_base, idx_stride);
+        ByteView posv = resolve_accessor(accessors[prim["attributes"]["POSITION"].get<int>()], bufferViews, bin, 12,
+                                         disk);
+        ByteView idxv = resolve_accessor(iacc, bufferViews, bin, isz, disk);
         const size_t idx_count = iacc.at("count").get<size_t>();
 
         auto read_idx = [&](size_t i) -> uint32_t {
             if (isz == 4) {
                 uint32_t v;
-                std::memcpy(&v, idx_base + i * idx_stride, 4);
+                std::memcpy(&v, idxv.ptr + i * idxv.stride, 4);
                 return v;
             }
             uint16_t v;
-            std::memcpy(&v, idx_base + i * idx_stride, 2);
+            std::memcpy(&v, idxv.ptr + i * idxv.stride, 2);
             return v;
         };
-        auto read_pos = [&](uint32_t vi, float o[3]) { std::memcpy(o, pos_base + (size_t) vi * pos_stride, 12); };
+        auto read_pos = [&](uint32_t vi, float o[3]) { std::memcpy(o, posv.ptr + (size_t) vi * posv.stride, 12); };
 
         for (auto rit = kit.value().begin(); rit != kit.value().end(); ++rit) {
             const njson &rng = rit.value();
@@ -280,7 +348,7 @@ inline std::vector<ElementSummary> summarize_glb_file(const std::string &path,
     if (m == MAP_FAILED)
         return {};
     ::madvise(m, sz, MADV_SEQUENTIAL);
-    auto out = summarize_glb_buf((const unsigned char *) m, sz, keep, keep_tris);
+    auto out = summarize_glb_buf((const unsigned char *) m, sz, keep, keep_tris, /*disk=*/true);
     ::madvise(m, sz, MADV_DONTNEED);
     ::munmap(m, sz);
     return out;
