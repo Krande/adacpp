@@ -15,6 +15,8 @@
 #include "step_to_glb_st.h"     // single-threaded, mmap-free STEP->GLB core (wasm/OPFS + native oracle)
 #include "step_to_glb_stream.h"  // threaded OCC-free STEP->GLB core (shared with the STP2GLB CLI)
 #include "step_to_mesh_stream.h" // threaded OCC-free STEP->STL/OBJ core (parallel, baked, streaming)
+
+#include "../diff/glb_diff_native.h" // GLB model-diff core (summary match + removed overlay)
 #include "../geom/neutral/ngeom_tessellate.h"
 #include "../geom/neutral/ngeom_meshopt.h"
 #include "../cadit/step/step_reader.h"
@@ -588,6 +590,73 @@ long stream_step_to_mesh_impl(const std::string &in_path, const std::string &out
                               double deflection, double angular_deg, int num_threads) {
     adacpp::MeshFormat mf = (fmt == "obj" || fmt == "OBJ") ? adacpp::MeshFormat::OBJ : adacpp::MeshFormat::STL;
     return adacpp::stream_step_to_mesh(in_path, out_path, mf, deflection, angular_deg, num_threads);
+}
+
+// GLB model diff: parse two GLBs into per-element summaries, match them, and emit colour ops keyed by
+// node_id (== frontend rangeId) + a removed-overlay GLB (ref-only geometry). One model parsed at a
+// time (never both full models resident). Returns {ops:[(node_id,status)], removed:[…], added:[…],
+// counts:{…}, overlay:bytes}. status: 0=unchanged 1=added 2=removed 3=modified.
+nb::dict glb_diff_impl(nb::bytes scene_b, nb::bytes ref_b, const std::string &mode_s, double tol,
+                       uint32_t overlay_rgba) {
+    using namespace adacpp::gdiff;
+    Mode mode = Mode::NameThenCentroid;
+    if (mode_s == "byName")
+        mode = Mode::ByName;
+    else if (mode_s == "byGuid")
+        mode = Mode::ByGuid;
+    else if (mode_s == "byCentroid")
+        mode = Mode::ByCentroid;
+    else if (mode_s == "byProperty")
+        mode = Mode::ByProperty;
+
+    // scene: parse -> summarise -> drop geometry (only the summary table is needed to match).
+    std::vector<ElementSummary> ss;
+    {
+        std::vector<ParsedElement> el = parse_glb_elements(std::string(scene_b.c_str(), scene_b.size()));
+        ss.reserve(el.size());
+        for (const ParsedElement &e : el)
+            ss.push_back(summarize_one(e));
+    }
+    // ref: keep the parsed elements alive — needed to extract the removed overlay geometry.
+    std::vector<ParsedElement> ref_el = parse_glb_elements(std::string(ref_b.c_str(), ref_b.size()));
+    std::vector<ElementSummary> rs;
+    rs.reserve(ref_el.size());
+    for (const ParsedElement &e : ref_el)
+        rs.push_back(summarize_one(e));
+
+    DiffResult res = diff_summaries(ss, rs, mode, tol);
+
+    std::unordered_map<std::string, const ParsedElement *> ref_by_id;
+    for (const ParsedElement &e : ref_el)
+        ref_by_id[e.node_id] = &e;
+    std::vector<const ParsedElement *> removed;
+    for (const std::string &id : res.removed_node_ids) {
+        auto it = ref_by_id.find(id);
+        if (it != ref_by_id.end())
+            removed.push_back(it->second);
+    }
+    std::string overlay = write_overlay_glb(removed, overlay_rgba);
+
+    nb::dict d;
+    nb::list ops;
+    for (const DiffOp &o : res.ops)
+        ops.append(nb::make_tuple(o.node_id, (int) o.status));
+    d["ops"] = ops;
+    nb::list rem, add;
+    for (const std::string &id : res.removed_node_ids)
+        rem.append(id);
+    for (const std::string &id : res.added_node_ids)
+        add.append(id);
+    d["removed"] = rem;
+    d["added"] = add;
+    nb::dict counts;
+    counts["added"] = res.n_added;
+    counts["removed"] = res.n_removed;
+    counts["modified"] = res.n_modified;
+    counts["unchanged"] = res.n_unchanged;
+    d["counts"] = counts;
+    d["overlay"] = nb::bytes(overlay.data(), overlay.size());
+    return d;
 }
 
 // Single-threaded, mmap-free STEP -> GLB (the wasm/OPFS core, exercised natively here as a parity
@@ -2634,6 +2703,13 @@ void cad_module(nb::module_ &m) {
           "stream_step_to_glb, but bakes each instance's world placement and streams triangles straight "
           "to a binary STL (fmt='stl') or Wavefront OBJ (fmt='obj'). Bounded memory; no Python round-trip. "
           "Returns the triangle count (-1 on I/O error). angular_deg in degrees.");
+
+    m.def("glb_diff", &glb_diff_impl, "scene"_a, "ref"_a, "mode"_a = "nameThenCentroid", "tol"_a = 1e-3,
+          "overlay_rgba"_a = 0xD50000FFu,
+          "Diff two GLBs: parse each into per-element summaries (one model at a time, never both), match "
+          "by mode ('byName'|'byGuid'|'byCentroid'|'byProperty'|'nameThenCentroid'), and return "
+          "{ops:[(node_id,status)], removed:[node_id], added:[node_id], counts:{...}, overlay:bytes}. "
+          "status 0=unchanged 1=added 2=removed 3=modified; overlay is a red GLB of the ref-only geometry.");
 
     m.def("stream_step_to_glb_st", &stream_step_to_glb_st_impl, "in_path"_a, "out_path"_a, "deflection"_a = 2.0,
           "angular_deg"_a = 20.0, "meshopt"_a = false,
