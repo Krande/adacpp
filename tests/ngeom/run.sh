@@ -41,6 +41,9 @@ done
 TESS_LINK="src/geom/neutral/ngeom_tessellate.cpp src/geom/neutral/ngeom_boolean.cpp"
 g++ -std=c++20 -O2 -Wall $INC tests/ngeom/test_tessellate.cpp $TESS_LINK "$obj"/*.o -o "$obj/test_tessellate"
 "$obj/test_tessellate"
+g++ -std=c++20 -O2 -Wall $INC tests/ngeom/test_solidify_manifold.cpp $TESS_LINK "$obj"/*.o \
+    -o "$obj/test_solidify_manifold"
+"$obj/test_solidify_manifold"
 g++ -std=c++20 -O2 -Wall $INC -I src/cadit/step tests/step/test_step_reader.cpp $TESS_LINK "$obj"/*.o \
     -o "$obj/test_step_reader"
 "$obj/test_step_reader"
