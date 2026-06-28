@@ -928,8 +928,26 @@ private:
     }
 
     // Analytic + B-spline surfaces. Analytic entities are `(name, #position, <params...>)` with
+    // A swept surface's generatrix profile. Unlike edge geometry, a swept profile that is a
+    // LINE must materialise as a real LineCurve (curve() returns null for LINE — that's only safe
+    // for edges, which discretize straight through their endpoints). Circles/ellipses/B-splines
+    // reuse curve().
+    std::shared_ptr<ng::Curve> swept_profile(long id) {
+        const Instance *in = inst(id);
+        if (in && in->type == "LINE" && in->args.size() >= 3 && in->args[1].is_ref() && in->args[2].is_ref()) {
+            ng::Vec3 pnt = point(in->args[1].i);
+            const Instance *vec = inst(in->args[2].i);  // VECTOR('',#dir,mag)
+            ng::Vec3 dir{0, 0, 1};
+            if (vec && vec->args.size() >= 2 && vec->args[1].is_ref())
+                dir = point(vec->args[1].i);
+            return std::make_shared<ng::LineCurve>(pnt, dir);
+        }
+        return curve(id);
+    }
+
     // #position an AXIS2_PLACEMENT_3D; B_SPLINE_SURFACE_WITH_KNOTS and rational complex records
-    // carry their own data.
+    // carry their own data. Swept surfaces (SURFACE_OF_LINEAR_EXTRUSION / SURFACE_OF_REVOLUTION)
+    // carry a profile curve + a sweep vector/axis instead of a placement.
     std::shared_ptr<ng::Surface> surface(long id) {
         auto c = surf_cache_.find(id);
         if (c != surf_cache_.end())
@@ -943,7 +961,32 @@ private:
             if (t == "B_SPLINE_SURFACE_WITH_KNOTS" && in->args.size() >= 12)
                 s = build_bspline_surface(in->args[1].i, in->args[2].i, in->args[3], in->args[8], in->args[9],
                                           in->args[10], in->args[11], nullptr);
-            else if (in->args.size() >= 2 && in->args[1].is_ref()) {
+            else if (t == "SURFACE_OF_LINEAR_EXTRUSION" && in->args.size() >= 3 && in->args[1].is_ref() &&
+                     in->args[2].is_ref()) {
+                // SURFACE_OF_LINEAR_EXTRUSION('',#swept_curve,#VECTOR('',#dir,depth))
+                auto prof = swept_profile(in->args[1].i);
+                const Instance *vec = inst(in->args[2].i);
+                ng::Vec3 dir{0, 0, 1};
+                double depth = 1.0;
+                if (vec && vec->args.size() >= 3 && vec->args[1].is_ref()) {
+                    dir = point(vec->args[1].i);
+                    depth = vec->args[2].as_double();
+                }
+                if (prof)
+                    s = std::make_shared<ng::LinearExtrusionSurface>(prof, dir, depth);
+            } else if (t == "SURFACE_OF_REVOLUTION" && in->args.size() >= 3 && in->args[1].is_ref() &&
+                       in->args[2].is_ref()) {
+                // SURFACE_OF_REVOLUTION('',#swept_curve,#AXIS1_PLACEMENT('',#loc,#axis))
+                auto prof = swept_profile(in->args[1].i);
+                const Instance *ax = inst(in->args[2].i);
+                ng::Vec3 loc{0, 0, 0}, adir{0, 0, 1};
+                if (ax && ax->args.size() >= 2 && ax->args[1].is_ref())
+                    loc = point(ax->args[1].i);
+                if (ax && ax->args.size() >= 3 && ax->args[2].is_ref())
+                    adir = point(ax->args[2].i);
+                if (prof)
+                    s = std::make_shared<ng::RevolutionSurface>(prof, loc, adir);
+            } else if (in->args.size() >= 2 && in->args[1].is_ref()) {
                 ng::Frame fr = placement(in->args[1].i);
                 if (t == "PLANE")
                     s = std::make_shared<ng::PlaneSurface>(fr);

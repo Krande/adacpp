@@ -85,6 +85,13 @@ private:
         put_v3(b, f.x);
         return add(tag::PLACEMENT3, std::move(b));
     }
+    // PLACEMENT1 stores (location, axis) — the revolution axis (spec §5 SURF_REVOLUTION).
+    int placement1(const Vec3 &loc, const Vec3 &axis) {
+        std::vector<uint8_t> b;
+        put_v3(b, loc);
+        put_v3(b, axis);
+        return add(tag::PLACEMENT1, std::move(b));
+    }
     static void rle_knots(const std::vector<double> &U, std::vector<double> &knots, std::vector<int> &mults) {
         for (size_t i = 0; i < U.size();) {
             size_t j = i + 1;
@@ -203,6 +210,21 @@ private:
             for (double w : bs->weights)
                 put_f64(b, w);
             idx = add(tag::BSPLINE_SURFACE, std::move(b));
+        } else if (auto *le = dynamic_cast<LinearExtrusionSurface *>(s.get())) {
+            // SURF_LIN_EXTRUSION: i32(swept_curve) i32(position=-1/None) v3(dir) f64(depth).
+            // The neutral model carries no position frame; -1 decodes to None (== adapy's
+            // SurfaceOfLinearExtrusion.position) — the trimming face bounds carry the extent.
+            put_i32(b, curve(le->profile));
+            put_i32(b, -1);
+            put_v3(b, le->dir);
+            put_f64(b, le->depth);
+            idx = add(tag::SURF_LIN_EXTRUSION, std::move(b));
+        } else if (auto *rv = dynamic_cast<RevolutionSurface *>(s.get())) {
+            // SURF_REVOLUTION: i32(swept_curve) i32(axis PLACEMENT1) i32(-1 reserved).
+            put_i32(b, curve(rv->profile));
+            put_i32(b, placement1(rv->axis_loc, rv->axis_dir));
+            put_i32(b, -1);
+            idx = add(tag::SURF_REVOLUTION, std::move(b));
         }
         memo_[s.get()] = idx;
         return idx;
