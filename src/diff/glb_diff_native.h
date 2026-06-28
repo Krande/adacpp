@@ -39,9 +39,9 @@ namespace gdiff {
 using njson = nlohmann::json;
 
 // Only spill a meshopt-decoded bufferView to disk when it exceeds this — small/common nodes decode in
-// RAM (fast); a single huge (>1 GiB) material chunk goes disk-backed so it can't blow RSS. Tuned so
-// the disk path's msync+page-fault overhead is only paid when RAM decode would actually be dangerous.
-constexpr size_t kDiskDecodeThreshold = 1ull << 30; // 1 GiB
+// RAM (fast); a larger (>512 MiB) material chunk goes disk-backed so it can't blow RSS. Tuned so the
+// disk path's msync+page-fault overhead is only paid when RAM decode would actually be dangerous.
+constexpr size_t kDiskDecodeThreshold = 512ull << 20; // 512 MiB
 
 inline uint32_t pad4(uint32_t n) {
     return (4 - (n & 3u)) & 3u;
@@ -172,7 +172,8 @@ inline std::vector<ElementSummary> summarize_glb_buf(const unsigned char *data, 
 
     njson j;
     try {
-        j = njson::parse(data + 20, data + 20 + json_len);
+        const char *jbeg = (const char *) (data + 20);
+        j = njson::parse(jbeg, jbeg + json_len);
     } catch (...) {
         return out;
     }

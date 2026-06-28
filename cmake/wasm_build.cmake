@@ -1,3 +1,30 @@
+# The OCC-free GLB diff (summarise + match + removed overlay) as a STANDALONE embind wasm module —
+# no OCCT, no pyodide, no tinygltf. Reuses the portable diff core (glb_diff_native.h's
+# summarize_glb_buf, RAM-decode path) + meshoptimizer + nlohmann json. Takes two GLB buffers, returns
+# the viewer-ops + a red overlay GLB, entirely in-browser (no worker job / server memory).
+if (BUILD_GLB_DIFF_WASM)
+    add_executable(adacpp_glb_diff
+            ${CMAKE_SOURCE_DIR}/src/cad/glb_diff_wasm.cpp
+            ${CMAKE_SOURCE_DIR}/src/geom/neutral/ngeom_meshopt.cpp
+            ${MESHOPT_SOURCES})
+    # nlohmann json.hpp lives in the (wasm) conda env include — emscripten doesn't search it by default.
+    target_include_directories(adacpp_glb_diff PRIVATE $ENV{CONDA_PREFIX}/include)
+    # try/catch (nlohmann parse) needs real EH; match the wasm EH model used elsewhere (manifold).
+    target_compile_options(adacpp_glb_diff PRIVATE -fwasm-exceptions)
+    set_target_properties(adacpp_glb_diff PROPERTIES OUTPUT_NAME "adacpp_glb_diff" SUFFIX ".js")
+    target_link_options(adacpp_glb_diff PRIVATE
+            "-lembind"
+            "-fwasm-exceptions"
+            "-sALLOW_MEMORY_GROWTH=1"
+            "-sMAXIMUM_MEMORY=4294967296"
+            "-sMODULARIZE=1"
+            "-sEXPORT_ES6=1"
+            "-sEXPORT_NAME=createAdacppGlbDiff"
+            "-sENVIRONMENT=web,worker,node"
+            "-sSTACK_SIZE=1048576")
+    return() # standalone target
+endif ()
+
 # The OCC-free native STEP->GLB pipeline as a STANDALONE embind wasm module — no OCCT, no pyodide,
 # no nanobind, no Python. Single-threaded (no -pthread, so no SharedArrayBuffer / COOP-COEP needed);
 # streams the STEP from OPFS via WASMFS so multi-GB files never have to fit in the wasm heap.
