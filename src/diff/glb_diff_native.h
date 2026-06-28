@@ -13,6 +13,7 @@
 
 #include <tiny_gltf.h>
 
+#include "../geom/neutral/ngeom_meshopt.h" // EXT_meshopt_compression decode
 #include "glb_diff.h"
 
 namespace adacpp {
@@ -20,6 +21,110 @@ namespace gdiff {
 
 inline uint32_t pad4(uint32_t n) {
     return (4 - (n & 3u)) & 3u;
+}
+
+// tinygltf rejects a meshopt GLB: the EXT_meshopt_compression fallback buffer declares the DECODED
+// size, which exceeds the stored BIN bytes. Clamp every JSON ``byteLength`` that exceeds the BIN
+// chunk size down to it so tinygltf loads (only the fallback buffer's exceeds it; meshopt
+// bufferViews are read via their extension's count/stride, not byteLength, so clamping is safe).
+inline std::string patch_buffer_bytelength(const std::string &glb) {
+    const unsigned char *d = (const unsigned char *) glb.data();
+    if (glb.size() < 20 || std::memcmp(d, "glTF", 4) != 0)
+        return glb;
+    uint32_t json_len;
+    std::memcpy(&json_len, d + 12, 4);
+    size_t json_end = 20 + json_len;
+    if (json_end + 8 > glb.size())
+        return glb;
+    uint32_t bin_len;
+    std::memcpy(&bin_len, d + json_end, 4); // following chunk header = BIN length
+    std::string json(glb.begin() + 20, glb.begin() + json_end);
+
+    const std::string key = "\"byteLength\"";
+    std::string nj;
+    nj.reserve(json.size());
+    bool changed = false;
+    size_t i = 0;
+    while (i < json.size()) {
+        size_t k = json.find(key, i);
+        if (k == std::string::npos) {
+            nj.append(json, i, json.size() - i);
+            break;
+        }
+        size_t ns = json.find(':', k) + 1;
+        while (ns < json.size() && json[ns] == ' ')
+            ++ns;
+        size_t ne = ns;
+        while (ne < json.size() && json[ne] >= '0' && json[ne] <= '9')
+            ++ne;
+        size_t val = 0;
+        for (size_t j = ns; j < ne; ++j)
+            val = val * 10 + (json[j] - '0');
+        nj.append(json, i, ns - i); // through the key, colon, and any spaces
+        if (val > bin_len) {
+            nj += std::to_string((unsigned) bin_len);
+            changed = true;
+        } else {
+            nj.append(json, ns, ne - ns);
+        }
+        i = ne;
+    }
+    if (!changed)
+        return glb; // uncompressed GLB — nothing to patch
+
+    nj.append(pad4((uint32_t) nj.size()), ' ');
+    const char *bin = glb.data() + json_end + 8;
+    uint32_t njl = (uint32_t) nj.size();
+    uint32_t total = 12 + 8 + njl + 8 + bin_len;
+    std::string out;
+    out.reserve(total);
+    auto u32 = [&](uint32_t v) { out.append((const char *) &v, 4); };
+    out.append("glTF", 4);
+    u32(2);
+    u32(total);
+    u32(njl);
+    u32(0x4E4F534Au); // "JSON"
+    out.append(nj);
+    u32(bin_len);
+    u32(0x004E4942u); // "BIN\0"
+    out.append(bin, bin_len);
+    return out;
+}
+
+// Decoded-bufferView cache: a bufferView with EXT_meshopt_compression is decoded once (the viewer's
+// crane GLBs are meshopt-compressed); raw bufferViews are read in place. ``stride`` is the element
+// byte-stride to walk with.
+using BvCache = std::unordered_map<int, std::vector<unsigned char>>;
+struct BvView {
+    const unsigned char *data;
+    size_t stride;
+};
+
+// ``bin`` is the GLB's embedded BIN chunk (we read buffer data directly from it rather than
+// model.buffers[].data: a meshopt no-fallback GLB declares the buffer's DECODED byteLength, which
+// exceeds the stored bytes, so tinygltf refuses to populate buffers — but it parses the JSON fine).
+inline BvView resolve_bufferview(const tinygltf::Model &m, int bv_idx, size_t elem_size, BvCache &cache,
+                                 const unsigned char *bin) {
+    const tinygltf::BufferView &bv = m.bufferViews[bv_idx];
+    auto eit = bv.extensions.find("EXT_meshopt_compression");
+    if (eit != bv.extensions.end()) {
+        const tinygltf::Value &e = eit->second;
+        size_t bo = (size_t) e.Get("byteOffset").GetNumberAsInt();
+        size_t bl = (size_t) e.Get("byteLength").GetNumberAsInt();
+        size_t cnt = (size_t) e.Get("count").GetNumberAsInt();
+        size_t stride = (size_t) e.Get("byteStride").GetNumberAsInt();
+        std::string mode = e.Has("mode") ? e.Get("mode").Get<std::string>() : std::string("ATTRIBUTES");
+        auto cit = cache.find(bv_idx);
+        if (cit == cache.end()) {
+            const unsigned char *enc = bin + bo;
+            std::vector<unsigned char> dec = (mode == "ATTRIBUTES")
+                                                 ? ::ngeom::meshopt_decode_vertices(enc, bl, cnt, stride)
+                                                 : ::ngeom::meshopt_decode_indices(enc, bl, cnt, stride);
+            cit = cache.emplace(bv_idx, std::move(dec)).first;
+        }
+        return {cit->second.data(), stride};
+    }
+    return {bin + bv.byteOffset, bv.byteStride ? (size_t) bv.byteStride : elem_size};
 }
 
 // hash the MODIFIED-relevant metadata fields (section/material/thickness/type), order-stable.
@@ -42,40 +147,34 @@ inline uint64_t meta_signature(const tinygltf::Value &m) {
     return std::hash<std::string>{}(s);
 }
 
-// Read a scalar/vec accessor into a flat double buffer (handles float/uint16/uint32; v1 = no meshopt).
-inline void read_accessor_floats(const tinygltf::Model &model, int acc_idx, std::vector<float> &out, int &ncomp) {
+// Read a float vec accessor (POSITION) into a flat buffer; decodes meshopt if present.
+inline void read_accessor_floats(const tinygltf::Model &model, int acc_idx, std::vector<float> &out, int &ncomp,
+                                 BvCache &cache, const unsigned char *bin) {
     const tinygltf::Accessor &acc = model.accessors[acc_idx];
-    const tinygltf::BufferView &bv = model.bufferViews[acc.bufferView];
-    const tinygltf::Buffer &buf = model.buffers[bv.buffer];
     ncomp = (acc.type == TINYGLTF_TYPE_VEC3) ? 3 : (acc.type == TINYGLTF_TYPE_VEC2 ? 2 : 1);
-    size_t off = bv.byteOffset + acc.byteOffset;
-    out.resize(acc.count * ncomp);
-    const unsigned char *p = buf.data.data() + off;
-    for (size_t i = 0; i < acc.count * (size_t) ncomp; ++i) {
-        float f;
-        std::memcpy(&f, p + i * 4, 4);
-        out[i] = f;
-    }
+    BvView v = resolve_bufferview(model, acc.bufferView, (size_t) ncomp * 4, cache, bin);
+    const unsigned char *base = v.data + acc.byteOffset;
+    out.resize(acc.count * (size_t) ncomp);
+    for (size_t i = 0; i < acc.count; ++i)
+        std::memcpy(&out[i * ncomp], base + i * v.stride, (size_t) ncomp * 4);
 }
 
-inline void read_accessor_indices(const tinygltf::Model &model, int acc_idx, std::vector<uint32_t> &out) {
+inline void read_accessor_indices(const tinygltf::Model &model, int acc_idx, std::vector<uint32_t> &out,
+                                  BvCache &cache, const unsigned char *bin) {
     const tinygltf::Accessor &acc = model.accessors[acc_idx];
-    const tinygltf::BufferView &bv = model.bufferViews[acc.bufferView];
-    const tinygltf::Buffer &buf = model.buffers[bv.buffer];
-    size_t off = bv.byteOffset + acc.byteOffset;
-    const unsigned char *p = buf.data.data() + off;
+    const size_t isz = (acc.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT) ? 4 : 2;
+    BvView v = resolve_bufferview(model, acc.bufferView, isz, cache, bin);
+    const unsigned char *base = v.data + acc.byteOffset;
     out.resize(acc.count);
-    if (acc.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT) {
-        for (size_t i = 0; i < acc.count; ++i) {
-            uint32_t v;
-            std::memcpy(&v, p + i * 4, 4);
-            out[i] = v;
-        }
-    } else { // UNSIGNED_SHORT
-        for (size_t i = 0; i < acc.count; ++i) {
-            uint16_t v;
-            std::memcpy(&v, p + i * 2, 2);
-            out[i] = v;
+    for (size_t i = 0; i < acc.count; ++i) {
+        if (isz == 4) {
+            uint32_t x;
+            std::memcpy(&x, base + i * v.stride, 4);
+            out[i] = x;
+        } else {
+            uint16_t x;
+            std::memcpy(&x, base + i * v.stride, 2);
+            out[i] = x;
         }
     }
 }
@@ -86,10 +185,13 @@ inline std::vector<ParsedElement> parse_glb_elements(const std::string &glb) {
     tinygltf::Model model;
     tinygltf::TinyGLTF loader;
     std::string err, warn;
-    if (!loader.LoadBinaryFromMemory(&model, &err, &warn, (const unsigned char *) glb.data(), glb.size()))
+    // Ignore the bool: a meshopt no-fallback GLB fails buffer-load (decoded byteLength > stored
+    // bytes) but the JSON (scenes/nodes/meshes/accessors/bufferViews/extensions) is parsed first.
+    std::string patched = patch_buffer_bytelength(glb);
+    bool ok = loader.LoadBinaryFromMemory(&model, &err, &warn, (const unsigned char *) patched.data(), patched.size());
+    if (!ok || model.scenes.empty() || model.bufferViews.empty() || model.buffers.empty())
         return out;
-    if (model.scenes.empty())
-        return out;
+    const unsigned char *bin = model.buffers[0].data.data();
     const tinygltf::Scene &scene = model.scenes[model.defaultScene >= 0 ? model.defaultScene : 0];
     const tinygltf::Value &extras = scene.extras;
     if (!extras.IsObject())
@@ -138,7 +240,8 @@ inline std::vector<ParsedElement> parse_glb_elements(const std::string &glb) {
         }
     }
 
-    // node name -> (positions, indices)
+    // node name -> (positions, indices). meshopt bufferViews decoded once via the cache.
+    BvCache bv_cache;
     std::unordered_map<std::string, std::pair<std::vector<float>, std::vector<uint32_t>>> node_geo;
     for (const tinygltf::Node &node : model.nodes) {
         if (node.mesh < 0)
@@ -149,9 +252,9 @@ inline std::vector<ParsedElement> parse_glb_elements(const std::string &glb) {
             continue;
         std::vector<float> pos;
         int nc = 0;
-        read_accessor_floats(model, pit->second, pos, nc);
+        read_accessor_floats(model, pit->second, pos, nc, bv_cache, bin);
         std::vector<uint32_t> idx;
-        read_accessor_indices(model, prim.indices, idx);
+        read_accessor_indices(model, prim.indices, idx, bv_cache, bin);
         node_geo[node.name] = {std::move(pos), std::move(idx)};
     }
 
