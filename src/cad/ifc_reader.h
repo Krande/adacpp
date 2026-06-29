@@ -525,32 +525,80 @@ class IfcResolver {
             double rad = ad(in, 3);
             if (rad <= 0)
                 return nullptr;
-            const int N = 64;
-            for (int i = 0; i < N; ++i) {
-                double a = 2.0 * PI * i / N;
-                poly.push_back({rad * std::cos(a), rad * std::sin(a), 0});
-            }
+            poly = circle_poly(rad);
             apply_placement2d(ref_arg(*in, 2), poly);
+        } else if (iequals(in->type, "IFCUSHAPEPROFILEDEF")) {
+            // (.., Position, Depth, FlangeWidth, WebThickness, FlangeThickness, ...). Channel opening +x.
+            double hy = ad(in, 3) / 2, w = ad(in, 4), tw = ad(in, 5), tf = ad(in, 6);
+            if (hy <= 0 || w <= 0 || tw <= 0 || tf <= 0)
+                return nullptr;
+            double x0 = -w / 2, x1 = w / 2, fy = hy - tf, wx = -w / 2 + tw;
+            poly = {{x0, -hy, 0}, {x1, -hy, 0}, {x1, -fy, 0}, {wx, -fy, 0},
+                    {wx, fy, 0},  {x1, fy, 0},  {x1, hy, 0},  {x0, hy, 0}};
+            apply_placement2d(ref_arg(*in, 2), poly);
+        } else if (iequals(in->type, "IFCCIRCLEHOLLOWPROFILEDEF")) {
+            // (.., Position, Radius, WallThickness) -> outer + inner circle (void).
+            double R = ad(in, 3), tw = ad(in, 4);
+            if (R <= 0 || tw <= 0 || tw >= R)
+                return nullptr;
+            std::vector<Vec3> outer = circle_poly(R), inner = circle_poly(R - tw);
+            apply_placement2d(ref_arg(*in, 2), outer);
+            apply_placement2d(ref_arg(*in, 2), inner);
+            return make_profile(std::move(outer), {std::move(inner)});
+        } else if (iequals(in->type, "IFCRECTANGLEHOLLOWPROFILEDEF")) {
+            // (.., Position, XDim, YDim, WallThickness, ...) -> outer + inner rectangle (void).
+            double hx = ad(in, 3) / 2, hy = ad(in, 4) / 2, t = ad(in, 5);
+            if (hx <= 0 || hy <= 0 || t <= 0 || t >= hx || t >= hy)
+                return nullptr;
+            std::vector<Vec3> outer = {{-hx, -hy, 0}, {hx, -hy, 0}, {hx, hy, 0}, {-hx, hy, 0}};
+            std::vector<Vec3> inner = {{-hx + t, -hy + t, 0}, {hx - t, -hy + t, 0}, {hx - t, hy - t, 0}, {-hx + t, hy - t, 0}};
+            apply_placement2d(ref_arg(*in, 2), outer);
+            apply_placement2d(ref_arg(*in, 2), inner);
+            return make_profile(std::move(outer), {std::move(inner)});
+        } else if (iequals(in->type, "IFCARBITRARYPROFILEDEFWITHVOIDS")) {
+            // (.., OuterCurve, InnerCurves[list]) -> outer polygon + void polygons.
+            std::vector<Vec3> outer = curve_points2d(ref_arg(*in, 2));
+            std::vector<std::vector<Vec3>> holes;
+            if (in->args.size() > 3 && in->args[3].is_list())
+                for (const Value &cr : in->args[3].items)
+                    if (cr.is_ref()) {
+                        auto h = curve_points2d(cr.i);
+                        if (h.size() >= 3)
+                            holes.push_back(std::move(h));
+                    }
+            return make_profile(std::move(outer), std::move(holes));
         } else {
             return nullptr;
         }
         return make_poly_profile(std::move(poly));
     }
-    // Wrap a 2D polygon (z=0) as a planar profile FaceSurfaceN (single poly outer loop).
-    static std::shared_ptr<FaceSurfaceN> make_poly_profile(std::vector<Vec3> poly) {
-        if (poly.size() < 3)
+    // Wrap a 2D outer polygon + optional hole polygons (z=0) as a planar profile FaceSurfaceN. Holes are
+    // reversed (opposite winding) so the cap triangulates the void and the swept side bands face right.
+    static std::shared_ptr<FaceSurfaceN> make_profile(std::vector<Vec3> outer, std::vector<std::vector<Vec3>> holes = {}) {
+        if (outer.size() < 3)
             return nullptr;
         auto prof = std::make_shared<FaceSurfaceN>();
         prof->surface = std::make_shared<PlaneSurface>(Frame{});
         prof->same_sense = true;
-        auto lp = std::make_shared<LoopN>();
-        lp->is_poly = true;
-        lp->polygon = std::move(poly);
-        FaceBoundN fb;
-        fb.loop = lp;
-        fb.orientation = true;
-        prof->bounds.push_back(fb);
+        auto add = [&](std::vector<Vec3> poly) {
+            auto lp = std::make_shared<LoopN>();
+            lp->is_poly = true;
+            lp->polygon = std::move(poly);
+            FaceBoundN fb;
+            fb.loop = lp;
+            fb.orientation = true;
+            prof->bounds.push_back(fb);
+        };
+        add(std::move(outer));
+        for (auto &h : holes)
+            if (h.size() >= 3) {
+                std::reverse(h.begin(), h.end());
+                add(std::move(h));
+            }
         return prof;
+    }
+    static std::shared_ptr<FaceSurfaceN> make_poly_profile(std::vector<Vec3> poly) {
+        return make_profile(std::move(poly));
     }
     static std::vector<Vec3> circle_poly(double r, int n = 64) {
         std::vector<Vec3> p;

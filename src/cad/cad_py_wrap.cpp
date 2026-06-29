@@ -3034,10 +3034,11 @@ static bool emit_solid_step(adacpp::step_emit::StepBrepEmitter &em, std::string 
     long solid = 0;
     const char *rep_kw = "ADVANCED_BREP_SHAPE_REPRESENTATION";
     if (root.extrusion) {
-        if (em.tf_rigid()) { // rigid instance -> native EXTRUDED_AREA_SOLID (procedural, compact)
+        bool hollow = root.extrusion->profile && root.extrusion->profile->bounds.size() > 1;
+        if (em.tf_rigid() && !hollow) { // rigid, solid profile -> native EXTRUDED_AREA_SOLID
             solid = em.emit_extrusion(buf, *root.extrusion);
             rep_kw = "SHAPE_REPRESENTATION";
-        } else { // scale/shear -> bake to a B-rep (Position can't carry a scale)
+        } else { // scale/shear or hollow profile -> bake to a B-rep (annular caps for voids)
             solid = em.emit_extrusion_baked(buf, *root.extrusion, nm);
         }
     } else if (root.revolve) { // non-rigid revolves are dropped to OCC by the reader -> rigid here

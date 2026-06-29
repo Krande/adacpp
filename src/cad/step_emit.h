@@ -152,39 +152,52 @@ class StepBrepEmitter {
         return std::abs(c0 - 1) < 1e-4 && std::abs(c1 - 1) < 1e-4 && std::abs(c2 - 1) < 1e-4;
     }
 
-    // Bake an extrusion to a MANIFOLD_SOLID_BREP of planar faces (two caps + a side quad per profile
+    // Bake an extrusion to a MANIFOLD_SOLID_BREP of planar faces (two end caps + a side quad per profile
     // edge), in the solid's frame-local world; pt() then bakes the full instance affine. Handles any
-    // instance transform (incl. non-uniform scale/shear). Returns the brep id (0 on failure).
+    // instance transform (scale/shear) AND hollow profiles (the outer loop + inner void loops -> annular
+    // caps + side bands per loop). Returns the brep id (0 on failure).
     long emit_extrusion_baked(std::string &out, const ExtrusionN &ex, const std::string &name) {
-        if (!ex.profile || ex.profile->bounds.empty() || !ex.profile->bounds[0].loop)
-            return 0;
-        const LoopN &lp = *ex.profile->bounds[0].loop;
-        std::vector<Vec3> ring = lp.is_poly ? lp.polygon : lp.discretize(deflection_, angular_);
-        if (ring.size() > 1 && (ring.front() - ring.back()).norm() < 1e-12)
-            ring.pop_back();
-        if (ring.size() < 3)
+        if (!ex.profile || ex.profile->bounds.empty())
             return 0;
         const Frame &F = ex.frame;
         Vec3 d = ex.direction * ex.depth;
-        std::vector<Vec3> bot, top;
-        bot.reserve(ring.size());
-        top.reserve(ring.size());
-        for (const Vec3 &p : ring) {
-            bot.push_back(F.to_world(p.x, p.y, 0));
-            top.push_back(F.to_world(p.x + d.x, p.y + d.y, d.z));
+        std::vector<std::vector<Vec3>> bot_rings, top_rings; // [0] outer, rest voids
+        for (const auto &b : ex.profile->bounds) {
+            if (!b.loop)
+                continue;
+            std::vector<Vec3> ring = b.loop->is_poly ? b.loop->polygon : b.loop->discretize(deflection_, angular_);
+            if (ring.size() > 1 && (ring.front() - ring.back()).norm() < 1e-12)
+                ring.pop_back();
+            if (ring.size() < 3)
+                continue;
+            std::vector<Vec3> bot, top;
+            for (const Vec3 &p : ring) {
+                bot.push_back(F.to_world(p.x, p.y, 0));
+                top.push_back(F.to_world(p.x + d.x, p.y + d.y, d.z));
+            }
+            bot_rings.push_back(std::move(bot));
+            top_rings.push_back(std::move(top));
         }
+        if (bot_rings.empty())
+            return 0;
         vcache_.clear();
         std::vector<long> fids;
-        std::vector<Vec3> botr(bot.rbegin(), bot.rend()); // bottom cap reversed (outward normal)
-        if (long f = emit_plane_face(out, botr))
+        std::vector<std::vector<Vec3>> botr; // bottom cap: reverse the outer for outward normal
+        for (size_t r = 0; r < bot_rings.size(); ++r)
+            botr.push_back(std::vector<Vec3>(bot_rings[r].rbegin(), bot_rings[r].rend()));
+        if (long f = emit_plane_face_multi(out, botr))
             fids.push_back(f);
-        if (long f = emit_plane_face(out, top))
+        if (long f = emit_plane_face_multi(out, top_rings))
             fids.push_back(f);
-        size_t n = ring.size();
-        for (size_t i = 0; i < n; ++i) {
-            std::vector<Vec3> quad = {bot[i], bot[(i + 1) % n], top[(i + 1) % n], top[i]};
-            if (long f = emit_plane_face(out, quad))
-                fids.push_back(f);
+        for (size_t r = 0; r < bot_rings.size(); ++r) { // side band per loop (outer + each void)
+            const auto &bot = bot_rings[r];
+            const auto &top = top_rings[r];
+            size_t n = bot.size();
+            for (size_t i = 0; i < n; ++i) {
+                std::vector<Vec3> quad = {bot[i], bot[(i + 1) % n], top[(i + 1) % n], top[i]};
+                if (long f = emit_plane_face(out, quad))
+                    fids.push_back(f);
+            }
         }
         if (fids.size() < 4)
             return 0;
@@ -273,6 +286,45 @@ class StepBrepEmitter {
         long loop = emit(out, "POLY_LOOP(''," + refs(pids) + ")");
         long bound = emit(out, "FACE_OUTER_BOUND('',#" + std::to_string(loop) + ",.T.)");
         return emit(out, "ADVANCED_FACE('',(#" + std::to_string(bound) + "),#" + std::to_string(plane) + ",.T.)");
+    }
+    // Planar ADVANCED_FACE with rings[0] = outer bound + rings[1..] = void bounds (annular cap). Plane
+    // frame from the outer ring.
+    long emit_plane_face_multi(std::string &out, const std::vector<std::vector<Vec3>> &rings) {
+        if (rings.empty() || rings[0].size() < 3)
+            return 0;
+        if (rings.size() == 1)
+            return emit_plane_face(out, rings[0]);
+        const auto &outer = rings[0];
+        Vec3 e1 = outer[1] - outer[0], nrm{0, 0, 1};
+        for (size_t i = 2; i < outer.size(); ++i) {
+            Vec3 c = e1.cross(outer[i] - outer[0]);
+            if (c.norm() > 1e-9) {
+                nrm = c;
+                break;
+            }
+        }
+        double nn = nrm.norm();
+        if (nn)
+            nrm = {nrm.x / nn, nrm.y / nn, nrm.z / nn};
+        double e1n = e1.norm();
+        Frame f;
+        f.o = outer[0];
+        f.z = nrm;
+        f.x = e1n ? Vec3{e1.x / e1n, e1.y / e1n, e1.z / e1n} : Vec3{1, 0, 0};
+        f.y = nrm.cross(f.x);
+        long plane = emit(out, "PLANE('',#" + std::to_string(axis2(out, f)) + ")");
+        std::vector<long> bounds;
+        for (size_t r = 0; r < rings.size(); ++r) {
+            if (rings[r].size() < 3)
+                continue;
+            std::vector<long> pids;
+            for (const Vec3 &p : rings[r])
+                pids.push_back(pt(out, p));
+            long loop = emit(out, "POLY_LOOP(''," + refs(pids) + ")");
+            const char *kw = (r == 0) ? "FACE_OUTER_BOUND" : "FACE_BOUND";
+            bounds.push_back(emit(out, std::string(kw) + "('',#" + std::to_string(loop) + ",.T.)"));
+        }
+        return emit(out, "ADVANCED_FACE(''," + refs(bounds) + ",#" + std::to_string(plane) + ",.T.)");
     }
     long vertex(std::string &out, const Vec3 &p) {
         long long key = pkey(tp(p));
