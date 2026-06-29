@@ -532,6 +532,10 @@ class IfcResolver {
         } else {
             return nullptr;
         }
+        return make_poly_profile(std::move(poly));
+    }
+    // Wrap a 2D polygon (z=0) as a planar profile FaceSurfaceN (single poly outer loop).
+    static std::shared_ptr<FaceSurfaceN> make_poly_profile(std::vector<Vec3> poly) {
         if (poly.size() < 3)
             return nullptr;
         auto prof = std::make_shared<FaceSurfaceN>();
@@ -545,6 +549,15 @@ class IfcResolver {
         fb.orientation = true;
         prof->bounds.push_back(fb);
         return prof;
+    }
+    static std::vector<Vec3> circle_poly(double r, int n = 64) {
+        std::vector<Vec3> p;
+        p.reserve(n);
+        for (int i = 0; i < n; ++i) {
+            double a = 2.0 * PI * i / n;
+            p.push_back({r * std::cos(a), r * std::sin(a), 0});
+        }
+        return p;
     }
     // OuterCurve (IfcPolyline of IfcCartesianPoint, or IfcIndexedPolyCurve over an IfcCartesianPointList2D)
     // -> the profile's 2D polygon (z=0), drop the closing duplicate point.
@@ -652,6 +665,83 @@ class IfcResolver {
             rv->axis_dir = (ax && ax->args.size() > 1 && ax->args[1].is_ref()) ? dir(ax->args[1].i) : Vec3{0, 0, 1};
             rv->angle = in->args.size() > 3 ? in->args[3].as_double() : 0.0;
             root.revolve = rv;
+        } else if (iequals(t, "IFCBLOCK")) {
+            // (Position, XLength, YLength, ZLength) — a box from the Position corner -> rectangle [0,X]x[0,Y]
+            // extruded Z along local Z. (IfcBlock is corner-anchored, not centred.)
+            if (!claim_solid(root, id))
+                return;
+            double X = ad(in, 1), Y = ad(in, 2), Z = ad(in, 3);
+            if (X <= 0 || Y <= 0 || Z <= 0)
+                return;
+            auto ex = std::make_shared<ExtrusionN>();
+            ex->profile = make_poly_profile({{0, 0, 0}, {X, 0, 0}, {X, Y, 0}, {0, Y, 0}});
+            ex->frame = axis2(ref_arg(*in, 0));
+            ex->direction = {0, 0, 1};
+            ex->depth = Z;
+            if (ex->profile)
+                root.extrusion = ex;
+        } else if (iequals(t, "IFCRIGHTCIRCULARCYLINDER")) {
+            // (Position, Height, Radius) -> circle profile extruded Height along local Z.
+            if (!claim_solid(root, id))
+                return;
+            double H = ad(in, 1), R = ad(in, 2);
+            if (H <= 0 || R <= 0)
+                return;
+            auto ex = std::make_shared<ExtrusionN>();
+            ex->profile = make_poly_profile(circle_poly(R));
+            ex->frame = axis2(ref_arg(*in, 0));
+            ex->direction = {0, 0, 1};
+            ex->depth = H;
+            if (ex->profile)
+                root.extrusion = ex;
+        } else if (iequals(t, "IFCSPHERE")) {
+            // (Position, Radius) -> a half-disk (semicircle through +x) revolved 2pi about local Y; the
+            // sphere is symmetric so only Position's location matters. Faceted (32 arc segments).
+            if (!claim_solid(root, id))
+                return;
+            double R = ad(in, 1);
+            if (R <= 0)
+                return;
+            std::vector<Vec3> poly;
+            const int n = 32;
+            for (int i = 0; i <= n; ++i) {
+                double a = -PI / 2 + PI * i / n; // (0,-R) -> (R,0) -> (0,R); loop closes along x=0 (the axis)
+                poly.push_back({R * std::cos(a), R * std::sin(a), 0});
+            }
+            auto rv = std::make_shared<RevolveN>();
+            rv->profile = make_poly_profile(std::move(poly));
+            rv->frame = axis2(ref_arg(*in, 0));
+            rv->axis_origin = {0, 0, 0};
+            rv->axis_dir = {0, 1, 0};
+            rv->angle = 2.0 * PI;
+            if (rv->profile)
+                root.revolve = rv;
+        } else if (iequals(t, "IFCRIGHTCIRCULARCONE")) {
+            // (Position, Height, BottomRadius) -> profile triangle revolved 2pi; frame maps the revolve's
+            // local Y (cone axis) onto Position's Z so the apex points along Position.Z.
+            if (!claim_solid(root, id))
+                return;
+            double H = ad(in, 1), R = ad(in, 2);
+            if (H <= 0 || R <= 0)
+                return;
+            auto rv = std::make_shared<RevolveN>();
+            rv->profile = make_poly_profile({{0, 0, 0}, {R, 0, 0}, {0, H, 0}});
+            Frame pos = axis2(ref_arg(*in, 0));
+            Frame F;
+            F.o = pos.o;
+            F.x = pos.x;
+            F.y = pos.z; // cone axis
+            F.z = pos.x.cross(pos.z);
+            rv->frame = F;
+            rv->axis_origin = {0, 0, 0};
+            rv->axis_dir = {0, 1, 0};
+            rv->angle = 2.0 * PI;
+            if (rv->profile)
+                root.revolve = rv;
+        } else if (iequals(t, "IFCCSGSOLID")) {
+            // (TreeRootExpression) -> a CSG primitive or IfcBooleanResult; recurse (boolean -> skip).
+            if (in->args.size() > 0 && in->args[0].is_ref())
+                resolve_item(in->args[0].i, root);
         } else if (iequals(t, "IFCMAPPEDITEM")) {
             // (MappingSource=IfcRepresentationMap, MappingTarget=IfcCartesianTransformationOperator3D)
             const Instance *rm = inst(ref_arg(*in, 0));
