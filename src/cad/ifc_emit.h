@@ -521,6 +521,10 @@ inline std::string ifc_str(const std::string &s) {
 struct FileStats {
     long solids_in = 0, solids_out = 0;
     double unit_scale = 1.0; // metres per file length-unit (declared in the IFC header)
+    // IFC->STEP coverage: roots seen vs roots that yielded no resolvable B-rep (non-advanced-brep
+    // geometry — extrusion/CSG/tessellated — which the analytic reader can't represent). Non-zero
+    // skipped => the native path is INCOMPLETE; the caller falls back to OCC to avoid silent loss.
+    long products_total = 0, products_skipped = 0;
     EmitStats geom;
 };
 

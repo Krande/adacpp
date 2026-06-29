@@ -3215,6 +3215,7 @@ static adacpp::ifc_emit::FileStats write_ifc_to_step_impl(const std::string &in_
     std::vector<long> roots = r.proxy_roots();
     if (max_solids > 0 && (long) roots.size() > max_solids)
         roots.resize(max_solids);
+    fs.products_total = (long) roots.size();
     std::FILE *fp = std::fopen(out_path.c_str(), "wb");
     if (!fp)
         return fs;
@@ -3231,8 +3232,10 @@ static adacpp::ifc_emit::FileStats write_ifc_to_step_impl(const std::string &in_
     };
     for (long pid : roots) {
         NgeomRoot root = r.resolve_product(pid);
-        if (root.faces.empty())
+        if (root.faces.empty()) {
+            ++fs.products_skipped; // a product whose geometry the analytic reader couldn't represent
             continue;
+        }
         ++fs.solids_in;
         size_t ninst = root.transforms.empty() ? 1 : root.transforms.size();
         bool any = false;
@@ -3493,6 +3496,8 @@ void cad_module(nb::module_ &m) {
             nb::dict d;
             d["solids_in"] = fs.solids_in;
             d["solids_out"] = fs.solids_out;
+            d["products_total"] = fs.products_total;
+            d["products_skipped"] = fs.products_skipped;
             d["unit_scale"] = fs.unit_scale;
             d["faces_in"] = fs.geom.faces_in;
             d["faces_out"] = fs.geom.faces_out;
