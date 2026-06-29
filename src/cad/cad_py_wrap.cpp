@@ -2605,10 +2605,10 @@ static std::string ifc_header_block(const std::string &schema) {
          "#4=IFCAXIS2PLACEMENT3D(#1,#2,#3);\n#5=IFCDIRECTION((1.,0.));\n"
          "#6=IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-5,#4,#5);\n"
          "#7=IFCSIUNIT(*,.LENGTHUNIT.,$,.METRE.);\n#8=IFCUNITASSIGNMENT((#7));\n";
-    b += "#9=IFCPROJECT('" + ifc_guid(1) + "',$,'adacpp STEP->IFC',$,$,$,$,(#6),#8);\n";
+    b += "#9=IFCPROJECT('" + ifc_guid(0xF0000001ull) + "',$,'adacpp STEP->IFC',$,$,$,$,(#6),#8);\n";
     b += "#10=IFCAXIS2PLACEMENT3D(#1,$,$);\n#11=IFCLOCALPLACEMENT($,#10);\n";
-    b += "#12=IFCSITE('" + ifc_guid(2) + "',$,'Site',$,$,#11,$,$,.ELEMENT.,$,$,$,$,$);\n";
-    b += "#13=IFCRELAGGREGATES('" + ifc_guid(3) + "',$,$,$,#9,(#12));\n";
+    b += "#12=IFCSITE('" + ifc_guid(0xF0000002ull) + "',$,'Site',$,$,#11,$,$,.ELEMENT.,$,$,$,$,$);\n";
+    b += "#13=IFCRELAGGREGATES('" + ifc_guid(0xF0000003ull) + "',$,$,$,#9,(#12));\n";
     return b;
 }
 
@@ -2655,7 +2655,7 @@ static adacpp::ifc_emit::FileStats write_ifc_file_impl(const std::string &in_pat
         for (size_t i = 0; i < proxies.size(); ++i)
             refs += (i ? ",#" : "#") + std::to_string(proxies[i]);
         refs += ")";
-        em.emit_entity(buf, "IfcRelContainedInSpatialStructure('" + ifc_guid(900000001) + "',$,$,$," + refs +
+        em.emit_entity(buf, "IfcRelContainedInSpatialStructure('" + ifc_guid(0xF0000000ull) + "',$,$,$," + refs +
                                 ",#12)");
     }
     buf += "ENDSEC;\nEND-ISO-10303-21;\n";
@@ -2867,7 +2867,7 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
     fs.solids_in = solids_in.load();
     if (!all_proxies.empty()) {
         long cid = id_counter.fetch_add(1); // next free global id (above all reserved blocks)
-        std::string c = "#" + std::to_string(cid) + "=IFCRELCONTAINEDINSPATIALSTRUCTURE('" + ifc_guid(900000001) +
+        std::string c = "#" + std::to_string(cid) + "=IFCRELCONTAINEDINSPATIALSTRUCTURE('" + ifc_guid(0xF0000000ull) +
                         "',$,$,$,(";
         for (size_t i = 0; i < all_proxies.size(); ++i)
             c += (i ? ",#" : "#") + std::to_string(all_proxies[i]);
