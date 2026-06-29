@@ -15,6 +15,7 @@
 #include "step_to_glb_st.h"     // single-threaded, mmap-free STEP->GLB core (wasm/OPFS + native oracle)
 #include "step_to_glb_stream.h"  // threaded OCC-free STEP->GLB core (shared with the STP2GLB CLI)
 #include "step_to_mesh_stream.h" // threaded OCC-free STEP->STL/OBJ core (parallel, baked, streaming)
+#include "ifc_emit.h"            // native IFC4 advanced-B-rep emitter (Phase 1, native STEP->IFC writer)
 
 #include "../diff/glb_diff_native.h" // GLB model-diff core (summary match + removed overlay)
 #include "../geom/neutral/ngeom_tessellate.h"
@@ -2673,6 +2674,28 @@ void cad_module(nb::module_ &m) {
           "'hybrid' (ifcopenshell taxonomy kernels). angular_deg in degrees. settings: "
           "ifcopenshell ConversionSettings overrides for the taxonomy paths, e.g. "
           "{'no-wire-intersection-check': True, 'precision': 1e-3} — see ifc_taxonomy_settings().");
+
+    // Phase 1 of the native streaming STEP->IFC writer (dap plan/v3/spec_native_streaming_ifc.md):
+    // emit ONE solid's IFC4 advanced-B-rep SPF lines from ng:: (no ada.geom). Test/parity entry —
+    // the full multi-threaded file writer is later phases.
+    m.def(
+        "step_emit_ifc_brep",
+        [](const std::string &path, size_t index, long start_id) -> std::string {
+            auto idx = adacpp::step::StreamIndex::from_file(path);
+            adacpp::step::Resolver r(idx);
+            r.build_metadata(idx.lists);
+            const auto &roots = idx.lists.roots;
+            if (index >= roots.size())
+                return "";
+            adacpp::ngeom::NgeomRoot root = r.resolve_root(roots[index]);
+            std::string out;
+            adacpp::ifc_emit::BrepEmitter em(start_id);
+            em.emit_advanced_brep(out, root);
+            return out;
+        },
+        "path"_a, "index"_a = 0, "start_id"_a = 100,
+        "Emit one solid's IFC4 IfcAdvancedBrep SPF lines (string) from the native NGEOM reader. "
+        "Phase 1 test entry for the native STEP->IFC writer; returns '' if the solid was skipped.");
 
     m.def("stream_step_to_meshes", &stream_step_to_meshes_impl, "path"_a, "pipeline"_a = "libtess2",
           "deflection"_a = 0.0, "angular_deg"_a = 20.0,
