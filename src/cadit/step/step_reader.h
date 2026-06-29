@@ -601,21 +601,31 @@ public:
         if (!in || in->args.size() < 2)
             return root;
         root.id = solid_name(in, sid);
+        // Collect the shell ids FIRST, then build — `shell_into` may clear parse_cache_ (the
+        // bounded giant-shell path), which frees `in` itself. Iterating `in->args` *while* calling
+        // shell_into would dereference a freed `in` on the 2nd+ shell (BREP_WITH_VOIDS voids /
+        // SHELL_BASED_SURFACE_MODEL shell lists) — the crane's multi-shell solids segfaulted here,
+        // while a single-shell MANIFOLD_SOLID_BREP (469826) happened to survive. Do not touch `in`
+        // after this block.
+        std::vector<long> shell_ids;
         if (in->type == "MANIFOLD_SOLID_BREP") {
             if (in->args[1].is_ref())
-                shell_into(in->args[1].i, root.faces); // arg1 = the CLOSED_SHELL
+                shell_ids.push_back(in->args[1].i); // arg1 = the CLOSED_SHELL
         } else if (in->type == "BREP_WITH_VOIDS") {
             if (in->args[1].is_ref())
-                shell_into(in->args[1].i, root.faces); // arg1 = outer CLOSED_SHELL
+                shell_ids.push_back(in->args[1].i); // arg1 = outer CLOSED_SHELL
             if (in->args.size() > 2 && in->args[2].kind == Kind::List)
                 for (const Value &v : in->args[2].items) // arg2 = void (ORIENTED_CLOSED_)SHELLs
                     if (v.is_ref())
-                        shell_into(v.i, root.faces);
+                        shell_ids.push_back(v.i);
         } else if (in->args[1].kind == Kind::List) {
             for (const Value &sh : in->args[1].items) // arg1 = list of shells
                 if (sh.is_ref())
-                    shell_into(sh.i, root.faces);
+                    shell_ids.push_back(sh.i);
         }
+        in = nullptr; // shell_into below may clear parse_cache_ and invalidate `in`
+        for (long shid : shell_ids)
+            shell_into(shid, root.faces);
         auto cit = colour_map_.find(sid); // STYLED_ITEM colour usually targets the solid root
         if (cit != colour_map_.end()) {
             root.has_color = true;
