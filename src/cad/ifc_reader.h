@@ -52,12 +52,33 @@ class IfcResolver {
         std::vector<long> roots;
         std::string scratch;
         for (long id : idx_.ids) {
-            std::string_view t = type_of(id, scratch);
-            if (iequals(t, "IFCBUILDINGELEMENTPROXY") || iequals(t, "IFCMECHANICALFASTENER") ||
-                iequals(t, "IFCELEMENTASSEMBLY"))
+            if (is_product_type(type_of(id, scratch)))
                 roots.push_back(id);
         }
         return roots;
+    }
+
+    // The geometry-bearing IfcElement subtypes (cheap type-name test — avoids parsing every entity on
+    // a giant file). Anything not listed (or with unrepresentable geometry) is skipped -> OCC fallback.
+    static bool is_product_type(std::string_view t) {
+        static const char *kinds[] = {
+            "IFCBUILDINGELEMENTPROXY", "IFCMECHANICALFASTENER", "IFCELEMENTASSEMBLY", "IFCFASTENER",
+            "IFCDISCRETEACCESSORY", "IFCBUILDINGELEMENTPART", "IFCBEAM", "IFCCOLUMN", "IFCMEMBER",
+            "IFCPLATE", "IFCWALL", "IFCWALLSTANDARDCASE", "IFCSLAB", "IFCFOOTING", "IFCPILE", "IFCROOF",
+            "IFCSTAIR", "IFCSTAIRFLIGHT", "IFCRAMP", "IFCRAMPFLIGHT", "IFCRAILING", "IFCCOVERING",
+            "IFCCURTAINWALL", "IFCDOOR", "IFCWINDOW", "IFCCHIMNEY", "IFCSHADINGDEVICE", "IFCPIPESEGMENT",
+            "IFCPIPEFITTING", "IFCDUCTSEGMENT", "IFCDUCTFITTING", "IFCFLOWSEGMENT", "IFCFLOWFITTING",
+            "IFCFLOWTERMINAL", "IFCFLOWCONTROLLER", "IFCDISTRIBUTIONELEMENT", "IFCENERGYCONVERSIONDEVICE",
+            "IFCREINFORCINGBAR", "IFCREINFORCINGMESH", "IFCTENDON", "IFCTENDONANCHOR", "IFCFURNISHINGELEMENT",
+            "IFCFURNITURE", "IFCSYSTEMFURNITUREELEMENT", "IFCCIVILELEMENT", "IFCGEOGRAPHICELEMENT",
+            // *StandardCase / *ElementedCase product subtypes (NB: the *TYPE entities are NOT products)
+            "IFCBEAMSTANDARDCASE", "IFCCOLUMNSTANDARDCASE", "IFCMEMBERSTANDARDCASE", "IFCPLATESTANDARDCASE",
+            "IFCSLABSTANDARDCASE", "IFCSLABELEMENTEDCASE", "IFCWALLELEMENTEDCASE", "IFCDOORSTANDARDCASE",
+            "IFCWINDOWSTANDARDCASE"};
+        for (const char *k : kinds)
+            if (iequals(t, k))
+                return true;
+        return false;
     }
 
     // The file's length unit as metres-per-unit, from the first IfcSIUnit(*,.LENGTHUNIT.,prefix,.METRE.).
@@ -182,6 +203,12 @@ class IfcResolver {
     }
     static long ref_arg(const Instance &in, size_t i) {
         return (i < in.args.size() && in.args[i].is_ref()) ? in.args[i].i : 0;
+    }
+    static double ad(const Instance *in, size_t i) { // numeric arg (0 if absent/$)
+        return (in && i < in->args.size() &&
+                (in->args[i].kind == adacpp::step::Kind::Real || in->args[i].kind == adacpp::step::Kind::Int))
+                   ? in->args[i].as_double()
+                   : 0.0;
     }
     static std::string name_of(const Instance &in) {
         // rooted entities: GlobalId, OwnerHistory, Name(arg2) ...
@@ -462,6 +489,37 @@ class IfcResolver {
             apply_placement2d(ref_arg(*in, 2), poly);
         } else if (iequals(in->type, "IFCARBITRARYCLOSEDPROFILEDEF")) {
             poly = curve_points2d(ref_arg(*in, 2)); // (ProfileType, ProfileName, OuterCurve)
+        } else if (iequals(in->type, "IFCISHAPEPROFILEDEF")) {
+            // (.., Position, OverallWidth, OverallDepth, WebThickness, FlangeThickness, FilletRadius, ...)
+            // Centred on the bounding box; fillets ignored (sharp corners). Outline CCW from bottom-right.
+            double bx = ad(in, 3) / 2, hy = ad(in, 4) / 2, wx = ad(in, 5) / 2, tf = ad(in, 6);
+            if (bx <= 0 || hy <= 0 || wx <= 0 || tf <= 0)
+                return nullptr;
+            double fy = hy - tf;
+            poly = {{bx, -hy, 0},  {bx, -fy, 0},  {wx, -fy, 0},  {wx, fy, 0},   {bx, fy, 0},   {bx, hy, 0},
+                    {-bx, hy, 0},  {-bx, fy, 0},  {-wx, fy, 0},  {-wx, -fy, 0}, {-bx, -fy, 0}, {-bx, -hy, 0}};
+            apply_placement2d(ref_arg(*in, 2), poly);
+        } else if (iequals(in->type, "IFCTSHAPEPROFILEDEF")) {
+            // (.., Position, Depth, FlangeWidth, WebThickness, FlangeThickness, ...). Flange at +y (top),
+            // web hangs to -y; centred on the bounding box.
+            double hy = ad(in, 3) / 2, fx = ad(in, 4) / 2, wx = ad(in, 5) / 2, tf = ad(in, 6);
+            if (hy <= 0 || fx <= 0 || wx <= 0 || tf <= 0)
+                return nullptr;
+            double fy = hy - tf;
+            poly = {{wx, -hy, 0}, {wx, fy, 0},  {fx, fy, 0},   {fx, hy, 0},
+                    {-fx, hy, 0}, {-fx, fy, 0}, {-wx, fy, 0},  {-wx, -hy, 0}};
+            apply_placement2d(ref_arg(*in, 2), poly);
+        } else if (iequals(in->type, "IFCCIRCLEPROFILEDEF")) {
+            // (.., Position, Radius). 64-gon (vertices on the axes -> bbox == analytic 2R).
+            double rad = ad(in, 3);
+            if (rad <= 0)
+                return nullptr;
+            const int N = 64;
+            for (int i = 0; i < N; ++i) {
+                double a = 2.0 * PI * i / N;
+                poly.push_back({rad * std::cos(a), rad * std::sin(a), 0});
+            }
+            apply_placement2d(ref_arg(*in, 2), poly);
         } else {
             return nullptr;
         }
