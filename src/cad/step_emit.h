@@ -118,6 +118,28 @@ class StepBrepEmitter {
                              std::to_string(ax) + "," + ifc_real(rv.angle) + ")");
     }
 
+    // Emit a boolean-operand solid -> its STEP id (0 if unrepresentable). Recursive for nested booleans.
+    long emit_solid_item(std::string &out, const SolidItemN &it) {
+        if (it.extrusion)
+            return emit_extrusion(out, *it.extrusion);
+        if (it.revolve)
+            return emit_revolve(out, *it.revolve);
+        if (it.boolean)
+            return emit_boolean(out, *it.boolean);
+        return 0; // brep-faces operands not emitted here (rare in CSG) -> caller drops to OCC
+    }
+    // ng::BooleanN -> BOOLEAN_RESULT('',op,#first,#second). Operands keep their analytic STEP form (the
+    // CSG tree is preserved, not evaluated); a kernel-equipped consumer evaluates it.
+    long emit_boolean(std::string &out, const BooleanN &bn) {
+        long a = emit_solid_item(out, bn.a);
+        long b = emit_solid_item(out, bn.b);
+        if (!a || !b)
+            return 0;
+        const char *op = bn.op == 1 ? "UNION" : bn.op == 2 ? "INTERSECTION" : "DIFFERENCE";
+        return emit(out, "BOOLEAN_RESULT('',." + std::string(op) + ".,#" + std::to_string(a) + ",#" +
+                             std::to_string(b) + ")");
+    }
+
     // True if the baked transform is rigid (orthonormal 3x3) — a scale/shear can't be carried by an
     // EXTRUDED_AREA_SOLID's Position (rotation-only), so such instances are baked to B-rep instead.
     bool tf_rigid() const {

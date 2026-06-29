@@ -145,10 +145,11 @@ class IfcResolver {
             root.faces.clear();
             root.extrusion = nullptr;
             root.revolve = nullptr;
+            root.boolean = nullptr;
         }
         // Compose the product's world placement (IfcLocalPlacement chain) onto every instance — the
         // geometry rep is in the element's local frame; ObjectPlacement positions it in the world.
-        if (!root.faces.empty() || root.extrusion || root.revolve) {
+        if (!root.faces.empty() || root.extrusion || root.revolve || root.boolean) {
             std::array<float, 16> objp = object_placement(ref_arg(*p, 5)); // ObjectPlacement = arg 5
             if (!is_identity(objp)) {
                 if (root.transforms.empty())
@@ -158,12 +159,13 @@ class IfcResolver {
                         m = mat_mul(objp, m);
             }
         }
-        // A revolve under a non-rigid (scale/shear) instance is no longer a revolve (the circular sweep
-        // distorts) and can't be carried by REVOLVED_AREA_SOLID -> drop it to OCC rather than emit wrong.
-        if (root.revolve)
+        // A revolve/boolean under a non-rigid (scale/shear) instance distorts in a way the analytic
+        // forms can't carry -> drop it to OCC rather than emit wrong geometry.
+        if (root.revolve || root.boolean)
             for (const auto &m : root.transforms)
                 if (!is_rigid(m)) {
                     root.revolve = nullptr;
+                    root.boolean = nullptr;
                     break;
                 }
         return root;
@@ -611,101 +613,74 @@ class IfcResolver {
             mixed_ = true;
             return false;
         }
-        if ((root.extrusion || root.revolve) && solid_src_ != id) {
+        if ((root.extrusion || root.revolve || root.boolean) && solid_src_ != id) {
             mixed_ = true;
             return false;
         }
         solid_src_ = id;
         return true;
     }
-    // Append an IfcShapeRepresentation item's geometry to root: IfcAdvancedBrep, IfcFacetedBrep,
-    // IfcShellBasedSurfaceModel, IfcExtrudedAreaSolid, IfcRevolvedAreaSolid, IfcMappedItem.
-    void resolve_item(long id, NgeomRoot &root) {
+    static bool solid_ok(const SolidItemN &it) {
+        return it.extrusion || it.revolve || it.boolean || !it.faces.empty();
+    }
+    // Resolve an IfcSolidModel / IfcCsgPrimitive3D / IfcBooleanResult / IfcHalfSpaceSolid into a
+    // SolidItemN (the boolean-operand form). `ref*` = a sibling-operand bbox to bound a half-space.
+    SolidItemN resolve_solid_item(long id, const Vec3 *refmin = nullptr, const Vec3 *refmax = nullptr) {
+        SolidItemN out;
         const Instance *in = inst(id);
         if (!in)
-            return;
+            return out;
         std::string_view t = in->type;
-        if (iequals(t, "IFCADVANCEDBREP") || iequals(t, "IFCFACETEDBREP")) {
-            if (root.extrusion || root.revolve) { // brep mixed with a procedural solid -> skip
-                mixed_ = true;
-                return;
-            }
-            const Instance *shell = inst(ref_arg(*in, 0)); // IfcClosedShell(CfsFaces)
-            if (shell && !shell->args.empty() && shell->args[0].is_list())
-                for (const Value &fref : shell->args[0].items)
-                    if (fref.is_ref())
-                        if (auto f = face(fref.i))
-                            root.faces.push_back(f);
-        } else if (iequals(t, "IFCEXTRUDEDAREASOLID")) {
-            // (SweptArea, Position, ExtrudedDirection, Depth). One solid per root; a 2nd distinct solid
-            // (or brep already present) => mixed -> skip. Mapped instances share the same id.
-            if (!claim_solid(root, id))
-                return;
+        if (iequals(t, "IFCEXTRUDEDAREASOLID")) {
             auto prof = profile_face(ref_arg(*in, 0));
             if (!prof)
-                return; // unsupported profile -> product yields no geometry -> OCC fallback
+                return out;
             auto ex = std::make_shared<ExtrusionN>();
             ex->profile = prof;
             ex->frame = (in->args.size() > 1 && in->args[1].is_ref()) ? axis2(in->args[1].i) : Frame{};
             ex->direction = (in->args.size() > 2 && in->args[2].is_ref()) ? dir(in->args[2].i) : Vec3{0, 0, 1};
             ex->depth = in->args.size() > 3 ? in->args[3].as_double() : 0.0;
-            root.extrusion = ex;
+            out.extrusion = ex;
         } else if (iequals(t, "IFCREVOLVEDAREASOLID")) {
-            // (SweptArea, Position, Axis=IfcAxis1Placement, Angle[rad]). Axis is local to Position.
-            if (!claim_solid(root, id))
-                return;
             auto prof = profile_face(ref_arg(*in, 0));
             if (!prof)
-                return;
+                return out;
             auto rv = std::make_shared<RevolveN>();
             rv->profile = prof;
             rv->frame = (in->args.size() > 1 && in->args[1].is_ref()) ? axis2(in->args[1].i) : Frame{};
-            const Instance *ax = inst(ref_arg(*in, 2)); // IfcAxis1Placement(Location, Axis)
+            const Instance *ax = inst(ref_arg(*in, 2));
             rv->axis_origin = (ax && ax->args.size() > 0 && ax->args[0].is_ref()) ? point(ax->args[0].i) : Vec3{0, 0, 0};
             rv->axis_dir = (ax && ax->args.size() > 1 && ax->args[1].is_ref()) ? dir(ax->args[1].i) : Vec3{0, 0, 1};
             rv->angle = in->args.size() > 3 ? in->args[3].as_double() : 0.0;
-            root.revolve = rv;
+            out.revolve = rv;
         } else if (iequals(t, "IFCBLOCK")) {
-            // (Position, XLength, YLength, ZLength) — a box from the Position corner -> rectangle [0,X]x[0,Y]
-            // extruded Z along local Z. (IfcBlock is corner-anchored, not centred.)
-            if (!claim_solid(root, id))
-                return;
             double X = ad(in, 1), Y = ad(in, 2), Z = ad(in, 3);
             if (X <= 0 || Y <= 0 || Z <= 0)
-                return;
+                return out;
             auto ex = std::make_shared<ExtrusionN>();
             ex->profile = make_poly_profile({{0, 0, 0}, {X, 0, 0}, {X, Y, 0}, {0, Y, 0}});
             ex->frame = axis2(ref_arg(*in, 0));
             ex->direction = {0, 0, 1};
             ex->depth = Z;
-            if (ex->profile)
-                root.extrusion = ex;
+            out.extrusion = ex->profile ? ex : nullptr;
         } else if (iequals(t, "IFCRIGHTCIRCULARCYLINDER")) {
-            // (Position, Height, Radius) -> circle profile extruded Height along local Z.
-            if (!claim_solid(root, id))
-                return;
             double H = ad(in, 1), R = ad(in, 2);
             if (H <= 0 || R <= 0)
-                return;
+                return out;
             auto ex = std::make_shared<ExtrusionN>();
             ex->profile = make_poly_profile(circle_poly(R));
             ex->frame = axis2(ref_arg(*in, 0));
             ex->direction = {0, 0, 1};
             ex->depth = H;
-            if (ex->profile)
-                root.extrusion = ex;
+            out.extrusion = ex->profile ? ex : nullptr;
         } else if (iequals(t, "IFCSPHERE")) {
-            // (Position, Radius) -> a half-disk (semicircle through +x) revolved 2pi about local Y; the
-            // sphere is symmetric so only Position's location matters. Faceted (32 arc segments).
-            if (!claim_solid(root, id))
-                return;
             double R = ad(in, 1);
             if (R <= 0)
-                return;
+                return out;
             std::vector<Vec3> poly;
             const int n = 32;
             for (int i = 0; i <= n; ++i) {
-                double a = -PI / 2 + PI * i / n; // (0,-R) -> (R,0) -> (0,R); loop closes along x=0 (the axis)
+                double a = -PI / 2 + PI * i / n;
                 poly.push_back({R * std::cos(a), R * std::sin(a), 0});
             }
             auto rv = std::make_shared<RevolveN>();
@@ -714,35 +689,145 @@ class IfcResolver {
             rv->axis_origin = {0, 0, 0};
             rv->axis_dir = {0, 1, 0};
             rv->angle = 2.0 * PI;
-            if (rv->profile)
-                root.revolve = rv;
+            out.revolve = rv->profile ? rv : nullptr;
         } else if (iequals(t, "IFCRIGHTCIRCULARCONE")) {
-            // (Position, Height, BottomRadius) -> profile triangle revolved 2pi; frame maps the revolve's
-            // local Y (cone axis) onto Position's Z so the apex points along Position.Z.
-            if (!claim_solid(root, id))
-                return;
             double H = ad(in, 1), R = ad(in, 2);
             if (H <= 0 || R <= 0)
-                return;
+                return out;
             auto rv = std::make_shared<RevolveN>();
             rv->profile = make_poly_profile({{0, 0, 0}, {R, 0, 0}, {0, H, 0}});
             Frame pos = axis2(ref_arg(*in, 0));
             Frame F;
             F.o = pos.o;
             F.x = pos.x;
-            F.y = pos.z; // cone axis
+            F.y = pos.z;
             F.z = pos.x.cross(pos.z);
             rv->frame = F;
             rv->axis_origin = {0, 0, 0};
             rv->axis_dir = {0, 1, 0};
             rv->angle = 2.0 * PI;
-            if (rv->profile)
-                root.revolve = rv;
+            out.revolve = rv->profile ? rv : nullptr;
         } else if (iequals(t, "IFCCSGSOLID")) {
-            // (TreeRootExpression) -> a CSG primitive or IfcBooleanResult; recurse (boolean -> skip).
-            if (in->args.size() > 0 && in->args[0].is_ref())
-                resolve_item(in->args[0].i, root);
-        } else if (iequals(t, "IFCMAPPEDITEM")) {
+            return resolve_solid_item(ref_arg(*in, 0), refmin, refmax);
+        } else if (iequals(t, "IFCBOOLEANRESULT") || iequals(t, "IFCBOOLEANCLIPPINGRESULT")) {
+            out.boolean = mk_boolean(in);
+        } else if (iequals(t, "IFCADVANCEDBREP") || iequals(t, "IFCFACETEDBREP")) {
+            const Instance *shell = inst(ref_arg(*in, 0));
+            if (shell && !shell->args.empty() && shell->args[0].is_list())
+                for (const Value &fref : shell->args[0].items)
+                    if (fref.is_ref())
+                        if (auto f = face(fref.i))
+                            out.faces.push_back(f);
+        } else if (iequals(t, "IFCHALFSPACESOLID")) {
+            if (auto ex = mk_halfspace(in, refmin, refmax))
+                out.extrusion = ex;
+        }
+        return out;
+    }
+    // IfcBooleanResult(Operator, FirstOperand, SecondOperand) -> ng::BooleanN (null if an operand can't
+    // be resolved). op: 0 difference / 1 union / 2 intersection. The 1st operand bounds a half-space 2nd.
+    std::shared_ptr<BooleanN> mk_boolean(const Instance *in) {
+        if (!in || in->args.size() < 3)
+            return nullptr;
+        auto bn = std::make_shared<BooleanN>();
+        std::string_view op = (in->args[0].kind == adacpp::step::Kind::Enum) ? in->args[0].s : std::string_view("DIFFERENCE");
+        bn->op = (op == "UNION") ? 1 : (op == "INTERSECTION") ? 2 : 0;
+        bn->a = resolve_solid_item(ref_arg(*in, 1));
+        if (!solid_ok(bn->a))
+            return nullptr;
+        Vec3 amin, amax;
+        bool hb = solid_item_bbox(bn->a, amin, amax);
+        bn->b = resolve_solid_item(ref_arg(*in, 2), hb ? &amin : nullptr, hb ? &amax : nullptr);
+        if (!solid_ok(bn->b))
+            return nullptr;
+        return bn;
+    }
+    // Loose world bbox of a SolidItemN (over-estimate is fine — only used to size a half-space box).
+    bool solid_item_bbox(const SolidItemN &it, Vec3 &mn, Vec3 &mx) {
+        std::vector<Vec3> pts;
+        if (it.extrusion && it.extrusion->profile && !it.extrusion->profile->bounds.empty() &&
+            it.extrusion->profile->bounds[0].loop) {
+            const auto &ex = *it.extrusion;
+            Vec3 d = ex.direction * ex.depth;
+            for (const Vec3 &p : ex.profile->bounds[0].loop->polygon) {
+                pts.push_back(ex.frame.to_world(p.x, p.y, 0));
+                pts.push_back(ex.frame.to_world(p.x + d.x, p.y + d.y, d.z));
+            }
+        } else if (it.revolve && it.revolve->profile && !it.revolve->profile->bounds.empty() &&
+                   it.revolve->profile->bounds[0].loop) {
+            const auto &rv = *it.revolve;
+            Vec3 axd = rv.axis_dir.norm() > 1e-9 ? rv.axis_dir.normalized() : Vec3{0, 1, 0};
+            double rmax = 0;
+            std::vector<Vec3> w;
+            for (const Vec3 &p : rv.profile->bounds[0].loop->polygon) {
+                Vec3 rel = p - rv.axis_origin;
+                rmax = std::max(rmax, (rel - axd * axd.dot(rel)).norm());
+                w.push_back(rv.frame.to_world(p.x, p.y, p.z));
+            }
+            Vec3 e{rmax, rmax, rmax}; // expand for the swept circle (loose)
+            for (const Vec3 &p : w) {
+                pts.push_back(p + e);
+                pts.push_back(p - e);
+            }
+        } else if (it.boolean) {
+            return solid_item_bbox(it.boolean->a, mn, mx); // result is contained in operand a
+        } else if (!it.faces.empty()) {
+            for (const auto &f : it.faces)
+                for (const auto &b : f->bounds)
+                    if (b.loop) {
+                        if (b.loop->is_poly)
+                            for (const Vec3 &p : b.loop->polygon)
+                                pts.push_back(p);
+                        else
+                            for (const auto &e : b.loop->edges) {
+                                pts.push_back(e.start);
+                                pts.push_back(e.end);
+                            }
+                    }
+        }
+        if (pts.empty())
+            return false;
+        mn = mx = pts[0];
+        for (const Vec3 &p : pts) {
+            mn.x = std::min(mn.x, p.x); mn.y = std::min(mn.y, p.y); mn.z = std::min(mn.z, p.z);
+            mx.x = std::max(mx.x, p.x); mx.y = std::max(mx.y, p.y); mx.z = std::max(mx.z, p.z);
+        }
+        return true;
+    }
+    // IfcHalfSpaceSolid(BaseSurface=IfcPlane, AgreementFlag) -> a finite box (extrusion) on the material
+    // side of the plane, sized to cover the reference bbox so the boolean DIFFERENCE clips correctly.
+    std::shared_ptr<ExtrusionN> mk_halfspace(const Instance *in, const Vec3 *refmin, const Vec3 *refmax) {
+        if (!refmin || !refmax)
+            return nullptr; // no reference extent -> can't bound a half-space -> skip (OCC)
+        const Instance *plane = inst(ref_arg(*in, 0)); // IfcPlane(Position)
+        if (!plane)
+            return nullptr;
+        Frame pf = axis2(ref_arg(*plane, 0)); // o on the plane, z = normal
+        bool agree = !(in->args.size() > 1 && in->args[1].kind == adacpp::step::Kind::Enum && in->args[1].s == "F");
+        Vec3 hd = agree ? Vec3{-pf.z.x, -pf.z.y, -pf.z.z} : pf.z; // material side (sign validated vs OCC)
+        Vec3 c{(refmin->x + refmax->x) / 2, (refmin->y + refmax->y) / 2, (refmin->z + refmax->z) / 2};
+        double S = (*refmax - *refmin).norm() * 1.5 + 1e-6;
+        Vec3 cp = c - pf.z * pf.z.dot(c - pf.o); // project the centre onto the cutting plane
+        Frame F;
+        F.o = cp;
+        F.z = hd.normalized();
+        Vec3 t = std::abs(F.z.dot(pf.x)) < 0.9 ? pf.x : pf.y;
+        F.x = (t - F.z * F.z.dot(t)).normalized();
+        F.y = F.z.cross(F.x);
+        auto ex = std::make_shared<ExtrusionN>();
+        ex->profile = make_poly_profile({{-S, -S, 0}, {S, -S, 0}, {S, S, 0}, {-S, S, 0}});
+        ex->frame = F;
+        ex->direction = {0, 0, 1}; // local Z = hd, into the material
+        ex->depth = S;
+        return ex->profile ? ex : nullptr;
+    }
+    // Append an IfcShapeRepresentation item's geometry to root. Brep faces concatenate across items; a
+    // procedural solid (extrusion/revolve/CSG primitive/boolean) is one-per-root. IfcMappedItem places.
+    void resolve_item(long id, NgeomRoot &root) {
+        const Instance *in = inst(id);
+        if (!in)
+            return;
+        if (iequals(in->type, "IFCMAPPEDITEM")) {
             // (MappingSource=IfcRepresentationMap, MappingTarget=IfcCartesianTransformationOperator3D)
             const Instance *rm = inst(ref_arg(*in, 0));
             if (rm && rm->args.size() > 1) {
@@ -756,6 +841,22 @@ class IfcResolver {
             // transform operator -> a world-placement matrix appended to root.transforms.
             std::array<float, 16> M = op_matrix(ref_arg(*in, 1));
             root.transforms.push_back(M);
+            return;
+        }
+        SolidItemN it = resolve_solid_item(id);
+        if (!solid_ok(it))
+            return; // unsupported geometry -> product yields nothing here -> OCC fallback
+        if (!it.faces.empty() && !it.extrusion && !it.revolve && !it.boolean) {
+            if (root.extrusion || root.revolve || root.boolean) { // brep mixed with a procedural solid
+                mixed_ = true;
+                return;
+            }
+            for (auto &f : it.faces) // brep faces concatenate across items
+                root.faces.push_back(f);
+        } else if (claim_solid(root, id)) {
+            root.extrusion = it.extrusion;
+            root.revolve = it.revolve;
+            root.boolean = it.boolean;
         }
     }
     // IfcCartesianTransformationOperator3D(Axis1,Axis2,LocalOrigin,Scale,Axis3[,Scale2,Scale3])

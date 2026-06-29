@@ -351,6 +351,32 @@ private:
             offs.push_back(o);
         }
         std::sort(lists.roots.begin(), lists.roots.end()); // deterministic output order
+        prune_boolean_operands();
+    }
+
+    // A BOOLEAN_RESULT's operands are themselves solid entities (extrusion/revolve/nested boolean) and
+    // were classified as roots — drop them so only the top-level CSG tree is a root (else the operands
+    // tessellate standalone alongside the boolean). Cheap substring gate so boolean-free files pay ~0.
+    void prune_boolean_operands() {
+        std::unordered_set<long> operands;
+        std::string sc;
+        for (long id : lists.roots) {
+            std::string_view sv = statement_bytes(id, sc);
+            if (sv.find("BOOLEAN_RESULT") == std::string_view::npos)
+                continue;
+            std::string bytes(sv);
+            Instance ins;
+            if (!parse_statement(bytes, ins) || ins.type != "BOOLEAN_RESULT")
+                continue;
+            if (ins.args.size() > 2 && ins.args[2].is_ref()) // ('',op,first,second)
+                operands.insert(ins.args[2].i);
+            if (ins.args.size() > 3 && ins.args[3].is_ref())
+                operands.insert(ins.args[3].i);
+        }
+        if (!operands.empty())
+            lists.roots.erase(std::remove_if(lists.roots.begin(), lists.roots.end(),
+                                             [&](long id) { return operands.count(id) > 0; }),
+                              lists.roots.end());
     }
 
     // pread-based variant of scan() (NO mmap): reads the file in chunks into a sliding window and
@@ -483,6 +509,7 @@ private:
             offs.push_back(o);
         }
         std::sort(lists.roots.begin(), lists.roots.end());
+        prune_boolean_operands();
     }
 
     // Light classify: extract id + type keyword (no arg parse) from the statement at `off` in `src`.
@@ -524,7 +551,7 @@ private:
             ++p;
         std::string_view t(t0, p - t0);
         if (t == "MANIFOLD_SOLID_BREP" || t == "SHELL_BASED_SURFACE_MODEL" || t == "BREP_WITH_VOIDS" ||
-            t == "EXTRUDED_AREA_SOLID" || t == "REVOLVED_AREA_SOLID")
+            t == "EXTRUDED_AREA_SOLID" || t == "REVOLVED_AREA_SOLID" || t == "BOOLEAN_RESULT")
             lists.roots.push_back(id);
         else if (t == "STYLED_ITEM")
             lists.styled.push_back(id);
@@ -616,6 +643,9 @@ public:
             in = nullptr;
         } else if (in->type == "REVOLVED_AREA_SOLID") {
             root.revolve = build_revolve(in); // ('', #profile, #position, #axis1, angle)
+            in = nullptr;
+        } else if (in->type == "BOOLEAN_RESULT") {
+            root.boolean = build_boolean(in); // ('', operator, #first, #second)
             in = nullptr;
         } else {
         std::vector<long> shell_ids;
@@ -931,6 +961,37 @@ private:
         rv->axis_dir = (ax && ax->args.size() > 2 && ax->args[2].is_ref()) ? point(ax->args[2].i) : ng::Vec3{0, 0, 1};
         rv->angle = in->args[4].as_double();
         return rv;
+    }
+
+    // A BOOLEAN_RESULT operand (#id) -> ng::SolidItemN (extrusion / revolve / nested boolean / brep).
+    ng::SolidItemN build_solid_item(long id) {
+        ng::SolidItemN it;
+        const Instance *in = inst(id);
+        if (!in)
+            return it;
+        if (in->type == "EXTRUDED_AREA_SOLID")
+            it.extrusion = build_extrusion(in);
+        else if (in->type == "REVOLVED_AREA_SOLID")
+            it.revolve = build_revolve(in);
+        else if (in->type == "BOOLEAN_RESULT")
+            it.boolean = build_boolean(in);
+        else if (in->type == "MANIFOLD_SOLID_BREP" && in->args.size() > 1 && in->args[1].is_ref())
+            shell_into(in->args[1].i, it.faces);
+        return it;
+    }
+    // BOOLEAN_RESULT('', operator, #first, #second) -> ng::BooleanN (null if an operand is unresolvable).
+    std::shared_ptr<ng::BooleanN> build_boolean(const Instance *in) {
+        if (!in || in->args.size() < 4)
+            return nullptr;
+        auto bn = std::make_shared<ng::BooleanN>();
+        std::string_view op = (in->args[1].kind == Kind::Enum) ? in->args[1].s : std::string_view("DIFFERENCE");
+        bn->op = (op == "UNION") ? 1 : (op == "INTERSECTION") ? 2 : 0;
+        bn->a = build_solid_item(in->args[2].is_ref() ? in->args[2].i : 0);
+        bn->b = build_solid_item(in->args[3].is_ref() ? in->args[3].i : 0);
+        auto ok = [](const ng::SolidItemN &it) { return it.extrusion || it.revolve || it.boolean || !it.faces.empty(); };
+        if (!ok(bn->a) || !ok(bn->b))
+            return nullptr;
+        return bn;
     }
 
     // --- B-spline helpers ----------------------------------------------------------------
