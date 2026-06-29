@@ -2665,6 +2665,50 @@ static adacpp::ifc_emit::FileStats write_ifc_file_impl(const std::string &in_pat
     return fs;
 }
 
+// Append `src` to `out`, adding `offset` to every entity id (#N defs + refs) WHOSE id > `keep_below`
+// — so references to the shared header block (#1..#keep_below, e.g. #4/#6/#11/#12) are left intact
+// while the solid's local ids are shifted to its reserved global block. Skips '#' inside
+// single-quoted SPF strings so a '#' in a name/GUID isn't mangled ('' is an escaped quote).
+static void renumber_into(std::string &out, const std::string &src, long offset, long keep_below) {
+    out.reserve(out.size() + src.size() + src.size() / 8);
+    bool in_str = false;
+    size_t i = 0, nsz = src.size();
+    while (i < nsz) {
+        char ch = src[i];
+        if (in_str) {
+            out += ch;
+            if (ch == '\'') {
+                if (i + 1 < nsz && src[i + 1] == '\'') {
+                    out += '\'';
+                    i += 2;
+                    continue;
+                }
+                in_str = false;
+            }
+            ++i;
+            continue;
+        }
+        if (ch == '\'') {
+            in_str = true;
+            out += ch;
+            ++i;
+            continue;
+        }
+        if (ch == '#' && i + 1 < nsz && src[i + 1] >= '0' && src[i + 1] <= '9') {
+            size_t j = i + 1;
+            long v = 0;
+            while (j < nsz && src[j] >= '0' && src[j] <= '9')
+                v = v * 10 + (src[j++] - '0');
+            out += '#';
+            out += std::to_string(v > keep_below ? v + offset : v);
+            i = j;
+            continue;
+        }
+        out += ch;
+        ++i;
+    }
+}
+
 // Phase 3: PARALLEL STEP->IFC. Mirrors the mesh/glb harness — one shared StreamIndex, per-worker
 // Resolver (copy_metadata_from), LPT scheduling, per-worker temp lanes. IFC's single global id space
 // is handled by giving solid at LPT-index i a DISJOINT id block [K + i*STRIDE, K + (i+1)*STRIDE)
@@ -2687,23 +2731,22 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
     std::vector<long> roots(idx.lists.roots.begin(), idx.lists.roots.end());
     if (max_solids > 0 && (long) roots.size() > max_solids)
         roots.resize(max_solids);
-    // LPT order + STRIDE from the heaviest solid (one solid_face_count pass).
-    size_t maxfaces = 0;
+    // LPT order (one solid_face_count pass) — load-balance the heavy solids first.
     {
         std::vector<std::pair<size_t, long>> cost;
         cost.reserve(roots.size());
-        for (long sid : roots) {
-            size_t fc = master.solid_face_count(sid);
-            maxfaces = std::max(maxfaces, fc);
-            cost.emplace_back(fc, sid);
-        }
+        for (long sid : roots)
+            cost.emplace_back(master.solid_face_count(sid), sid);
         master.clear_geom_cache();
         std::sort(cost.begin(), cost.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
         for (size_t i = 0; i < cost.size(); ++i)
             roots[i] = cost[i].second;
     }
-    const long K = 100;
-    const long STRIDE = (long) maxfaces * 64 + 200000; // ~64 entities/face bound + slack (gaps legal)
+    const long K = 13; // ids #1..#13 are the shared header block
+    // Robust global id allocation: each solid is emitted with LOCAL ids (1..n), then a contiguous
+    // block of n ids is reserved atomically and the solid's text is renumbered by the block base.
+    // No STRIDE guessing, no overflow, compact ids — correct regardless of per-face entity counts.
+    std::atomic<long> id_counter{K + 1};
 
     unsigned hw = std::thread::hardware_concurrency();
     int nth = num_threads > 0 ? num_threads : (int) (hw > 1 ? hw : 1);
@@ -2720,7 +2763,7 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
         std::string path, buf;
         std::vector<long> proxies;
         EmitStats stats;
-        long solids_out = 0, overflow = 0;
+        long solids_out = 0;
     };
     std::vector<Lane> lanes(nth);
     for (int t = 0; t < nth; ++t) {
@@ -2735,6 +2778,7 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
         adacpp::step::Resolver r(idx);
         r.copy_metadata_from(master);
         Lane &L = lanes[t];
+        std::string sb; // per-solid local-id buffer (renumbered into L.buf)
         auto flush = [&](bool force) {
             if (L.buf.size() >= (4u << 20) || force) {
                 std::fwrite(L.buf.data(), 1, L.buf.size(), L.fp);
@@ -2748,14 +2792,22 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
                 break;
             NgeomRoot root = r.resolve_root(roots[i]);
             solids_in.fetch_add(1, std::memory_order_relaxed);
-            long base = K + (long) i * STRIDE;
-            BrepEmitter em(base, nullptr, deflection, angular_deg);
-            size_t before = L.proxies.size();
-            emit_solid_ifc(em, L.buf, root, roots[i], (uint64_t) base, L.proxies);
-            if (L.proxies.size() > before)
+            // Emit with LOCAL ids starting ABOVE the shared header block (K+1..), so shared refs
+            // (#1..#K) are distinguishable and left intact by renumber. Then reserve a contiguous
+            // global block of n ids atomically and shift the solid's local ids into it.
+            sb.clear();
+            BrepEmitter em(K, nullptr, deflection, angular_deg);
+            std::vector<long> local_proxies;
+            emit_solid_ifc(em, sb, root, roots[i], (uint64_t) i * 1000u, local_proxies);
+            long n = em.current_id() - K; // local ids K+1..K+n
+            if (!local_proxies.empty()) {
+                long gbase = id_counter.fetch_add(n, std::memory_order_relaxed); // reserve [gbase, gbase+n-1]
+                long offset = gbase - (K + 1);                                   // local K+1 -> gbase
+                renumber_into(L.buf, sb, offset, K);
+                for (long p : local_proxies)
+                    L.proxies.push_back(p + offset);
                 ++L.solids_out;
-            if (em.current_id() >= base + STRIDE)
-                ++L.overflow; // id-block overflow (STRIDE too small) — would collide; flagged
+            }
             const EmitStats &s = em.stats();
             L.stats.faces_in += s.faces_in;
             L.stats.faces_out += s.faces_out;
@@ -2811,12 +2863,10 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
         fs.geom.edges_degenerate += L.stats.edges_degenerate;
         for (const auto &[k, v] : L.stats.drop_reasons)
             fs.geom.drop_reasons[k] += v;
-        if (L.overflow)
-            fs.geom.drop_reasons["id_block_overflow"] += L.overflow;
     }
     fs.solids_in = solids_in.load();
     if (!all_proxies.empty()) {
-        long cid = K + (long) roots.size() * STRIDE + 1; // above every block
+        long cid = id_counter.fetch_add(1); // next free global id (above all reserved blocks)
         std::string c = "#" + std::to_string(cid) + "=IFCRELCONTAINEDINSPATIALSTRUCTURE('" + ifc_guid(900000001) +
                         "',$,$,$,(";
         for (size_t i = 0; i < all_proxies.size(); ++i)
