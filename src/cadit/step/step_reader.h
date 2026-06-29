@@ -524,7 +524,7 @@ private:
             ++p;
         std::string_view t(t0, p - t0);
         if (t == "MANIFOLD_SOLID_BREP" || t == "SHELL_BASED_SURFACE_MODEL" || t == "BREP_WITH_VOIDS" ||
-            t == "EXTRUDED_AREA_SOLID")
+            t == "EXTRUDED_AREA_SOLID" || t == "REVOLVED_AREA_SOLID")
             lists.roots.push_back(id);
         else if (t == "STYLED_ITEM")
             lists.styled.push_back(id);
@@ -613,6 +613,9 @@ public:
             // 2D-local; position places it; dir is local to position. Mirrors emit_extrusion / the
             // ng:: extrusion tessellation. (no shells)
             root.extrusion = build_extrusion(in);
+            in = nullptr;
+        } else if (in->type == "REVOLVED_AREA_SOLID") {
+            root.revolve = build_revolve(in); // ('', #profile, #position, #axis1, angle)
             in = nullptr;
         } else {
         std::vector<long> shell_ids;
@@ -728,7 +731,8 @@ private:
                 continue;
             }
             std::string_view t = in->type;
-            if (t == "MANIFOLD_SOLID_BREP" || t == "SHELL_BASED_SURFACE_MODEL" || t == "EXTRUDED_AREA_SOLID")
+            if (t == "MANIFOLD_SOLID_BREP" || t == "SHELL_BASED_SURFACE_MODEL" || t == "EXTRUDED_AREA_SOLID" ||
+                t == "REVOLVED_AREA_SOLID")
                 tl.roots.push_back(id);
             else if (t == "STYLED_ITEM")
                 tl.styled.push_back(id);
@@ -910,6 +914,23 @@ private:
         ex->direction = in->args[3].is_ref() ? point(in->args[3].i) : ng::Vec3{0, 0, 1}; // DIRECTION via point()
         ex->depth = in->args[4].as_double();
         return ex;
+    }
+
+    // REVOLVED_AREA_SOLID('', #profile, #position, #axis1, angle) -> ng::RevolveN (null if no profile).
+    std::shared_ptr<ng::RevolveN> build_revolve(const Instance *in) {
+        if (!in || in->args.size() < 5)
+            return nullptr;
+        auto prof = profile_from_step(in->args[1].is_ref() ? in->args[1].i : 0);
+        if (!prof)
+            return nullptr;
+        auto rv = std::make_shared<ng::RevolveN>();
+        rv->profile = prof;
+        rv->frame = in->args[2].is_ref() ? placement(in->args[2].i) : ng::Frame{};
+        const Instance *ax = inst(in->args[3].is_ref() ? in->args[3].i : 0); // AXIS1_PLACEMENT('',#loc,#dir)
+        rv->axis_origin = (ax && ax->args.size() > 1 && ax->args[1].is_ref()) ? point(ax->args[1].i) : ng::Vec3{0, 0, 0};
+        rv->axis_dir = (ax && ax->args.size() > 2 && ax->args[2].is_ref()) ? point(ax->args[2].i) : ng::Vec3{0, 0, 1};
+        rv->angle = in->args[4].as_double();
+        return rv;
     }
 
     // --- B-spline helpers ----------------------------------------------------------------

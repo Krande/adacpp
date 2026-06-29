@@ -144,10 +144,11 @@ class IfcResolver {
         if (mixed_) {
             root.faces.clear();
             root.extrusion = nullptr;
+            root.revolve = nullptr;
         }
         // Compose the product's world placement (IfcLocalPlacement chain) onto every instance — the
         // geometry rep is in the element's local frame; ObjectPlacement positions it in the world.
-        if (!root.faces.empty() || root.extrusion) {
+        if (!root.faces.empty() || root.extrusion || root.revolve) {
             std::array<float, 16> objp = object_placement(ref_arg(*p, 5)); // ObjectPlacement = arg 5
             if (!is_identity(objp)) {
                 if (root.transforms.empty())
@@ -157,6 +158,14 @@ class IfcResolver {
                         m = mat_mul(objp, m);
             }
         }
+        // A revolve under a non-rigid (scale/shear) instance is no longer a revolve (the circular sweep
+        // distorts) and can't be carried by REVOLVED_AREA_SOLID -> drop it to OCC rather than emit wrong.
+        if (root.revolve)
+            for (const auto &m : root.transforms)
+                if (!is_rigid(m)) {
+                    root.revolve = nullptr;
+                    break;
+                }
         return root;
     }
 
@@ -582,15 +591,29 @@ class IfcResolver {
             p = {loc.x + cx * x - sx * y, loc.y + sx * x + cx * y, 0};
         }
     }
+    // One procedural solid per root. False (+ flags mixed_) if a brep or a DIFFERENT solid is already
+    // present; mapped instances of the same solid (same id) are allowed (their transforms accumulate).
+    bool claim_solid(NgeomRoot &root, long id) {
+        if (!root.faces.empty()) {
+            mixed_ = true;
+            return false;
+        }
+        if ((root.extrusion || root.revolve) && solid_src_ != id) {
+            mixed_ = true;
+            return false;
+        }
+        solid_src_ = id;
+        return true;
+    }
     // Append an IfcShapeRepresentation item's geometry to root: IfcAdvancedBrep, IfcFacetedBrep,
-    // IfcShellBasedSurfaceModel, IfcExtrudedAreaSolid, or IfcMappedItem (a placed instance -> transform).
+    // IfcShellBasedSurfaceModel, IfcExtrudedAreaSolid, IfcRevolvedAreaSolid, IfcMappedItem.
     void resolve_item(long id, NgeomRoot &root) {
         const Instance *in = inst(id);
         if (!in)
             return;
         std::string_view t = in->type;
         if (iequals(t, "IFCADVANCEDBREP") || iequals(t, "IFCFACETEDBREP")) {
-            if (root.extrusion) { // brep mixed with a procedural solid -> skip the product
+            if (root.extrusion || root.revolve) { // brep mixed with a procedural solid -> skip
                 mixed_ = true;
                 return;
             }
@@ -601,12 +624,10 @@ class IfcResolver {
                         if (auto f = face(fref.i))
                             root.faces.push_back(f);
         } else if (iequals(t, "IFCEXTRUDEDAREASOLID")) {
-            // (SweptArea, Position, ExtrudedDirection, Depth). One extrusion per root; a 2nd distinct
-            // solid (or brep already present) => mixed -> skip. Mapped instances share the same id.
-            if (!root.faces.empty() || (solid_src_ && solid_src_ != id)) {
-                mixed_ = true;
+            // (SweptArea, Position, ExtrudedDirection, Depth). One solid per root; a 2nd distinct solid
+            // (or brep already present) => mixed -> skip. Mapped instances share the same id.
+            if (!claim_solid(root, id))
                 return;
-            }
             auto prof = profile_face(ref_arg(*in, 0));
             if (!prof)
                 return; // unsupported profile -> product yields no geometry -> OCC fallback
@@ -616,7 +637,21 @@ class IfcResolver {
             ex->direction = (in->args.size() > 2 && in->args[2].is_ref()) ? dir(in->args[2].i) : Vec3{0, 0, 1};
             ex->depth = in->args.size() > 3 ? in->args[3].as_double() : 0.0;
             root.extrusion = ex;
-            solid_src_ = id;
+        } else if (iequals(t, "IFCREVOLVEDAREASOLID")) {
+            // (SweptArea, Position, Axis=IfcAxis1Placement, Angle[rad]). Axis is local to Position.
+            if (!claim_solid(root, id))
+                return;
+            auto prof = profile_face(ref_arg(*in, 0));
+            if (!prof)
+                return;
+            auto rv = std::make_shared<RevolveN>();
+            rv->profile = prof;
+            rv->frame = (in->args.size() > 1 && in->args[1].is_ref()) ? axis2(in->args[1].i) : Frame{};
+            const Instance *ax = inst(ref_arg(*in, 2)); // IfcAxis1Placement(Location, Axis)
+            rv->axis_origin = (ax && ax->args.size() > 0 && ax->args[0].is_ref()) ? point(ax->args[0].i) : Vec3{0, 0, 0};
+            rv->axis_dir = (ax && ax->args.size() > 1 && ax->args[1].is_ref()) ? dir(ax->args[1].i) : Vec3{0, 0, 1};
+            rv->angle = in->args.size() > 3 ? in->args[3].as_double() : 0.0;
+            root.revolve = rv;
         } else if (iequals(t, "IFCMAPPEDITEM")) {
             // (MappingSource=IfcRepresentationMap, MappingTarget=IfcCartesianTransformationOperator3D)
             const Instance *rm = inst(ref_arg(*in, 0));
@@ -693,6 +728,13 @@ class IfcResolver {
             if (std::abs(M[i] - I[i]) > 1e-9f)
                 return false;
         return true;
+    }
+    // Orthonormal 3x3 (rotation only, no scale/shear) — column-major glTF columns are unit length.
+    static bool is_rigid(const std::array<float, 16> &M) {
+        double c0 = std::sqrt((double) M[0] * M[0] + (double) M[1] * M[1] + (double) M[2] * M[2]);
+        double c1 = std::sqrt((double) M[4] * M[4] + (double) M[5] * M[5] + (double) M[6] * M[6]);
+        double c2 = std::sqrt((double) M[8] * M[8] + (double) M[9] * M[9] + (double) M[10] * M[10]);
+        return std::abs(c0 - 1) < 1e-4 && std::abs(c1 - 1) < 1e-4 && std::abs(c2 - 1) < 1e-4;
     }
     // IfcAxis2Placement3D -> column-major glTF matrix.
     std::array<float, 16> axis2_mat(long id) {

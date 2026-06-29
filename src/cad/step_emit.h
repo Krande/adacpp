@@ -91,6 +91,33 @@ class StepBrepEmitter {
                              std::to_string(ed) + "," + ifc_real(ex.depth) + ")");
     }
 
+    // Emit a revolved-area solid -> REVOLVED_AREA_SOLID id (0 on failure). Instance transform baked into
+    // Position (caller ensures it's rigid); the 2D profile + the local revolution Axis emitted raw.
+    long emit_revolve(std::string &out, const RevolveN &rv) {
+        if (!rv.profile || rv.profile->bounds.empty() || !rv.profile->bounds[0].loop)
+            return 0;
+        const LoopN &lp = *rv.profile->bounds[0].loop;
+        std::vector<Vec3> ring = lp.is_poly ? lp.polygon : lp.discretize(deflection_, angular_);
+        if (ring.size() > 1 && (ring.front() - ring.back()).norm() < 1e-12)
+            ring.pop_back();
+        if (ring.size() < 3)
+            return 0;
+        std::vector<long> pids;
+        pids.reserve(ring.size() + 1);
+        for (const Vec3 &p : ring)
+            pids.push_back(pt2d_raw(out, p.x, p.y));
+        pids.push_back(pids.front());
+        long poly = emit(out, "POLYLINE(''," + refs(pids) + ")");
+        long prof = emit(out, "ARBITRARY_CLOSED_PROFILE_DEF(.AREA.,'',#" + std::to_string(poly) + ")");
+        Vec3 wo = tp(rv.frame.o), wz = td(rv.frame.z), wx = td(rv.frame.x);
+        long pos = emit(out, "AXIS2_PLACEMENT_3D('',#" + std::to_string(pt_raw(out, wo)) + ",#" +
+                                 std::to_string(dir_raw(out, wz)) + ",#" + std::to_string(dir_raw(out, wx)) + ")");
+        long ax = emit(out, "AXIS1_PLACEMENT('',#" + std::to_string(pt_raw(out, rv.axis_origin)) + ",#" +
+                                std::to_string(dir_raw(out, rv.axis_dir)) + ")"); // local to Position
+        return emit(out, "REVOLVED_AREA_SOLID('',#" + std::to_string(prof) + ",#" + std::to_string(pos) + ",#" +
+                             std::to_string(ax) + "," + ifc_real(rv.angle) + ")");
+    }
+
     // True if the baked transform is rigid (orthonormal 3x3) — a scale/shear can't be carried by an
     // EXTRUDED_AREA_SOLID's Position (rotation-only), so such instances are baked to B-rep instead.
     bool tf_rigid() const {
