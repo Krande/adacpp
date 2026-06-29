@@ -2596,15 +2596,37 @@ static void emit_solid_ifc(adacpp::ifc_emit::BrepEmitter &em, std::string &buf,
 }
 
 // Shared IFC header + spatial block (ids #1..#13). schema = "IFC4X3_ADD2" | "IFC4".
-static std::string ifc_header_block(const std::string &schema) {
+// The #7 length-unit line for the header. ng:: geometry is kept in the file's NATIVE units (the
+// mesh/glb path scales by unit_scale at bake time; the IFC writer emits native coords), so declare
+// the matching unit. unit_scale = metres per file-unit. SI prefixes cover m/mm/cm/dm/km/µm (≈ every
+// real STEP file); a non-SI scale (e.g. inch 0.0254) keeps METRE (no regression — was always METRE)
+// and is logged by the caller. Stays a SINGLE entity at #7 so the fixed #1..#13 header id layout holds.
+static std::string ifc_length_unit_line(double unit_scale) {
+    auto close = [](double a, double b) { return std::abs(a - b) <= 1e-9 * std::max(1.0, std::abs(b)); };
+    const char *prefix = nullptr; // null => plain METRE
+    if (close(unit_scale, 1e-3))
+        prefix = ".MILLI.";
+    else if (close(unit_scale, 1e-2))
+        prefix = ".CENTI.";
+    else if (close(unit_scale, 1e-1))
+        prefix = ".DECI.";
+    else if (close(unit_scale, 1e3))
+        prefix = ".KILO.";
+    else if (close(unit_scale, 1e-6))
+        prefix = ".MICRO.";
+    std::string pf = prefix ? prefix : "$";
+    return "#7=IFCSIUNIT(*,.LENGTHUNIT.," + pf + ",.METRE.);\n#8=IFCUNITASSIGNMENT((#7));\n";
+}
+
+static std::string ifc_header_block(const std::string &schema, double unit_scale) {
     using adacpp::ifc_emit::ifc_guid;
     std::string b;
     b += "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION((''),'2;1');\n";
     b += "FILE_NAME('','',(''),(''),'adacpp','','');\nFILE_SCHEMA(('" + schema + "'));\nENDSEC;\nDATA;\n";
     b += "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCDIRECTION((0.,0.,1.));\n#3=IFCDIRECTION((1.,0.,0.));\n"
          "#4=IFCAXIS2PLACEMENT3D(#1,#2,#3);\n#5=IFCDIRECTION((1.,0.));\n"
-         "#6=IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-5,#4,#5);\n"
-         "#7=IFCSIUNIT(*,.LENGTHUNIT.,$,.METRE.);\n#8=IFCUNITASSIGNMENT((#7));\n";
+         "#6=IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-5,#4,#5);\n";
+    b += ifc_length_unit_line(unit_scale);
     b += "#9=IFCPROJECT('" + ifc_guid(0xF0000001ull) + "',$,'adacpp STEP->IFC',$,$,$,$,(#6),#8);\n";
     b += "#10=IFCAXIS2PLACEMENT3D(#1,$,$);\n#11=IFCLOCALPLACEMENT($,#10);\n";
     b += "#12=IFCSITE('" + ifc_guid(0xF0000002ull) + "',$,'Site',$,$,#11,$,$,.ELEMENT.,$,$,$,$,$);\n";
@@ -2624,6 +2646,7 @@ static adacpp::ifc_emit::FileStats write_ifc_file_impl(const std::string &in_pat
     adacpp::step::Resolver r(idx);
     r.build_metadata(idx.lists);
     r.enable_parse_cache_bounding();
+    fs.unit_scale = r.unit_scale();
     std::FILE *fp = std::fopen(out_path.c_str(), "wb");
     if (!fp)
         return fs;
@@ -2635,7 +2658,7 @@ static adacpp::ifc_emit::FileStats write_ifc_file_impl(const std::string &in_pat
             buf.clear();
         }
     };
-    buf += ifc_header_block(schema);
+    buf += ifc_header_block(schema, r.unit_scale());
     BrepEmitter em(100, nullptr, deflection, angular_deg);
     std::vector<long> proxies;
     for (long sid : idx.lists.roots) {
@@ -2727,6 +2750,7 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
     auto idx = adacpp::step::StreamIndex::from_file(in_path);
     adacpp::step::Resolver master(idx);
     master.build_metadata(idx.lists);
+    fs.unit_scale = master.unit_scale();
 
     std::vector<long> roots(idx.lists.roots.begin(), idx.lists.roots.end());
     if (max_solids > 0 && (long) roots.size() > max_solids)
@@ -2840,7 +2864,7 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
         std::filesystem::remove_all(tdir);
         return fs;
     }
-    std::string hdr = ifc_header_block(schema);
+    std::string hdr = ifc_header_block(schema, master.unit_scale());
     std::fwrite(hdr.data(), 1, hdr.size(), out_fp);
     std::vector<long> all_proxies;
     std::vector<char> io(1 << 20);
@@ -3043,6 +3067,7 @@ void cad_module(nb::module_ &m) {
                                                    num_threads, max_solids);
             nb::dict d;
             d["solids_in"] = fs.solids_in;
+            d["unit_scale"] = fs.unit_scale;
             d["solids_out"] = fs.solids_out;
             d["faces_in"] = fs.geom.faces_in;
             d["faces_out"] = fs.geom.faces_out;

@@ -516,6 +516,7 @@ inline std::string ifc_str(const std::string &s) {
 
 struct FileStats {
     long solids_in = 0, solids_out = 0;
+    double unit_scale = 1.0; // metres per file length-unit (declared in the IFC header)
     EmitStats geom;
 };
 
