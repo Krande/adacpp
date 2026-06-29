@@ -2562,6 +2562,22 @@ static void emit_solid_ifc(adacpp::ifc_emit::BrepEmitter &em, std::string &buf,
     if (!brep)
         return;
     std::string nm = root.id.empty() ? ("solid_" + std::to_string(sid)) : ifc_str(root.id);
+    // Hierarchical instance name from the assembly path (root.instance_paths[k], parallel to
+    // transforms): "rootAsm/subAsm/.../solid" so the proxy is navigable by its assembly path in IFC
+    // viewers (vs a flat "name_k"). Refinement #2 — a navigable surfacing of the part hierarchy
+    // without a full IfcElementAssembly tree (instance_paths can't distinguish placements of the same
+    // sub-assembly, so a faithful nested tree needs a reader-side per-placement path first).
+    auto inst_name = [&](size_t k) -> std::string {
+        if (k >= root.instance_paths.size() || root.instance_paths[k].empty())
+            return nm + "_" + std::to_string(k);
+        std::string p;
+        for (const auto &lvl : root.instance_paths[k]) {
+            if (!p.empty())
+                p += "/";
+            p += lvl.second.empty() ? ("#" + std::to_string(lvl.first)) : lvl.second;
+        }
+        return ifc_str(p);
+    };
     long mrep =
         em.emit_entity(buf, "IfcShapeRepresentation(#6,'Body','AdvancedBrep',(#" + std::to_string(brep) + "))");
     if (root.transforms.empty()) {
@@ -2587,9 +2603,8 @@ static void emit_solid_ifc(adacpp::ifc_emit::BrepEmitter &em, std::string &buf,
         long sr = em.emit_entity(buf, "IfcShapeRepresentation(#6,'Body','MappedRepresentation',(#" +
                                           std::to_string(mi) + "))");
         long pds = em.emit_entity(buf, "IfcProductDefinitionShape($,$,(#" + std::to_string(sr) + "))");
-        long proxy = em.emit_entity(buf, "IfcBuildingElementProxy('" + ifc_guid(guid_seed + 1 + k) + "',$,'" + nm +
-                                             "_" + std::to_string(k) + "',$,$,#11,#" + std::to_string(pds) +
-                                             ",$,$)");
+        long proxy = em.emit_entity(buf, "IfcBuildingElementProxy('" + ifc_guid(guid_seed + 1 + k) + "',$,'" +
+                                             inst_name(k) + "',$,$,#11,#" + std::to_string(pds) + ",$,$)");
         proxies.push_back(proxy);
         ++k;
     }
