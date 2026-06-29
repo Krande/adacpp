@@ -47,8 +47,8 @@ inline void bake(const std::array<float, 16> &M, float usc, const float p[3], fl
 //       Avoids the 3x vertex blow-up of unshared per-triangle 'v' lines (crane OBJ 8.25 GB -> ~3 GB,
 //       ~6x fewer float-formats).
 struct MeshLane {
-    std::string path;       // STL: .stlraw ; OBJ: .objv (vertex lines)
-    std::string fpath;      // OBJ only: .objf (binary uint32 index triples, lane-local 0-based)
+    std::string path;  // STL: .stlraw ; OBJ: .objv (vertex lines)
+    std::string fpath; // OBJ only: .objf (binary uint32 index triples, lane-local 0-based)
     std::FILE *fp = nullptr;
     std::FILE *ffp = nullptr; // OBJ faces
     uint64_t tris = 0;

@@ -374,9 +374,9 @@ private:
                 operands.insert(ins.args[3].i);
         }
         if (!operands.empty())
-            lists.roots.erase(std::remove_if(lists.roots.begin(), lists.roots.end(),
-                                             [&](long id) { return operands.count(id) > 0; }),
-                              lists.roots.end());
+            lists.roots.erase(
+                std::remove_if(lists.roots.begin(), lists.roots.end(), [&](long id) { return operands.count(id) > 0; }),
+                lists.roots.end());
     }
 
     // pread-based variant of scan() (NO mmap): reads the file in chunks into a sliding window and
@@ -648,25 +648,25 @@ public:
             root.boolean = build_boolean(in); // ('', operator, #first, #second)
             in = nullptr;
         } else {
-        std::vector<long> shell_ids;
-        if (in->type == "MANIFOLD_SOLID_BREP") {
-            if (in->args[1].is_ref())
-                shell_ids.push_back(in->args[1].i); // arg1 = the CLOSED_SHELL
-        } else if (in->type == "BREP_WITH_VOIDS") {
-            if (in->args[1].is_ref())
-                shell_ids.push_back(in->args[1].i); // arg1 = outer CLOSED_SHELL
-            if (in->args.size() > 2 && in->args[2].kind == Kind::List)
-                for (const Value &v : in->args[2].items) // arg2 = void (ORIENTED_CLOSED_)SHELLs
-                    if (v.is_ref())
-                        shell_ids.push_back(v.i);
-        } else if (in->args[1].kind == Kind::List) {
-            for (const Value &sh : in->args[1].items) // arg1 = list of shells
-                if (sh.is_ref())
-                    shell_ids.push_back(sh.i);
-        }
-        in = nullptr; // shell_into below may clear parse_cache_ and invalidate `in`
-        for (long shid : shell_ids)
-            shell_into(shid, root.faces);
+            std::vector<long> shell_ids;
+            if (in->type == "MANIFOLD_SOLID_BREP") {
+                if (in->args[1].is_ref())
+                    shell_ids.push_back(in->args[1].i); // arg1 = the CLOSED_SHELL
+            } else if (in->type == "BREP_WITH_VOIDS") {
+                if (in->args[1].is_ref())
+                    shell_ids.push_back(in->args[1].i); // arg1 = outer CLOSED_SHELL
+                if (in->args.size() > 2 && in->args[2].kind == Kind::List)
+                    for (const Value &v : in->args[2].items) // arg2 = void (ORIENTED_CLOSED_)SHELLs
+                        if (v.is_ref())
+                            shell_ids.push_back(v.i);
+            } else if (in->args[1].kind == Kind::List) {
+                for (const Value &sh : in->args[1].items) // arg1 = list of shells
+                    if (sh.is_ref())
+                        shell_ids.push_back(sh.i);
+            }
+            in = nullptr; // shell_into below may clear parse_cache_ and invalidate `in`
+            for (long shid : shell_ids)
+                shell_into(shid, root.faces);
         } // end B-rep branch
         auto cit = colour_map_.find(sid); // STYLED_ITEM colour usually targets the solid root
         if (cit != colour_map_.end()) {
@@ -957,7 +957,8 @@ private:
         rv->profile = prof;
         rv->frame = in->args[2].is_ref() ? placement(in->args[2].i) : ng::Frame{};
         const Instance *ax = inst(in->args[3].is_ref() ? in->args[3].i : 0); // AXIS1_PLACEMENT('',#loc,#dir)
-        rv->axis_origin = (ax && ax->args.size() > 1 && ax->args[1].is_ref()) ? point(ax->args[1].i) : ng::Vec3{0, 0, 0};
+        rv->axis_origin =
+            (ax && ax->args.size() > 1 && ax->args[1].is_ref()) ? point(ax->args[1].i) : ng::Vec3{0, 0, 0};
         rv->axis_dir = (ax && ax->args.size() > 2 && ax->args[2].is_ref()) ? point(ax->args[2].i) : ng::Vec3{0, 0, 1};
         rv->angle = in->args[4].as_double();
         return rv;
@@ -988,7 +989,9 @@ private:
         bn->op = (op == "UNION") ? 1 : (op == "INTERSECTION") ? 2 : 0;
         bn->a = build_solid_item(in->args[2].is_ref() ? in->args[2].i : 0);
         bn->b = build_solid_item(in->args[3].is_ref() ? in->args[3].i : 0);
-        auto ok = [](const ng::SolidItemN &it) { return it.extrusion || it.revolve || it.boolean || !it.faces.empty(); };
+        auto ok = [](const ng::SolidItemN &it) {
+            return it.extrusion || it.revolve || it.boolean || !it.faces.empty();
+        };
         if (!ok(bn->a) || !ok(bn->b))
             return nullptr;
         return bn;
@@ -1105,7 +1108,7 @@ private:
         const Instance *in = inst(id);
         if (in && in->type == "LINE" && in->args.size() >= 3 && in->args[1].is_ref() && in->args[2].is_ref()) {
             ng::Vec3 pnt = point(in->args[1].i);
-            const Instance *vec = inst(in->args[2].i);  // VECTOR('',#dir,mag)
+            const Instance *vec = inst(in->args[2].i); // VECTOR('',#dir,mag)
             ng::Vec3 dir{0, 0, 1};
             if (vec && vec->args.size() >= 2 && vec->args[1].is_ref())
                 dir = point(vec->args[1].i);

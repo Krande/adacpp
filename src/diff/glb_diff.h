@@ -29,7 +29,7 @@ struct ElementSummary {
     std::array<double, 3> centroid{0, 0, 0};
     std::array<double, 3> bbox_min{0, 0, 0};
     std::array<double, 3> bbox_max{0, 0, 0};
-    double area = 0.0;     // summed triangle area
+    double area = 0.0; // summed triangle area
     uint32_t tri_count = 0;
     uint64_t meta_sig = 0; // hash of {section, material, thickness} for the MODIFIED test
 };
@@ -42,9 +42,9 @@ struct DiffOp {
     Status status;
 };
 struct DiffResult {
-    std::vector<DiffOp> ops;                    // added / modified / unchanged (scene node_ids)
-    std::vector<std::string> removed_node_ids;  // REF-only node_ids (overlay extraction)
-    std::vector<std::string> added_node_ids;    // SCENE-only node_ids (optional standalone overlay)
+    std::vector<DiffOp> ops;                   // added / modified / unchanged (scene node_ids)
+    std::vector<std::string> removed_node_ids; // REF-only node_ids (overlay extraction)
+    std::vector<std::string> added_node_ids;   // SCENE-only node_ids (optional standalone overlay)
     uint32_t n_added = 0, n_removed = 0, n_modified = 0, n_unchanged = 0;
 };
 
@@ -91,8 +91,8 @@ struct _Buckets {
 };
 
 // Match scene vs ref into a DiffResult. NameThenCentroid: name first, then centroid for the leftovers.
-inline DiffResult diff_summaries(const std::vector<ElementSummary> &scene,
-                                 const std::vector<ElementSummary> &ref, Mode mode, double tol) {
+inline DiffResult diff_summaries(const std::vector<ElementSummary> &scene, const std::vector<ElementSummary> &ref,
+                                 Mode mode, double tol) {
     DiffResult r;
     const bool check_props = (mode == Mode::ByProperty);
     std::vector<char> ref_used(ref.size(), 0);

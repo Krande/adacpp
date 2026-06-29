@@ -12,7 +12,7 @@
 #include "../geom/neutral/ada_ext_schema.h" // GENERATED from the adapy ADA_EXT_data JSON schema
 #include "../geom/neutral/ngeom_glb.h"
 #include "../geom/neutral/ngeom_profile.h"
-#include "step_to_glb_st.h"     // single-threaded, mmap-free STEP->GLB core (wasm/OPFS + native oracle)
+#include "step_to_glb_st.h"      // single-threaded, mmap-free STEP->GLB core (wasm/OPFS + native oracle)
 #include "step_to_glb_stream.h"  // threaded OCC-free STEP->GLB core (shared with the STP2GLB CLI)
 #include "step_to_mesh_stream.h" // threaded OCC-free STEP->STL/OBJ core (parallel, baked, streaming)
 #include "ifc_emit.h"            // native IFC4 advanced-B-rep emitter (Phase 1, native STEP->IFC writer)
@@ -2560,9 +2560,9 @@ nb::bytes meshopt_decode_index_sequence_impl(nb::bytes enc, size_t count, size_t
 // solid (instances use guid_seed+k; reserve a gap > max instances).
 using IfcPath = std::vector<std::pair<int, std::string>>; // root-first (rep_id, product_name) levels
 
-static void emit_solid_ifc(adacpp::ifc_emit::BrepEmitter &em, std::string &buf,
-                           const adacpp::ngeom::NgeomRoot &root, long sid, uint64_t guid_seed,
-                           std::vector<long> &proxies, std::vector<IfcPath> *proxy_paths) {
+static void emit_solid_ifc(adacpp::ifc_emit::BrepEmitter &em, std::string &buf, const adacpp::ngeom::NgeomRoot &root,
+                           long sid, uint64_t guid_seed, std::vector<long> &proxies,
+                           std::vector<IfcPath> *proxy_paths) {
     using namespace adacpp::ifc_emit;
     long brep = em.emit_advanced_brep(buf, root);
     if (!brep)
@@ -2584,12 +2584,11 @@ static void emit_solid_ifc(adacpp::ifc_emit::BrepEmitter &em, std::string &buf,
         }
         return nm;
     };
-    long mrep =
-        em.emit_entity(buf, "IfcShapeRepresentation(#6,'Body','AdvancedBrep',(#" + std::to_string(brep) + "))");
+    long mrep = em.emit_entity(buf, "IfcShapeRepresentation(#6,'Body','AdvancedBrep',(#" + std::to_string(brep) + "))");
     if (root.transforms.empty()) {
         long pds = em.emit_entity(buf, "IfcProductDefinitionShape($,$,(#" + std::to_string(mrep) + "))");
-        long proxy = em.emit_entity(buf, "IfcBuildingElementProxy('" + ifc_guid(guid_seed) + "',$,'" +
-                                             leaf_name(0) + "',$,$,#11,#" + std::to_string(pds) + ",$,$)");
+        long proxy = em.emit_entity(buf, "IfcBuildingElementProxy('" + ifc_guid(guid_seed) + "',$,'" + leaf_name(0) +
+                                             "',$,$,#11,#" + std::to_string(pds) + ",$,$)");
         record(proxy, 0);
         return;
     }
@@ -2622,12 +2621,12 @@ static void emit_solid_ifc(adacpp::ifc_emit::BrepEmitter &em, std::string &buf,
 // its deepest assembly via IfcRelAggregates; assemblies nest via IfcRelAggregates; top-level elements
 // (top assemblies + path-less proxies) are contained in the storey (#14). `next_id` allocates entity
 // ids; appends SPF to `out`.
-static void emit_spatial_tree(std::string &out, const std::function<long()> &next_id,
-                              const std::vector<long> &proxies, const std::vector<IfcPath> &paths) {
+static void emit_spatial_tree(std::string &out, const std::function<long()> &next_id, const std::vector<long> &proxies,
+                              const std::vector<IfcPath> &paths) {
     using adacpp::ifc_emit::ifc_guid;
     using adacpp::ifc_emit::ifc_str;
-    std::map<std::vector<int>, long> asm_id;              // rep-id prefix -> IfcElementAssembly id
-    std::map<long, std::vector<long>> children;           // parent entity id -> child entity ids
+    std::map<std::vector<int>, long> asm_id;    // rep-id prefix -> IfcElementAssembly id
+    std::map<long, std::vector<long>> children; // parent entity id -> child entity ids
     const long STOREY = 14;
     std::vector<long> storey_children;
     uint64_t aguid = 0xE0000000ull; // assembly/rel GUID namespace (disjoint from header 0xF.. + proxies)
@@ -2645,10 +2644,10 @@ static void emit_spatial_tree(std::string &out, const std::function<long()> &nex
             if (it == asm_id.end()) {
                 aid = next_id();
                 asm_id[prefix] = aid;
-                std::string an = path[d].second.empty() ? ("asm_" + std::to_string(path[d].first))
-                                                         : ifc_str(path[d].second);
-                out += "#" + std::to_string(aid) + "=IFCELEMENTASSEMBLY('" + ifc_guid(aguid++) +
-                       "',$,'" + an + "',$,$,#11,$,$,.NOTDEFINED.,.NOTDEFINED.);\n";
+                std::string an =
+                    path[d].second.empty() ? ("asm_" + std::to_string(path[d].first)) : ifc_str(path[d].second);
+                out += "#" + std::to_string(aid) + "=IFCELEMENTASSEMBLY('" + ifc_guid(aguid++) + "',$,'" + an +
+                       "',$,$,#11,$,$,.NOTDEFINED.,.NOTDEFINED.);\n";
                 (parent_is_storey ? storey_children : children[parent]).push_back(aid);
             } else {
                 aid = it->second;
@@ -2726,8 +2725,8 @@ static std::string ifc_header_block(const std::string &schema, double unit_scale
 // ifc_emit::BrepEmitter. Lives here (not in ifc_emit.h) so the emitter header stays reader-free.
 // Streams to disk per chunk; bounds parse_cache_ (single-threaded -> safe per fc37d71).
 static adacpp::ifc_emit::FileStats write_ifc_file_impl(const std::string &in_path, const std::string &out_path,
-                                                       const std::string &schema, double deflection,
-                                                       double angular_deg, long max_solids) {
+                                                       const std::string &schema, double deflection, double angular_deg,
+                                                       long max_solids) {
     using namespace adacpp::ifc_emit;
     FileStats fs;
     auto idx = adacpp::step::StreamIndex::from_file(in_path);
@@ -2821,11 +2820,9 @@ static void renumber_into(std::string &out, const std::string &src, long offset,
 // and no renumbering pass is needed. NO parse_cache_ bounding (that races multi-threaded — the
 // fc37d71 segfault); per-worker clear_geom_cache() per solid bounds memory the safe way. Final pass
 // (single-threaded): header + concat lanes + one IfcRelContainedInSpatialStructure over all proxies.
-static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::string &in_path,
-                                                                const std::string &out_path,
+static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::string &in_path, const std::string &out_path,
                                                                 const std::string &schema, double deflection,
-                                                                double angular_deg, int num_threads,
-                                                                long max_solids) {
+                                                                double angular_deg, int num_threads, long max_solids) {
     using namespace adacpp::ifc_emit;
     using adacpp::ngeom::NgeomRoot;
     FileStats fs;
@@ -3029,8 +3026,7 @@ static std::string step_header_block(double unit_scale) {
 // context #9) -> PRODUCT chain -> SHAPE_DEFINITION_REPRESENTATION. Returns true if a solid was emitted.
 static bool emit_solid_step(adacpp::step_emit::StepBrepEmitter &em, std::string &buf,
                             const adacpp::ngeom::NgeomRoot &root, long sid) {
-    std::string nm =
-        root.id.empty() ? ("solid_" + std::to_string(sid)) : adacpp::ifc_emit::ifc_str(root.id);
+    std::string nm = root.id.empty() ? ("solid_" + std::to_string(sid)) : adacpp::ifc_emit::ifc_str(root.id);
     long solid = 0;
     const char *rep_kw = "ADVANCED_BREP_SHAPE_REPRESENTATION";
     if (root.extrusion) {
@@ -3052,8 +3048,7 @@ static bool emit_solid_step(adacpp::step_emit::StepBrepEmitter &em, std::string 
     }
     if (!solid)
         return false;
-    long rep = em.emit_entity(buf, std::string(rep_kw) + "('" + nm + "',(#13,#" + std::to_string(solid) +
-                                       "),#9)");
+    long rep = em.emit_entity(buf, std::string(rep_kw) + "('" + nm + "',(#13,#" + std::to_string(solid) + "),#9)");
     long product = em.emit_entity(buf, "PRODUCT('" + nm + "','" + nm + "','',(#3))");
     long pdf = em.emit_entity(buf, "PRODUCT_DEFINITION_FORMATION('','',#" + std::to_string(product) + ")");
     long pd = em.emit_entity(buf, "PRODUCT_DEFINITION('design','',#" + std::to_string(pdf) + ",#4)");
@@ -3141,9 +3136,18 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
                 if (!root.transforms.empty()) {
                     // ng:: transforms are column-major glTF; StepBrepEmitter wants row-major.
                     const std::array<float, 16> &M = root.transforms[k];
-                    tf[0] = M[0]; tf[1] = M[4]; tf[2] = M[8]; tf[3] = M[12];
-                    tf[4] = M[1]; tf[5] = M[5]; tf[6] = M[9]; tf[7] = M[13];
-                    tf[8] = M[2]; tf[9] = M[6]; tf[10] = M[10]; tf[11] = M[14];
+                    tf[0] = M[0];
+                    tf[1] = M[4];
+                    tf[2] = M[8];
+                    tf[3] = M[12];
+                    tf[4] = M[1];
+                    tf[5] = M[5];
+                    tf[6] = M[9];
+                    tf[7] = M[13];
+                    tf[8] = M[2];
+                    tf[9] = M[6];
+                    tf[10] = M[10];
+                    tf[11] = M[14];
                     tfp = tf;
                 }
                 sb.clear();
@@ -3262,9 +3266,18 @@ static adacpp::ifc_emit::FileStats write_ifc_to_step_impl(const std::string &in_
             const double *tfp = nullptr;
             if (!root.transforms.empty()) {
                 const std::array<float, 16> &M = root.transforms[k];
-                tf[0] = M[0]; tf[1] = M[4]; tf[2] = M[8]; tf[3] = M[12];
-                tf[4] = M[1]; tf[5] = M[5]; tf[6] = M[9]; tf[7] = M[13];
-                tf[8] = M[2]; tf[9] = M[6]; tf[10] = M[10]; tf[11] = M[14];
+                tf[0] = M[0];
+                tf[1] = M[4];
+                tf[2] = M[8];
+                tf[3] = M[12];
+                tf[4] = M[1];
+                tf[5] = M[5];
+                tf[6] = M[9];
+                tf[7] = M[13];
+                tf[8] = M[2];
+                tf[9] = M[6];
+                tf[10] = M[10];
+                tf[11] = M[14];
                 tfp = tf;
             }
             StepBrepEmitter em(nid, tfp, deflection, angular_deg);
@@ -3446,13 +3459,12 @@ void cad_module(nb::module_ &m) {
     // (solids_in/out, faces_in/out/dropped, drop_reasons, edge approximation counts).
     m.def(
         "stream_step_to_ifc",
-        [](const std::string &in_path, const std::string &out_path, const std::string &schema,
-           double deflection, double angular_deg, long max_solids, int num_threads) -> nb::dict {
+        [](const std::string &in_path, const std::string &out_path, const std::string &schema, double deflection,
+           double angular_deg, long max_solids, int num_threads) -> nb::dict {
             adacpp::ifc_emit::FileStats fs =
-                (num_threads == 1)
-                    ? write_ifc_file_impl(in_path, out_path, schema, deflection, angular_deg, max_solids)
-                    : write_ifc_file_parallel_impl(in_path, out_path, schema, deflection, angular_deg,
-                                                   num_threads, max_solids);
+                (num_threads == 1) ? write_ifc_file_impl(in_path, out_path, schema, deflection, angular_deg, max_solids)
+                                   : write_ifc_file_parallel_impl(in_path, out_path, schema, deflection, angular_deg,
+                                                                  num_threads, max_solids);
             nb::dict d;
             d["solids_in"] = fs.solids_in;
             d["unit_scale"] = fs.unit_scale;

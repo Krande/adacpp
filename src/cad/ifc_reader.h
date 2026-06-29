@@ -43,7 +43,7 @@ inline bool iequals(std::string_view a, const char *b) {
 }
 
 class IfcResolver {
-  public:
+public:
     explicit IfcResolver(const StreamIndex &idx) : idx_(idx) {}
 
     // Root products: scan for IfcBuildingElementProxy (or any product carrying an AdvancedBrep). Each
@@ -63,14 +63,14 @@ class IfcResolver {
     static bool is_product_type(std::string_view t) {
         static const char *kinds[] = {
             "IFCBUILDINGELEMENTPROXY", "IFCMECHANICALFASTENER", "IFCELEMENTASSEMBLY", "IFCFASTENER",
-            "IFCDISCRETEACCESSORY", "IFCBUILDINGELEMENTPART", "IFCBEAM", "IFCCOLUMN", "IFCMEMBER",
-            "IFCPLATE", "IFCWALL", "IFCWALLSTANDARDCASE", "IFCSLAB", "IFCFOOTING", "IFCPILE", "IFCROOF",
-            "IFCSTAIR", "IFCSTAIRFLIGHT", "IFCRAMP", "IFCRAMPFLIGHT", "IFCRAILING", "IFCCOVERING",
-            "IFCCURTAINWALL", "IFCDOOR", "IFCWINDOW", "IFCCHIMNEY", "IFCSHADINGDEVICE", "IFCPIPESEGMENT",
-            "IFCPIPEFITTING", "IFCDUCTSEGMENT", "IFCDUCTFITTING", "IFCFLOWSEGMENT", "IFCFLOWFITTING",
-            "IFCFLOWTERMINAL", "IFCFLOWCONTROLLER", "IFCDISTRIBUTIONELEMENT", "IFCENERGYCONVERSIONDEVICE",
-            "IFCREINFORCINGBAR", "IFCREINFORCINGMESH", "IFCTENDON", "IFCTENDONANCHOR", "IFCFURNISHINGELEMENT",
-            "IFCFURNITURE", "IFCSYSTEMFURNITUREELEMENT", "IFCCIVILELEMENT", "IFCGEOGRAPHICELEMENT",
+            "IFCDISCRETEACCESSORY", "IFCBUILDINGELEMENTPART", "IFCBEAM", "IFCCOLUMN", "IFCMEMBER", "IFCPLATE",
+            "IFCWALL", "IFCWALLSTANDARDCASE", "IFCSLAB", "IFCFOOTING", "IFCPILE", "IFCROOF", "IFCSTAIR",
+            "IFCSTAIRFLIGHT", "IFCRAMP", "IFCRAMPFLIGHT", "IFCRAILING", "IFCCOVERING", "IFCCURTAINWALL", "IFCDOOR",
+            "IFCWINDOW", "IFCCHIMNEY", "IFCSHADINGDEVICE", "IFCPIPESEGMENT", "IFCPIPEFITTING", "IFCDUCTSEGMENT",
+            "IFCDUCTFITTING", "IFCFLOWSEGMENT", "IFCFLOWFITTING", "IFCFLOWTERMINAL", "IFCFLOWCONTROLLER",
+            "IFCDISTRIBUTIONELEMENT", "IFCENERGYCONVERSIONDEVICE", "IFCREINFORCINGBAR", "IFCREINFORCINGMESH",
+            "IFCTENDON", "IFCTENDONANCHOR", "IFCFURNISHINGELEMENT", "IFCFURNITURE", "IFCSYSTEMFURNITUREELEMENT",
+            "IFCCIVILELEMENT", "IFCGEOGRAPHICELEMENT",
             // *StandardCase / *ElementedCase product subtypes (NB: the *TYPE entities are NOT products)
             "IFCBEAMSTANDARDCASE", "IFCCOLUMNSTANDARDCASE", "IFCMEMBERSTANDARDCASE", "IFCPLATESTANDARDCASE",
             "IFCSLABSTANDARDCASE", "IFCSLABELEMENTEDCASE", "IFCWALLELEMENTEDCASE", "IFCDOORSTANDARDCASE",
@@ -171,13 +171,13 @@ class IfcResolver {
         return root;
     }
 
-  private:
+private:
     const StreamIndex &idx_;
     std::unordered_map<long, std::pair<std::string, Instance>> cache_;
     std::unordered_map<long, std::shared_ptr<Surface>> surf_cache_;
     std::string pread_scratch_;
-    long solid_src_ = 0;  // entity id of the one solid this product carries (mapped instances share it)
-    bool mixed_ = false;  // product has >1 distinct solid / mixes brep+procedural -> skip (OCC)
+    long solid_src_ = 0; // entity id of the one solid this product carries (mapped instances share it)
+    bool mixed_ = false; // product has >1 distinct solid / mixes brep+procedural -> skip (OCC)
 
     const Instance *inst(long id) {
         if (id <= 0)
@@ -296,9 +296,11 @@ class IfcResolver {
             return std::make_shared<LineCurve>(p, d);
         }
         if (iequals(t, "IFCCIRCLE"))
-            return std::make_shared<CircleCurve>(axis2(ref_arg(*in, 0)), in->args.size() > 1 ? in->args[1].as_double() : 0.0);
+            return std::make_shared<CircleCurve>(axis2(ref_arg(*in, 0)),
+                                                 in->args.size() > 1 ? in->args[1].as_double() : 0.0);
         if (iequals(t, "IFCELLIPSE"))
-            return std::make_shared<EllipseCurve>(axis2(ref_arg(*in, 0)), in->args.size() > 1 ? in->args[1].as_double() : 0.0,
+            return std::make_shared<EllipseCurve>(axis2(ref_arg(*in, 0)),
+                                                  in->args.size() > 1 ? in->args[1].as_double() : 0.0,
                                                   in->args.size() > 2 ? in->args[2].as_double() : 0.0);
         if (iequals(t, "IFCPOLYLINE"))
             return std::make_shared<PolylineCurve>(point_list(in->args.empty() ? Value{} : in->args[0]));
@@ -336,11 +338,14 @@ class IfcResolver {
         if (iequals(t, "IFCPLANE"))
             return std::make_shared<PlaneSurface>(axis2(ref_arg(*in, 0)));
         if (iequals(t, "IFCCYLINDRICALSURFACE"))
-            return std::make_shared<CylinderSurface>(axis2(ref_arg(*in, 0)), in->args.size() > 1 ? in->args[1].as_double() : 0.0);
+            return std::make_shared<CylinderSurface>(axis2(ref_arg(*in, 0)),
+                                                     in->args.size() > 1 ? in->args[1].as_double() : 0.0);
         if (iequals(t, "IFCSPHERICALSURFACE"))
-            return std::make_shared<SphereSurface>(axis2(ref_arg(*in, 0)), in->args.size() > 1 ? in->args[1].as_double() : 0.0);
+            return std::make_shared<SphereSurface>(axis2(ref_arg(*in, 0)),
+                                                   in->args.size() > 1 ? in->args[1].as_double() : 0.0);
         if (iequals(t, "IFCTOROIDALSURFACE"))
-            return std::make_shared<TorusSurface>(axis2(ref_arg(*in, 0)), in->args.size() > 1 ? in->args[1].as_double() : 0.0,
+            return std::make_shared<TorusSurface>(axis2(ref_arg(*in, 0)),
+                                                  in->args.size() > 1 ? in->args[1].as_double() : 0.0,
                                                   in->args.size() > 2 ? in->args[2].as_double() : 0.0);
         if (iequals(t, "IFCSURFACEOFLINEAREXTRUSION")) {
             // (SweptCurve=IfcProfileDef, Position, ExtrudedDirection, Depth)
@@ -473,7 +478,8 @@ class IfcResolver {
             fb.loop = loop(ref_arg(*b, 0));
             if (!fb.loop)
                 return nullptr;
-            fb.orientation = !(b->args.size() > 1 && b->args[1].kind == adacpp::step::Kind::Enum && b->args[1].s == "F");
+            fb.orientation =
+                !(b->args.size() > 1 && b->args[1].kind == adacpp::step::Kind::Enum && b->args[1].s == "F");
             // outer bound first
             if (iequals(b->type, "IFCFACEOUTERBOUND"))
                 fc->bounds.insert(fc->bounds.begin(), fb);
@@ -507,8 +513,8 @@ class IfcResolver {
             if (bx <= 0 || hy <= 0 || wx <= 0 || tf <= 0)
                 return nullptr;
             double fy = hy - tf;
-            poly = {{bx, -hy, 0},  {bx, -fy, 0},  {wx, -fy, 0},  {wx, fy, 0},   {bx, fy, 0},   {bx, hy, 0},
-                    {-bx, hy, 0},  {-bx, fy, 0},  {-wx, fy, 0},  {-wx, -fy, 0}, {-bx, -fy, 0}, {-bx, -hy, 0}};
+            poly = {{bx, -hy, 0}, {bx, -fy, 0}, {wx, -fy, 0}, {wx, fy, 0},   {bx, fy, 0},   {bx, hy, 0},
+                    {-bx, hy, 0}, {-bx, fy, 0}, {-wx, fy, 0}, {-wx, -fy, 0}, {-bx, -fy, 0}, {-bx, -hy, 0}};
             apply_placement2d(ref_arg(*in, 2), poly);
         } else if (iequals(in->type, "IFCTSHAPEPROFILEDEF")) {
             // (.., Position, Depth, FlangeWidth, WebThickness, FlangeThickness, ...). Flange at +y (top),
@@ -517,8 +523,8 @@ class IfcResolver {
             if (hy <= 0 || fx <= 0 || wx <= 0 || tf <= 0)
                 return nullptr;
             double fy = hy - tf;
-            poly = {{wx, -hy, 0}, {wx, fy, 0},  {fx, fy, 0},   {fx, hy, 0},
-                    {-fx, hy, 0}, {-fx, fy, 0}, {-wx, fy, 0},  {-wx, -hy, 0}};
+            poly = {{wx, -hy, 0}, {wx, fy, 0},  {fx, fy, 0},  {fx, hy, 0},
+                    {-fx, hy, 0}, {-fx, fy, 0}, {-wx, fy, 0}, {-wx, -hy, 0}};
             apply_placement2d(ref_arg(*in, 2), poly);
         } else if (iequals(in->type, "IFCCIRCLEPROFILEDEF")) {
             // (.., Position, Radius). 64-gon (vertices on the axes -> bbox == analytic 2R).
@@ -551,7 +557,8 @@ class IfcResolver {
             if (hx <= 0 || hy <= 0 || t <= 0 || t >= hx || t >= hy)
                 return nullptr;
             std::vector<Vec3> outer = {{-hx, -hy, 0}, {hx, -hy, 0}, {hx, hy, 0}, {-hx, hy, 0}};
-            std::vector<Vec3> inner = {{-hx + t, -hy + t, 0}, {hx - t, -hy + t, 0}, {hx - t, hy - t, 0}, {-hx + t, hy - t, 0}};
+            std::vector<Vec3> inner = {
+                {-hx + t, -hy + t, 0}, {hx - t, -hy + t, 0}, {hx - t, hy - t, 0}, {-hx + t, hy - t, 0}};
             apply_placement2d(ref_arg(*in, 2), outer);
             apply_placement2d(ref_arg(*in, 2), inner);
             return make_profile(std::move(outer), {std::move(inner)});
@@ -574,7 +581,8 @@ class IfcResolver {
     }
     // Wrap a 2D outer polygon + optional hole polygons (z=0) as a planar profile FaceSurfaceN. Holes are
     // reversed (opposite winding) so the cap triangulates the void and the swept side bands face right.
-    static std::shared_ptr<FaceSurfaceN> make_profile(std::vector<Vec3> outer, std::vector<std::vector<Vec3>> holes = {}) {
+    static std::shared_ptr<FaceSurfaceN> make_profile(std::vector<Vec3> outer,
+                                                      std::vector<std::vector<Vec3>> holes = {}) {
         if (outer.size() < 3)
             return nullptr;
         auto prof = std::make_shared<FaceSurfaceN>();
@@ -697,7 +705,8 @@ class IfcResolver {
             rv->profile = prof;
             rv->frame = (in->args.size() > 1 && in->args[1].is_ref()) ? axis2(in->args[1].i) : Frame{};
             const Instance *ax = inst(ref_arg(*in, 2));
-            rv->axis_origin = (ax && ax->args.size() > 0 && ax->args[0].is_ref()) ? point(ax->args[0].i) : Vec3{0, 0, 0};
+            rv->axis_origin =
+                (ax && ax->args.size() > 0 && ax->args[0].is_ref()) ? point(ax->args[0].i) : Vec3{0, 0, 0};
             rv->axis_dir = (ax && ax->args.size() > 1 && ax->args[1].is_ref()) ? dir(ax->args[1].i) : Vec3{0, 0, 1};
             rv->angle = in->args.size() > 3 ? in->args[3].as_double() : 0.0;
             out.revolve = rv;
@@ -778,7 +787,8 @@ class IfcResolver {
         if (!in || in->args.size() < 3)
             return nullptr;
         auto bn = std::make_shared<BooleanN>();
-        std::string_view op = (in->args[0].kind == adacpp::step::Kind::Enum) ? in->args[0].s : std::string_view("DIFFERENCE");
+        std::string_view op =
+            (in->args[0].kind == adacpp::step::Kind::Enum) ? in->args[0].s : std::string_view("DIFFERENCE");
         bn->op = (op == "UNION") ? 1 : (op == "INTERSECTION") ? 2 : 0;
         bn->a = resolve_solid_item(ref_arg(*in, 1));
         if (!solid_ok(bn->a))
@@ -837,8 +847,12 @@ class IfcResolver {
             return false;
         mn = mx = pts[0];
         for (const Vec3 &p : pts) {
-            mn.x = std::min(mn.x, p.x); mn.y = std::min(mn.y, p.y); mn.z = std::min(mn.z, p.z);
-            mx.x = std::max(mx.x, p.x); mx.y = std::max(mx.y, p.y); mx.z = std::max(mx.z, p.z);
+            mn.x = std::min(mn.x, p.x);
+            mn.y = std::min(mn.y, p.y);
+            mn.z = std::min(mn.z, p.z);
+            mx.x = std::max(mx.x, p.x);
+            mx.y = std::max(mx.y, p.y);
+            mx.z = std::max(mx.z, p.z);
         }
         return true;
     }
@@ -846,7 +860,7 @@ class IfcResolver {
     // side of the plane, sized to cover the reference bbox so the boolean DIFFERENCE clips correctly.
     std::shared_ptr<ExtrusionN> mk_halfspace(const Instance *in, const Vec3 *refmin, const Vec3 *refmax) {
         if (!refmin || !refmax)
-            return nullptr; // no reference extent -> can't bound a half-space -> skip (OCC)
+            return nullptr;                            // no reference extent -> can't bound a half-space -> skip (OCC)
         const Instance *plane = inst(ref_arg(*in, 0)); // IfcPlane(Position)
         if (!plane)
             return nullptr;
@@ -931,8 +945,8 @@ class IfcResolver {
         if (in->args.size() > 4 && in->args[4].is_ref())
             az = unit(dir(in->args[4].i));
         auto scale_at = [&](size_t i, double dflt) {
-            return (i < in->args.size() && (in->args[i].kind == adacpp::step::Kind::Real ||
-                                            in->args[i].kind == adacpp::step::Kind::Int))
+            return (i < in->args.size() &&
+                    (in->args[i].kind == adacpp::step::Kind::Real || in->args[i].kind == adacpp::step::Kind::Int))
                        ? in->args[i].as_double()
                        : dflt;
         };

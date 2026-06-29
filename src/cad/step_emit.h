@@ -27,7 +27,7 @@ using adacpp::ifc_emit::ifc_bool; // STEP .T./.F. is identical
 using adacpp::ifc_emit::ifc_real; // STEP real format is identical
 
 class StepBrepEmitter {
-  public:
+public:
     // `tf` = optional row-major 4x4 baked into every point/dir (instance world placement); null =
     // identity. STEP v1 bakes per-instance geometry (vs IFC's MAPPED_ITEM) — simplest lossless form.
     explicit StepBrepEmitter(long start_id, const double *tf = nullptr, double deflection = 2.0,
@@ -205,7 +205,7 @@ class StepBrepEmitter {
         return emit(out, "MANIFOLD_SOLID_BREP('" + name + "',#" + std::to_string(shell) + ")");
     }
 
-  private:
+private:
     long nid_;
     const double *tf_;
     double deflection_, angular_;
@@ -341,8 +341,8 @@ class StepBrepEmitter {
                              std::to_string(rf) + ")");
     }
     long axis1(std::string &out, const Vec3 &loc, const Vec3 &axis) {
-        return emit(out, "AXIS1_PLACEMENT('',#" + std::to_string(pt(out, loc)) + ",#" +
-                             std::to_string(dir(out, axis)) + ")");
+        return emit(out, "AXIS1_PLACEMENT('',#" + std::to_string(pt(out, loc)) + ",#" + std::to_string(dir(out, axis)) +
+                             ")");
     }
     static std::string refs(const std::vector<long> &ids) {
         std::string s = "(";
@@ -397,9 +397,8 @@ class StepBrepEmitter {
             out += "#" + std::to_string(nid_) + "=(" + body + ");\n";
             return nid_;
         }
-        return emit(out, "B_SPLINE_CURVE_WITH_KNOTS(''," + std::to_string(c.degree) + "," + cpr +
-                             ",.UNSPECIFIED.," + ifc_bool(c.closed) + ",.F.," + ilist(mults) + "," + rlist(knots) +
-                             ",.UNSPECIFIED.)");
+        return emit(out, "B_SPLINE_CURVE_WITH_KNOTS(''," + std::to_string(c.degree) + "," + cpr + ",.UNSPECIFIED.," +
+                             ifc_bool(c.closed) + ",.F.," + ilist(mults) + "," + rlist(knots) + ",.UNSPECIFIED.)");
     }
     long curve(std::string &out, const Curve *g) {
         if (const auto *l = dynamic_cast<const LineCurve *>(g)) {
@@ -457,8 +456,7 @@ class StepBrepEmitter {
                 double n = d.norm();
                 Vec3 u = n ? Vec3{d.x / n, d.y / n, d.z / n} : Vec3{0, 0, 1};
                 long v = emit(out, "VECTOR('',#" + std::to_string(dir(out, u)) + ",1.)");
-                crv = emit(out, "LINE('',#" + std::to_string(pt(out, oe.e_start)) + ",#" + std::to_string(v) +
-                                    ")");
+                crv = emit(out, "LINE('',#" + std::to_string(pt(out, oe.e_start)) + ",#" + std::to_string(v) + ")");
             }
             long v0 = vertex(out, oe.e_start), v1 = vertex(out, oe.e_end);
             ec = emit(out, "EDGE_CURVE('',#" + std::to_string(v0) + ",#" + std::to_string(v1) + ",#" +
@@ -543,17 +541,17 @@ class StepBrepEmitter {
         if (const auto *pl = dynamic_cast<const PlaneSurface *>(s))
             return emit(out, "PLANE('',#" + std::to_string(axis2(out, pl->f)) + ")");
         if (const auto *cy = dynamic_cast<const CylinderSurface *>(s))
-            return emit(out, "CYLINDRICAL_SURFACE('',#" + std::to_string(axis2(out, cy->f)) + "," +
-                                 ifc_real(cy->r) + ")");
+            return emit(out,
+                        "CYLINDRICAL_SURFACE('',#" + std::to_string(axis2(out, cy->f)) + "," + ifc_real(cy->r) + ")");
         if (const auto *co = dynamic_cast<const ConeSurface *>(s)) // STEP has a native conical surface
-            return emit(out, "CONICAL_SURFACE('',#" + std::to_string(axis2(out, co->f)) + "," + ifc_real(co->r0) +
-                                 "," + ifc_real(co->semi_angle) + ")");
+            return emit(out, "CONICAL_SURFACE('',#" + std::to_string(axis2(out, co->f)) + "," + ifc_real(co->r0) + "," +
+                                 ifc_real(co->semi_angle) + ")");
         if (const auto *sp = dynamic_cast<const SphereSurface *>(s))
-            return emit(out, "SPHERICAL_SURFACE('',#" + std::to_string(axis2(out, sp->f)) + "," + ifc_real(sp->r) +
-                                 ")");
+            return emit(out,
+                        "SPHERICAL_SURFACE('',#" + std::to_string(axis2(out, sp->f)) + "," + ifc_real(sp->r) + ")");
         if (const auto *to = dynamic_cast<const TorusSurface *>(s))
-            return emit(out, "TOROIDAL_SURFACE('',#" + std::to_string(axis2(out, to->f)) + "," + ifc_real(to->R) +
-                                 "," + ifc_real(to->r) + ")");
+            return emit(out, "TOROIDAL_SURFACE('',#" + std::to_string(axis2(out, to->f)) + "," + ifc_real(to->R) + "," +
+                                 ifc_real(to->r) + ")");
         if (const auto *ex = dynamic_cast<const LinearExtrusionSurface *>(s)) {
             long crv = curve_or_polyline(out, ex->profile.get());
             if (!crv)
@@ -590,7 +588,7 @@ class StepBrepEmitter {
             }
             const char *kw = (i == 0) ? "FACE_OUTER_BOUND" : "FACE_BOUND";
             bounds.push_back(emit(out, std::string(kw) + "('',#" + std::to_string(lp) + "," +
-                                          ifc_bool(fc.bounds[i].orientation) + ")"));
+                                           ifc_bool(fc.bounds[i].orientation) + ")"));
         }
         if (bounds.empty()) {
             stats_.drop("face:no-bounds");

@@ -95,8 +95,8 @@ struct DiskBuf {
     }
 };
 
-inline std::shared_ptr<DiskBuf> decode_to_disk(const unsigned char *enc, size_t enc_size, size_t count,
-                                               size_t stride, bool is_index) {
+inline std::shared_ptr<DiskBuf> decode_to_disk(const unsigned char *enc, size_t enc_size, size_t count, size_t stride,
+                                               bool is_index) {
     size_t dsize = count * stride;
     if (dsize == 0)
         return nullptr;
@@ -118,7 +118,7 @@ inline std::shared_ptr<DiskBuf> decode_to_disk(const unsigned char *enc, size_t 
                       : ::meshopt_decodeVertexBuffer(m, count, stride, enc, enc_size);
     if (rc != 0)
         return nullptr;
-    ::msync(m, dsize, MS_SYNC);       // force decoded bytes out to the temp file
+    ::msync(m, dsize, MS_SYNC);         // force decoded bytes out to the temp file
     ::madvise(m, dsize, MADV_DONTNEED); // drop them from RSS; folding re-faults what it touches
     return db;
 }
@@ -127,8 +127,7 @@ inline std::shared_ptr<DiskBuf> decode_to_disk(const unsigned char *enc, size_t 
 // Resolve an accessor to a ByteView. meshopt bufferViews are decoded — disk-backed when ``disk`` (so
 // a huge node never sits in RAM), else into a RAM vector (small models / wasm). Raw bufferViews point
 // straight into the mmap'd BIN.
-inline ByteView resolve_accessor(const njson &acc, const njson &bvs, const unsigned char *bin, size_t elem,
-                                 bool disk) {
+inline ByteView resolve_accessor(const njson &acc, const njson &bvs, const unsigned char *bin, size_t elem, bool disk) {
     const njson &bv = bvs[acc.at("bufferView").get<int>()];
     size_t acc_off = acc.value("byteOffset", (size_t) 0);
     auto ext = bv.find("extensions");
@@ -243,8 +242,8 @@ inline std::vector<ElementSummary> summarize_glb_buf(const unsigned char *data, 
 
         const njson &iacc = accessors[prim["indices"].get<int>()];
         const size_t isz = (iacc.value("componentType", 5125) == 5125) ? 4 : 2;
-        ByteView posv = resolve_accessor(accessors[prim["attributes"]["POSITION"].get<int>()], bufferViews, bin, 12,
-                                         disk);
+        ByteView posv =
+            resolve_accessor(accessors[prim["attributes"]["POSITION"].get<int>()], bufferViews, bin, 12, disk);
         ByteView idxv = resolve_accessor(iacc, bufferViews, bin, isz, disk);
         const size_t idx_count = iacc.at("count").get<size_t>();
 
@@ -383,8 +382,8 @@ inline std::string write_overlay_glb(const std::vector<float> &pos, uint32_t rgb
     js << "{\"asset\":{\"version\":\"2.0\"},\"scene\":0,\"scenes\":[{\"nodes\":[0]}],"
        << "\"nodes\":[{\"mesh\":0}],"
        << "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0},\"indices\":1,\"material\":0}]}],"
-       << "\"materials\":[{\"pbrMetallicRoughness\":{\"baseColorFactor\":[" << r << "," << g << "," << b << ","
-       << a << "],\"metallicFactor\":0.1,\"roughnessFactor\":0.8}}],"
+       << "\"materials\":[{\"pbrMetallicRoughness\":{\"baseColorFactor\":[" << r << "," << g << "," << b << "," << a
+       << "],\"metallicFactor\":0.1,\"roughnessFactor\":0.8}}],"
        << "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":" << nverts
        << ",\"type\":\"VEC3\",\"min\":[" << mn[0] << "," << mn[1] << "," << mn[2] << "],\"max\":[" << mx[0] << ","
        << mx[1] << "," << mx[2] << "]},{\"bufferView\":1,\"componentType\":5125,\"count\":" << idx.size()

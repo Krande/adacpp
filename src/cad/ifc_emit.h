@@ -74,13 +74,12 @@ struct EmitStats {
 };
 
 class BrepEmitter {
-  public:
+public:
     // `tf` = optional row-major 4x4 baked into every point/dir (instance world placement); null =
     // identity. deflection/angular drive the discretize->IfcPolyline fallback for curves with no
     // analytic IFC entity (hyperbola/parabola/composite/trimmed) — faithful to tolerance, never a
     // wrong straight chord.
-    explicit BrepEmitter(long start_id, const double *tf = nullptr, double deflection = 2.0,
-                         double angular_deg = 20.0)
+    explicit BrepEmitter(long start_id, const double *tf = nullptr, double deflection = 2.0, double angular_deg = 20.0)
         : nid_(start_id), tf_(tf), deflection_(deflection), angular_(angular_deg * PI / 180.0) {}
 
     long current_id() const {
@@ -116,7 +115,7 @@ class BrepEmitter {
         return emit(out, "IfcAdvancedBrep(#" + std::to_string(shell) + ")");
     }
 
-  private:
+private:
     long nid_;
     const double *tf_;
     double deflection_, angular_;
@@ -184,8 +183,8 @@ class BrepEmitter {
                              std::to_string(rf) + ")");
     }
     long axis1(std::string &out, const Vec3 &loc, const Vec3 &axis) {
-        return emit(out, "IfcAxis1Placement(#" + std::to_string(pt(out, loc)) + ",#" +
-                             std::to_string(dir(out, axis)) + ")");
+        return emit(out,
+                    "IfcAxis1Placement(#" + std::to_string(pt(out, loc)) + ",#" + std::to_string(dir(out, axis)) + ")");
     }
 
     static std::string refs(const std::vector<long> &ids) {
@@ -211,8 +210,8 @@ class BrepEmitter {
         std::vector<double> knots;
         std::vector<int> mults;
         compact_knots(c.U, knots, mults);
-        std::string common = std::to_string(c.degree) + "," + refs(cps) + ",.UNSPECIFIED.," +
-                             ifc_bool(c.closed) + ",.F.," + ilist(mults) + "," + rlist(knots) + ",.UNSPECIFIED.";
+        std::string common = std::to_string(c.degree) + "," + refs(cps) + ",.UNSPECIFIED.," + ifc_bool(c.closed) +
+                             ",.F.," + ilist(mults) + "," + rlist(knots) + ",.UNSPECIFIED.";
         if (!c.weights.empty())
             return emit(out, "IfcRationalBSplineCurveWithKnots(" + common + "," + rlist(c.weights) + ")");
         return emit(out, "IfcBSplineCurveWithKnots(" + common + ")");
@@ -221,8 +220,8 @@ class BrepEmitter {
     // A bare 3D geometric curve, or 0 if not representable here.
     long curve(std::string &out, const Curve *g) {
         if (const auto *l = dynamic_cast<const LineCurve *>(g))
-            return emit(out, "IfcLine(#" + std::to_string(pt(out, l->pnt)) + ",#" +
-                                 std::to_string(vec(out, l->dir)) + ")");
+            return emit(out,
+                        "IfcLine(#" + std::to_string(pt(out, l->pnt)) + ",#" + std::to_string(vec(out, l->dir)) + ")");
         if (const auto *c = dynamic_cast<const CircleCurve *>(g))
             return emit(out, "IfcCircle(#" + std::to_string(axis2(out, c->f)) + "," + ifc_real(c->r) + ")");
         if (const auto *e = dynamic_cast<const EllipseCurve *>(g))
@@ -261,8 +260,8 @@ class BrepEmitter {
                 Vec3 d = oe.e_end - oe.e_start;
                 double n = d.norm();
                 Vec3 u = n ? Vec3{d.x / n, d.y / n, d.z / n} : Vec3{0, 0, 1};
-                crv = emit(out, "IfcLine(#" + std::to_string(pt(out, oe.e_start)) + ",#" +
-                                    std::to_string(vec(out, u)) + ")");
+                crv = emit(out, "IfcLine(#" + std::to_string(pt(out, oe.e_start)) + ",#" + std::to_string(vec(out, u)) +
+                                    ")");
             }
             long v0 = vertex(out, oe.e_start), v1 = vertex(out, oe.e_end);
             ec = emit(out, "IfcEdgeCurve(#" + std::to_string(v0) + ",#" + std::to_string(v1) + ",#" +
@@ -283,8 +282,8 @@ class BrepEmitter {
         }
         long poly = polyline(out, pts);
         long v0 = vertex(out, oe.start), v1 = vertex(out, oe.end);
-        ec = emit(out, "IfcEdgeCurve(#" + std::to_string(v0) + ",#" + std::to_string(v1) + ",#" +
-                           std::to_string(poly) + ",.T.)");
+        ec = emit(out, "IfcEdgeCurve(#" + std::to_string(v0) + ",#" + std::to_string(v1) + ",#" + std::to_string(poly) +
+                           ",.T.)");
         return emit(out, "IfcOrientedEdge(*,*,#" + std::to_string(ec) + ",.T.)");
     }
 
@@ -371,8 +370,8 @@ class BrepEmitter {
                 return 0;
             long prof = emit(out, "IfcArbitraryOpenProfileDef(.CURVE.,$,#" + std::to_string(crv) + ")");
             long ed = dir(out, ex->dir);
-            return emit(out, "IfcSurfaceOfLinearExtrusion(#" + std::to_string(prof) + ",$,#" +
-                                 std::to_string(ed) + "," + ifc_real(ex->depth ? ex->depth : 1.0) + ")");
+            return emit(out, "IfcSurfaceOfLinearExtrusion(#" + std::to_string(prof) + ",$,#" + std::to_string(ed) +
+                                 "," + ifc_real(ex->depth ? ex->depth : 1.0) + ")");
         }
         if (const auto *rv = dynamic_cast<const RevolutionSurface *>(s)) {
             long crv = curve_or_polyline(out, rv->profile.get());
@@ -380,14 +379,13 @@ class BrepEmitter {
                 return 0;
             long prof = emit(out, "IfcArbitraryOpenProfileDef(.CURVE.,$,#" + std::to_string(crv) + ")");
             long ax = axis1(out, rv->axis_loc, rv->axis_dir);
-            return emit(out, "IfcSurfaceOfRevolution(#" + std::to_string(prof) + ",$,#" +
-                                 std::to_string(ax) + ")");
+            return emit(out, "IfcSurfaceOfRevolution(#" + std::to_string(prof) + ",$,#" + std::to_string(ax) + ")");
         }
         if (const auto *pl = dynamic_cast<const PlaneSurface *>(s))
             return emit(out, "IfcPlane(#" + std::to_string(axis2(out, pl->f)) + ")");
         if (const auto *cy = dynamic_cast<const CylinderSurface *>(s))
-            return emit(out, "IfcCylindricalSurface(#" + std::to_string(axis2(out, cy->f)) + "," +
-                                 ifc_real(cy->r) + ")");
+            return emit(out,
+                        "IfcCylindricalSurface(#" + std::to_string(axis2(out, cy->f)) + "," + ifc_real(cy->r) + ")");
         if (const auto *co = dynamic_cast<const ConeSurface *>(s)) {
             // IFC4/IFC4X3 have NO conical-surface entity -> represent the cone losslessly as an
             // IfcSurfaceOfRevolution of its straight slant generator about the cone axis. The
@@ -414,15 +412,13 @@ class BrepEmitter {
             long gen = polyline(out, {a, b}); // 2-pt bounded slant segment
             long prof = emit(out, "IfcArbitraryOpenProfileDef(.CURVE.,$,#" + std::to_string(gen) + ")");
             long ax = axis1(out, co->f.o, co->f.z);
-            return emit(out, "IfcSurfaceOfRevolution(#" + std::to_string(prof) + ",$,#" +
-                                 std::to_string(ax) + ")");
+            return emit(out, "IfcSurfaceOfRevolution(#" + std::to_string(prof) + ",$,#" + std::to_string(ax) + ")");
         }
         if (const auto *sp = dynamic_cast<const SphereSurface *>(s))
-            return emit(out, "IfcSphericalSurface(#" + std::to_string(axis2(out, sp->f)) + "," +
-                                 ifc_real(sp->r) + ")");
+            return emit(out, "IfcSphericalSurface(#" + std::to_string(axis2(out, sp->f)) + "," + ifc_real(sp->r) + ")");
         if (const auto *to = dynamic_cast<const TorusSurface *>(s))
-            return emit(out, "IfcToroidalSurface(#" + std::to_string(axis2(out, to->f)) + "," +
-                                 ifc_real(to->R) + "," + ifc_real(to->r) + ")");
+            return emit(out, "IfcToroidalSurface(#" + std::to_string(axis2(out, to->f)) + "," + ifc_real(to->R) + "," +
+                                 ifc_real(to->r) + ")");
         return 0;
     }
 
@@ -463,7 +459,7 @@ class BrepEmitter {
             }
             const char *kw = (i == 0) ? "IfcFaceOuterBound" : "IfcFaceBound";
             bounds.push_back(emit(out, std::string(kw) + "(#" + std::to_string(lp) + "," +
-                                          ifc_bool(fc.bounds[i].orientation) + ")"));
+                                           ifc_bool(fc.bounds[i].orientation) + ")"));
         }
         if (bounds.empty()) {
             stats_.drop("face:no-bounds");
