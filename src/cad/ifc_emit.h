@@ -89,6 +89,10 @@ class BrepEmitter {
     const EmitStats &stats() const {
         return stats_;
     }
+    // Public emit for the file writer's wrapper entities (shape rep / proxy / containment).
+    long emit_entity(std::string &out, const std::string &body) {
+        return emit(out, body);
+    }
 
     // Emit the root's faces as one IfcClosedShell -> IfcAdvancedBrep. Returns the IfcAdvancedBrep id,
     // or 0 if any face used non-emittable geometry (solid skipped wholesale, matching the Python).
@@ -484,6 +488,35 @@ class BrepEmitter {
         }
         return s + ")";
     }
+};
+
+// A valid 22-char IfcGloballyUniqueId (IFC base64 alphabet), deterministic from n. Distinct per n.
+inline std::string ifc_guid(uint64_t n) {
+    static const char *B = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_$";
+    uint64_t x = n * 0x9E3779B97F4A7C15ull + 0xD1B54A32D192ED03ull;
+    std::string s;
+    s.reserve(22);
+    for (int i = 0; i < 22; ++i) {
+        x = x * 6364136223846793005ull + 1442695040888963407ull;
+        // 22 base64 chars encode a 128-bit number: the FIRST char carries only 2 bits (must be 0..3),
+        // the remaining 21 carry 6 bits each (21*6 + 2 = 128).
+        s += B[(x >> 58) & (i == 0 ? 3u : 63u)];
+    }
+    return s;
+}
+
+// Escape an IFC SPF single-quoted string (only ' needs doubling; keep it simple/ASCII).
+inline std::string ifc_str(const std::string &s) {
+    std::string o;
+    o.reserve(s.size());
+    for (char c : s)
+        o += (c == '\'') ? std::string("''") : std::string(1, c);
+    return o;
+}
+
+struct FileStats {
+    long solids_in = 0, solids_out = 0;
+    EmitStats geom;
 };
 
 } // namespace adacpp::ifc_emit

@@ -2548,6 +2548,74 @@ nb::bytes meshopt_decode_index_sequence_impl(nb::bytes enc, size_t count, size_t
 
 } // namespace
 
+// Phase 2 STEP->IFC file writer: drives the native reader (StreamIndex/Resolver) + the dep-free
+// ifc_emit::BrepEmitter. Lives here (not in ifc_emit.h) so the emitter header stays reader-free.
+// Streams to disk per chunk; bounds parse_cache_ (single-threaded -> safe per fc37d71).
+static adacpp::ifc_emit::FileStats write_ifc_file_impl(const std::string &in_path, const std::string &out_path,
+                                                       const std::string &schema, double deflection,
+                                                       double angular_deg) {
+    using namespace adacpp::ifc_emit;
+    FileStats fs;
+    auto idx = adacpp::step::StreamIndex::from_file(in_path);
+    adacpp::step::Resolver r(idx);
+    r.build_metadata(idx.lists);
+    r.enable_parse_cache_bounding();
+    std::FILE *fp = std::fopen(out_path.c_str(), "wb");
+    if (!fp)
+        return fs;
+    std::string buf;
+    buf.reserve(1 << 22);
+    auto flush = [&](bool force) {
+        if (buf.size() >= (4u << 20) || force) {
+            std::fwrite(buf.data(), 1, buf.size(), fp);
+            buf.clear();
+        }
+    };
+    buf += "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION((''),'2;1');\n";
+    buf += "FILE_NAME('','',(''),(''),'adacpp','','');\nFILE_SCHEMA(('" + schema + "'));\nENDSEC;\nDATA;\n";
+    buf += "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCDIRECTION((0.,0.,1.));\n#3=IFCDIRECTION((1.,0.,0.));\n"
+           "#4=IFCAXIS2PLACEMENT3D(#1,#2,#3);\n#5=IFCDIRECTION((1.,0.));\n"
+           "#6=IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-5,#4,#5);\n"
+           "#7=IFCSIUNIT(*,.LENGTHUNIT.,$,.METRE.);\n#8=IFCUNITASSIGNMENT((#7));\n";
+    buf += "#9=IFCPROJECT('" + ifc_guid(1) + "',$,'adacpp STEP->IFC',$,$,$,$,(#6),#8);\n";
+    buf += "#10=IFCAXIS2PLACEMENT3D(#1,$,$);\n#11=IFCLOCALPLACEMENT($,#10);\n";
+    buf += "#12=IFCSITE('" + ifc_guid(2) + "',$,'Site',$,$,#11,$,$,.ELEMENT.,$,$,$,$,$);\n";
+    buf += "#13=IFCRELAGGREGATES('" + ifc_guid(3) + "',$,$,$,#9,(#12));\n";
+    BrepEmitter em(100, nullptr, deflection, angular_deg);
+    std::vector<long> proxies;
+    uint64_t guidn = 100;
+    for (long sid : idx.lists.roots) {
+        adacpp::ngeom::NgeomRoot root = r.resolve_root(sid);
+        ++fs.solids_in;
+        long brep = em.emit_advanced_brep(buf, root);
+        if (brep) {
+            ++fs.solids_out;
+            std::string nm = root.id.empty() ? ("solid_" + std::to_string(sid)) : ifc_str(root.id);
+            long shape = em.emit_entity(buf, "IfcShapeRepresentation(#6,'Body','AdvancedBrep',(#" +
+                                                 std::to_string(brep) + "))");
+            long pds = em.emit_entity(buf, "IfcProductDefinitionShape($,$,(#" + std::to_string(shape) + "))");
+            long proxy = em.emit_entity(buf, "IfcBuildingElementProxy('" + ifc_guid(++guidn) + "',$,'" + nm +
+                                                 "',$,$,#11,#" + std::to_string(pds) + ",$,$)");
+            proxies.push_back(proxy);
+        }
+        r.clear_geom_cache();
+        flush(false);
+    }
+    if (!proxies.empty()) {
+        std::string refs = "(";
+        for (size_t i = 0; i < proxies.size(); ++i)
+            refs += (i ? ",#" : "#") + std::to_string(proxies[i]);
+        refs += ")";
+        em.emit_entity(buf, "IfcRelContainedInSpatialStructure('" + ifc_guid(++guidn) + "',$,$,$," + refs +
+                                ",#12)");
+    }
+    buf += "ENDSEC;\nEND-ISO-10303-21;\n";
+    flush(true);
+    std::fclose(fp);
+    fs.geom = em.stats();
+    return fs;
+}
+
 void cad_module(nb::module_ &m) {
     // Kernel-agnostic mesh / color / group types live in cad — they're the
     // surface every backend (native OCCT, wasm OCCT, future CGAL) speaks.
@@ -2696,6 +2764,34 @@ void cad_module(nb::module_ &m) {
         "path"_a, "index"_a = 0, "start_id"_a = 100,
         "Emit one solid's IFC4 IfcAdvancedBrep SPF lines (string) from the native NGEOM reader. "
         "Phase 1 test entry for the native STEP->IFC writer; returns '' if the solid was skipped.");
+
+    // Phase 2: full single-threaded STEP->IFC file. Returns a dict with the losslessness audit
+    // (solids_in/out, faces_in/out/dropped, drop_reasons, edge approximation counts).
+    m.def(
+        "stream_step_to_ifc",
+        [](const std::string &in_path, const std::string &out_path, const std::string &schema,
+           double deflection, double angular_deg) -> nb::dict {
+            adacpp::ifc_emit::FileStats fs =
+                write_ifc_file_impl(in_path, out_path, schema, deflection, angular_deg);
+            nb::dict d;
+            d["solids_in"] = fs.solids_in;
+            d["solids_out"] = fs.solids_out;
+            d["faces_in"] = fs.geom.faces_in;
+            d["faces_out"] = fs.geom.faces_out;
+            d["faces_dropped"] = fs.geom.faces_dropped;
+            d["edges_analytic"] = fs.geom.edges_analytic;
+            d["edges_polyline_approx"] = fs.geom.edges_polyline_approx;
+            d["edges_degenerate"] = fs.geom.edges_degenerate;
+            nb::dict reasons;
+            for (const auto &[k, v] : fs.geom.drop_reasons)
+                reasons[k.c_str()] = v;
+            d["drop_reasons"] = reasons;
+            return d;
+        },
+        "in_path"_a, "out_path"_a, "schema"_a = "IFC4X3_ADD2", "deflection"_a = 2.0, "angular_deg"_a = 20.0,
+        "Native single-threaded STEP->IFC (Phase 2): write a full IFC file (header + spatial block + "
+        "one IfcAdvancedBrep+proxy per solid). Returns the losslessness audit dict (solids_in/out, "
+        "faces_in/out/dropped, drop_reasons). schema: 'IFC4X3_ADD2' | 'IFC4'.");
 
     m.def("stream_step_to_meshes", &stream_step_to_meshes_impl, "path"_a, "pipeline"_a = "libtess2",
           "deflection"_a = 0.0, "angular_deg"_a = 20.0,
