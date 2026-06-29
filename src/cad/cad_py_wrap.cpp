@@ -2553,7 +2553,7 @@ nb::bytes meshopt_decode_index_sequence_impl(nb::bytes enc, size_t count, size_t
 // Streams to disk per chunk; bounds parse_cache_ (single-threaded -> safe per fc37d71).
 static adacpp::ifc_emit::FileStats write_ifc_file_impl(const std::string &in_path, const std::string &out_path,
                                                        const std::string &schema, double deflection,
-                                                       double angular_deg) {
+                                                       double angular_deg, long max_solids) {
     using namespace adacpp::ifc_emit;
     FileStats fs;
     auto idx = adacpp::step::StreamIndex::from_file(in_path);
@@ -2585,18 +2585,53 @@ static adacpp::ifc_emit::FileStats write_ifc_file_impl(const std::string &in_pat
     std::vector<long> proxies;
     uint64_t guidn = 100;
     for (long sid : idx.lists.roots) {
+        if (max_solids > 0 && fs.solids_in >= max_solids)
+            break;
         adacpp::ngeom::NgeomRoot root = r.resolve_root(sid);
         ++fs.solids_in;
         long brep = em.emit_advanced_brep(buf, root);
         if (brep) {
             ++fs.solids_out;
             std::string nm = root.id.empty() ? ("solid_" + std::to_string(sid)) : ifc_str(root.id);
-            long shape = em.emit_entity(buf, "IfcShapeRepresentation(#6,'Body','AdvancedBrep',(#" +
-                                                 std::to_string(brep) + "))");
-            long pds = em.emit_entity(buf, "IfcProductDefinitionShape($,$,(#" + std::to_string(shape) + "))");
-            long proxy = em.emit_entity(buf, "IfcBuildingElementProxy('" + ifc_guid(++guidn) + "',$,'" + nm +
-                                                 "',$,$,#11,#" + std::to_string(pds) + ",$,$)");
-            proxies.push_back(proxy);
+            // The brep is in the solid's LOCAL/definition coords; root.transforms holds the per-instance
+            // world placements (assembly graph). Empty => flat/baked (geometry already world) => one proxy.
+            long mrep = em.emit_entity(buf, "IfcShapeRepresentation(#6,'Body','AdvancedBrep',(#" +
+                                                std::to_string(brep) + "))");
+            if (root.transforms.empty()) {
+                long pds = em.emit_entity(buf, "IfcProductDefinitionShape($,$,(#" + std::to_string(mrep) + "))");
+                long proxy = em.emit_entity(buf, "IfcBuildingElementProxy('" + ifc_guid(++guidn) + "',$,'" + nm +
+                                                     "',$,$,#11,#" + std::to_string(pds) + ",$,$)");
+                proxies.push_back(proxy);
+            } else {
+                // N assembly instances: SHARE the geometry via one IfcRepresentationMap + one
+                // IfcMappedItem per placement (no N-fold geometry duplication). Transform is
+                // column-major glTF: cols 0/1/2 = transformed x/y/z axes, col 3 = origin.
+                long repmap = em.emit_entity(buf, "IfcRepresentationMap(#4,#" + std::to_string(mrep) + ")");
+                int k = 0;
+                for (const auto &T : root.transforms) {
+                    auto R = [](float v) { return adacpp::ifc_emit::ifc_real(v); };
+                    auto D = [&](float a, float b, float cc) {
+                        return em.emit_entity(buf, "IfcDirection((" + R(a) + "," + R(b) + "," + R(cc) + "))");
+                    };
+                    long axx = D(T[0], T[1], T[2]); // glTF column 0 -> transformed X
+                    long axy = D(T[4], T[5], T[6]); // column 1 -> transformed Y
+                    long axz = D(T[8], T[9], T[10]); // column 2 -> transformed Z
+                    long org = em.emit_entity(buf, "IfcCartesianPoint((" + R(T[12]) + "," + R(T[13]) + "," +
+                                                       R(T[14]) + "))");
+                    long op = em.emit_entity(buf, "IfcCartesianTransformationOperator3D(#" + std::to_string(axx) +
+                                                      ",#" + std::to_string(axy) + ",#" + std::to_string(org) +
+                                                      ",1.,#" + std::to_string(axz) + ")");
+                    long mi = em.emit_entity(buf, "IfcMappedItem(#" + std::to_string(repmap) + ",#" +
+                                                      std::to_string(op) + ")");
+                    long sr = em.emit_entity(buf, "IfcShapeRepresentation(#6,'Body','MappedRepresentation',(#" +
+                                                      std::to_string(mi) + "))");
+                    long pds = em.emit_entity(buf, "IfcProductDefinitionShape($,$,(#" + std::to_string(sr) + "))");
+                    long proxy = em.emit_entity(buf, "IfcBuildingElementProxy('" + ifc_guid(++guidn) + "',$,'" +
+                                                         nm + "_" + std::to_string(k++) + "',$,$,#11,#" +
+                                                         std::to_string(pds) + ",$,$)");
+                    proxies.push_back(proxy);
+                }
+            }
         }
         r.clear_geom_cache();
         flush(false);
@@ -2770,9 +2805,9 @@ void cad_module(nb::module_ &m) {
     m.def(
         "stream_step_to_ifc",
         [](const std::string &in_path, const std::string &out_path, const std::string &schema,
-           double deflection, double angular_deg) -> nb::dict {
+           double deflection, double angular_deg, long max_solids) -> nb::dict {
             adacpp::ifc_emit::FileStats fs =
-                write_ifc_file_impl(in_path, out_path, schema, deflection, angular_deg);
+                write_ifc_file_impl(in_path, out_path, schema, deflection, angular_deg, max_solids);
             nb::dict d;
             d["solids_in"] = fs.solids_in;
             d["solids_out"] = fs.solids_out;
@@ -2789,6 +2824,7 @@ void cad_module(nb::module_ &m) {
             return d;
         },
         "in_path"_a, "out_path"_a, "schema"_a = "IFC4X3_ADD2", "deflection"_a = 2.0, "angular_deg"_a = 20.0,
+        "max_solids"_a = 0,
         "Native single-threaded STEP->IFC (Phase 2): write a full IFC file (header + spatial block + "
         "one IfcAdvancedBrep+proxy per solid). Returns the losslessness audit dict (solids_in/out, "
         "faces_in/out/dropped, drop_reasons). schema: 'IFC4X3_ADD2' | 'IFC4'.");
