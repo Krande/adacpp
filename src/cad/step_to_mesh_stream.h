@@ -36,67 +36,111 @@ enum class MeshFormat { STL, OBJ };
 
 namespace meshwrite {
 
-// One worker lane: buffers geometry to a temp file, tracks its triangle count. STL writes raw
-// 50-byte little-endian facets (no header); OBJ writes 'v x y z' lines (3 unshared verts/triangle).
+inline void bake(const std::array<float, 16> &M, float usc, const float p[3], float out[3]); // fwd
+
+// One worker lane: buffers geometry to a temp file, tracks its triangle count.
+//  STL: raw 50-byte little-endian facets (no header), 3 unshared verts/facet — STL has no vertex
+//       sharing, so per-triangle is the format's natural form.
+//  OBJ: WELDED — each instance's unique tessellated vertices are written once ('v' lines, .objv) and
+//       triangles reference them as lane-local 0-based indices stored binary in .objf. The assembly
+//       concatenates the 'v' files and rewrites the indices as 'f' lines with a per-lane global base.
+//       Avoids the 3x vertex blow-up of unshared per-triangle 'v' lines (crane OBJ 8.25 GB -> ~3 GB,
+//       ~6x fewer float-formats).
 struct MeshLane {
-    std::string path;
+    std::string path;       // STL: .stlraw ; OBJ: .objv (vertex lines)
+    std::string fpath;      // OBJ only: .objf (binary uint32 index triples, lane-local 0-based)
     std::FILE *fp = nullptr;
+    std::FILE *ffp = nullptr; // OBJ faces
     uint64_t tris = 0;
+    uint64_t vcount = 0; // OBJ: running lane-local vertex count
     MeshFormat fmt;
     std::vector<char> buf;
+    std::vector<uint32_t> fbuf; // OBJ: pending face indices
 
     MeshLane(const std::string &dir, int t, MeshFormat f) : fmt(f) {
-        path = dir + "/lane_" + std::to_string(t) + (f == MeshFormat::STL ? ".stlraw" : ".objv");
+        std::string base = dir + "/lane_" + std::to_string(t);
+        path = base + (f == MeshFormat::STL ? ".stlraw" : ".objv");
         fp = std::fopen(path.c_str(), "wb");
         buf.reserve(1 << 20);
+        if (f == MeshFormat::OBJ) {
+            fpath = base + ".objf";
+            ffp = std::fopen(fpath.c_str(), "wb");
+            fbuf.reserve(1 << 18);
+        }
     }
     ~MeshLane() {
         if (fp)
             std::fclose(fp);
+        if (ffp)
+            std::fclose(ffp);
         std::error_code ec;
         std::filesystem::remove(path, ec);
+        if (!fpath.empty())
+            std::filesystem::remove(fpath, ec);
     }
     void flush() {
         if (!buf.empty() && fp) {
             std::fwrite(buf.data(), 1, buf.size(), fp);
             buf.clear();
         }
+        if (!fbuf.empty() && ffp) {
+            std::fwrite(fbuf.data(), sizeof(uint32_t), fbuf.size(), ffp);
+            fbuf.clear();
+        }
         if (fp)
             std::fflush(fp); // ensure the lane file is complete on disk before assembly reads it
+        if (ffp)
+            std::fflush(ffp);
     }
     void put(const char *p, size_t n) {
         buf.insert(buf.end(), p, p + n);
         if (buf.size() >= (1 << 20))
             flush();
     }
+    // STL per-facet (3 unshared verts). OBJ uses add_instance() instead.
     void facet(const float v0[3], const float v1[3], const float v2[3]) {
-        if (fmt == MeshFormat::STL) {
-            float n[3] = {(v1[1] - v0[1]) * (v2[2] - v0[2]) - (v1[2] - v0[2]) * (v2[1] - v0[1]),
-                          (v1[2] - v0[2]) * (v2[0] - v0[0]) - (v1[0] - v0[0]) * (v2[2] - v0[2]),
-                          (v1[0] - v0[0]) * (v2[1] - v0[1]) - (v1[1] - v0[1]) * (v2[0] - v0[0])};
-            float ln = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
-            if (ln > 0) {
-                n[0] /= ln;
-                n[1] /= ln;
-                n[2] /= ln;
-            }
-            char rec[50];
-            std::memcpy(rec, n, 12);
-            std::memcpy(rec + 12, v0, 12);
-            std::memcpy(rec + 24, v1, 12);
-            std::memcpy(rec + 36, v2, 12);
-            rec[48] = 0;
-            rec[49] = 0;
-            put(rec, 50);
-        } else {
-            char line[160];
-            int n = std::snprintf(line, sizeof line,
-                                  "v %.6g %.6g %.6g\nv %.6g %.6g %.6g\nv %.6g %.6g %.6g\n", v0[0], v0[1], v0[2],
-                                  v1[0], v1[1], v1[2], v2[0], v2[1], v2[2]);
+        float n[3] = {(v1[1] - v0[1]) * (v2[2] - v0[2]) - (v1[2] - v0[2]) * (v2[1] - v0[1]),
+                      (v1[2] - v0[2]) * (v2[0] - v0[0]) - (v1[0] - v0[0]) * (v2[2] - v0[2]),
+                      (v1[0] - v0[0]) * (v2[1] - v0[1]) - (v1[1] - v0[1]) * (v2[0] - v0[0])};
+        float ln = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+        if (ln > 0) {
+            n[0] /= ln;
+            n[1] /= ln;
+            n[2] /= ln;
+        }
+        char rec[50];
+        std::memcpy(rec, n, 12);
+        std::memcpy(rec + 12, v0, 12);
+        std::memcpy(rec + 24, v1, 12);
+        std::memcpy(rec + 36, v2, 12);
+        rec[48] = 0;
+        rec[49] = 0;
+        put(rec, 50);
+        ++tris;
+    }
+    // OBJ welded instance: bake + write each unique vertex once, faces as lane-local indices.
+    void add_instance(const std::vector<float> &positions, const std::vector<uint32_t> &indices,
+                      const std::array<float, 16> &M, float usc) {
+        size_t nv = positions.size() / 3;
+        char line[96];
+        for (size_t j = 0; j < nv; ++j) {
+            float w[3];
+            bake(M, usc, &positions[3 * j], w);
+            int n = std::snprintf(line, sizeof line, "v %.6g %.6g %.6g\n", w[0], w[1], w[2]);
             if (n > 0)
                 put(line, (size_t) n);
         }
-        ++tris;
+        for (size_t e = 0; e + 2 < indices.size(); e += 3) {
+            fbuf.push_back((uint32_t) (vcount + indices[e]));
+            fbuf.push_back((uint32_t) (vcount + indices[e + 1]));
+            fbuf.push_back((uint32_t) (vcount + indices[e + 2]));
+            ++tris;
+            if (fbuf.size() >= (1u << 18)) {
+                std::fwrite(fbuf.data(), sizeof(uint32_t), fbuf.size(), ffp);
+                fbuf.clear();
+            }
+        }
+        vcount += nv;
     }
 };
 
@@ -190,12 +234,16 @@ inline long stream_step_to_mesh(const std::string &in_path, const std::string &o
                     size_t ninst = tfs.empty() ? 1 : tfs.size();
                     for (size_t k = 0; k < ninst; ++k) {
                         const std::array<float, 16> &M = tfs.empty() ? kIdentity : tfs[k];
-                        for (size_t e = 0; e + 2 < tm.indices.size(); e += 3) {
-                            float w0[3], w1[3], w2[3];
-                            meshwrite::bake(M, usc, &tm.positions[3 * tm.indices[e]], w0);
-                            meshwrite::bake(M, usc, &tm.positions[3 * tm.indices[e + 1]], w1);
-                            meshwrite::bake(M, usc, &tm.positions[3 * tm.indices[e + 2]], w2);
-                            lane.facet(w0, w1, w2);
+                        if (fmt == MeshFormat::OBJ) {
+                            lane.add_instance(tm.positions, tm.indices, M, usc); // welded
+                        } else {
+                            for (size_t e = 0; e + 2 < tm.indices.size(); e += 3) {
+                                float w0[3], w1[3], w2[3];
+                                meshwrite::bake(M, usc, &tm.positions[3 * tm.indices[e]], w0);
+                                meshwrite::bake(M, usc, &tm.positions[3 * tm.indices[e + 1]], w1);
+                                meshwrite::bake(M, usc, &tm.positions[3 * tm.indices[e + 2]], w2);
+                                lane.facet(w0, w1, w2);
+                            }
                         }
                     }
                 }
@@ -241,24 +289,34 @@ inline long stream_step_to_mesh(const std::string &in_path, const std::string &o
             std::fwrite(&cnt, 4, 1, out);
             for (auto &l : lanes)
                 copy_lane(l.path);
-        } else { // OBJ: all vertices (concat), then faces with a running offset
+        } else { // OBJ: concat welded 'v' files, then faces from the binary index lanes (+global base)
             for (auto &l : lanes)
-                copy_lane(l.path);
+                copy_lane(l.path); // .objv vertex files, in lane order
             std::vector<char> fb;
             fb.reserve(1 << 20);
-            uint64_t off = 1; // 1-based, advances by 3 per triangle
+            uint64_t base = 0; // verts written by prior lanes (1-based -> +1 at emit)
             for (auto &l : lanes) {
-                for (uint64_t tri = 0; tri < l.tris; ++tri) {
-                    char line[64];
-                    int n = std::snprintf(line, sizeof line, "f %llu %llu %llu\n", (unsigned long long) off,
-                                          (unsigned long long) (off + 1), (unsigned long long) (off + 2));
-                    fb.insert(fb.end(), line, line + n);
-                    off += 3;
-                    if (fb.size() >= (1 << 20)) {
-                        std::fwrite(fb.data(), 1, fb.size(), out);
-                        fb.clear();
+                std::FILE *fin = std::fopen(l.fpath.c_str(), "rb");
+                if (fin) {
+                    std::vector<uint32_t> ib(3 << 16);
+                    size_t got;
+                    while ((got = std::fread(ib.data(), sizeof(uint32_t), ib.size(), fin)) >= 3) {
+                        for (size_t e = 0; e + 2 < got; e += 3) {
+                            char line[64];
+                            int n = std::snprintf(line, sizeof line, "f %llu %llu %llu\n",
+                                                  (unsigned long long) (base + ib[e] + 1),
+                                                  (unsigned long long) (base + ib[e + 1] + 1),
+                                                  (unsigned long long) (base + ib[e + 2] + 1));
+                            fb.insert(fb.end(), line, line + n);
+                        }
+                        if (fb.size() >= (1 << 20)) {
+                            std::fwrite(fb.data(), 1, fb.size(), out);
+                            fb.clear();
+                        }
                     }
+                    std::fclose(fin);
                 }
+                base += l.vcount;
             }
             if (!fb.empty())
                 std::fwrite(fb.data(), 1, fb.size(), out);
