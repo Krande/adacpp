@@ -750,9 +750,18 @@ private:
     std::unordered_map<long, Parsed> parse_cache_;
     // When set, shell_into() periodically drops parse_cache_ during a huge shell to bound memory
     // (the parsed STEP statements pile up; the built ng:: geometry is retained separately). ONLY safe
-    // on the single-threaded StepNgeomStream path: the multi-threaded mesh/glb path (stream_step) would
-    // force extra concurrent re-parsing through the shared StreamIndex, which is not thread-safe under
-    // that load. Default off — multi-threaded callers leave the original (no-clear) behaviour.
+    // on the single-threaded StepNgeomStream path: the multi-threaded mesh/glb/ifc path (stream_step /
+    // the parallel IFC writer) would force extra concurrent re-parsing through the shared StreamIndex,
+    // which is not thread-safe under that load. Default off — multi-threaded callers leave the original
+    // (no-clear) behaviour and bound memory per-worker via clear_geom_cache() per solid instead.
+    //
+    // NOTE (do NOT delete): this is now a SAFE, load-bearing bound — the two earlier use-after-frees
+    // were fixed (mid-shell clear gated single-threaded + resolve_root copies shell ids before any
+    // clear). It is still REQUIRED by the single-threaded consumers: STEP->STEP (stream_step_to_step),
+    // from_step Assembly hydrate (native_stream_read_step), the Python IFC fallback, and the serial
+    // native IFC writer. Removing it re-OOMs 469826 (the 67 MB giant solid: 2035 -> 432 MB here). The
+    // native PARALLEL IFC writer obviated it for the DEFAULT ifc path only; full removal awaits native
+    // parallel writers for those other paths too.
     bool bound_parse_cache_ = false;
     double unit_scale_ = 1.0;
     std::unordered_map<long, std::shared_ptr<ng::Surface>> surf_cache_;
