@@ -93,6 +93,10 @@ class BrepEmitter {
     long emit_entity(std::string &out, const std::string &body) {
         return emit(out, body);
     }
+    // Allocate a fresh entity id WITHOUT emitting (the spatial-tree builder writes its own SPF lines).
+    long alloc_id() {
+        return ++nid_;
+    }
 
     // Emit the root's faces as one IfcClosedShell -> IfcAdvancedBrep. Returns the IfcAdvancedBrep id,
     // or 0 if any face used non-emittable geometry (solid skipped wholesale, matching the Python).

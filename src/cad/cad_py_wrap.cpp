@@ -32,6 +32,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <functional>
+#include <map>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -2554,37 +2556,39 @@ nb::bytes meshopt_decode_index_sequence_impl(nb::bytes enc, size_t count, size_t
 // one IfcRepresentationMap + one IfcMappedItem+IfcCartesianTransformationOperator3D+proxy per world
 // placement (geometry shared). Appends every proxy id to `proxies`. guid_seed must be unique per
 // solid (instances use guid_seed+k; reserve a gap > max instances).
+using IfcPath = std::vector<std::pair<int, std::string>>; // root-first (rep_id, product_name) levels
+
 static void emit_solid_ifc(adacpp::ifc_emit::BrepEmitter &em, std::string &buf,
                            const adacpp::ngeom::NgeomRoot &root, long sid, uint64_t guid_seed,
-                           std::vector<long> &proxies) {
+                           std::vector<long> &proxies, std::vector<IfcPath> *proxy_paths) {
     using namespace adacpp::ifc_emit;
     long brep = em.emit_advanced_brep(buf, root);
     if (!brep)
         return;
     std::string nm = root.id.empty() ? ("solid_" + std::to_string(sid)) : ifc_str(root.id);
-    // Hierarchical instance name from the assembly path (root.instance_paths[k], parallel to
-    // transforms): "rootAsm/subAsm/.../solid" so the proxy is navigable by its assembly path in IFC
-    // viewers (vs a flat "name_k"). Refinement #2 — a navigable surfacing of the part hierarchy
-    // without a full IfcElementAssembly tree (instance_paths can't distinguish placements of the same
-    // sub-assembly, so a faithful nested tree needs a reader-side per-placement path first).
-    auto inst_name = [&](size_t k) -> std::string {
-        if (k >= root.instance_paths.size() || root.instance_paths[k].empty())
-            return nm + "_" + std::to_string(k);
-        std::string p;
-        for (const auto &lvl : root.instance_paths[k]) {
-            if (!p.empty())
-                p += "/";
-            p += lvl.second.empty() ? ("#" + std::to_string(lvl.first)) : lvl.second;
+    auto record = [&](long proxy, size_t k) {
+        proxies.push_back(proxy);
+        if (proxy_paths)
+            proxy_paths->push_back(k < root.instance_paths.size() ? root.instance_paths[k] : IfcPath{});
+    };
+    // Proxy Name = the solid's own (leaf) product name; the assembly PATH is carried by proxy_paths
+    // and emitted as a nested IfcElementAssembly tree by emit_spatial_tree (aligned with the STEP->GLB
+    // product tree). Falls back to root.id when there's no path.
+    auto leaf_name = [&](size_t k) -> std::string {
+        if (k < root.instance_paths.size() && !root.instance_paths[k].empty()) {
+            const std::string &ln = root.instance_paths[k].back().second;
+            if (!ln.empty())
+                return ifc_str(ln);
         }
-        return ifc_str(p);
+        return nm;
     };
     long mrep =
         em.emit_entity(buf, "IfcShapeRepresentation(#6,'Body','AdvancedBrep',(#" + std::to_string(brep) + "))");
     if (root.transforms.empty()) {
         long pds = em.emit_entity(buf, "IfcProductDefinitionShape($,$,(#" + std::to_string(mrep) + "))");
-        long proxy = em.emit_entity(buf, "IfcBuildingElementProxy('" + ifc_guid(guid_seed) + "',$,'" + nm +
-                                             "',$,$,#11,#" + std::to_string(pds) + ",$,$)");
-        proxies.push_back(proxy);
+        long proxy = em.emit_entity(buf, "IfcBuildingElementProxy('" + ifc_guid(guid_seed) + "',$,'" +
+                                             leaf_name(0) + "',$,$,#11,#" + std::to_string(pds) + ",$,$)");
+        record(proxy, 0);
         return;
     }
     long repmap = em.emit_entity(buf, "IfcRepresentationMap(#4,#" + std::to_string(mrep) + ")");
@@ -2604,9 +2608,69 @@ static void emit_solid_ifc(adacpp::ifc_emit::BrepEmitter &em, std::string &buf,
                                           std::to_string(mi) + "))");
         long pds = em.emit_entity(buf, "IfcProductDefinitionShape($,$,(#" + std::to_string(sr) + "))");
         long proxy = em.emit_entity(buf, "IfcBuildingElementProxy('" + ifc_guid(guid_seed + 1 + k) + "',$,'" +
-                                             inst_name(k) + "',$,$,#11,#" + std::to_string(pds) + ",$,$)");
-        proxies.push_back(proxy);
+                                             leaf_name(k) + "',$,$,#11,#" + std::to_string(pds) + ",$,$)");
+        record(proxy, k);
         ++k;
+    }
+}
+
+// Emit the nested IfcElementAssembly tree from per-proxy assembly paths, aligned with the STEP->GLB
+// product tree (scene_from_step_stream._group_parent): assembly nodes keyed by the path's REP-ID
+// prefix (names repeat across branches), named by product name. The proxy (leaf) is aggregated under
+// its deepest assembly via IfcRelAggregates; assemblies nest via IfcRelAggregates; top-level elements
+// (top assemblies + path-less proxies) are contained in the storey (#14). `next_id` allocates entity
+// ids; appends SPF to `out`.
+static void emit_spatial_tree(std::string &out, const std::function<long()> &next_id,
+                              const std::vector<long> &proxies, const std::vector<IfcPath> &paths) {
+    using adacpp::ifc_emit::ifc_guid;
+    using adacpp::ifc_emit::ifc_str;
+    std::map<std::vector<int>, long> asm_id;              // rep-id prefix -> IfcElementAssembly id
+    std::map<long, std::vector<long>> children;           // parent entity id -> child entity ids
+    const long STOREY = 14;
+    std::vector<long> storey_children;
+    uint64_t aguid = 0xE0000000ull; // assembly/rel GUID namespace (disjoint from header 0xF.. + proxies)
+
+    for (size_t i = 0; i < proxies.size(); ++i) {
+        const IfcPath &path = (i < paths.size()) ? paths[i] : IfcPath{};
+        // Intermediate assembly levels = path[0 .. n-2]; path.back() is the solid's own (leaf) product.
+        long parent = STOREY;
+        bool parent_is_storey = true;
+        std::vector<int> prefix;
+        for (size_t d = 0; d + 1 < path.size(); ++d) {
+            prefix.push_back(path[d].first);
+            auto it = asm_id.find(prefix);
+            long aid;
+            if (it == asm_id.end()) {
+                aid = next_id();
+                asm_id[prefix] = aid;
+                std::string an = path[d].second.empty() ? ("asm_" + std::to_string(path[d].first))
+                                                         : ifc_str(path[d].second);
+                out += "#" + std::to_string(aid) + "=IFCELEMENTASSEMBLY('" + ifc_guid(aguid++) +
+                       "',$,'" + an + "',$,$,#11,$,$,.NOTDEFINED.,.NOTDEFINED.);\n";
+                (parent_is_storey ? storey_children : children[parent]).push_back(aid);
+            } else {
+                aid = it->second;
+            }
+            parent = aid;
+            parent_is_storey = false;
+        }
+        (parent_is_storey ? storey_children : children[parent]).push_back(proxies[i]);
+    }
+    for (const auto &[pid, kids] : children) {
+        std::string refs = "(";
+        for (size_t j = 0; j < kids.size(); ++j)
+            refs += (j ? ",#" : "#") + std::to_string(kids[j]);
+        refs += ")";
+        out += "#" + std::to_string(next_id()) + "=IFCRELAGGREGATES('" + ifc_guid(aguid++) + "',$,$,$,#" +
+               std::to_string(pid) + "," + refs + ");\n";
+    }
+    if (!storey_children.empty()) {
+        std::string refs = "(";
+        for (size_t j = 0; j < storey_children.size(); ++j)
+            refs += (j ? ",#" : "#") + std::to_string(storey_children[j]);
+        refs += ")";
+        out += "#" + std::to_string(next_id()) + "=IFCRELCONTAINEDINSPATIALSTRUCTURE('" + ifc_guid(aguid++) +
+               "',$,$,$," + refs + ",#" + std::to_string(STOREY) + ");\n";
     }
 }
 
@@ -2638,6 +2702,9 @@ static std::string ifc_header_block(const std::string &schema, double unit_scale
     std::string b;
     b += "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION((''),'2;1');\n";
     b += "FILE_NAME('','',(''),(''),'adacpp','','');\nFILE_SCHEMA(('" + schema + "'));\nENDSEC;\nDATA;\n";
+    // adapy's default spatial hierarchy: IfcProject -> IfcSite -> IfcBuilding -> IfcBuildingStorey,
+    // chained by IfcRelAggregates. Elements/assemblies are contained in the storey (#14). Reserved
+    // header ids #1..#17 (K) — keep in sync with the parallel writer's K + renumber threshold.
     b += "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCDIRECTION((0.,0.,1.));\n#3=IFCDIRECTION((1.,0.,0.));\n"
          "#4=IFCAXIS2PLACEMENT3D(#1,#2,#3);\n#5=IFCDIRECTION((1.,0.));\n"
          "#6=IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-5,#4,#5);\n";
@@ -2645,7 +2712,11 @@ static std::string ifc_header_block(const std::string &schema, double unit_scale
     b += "#9=IFCPROJECT('" + ifc_guid(0xF0000001ull) + "',$,'adacpp STEP->IFC',$,$,$,$,(#6),#8);\n";
     b += "#10=IFCAXIS2PLACEMENT3D(#1,$,$);\n#11=IFCLOCALPLACEMENT($,#10);\n";
     b += "#12=IFCSITE('" + ifc_guid(0xF0000002ull) + "',$,'Site',$,$,#11,$,$,.ELEMENT.,$,$,$,$,$);\n";
-    b += "#13=IFCRELAGGREGATES('" + ifc_guid(0xF0000003ull) + "',$,$,$,#9,(#12));\n";
+    b += "#13=IFCBUILDING('" + ifc_guid(0xF0000003ull) + "',$,'Building',$,$,#11,$,$,.ELEMENT.,$,$,$);\n";
+    b += "#14=IFCBUILDINGSTOREY('" + ifc_guid(0xF0000004ull) + "',$,'Storey',$,$,#11,$,$,.ELEMENT.,$);\n";
+    b += "#15=IFCRELAGGREGATES('" + ifc_guid(0xF0000005ull) + "',$,$,$,#9,(#12));\n";
+    b += "#16=IFCRELAGGREGATES('" + ifc_guid(0xF0000006ull) + "',$,$,$,#12,(#13));\n";
+    b += "#17=IFCRELAGGREGATES('" + ifc_guid(0xF0000007ull) + "',$,$,$,#13,(#14));\n";
     return b;
 }
 
@@ -2676,26 +2747,20 @@ static adacpp::ifc_emit::FileStats write_ifc_file_impl(const std::string &in_pat
     buf += ifc_header_block(schema, r.unit_scale());
     BrepEmitter em(100, nullptr, deflection, angular_deg);
     std::vector<long> proxies;
+    std::vector<IfcPath> proxy_paths;
     for (long sid : idx.lists.roots) {
         if (max_solids > 0 && fs.solids_in >= max_solids)
             break;
         adacpp::ngeom::NgeomRoot root = r.resolve_root(sid);
         ++fs.solids_in;
         size_t before = proxies.size();
-        emit_solid_ifc(em, buf, root, sid, (uint64_t) fs.solids_in * 1000u, proxies);
+        emit_solid_ifc(em, buf, root, sid, (uint64_t) fs.solids_in * 1000u, proxies, &proxy_paths);
         if (proxies.size() > before)
             ++fs.solids_out;
         r.clear_geom_cache();
         flush(false);
     }
-    if (!proxies.empty()) {
-        std::string refs = "(";
-        for (size_t i = 0; i < proxies.size(); ++i)
-            refs += (i ? ",#" : "#") + std::to_string(proxies[i]);
-        refs += ")";
-        em.emit_entity(buf, "IfcRelContainedInSpatialStructure('" + ifc_guid(0xF0000000ull) + "',$,$,$," + refs +
-                                ",#12)");
-    }
+    emit_spatial_tree(buf, [&]() { return em.alloc_id(); }, proxies, proxy_paths);
     buf += "ENDSEC;\nEND-ISO-10303-21;\n";
     flush(true);
     std::fclose(fp);
@@ -2781,7 +2846,7 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
         for (size_t i = 0; i < cost.size(); ++i)
             roots[i] = cost[i].second;
     }
-    const long K = 13; // ids #1..#13 are the shared header block
+    const long K = 17; // ids #1..#17 are the shared header block (Project/Site/Building/Storey + rels)
     // Robust global id allocation: each solid is emitted with LOCAL ids (1..n), then a contiguous
     // block of n ids is reserved atomically and the solid's text is renumbered by the block base.
     // No STRIDE guessing, no overflow, compact ids — correct regardless of per-face entity counts.
@@ -2801,6 +2866,7 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
         std::FILE *fp = nullptr;
         std::string path, buf;
         std::vector<long> proxies;
+        std::vector<IfcPath> proxy_paths; // assembly path per proxy (parallel to proxies)
         EmitStats stats;
         long solids_out = 0;
     };
@@ -2837,7 +2903,8 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
             sb.clear();
             BrepEmitter em(K, nullptr, deflection, angular_deg);
             std::vector<long> local_proxies;
-            emit_solid_ifc(em, sb, root, roots[i], (uint64_t) i * 1000u, local_proxies);
+            std::vector<IfcPath> local_paths;
+            emit_solid_ifc(em, sb, root, roots[i], (uint64_t) i * 1000u, local_proxies, &local_paths);
             long n = em.current_id() - K; // local ids K+1..K+n
             if (!local_proxies.empty()) {
                 long gbase = id_counter.fetch_add(n, std::memory_order_relaxed); // reserve [gbase, gbase+n-1]
@@ -2845,6 +2912,8 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
                 renumber_into(L.buf, sb, offset, K);
                 for (long p : local_proxies)
                     L.proxies.push_back(p + offset);
+                for (auto &pth : local_paths)
+                    L.proxy_paths.push_back(std::move(pth));
                 ++L.solids_out;
             }
             const EmitStats &s = em.stats();
@@ -2882,6 +2951,7 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
     std::string hdr = ifc_header_block(schema, master.unit_scale());
     std::fwrite(hdr.data(), 1, hdr.size(), out_fp);
     std::vector<long> all_proxies;
+    std::vector<IfcPath> all_paths;
     std::vector<char> io(1 << 20);
     for (int t = 0; t < nth; ++t) {
         Lane &L = lanes[t];
@@ -2893,6 +2963,8 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
             std::fclose(lf);
         }
         all_proxies.insert(all_proxies.end(), L.proxies.begin(), L.proxies.end());
+        for (auto &pth : L.proxy_paths)
+            all_paths.push_back(std::move(pth));
         fs.solids_out += L.solids_out;
         fs.geom.faces_in += L.stats.faces_in;
         fs.geom.faces_out += L.stats.faces_out;
@@ -2904,15 +2976,10 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
             fs.geom.drop_reasons[k] += v;
     }
     fs.solids_in = solids_in.load();
-    if (!all_proxies.empty()) {
-        long cid = id_counter.fetch_add(1); // next free global id (above all reserved blocks)
-        std::string c = "#" + std::to_string(cid) + "=IFCRELCONTAINEDINSPATIALSTRUCTURE('" + ifc_guid(0xF0000000ull) +
-                        "',$,$,$,(";
-        for (size_t i = 0; i < all_proxies.size(); ++i)
-            c += (i ? ",#" : "#") + std::to_string(all_proxies[i]);
-        c += "),#12);\n";
-        std::fwrite(c.data(), 1, c.size(), out_fp);
-    }
+    // Nested IfcElementAssembly tree over all proxies (ids from the shared atomic counter).
+    std::string tree;
+    emit_spatial_tree(tree, [&]() { return id_counter.fetch_add(1); }, all_proxies, all_paths);
+    std::fwrite(tree.data(), 1, tree.size(), out_fp);
     const char *foot = "ENDSEC;\nEND-ISO-10303-21;\n";
     std::fwrite(foot, 1, std::strlen(foot), out_fp);
     std::fclose(out_fp);
