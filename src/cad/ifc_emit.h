@@ -60,14 +60,34 @@ inline void compact_knots(const std::vector<double> &U, std::vector<double> &kno
     }
 }
 
+// Coverage accounting so "no geometry left behind" is VISIBLE, never silent: every face that fails
+// to emit, and every curve that had to be approximated (no analytic IFC entity), is counted with a
+// reason. A clean run is faces_in == faces_out, faces_dropped == 0.
+struct EmitStats {
+    long faces_in = 0, faces_out = 0, faces_dropped = 0;
+    long edges_analytic = 0, edges_polyline_approx = 0, edges_degenerate = 0;
+    std::unordered_map<std::string, long> drop_reasons; // e.g. "surface:unknown", "loop:empty"
+    void drop(const std::string &why) {
+        ++faces_dropped;
+        ++drop_reasons[why];
+    }
+};
+
 class BrepEmitter {
   public:
     // `tf` = optional row-major 4x4 baked into every point/dir (instance world placement); null =
-    // identity. For Phase 1 parity tests pass null (Python solid(transform=None)).
-    explicit BrepEmitter(long start_id, const double *tf = nullptr) : nid_(start_id), tf_(tf) {}
+    // identity. deflection/angular drive the discretize->IfcPolyline fallback for curves with no
+    // analytic IFC entity (hyperbola/parabola/composite/trimmed) — faithful to tolerance, never a
+    // wrong straight chord.
+    explicit BrepEmitter(long start_id, const double *tf = nullptr, double deflection = 2.0,
+                         double angular_deg = 20.0)
+        : nid_(start_id), tf_(tf), deflection_(deflection), angular_(angular_deg * PI / 180.0) {}
 
     long current_id() const {
         return nid_;
+    }
+    const EmitStats &stats() const {
+        return stats_;
     }
 
     // Emit the root's faces as one IfcClosedShell -> IfcAdvancedBrep. Returns the IfcAdvancedBrep id,
@@ -78,9 +98,9 @@ class BrepEmitter {
         face_ids.reserve(root.faces.size());
         for (const auto &fc : root.faces) {
             long fid = face(out, *fc);
-            if (!fid)
-                return 0;
-            face_ids.push_back(fid);
+            if (fid)
+                face_ids.push_back(fid); // a dropped face is counted in stats_ (no silent skip),
+                                         // but never sinks the whole solid — keep every good face
         }
         if (face_ids.empty())
             return 0;
@@ -91,6 +111,8 @@ class BrepEmitter {
   private:
     long nid_;
     const double *tf_;
+    double deflection_, angular_;
+    EmitStats stats_;
     std::unordered_map<long long, long> vcache_; // rounded-point key -> IfcVertexPoint id
 
     long emit(std::string &out, const std::string &body) {
@@ -200,32 +222,62 @@ class BrepEmitter {
                                  ifc_real(e->a2) + ")");
         if (const auto *b = dynamic_cast<const BSplineCurve *>(g))
             return bspline_curve(out, *b);
-        return 0;
+        if (const auto *p = dynamic_cast<const PolylineCurve *>(g))
+            return polyline(out, p->pts);
+        return 0; // no analytic IFC entity (hyperbola/parabola/composite/trimmed) -> caller discretizes
     }
 
-    long edge_curve(std::string &out, const OrientedEdgeN &oe) {
-        const Curve *g = oe.geometry.get();
-        long crv = 0;
-        if (g && !dynamic_cast<const LineCurve *>(g))
-            crv = curve(out, g);
-        if (!crv) {
-            // straight (or null) edge: IfcLine through the raw endpoints
-            Vec3 d = oe.e_end - oe.e_start;
-            double n = d.norm();
-            Vec3 u = n ? Vec3{d.x / n, d.y / n, d.z / n} : Vec3{0, 0, 1};
-            crv = emit(out, "IfcLine(#" + std::to_string(pt(out, oe.e_start)) + ",#" +
-                                std::to_string(vec(out, u)) + ")");
-        }
-        long v0 = vertex(out, oe.e_start), v1 = vertex(out, oe.e_end);
-        return emit(out, "IfcEdgeCurve(#" + std::to_string(v0) + ",#" + std::to_string(v1) + ",#" +
-                             std::to_string(crv) + "," + ifc_bool(oe.same_sense) + ")");
+    long polyline(std::string &out, const std::vector<Vec3> &pts) {
+        std::vector<long> ids;
+        ids.reserve(pts.size());
+        for (const auto &p : pts)
+            ids.push_back(pt(out, p));
+        return emit(out, "IfcPolyline(" + refs(ids) + ")");
+    }
+
+    // True for curve types with a faithful analytic IFC entity (so no approximation needed).
+    static bool analytic_curve(const Curve *g) {
+        return !g || dynamic_cast<const LineCurve *>(g) || dynamic_cast<const CircleCurve *>(g) ||
+               dynamic_cast<const EllipseCurve *>(g) || dynamic_cast<const BSplineCurve *>(g) ||
+               dynamic_cast<const PolylineCurve *>(g);
     }
 
     long oriented_edge(std::string &out, const OrientedEdgeN &oe) {
-        long ec = edge_curve(out, oe);
-        // EdgeStart/EdgeEnd are DERIVED in IfcOrientedEdge (from the referenced edge) -> SPF '*',
-        // not '$' (ifcopenshell.validate flags '$' here as "Attribute is derived in subtype").
-        return emit(out, "IfcOrientedEdge(*,*,#" + std::to_string(ec) + "," + ifc_bool(oe.orientation) + ")");
+        const Curve *g = oe.geometry.get();
+        long ec;
+        if (analytic_curve(g)) {
+            // analytic edge: emit the basis curve in its raw EDGE_CURVE sense; orientation stays on
+            // the IfcOrientedEdge. (null/Line -> IfcLine through the raw endpoints.)
+            long crv = g ? curve(out, g) : 0;
+            if (!crv) {
+                Vec3 d = oe.e_end - oe.e_start;
+                double n = d.norm();
+                Vec3 u = n ? Vec3{d.x / n, d.y / n, d.z / n} : Vec3{0, 0, 1};
+                crv = emit(out, "IfcLine(#" + std::to_string(pt(out, oe.e_start)) + ",#" +
+                                    std::to_string(vec(out, u)) + ")");
+            }
+            long v0 = vertex(out, oe.e_start), v1 = vertex(out, oe.e_end);
+            ec = emit(out, "IfcEdgeCurve(#" + std::to_string(v0) + ",#" + std::to_string(v1) + ",#" +
+                               std::to_string(crv) + "," + ifc_bool(oe.same_sense) + ")");
+            ++stats_.edges_analytic;
+            return emit(out, "IfcOrientedEdge(*,*,#" + std::to_string(ec) + "," + ifc_bool(oe.orientation) + ")");
+        }
+        // No analytic IFC entity (hyperbola/parabola/composite/trimmed/...): discretize the edge to a
+        // faithful IfcPolyline (tolerance-bounded) with orientation BAKED IN — never a wrong straight
+        // chord, never silently dropped. NOTHING LEFT BEHIND. The oriented endpoints + .T./.T. then
+        // match the baked traversal.
+        std::vector<Vec3> pts = oe.discretize(deflection_, angular_);
+        if (pts.size() < 2) {
+            pts = {oe.start, oe.end};
+            ++stats_.edges_degenerate;
+        } else {
+            ++stats_.edges_polyline_approx;
+        }
+        long poly = polyline(out, pts);
+        long v0 = vertex(out, oe.start), v1 = vertex(out, oe.end);
+        ec = emit(out, "IfcEdgeCurve(#" + std::to_string(v0) + ",#" + std::to_string(v1) + ",#" +
+                           std::to_string(poly) + ",.T.)");
+        return emit(out, "IfcOrientedEdge(*,*,#" + std::to_string(ec) + ",.T.)");
     }
 
     long loop(std::string &out, const LoopN &lp) {
@@ -281,17 +333,82 @@ class BrepEmitter {
         return emit(out, "IfcBSplineSurfaceWithKnots(" + common + ")");
     }
 
-    long surface(std::string &out, const Surface *s) {
+    // A bare profile/basis curve as an IfcCurve: analytic when possible, else sampled to IfcPolyline
+    // over its natural range (faithful, never dropped).
+    long curve_or_polyline(std::string &out, const Curve *g) {
+        if (analytic_curve(g)) {
+            long c = g ? curve(out, g) : 0;
+            if (c)
+                return c;
+        }
+        if (!g)
+            return 0;
+        double lo, hi, period;
+        bool periodic;
+        g->range(lo, hi, periodic, period);
+        int n = std::max(2, g->discretize_spans(lo, hi));
+        std::vector<Vec3> pts;
+        pts.reserve(n + 1);
+        for (int i = 0; i <= n; ++i)
+            pts.push_back(g->point(lo + (hi - lo) * i / n));
+        return polyline(out, pts);
+    }
+
+    long surface(std::string &out, const Surface *s, const std::vector<Vec3> &fpts = {}) {
         if (const auto *bs = dynamic_cast<const BSplineSurface *>(s))
             return bspline_surface(out, *bs);
+        if (const auto *ex = dynamic_cast<const LinearExtrusionSurface *>(s)) {
+            long crv = curve_or_polyline(out, ex->profile.get());
+            if (!crv)
+                return 0;
+            long prof = emit(out, "IfcArbitraryOpenProfileDef(.CURVE.,$,#" + std::to_string(crv) + ")");
+            long ed = dir(out, ex->dir);
+            return emit(out, "IfcSurfaceOfLinearExtrusion(#" + std::to_string(prof) + ",$,#" +
+                                 std::to_string(ed) + "," + ifc_real(ex->depth ? ex->depth : 1.0) + ")");
+        }
+        if (const auto *rv = dynamic_cast<const RevolutionSurface *>(s)) {
+            long crv = curve_or_polyline(out, rv->profile.get());
+            if (!crv)
+                return 0;
+            long prof = emit(out, "IfcArbitraryOpenProfileDef(.CURVE.,$,#" + std::to_string(crv) + ")");
+            long ax = axis1(out, rv->axis_loc, rv->axis_dir);
+            return emit(out, "IfcSurfaceOfRevolution(#" + std::to_string(prof) + ",$,#" +
+                                 std::to_string(ax) + ")");
+        }
         if (const auto *pl = dynamic_cast<const PlaneSurface *>(s))
             return emit(out, "IfcPlane(#" + std::to_string(axis2(out, pl->f)) + ")");
         if (const auto *cy = dynamic_cast<const CylinderSurface *>(s))
             return emit(out, "IfcCylindricalSurface(#" + std::to_string(axis2(out, cy->f)) + "," +
                                  ifc_real(cy->r) + ")");
-        if (const auto *co = dynamic_cast<const ConeSurface *>(s))
-            return emit(out, "IfcConicalSurface(#" + std::to_string(axis2(out, co->f)) + "," +
-                                 ifc_real(co->r0) + "," + ifc_real(co->semi_angle) + ")");
+        if (const auto *co = dynamic_cast<const ConeSurface *>(s)) {
+            // IFC4/IFC4X3 have NO conical-surface entity -> represent the cone losslessly as an
+            // IfcSurfaceOfRevolution of its straight slant generator about the cone axis. The
+            // generator must be a BOUNDED curve (IfcArbitraryOpenProfileDef.Curve is IfcBoundedCurve),
+            // and the ng:: cone is unbounded — so size the slant segment to the face's axial extent
+            // (project the face vertices onto the axis), with a margin. Generator local: along v,
+            // radius r0 + v*tan(semi_angle), point (rr,0,v); axis = (f.o, f.z).
+            double ta = std::tan(co->semi_angle);
+            double vmin = -1.0, vmax = 1.0;
+            if (!fpts.empty()) {
+                vmin = 1e300;
+                vmax = -1e300;
+                for (const Vec3 &p : fpts) {
+                    double v = co->f.z.dot(p - co->f.o); // axial coordinate
+                    vmin = std::min(vmin, v);
+                    vmax = std::max(vmax, v);
+                }
+                double pad = 0.05 * (vmax - vmin) + 1e-6;
+                vmin -= pad;
+                vmax += pad;
+            }
+            Vec3 a = co->f.to_world(co->r0 + vmin * ta, 0.0, vmin);
+            Vec3 b = co->f.to_world(co->r0 + vmax * ta, 0.0, vmax);
+            long gen = polyline(out, {a, b}); // 2-pt bounded slant segment
+            long prof = emit(out, "IfcArbitraryOpenProfileDef(.CURVE.,$,#" + std::to_string(gen) + ")");
+            long ax = axis1(out, co->f.o, co->f.z);
+            return emit(out, "IfcSurfaceOfRevolution(#" + std::to_string(prof) + ",$,#" +
+                                 std::to_string(ax) + ")");
+        }
         if (const auto *sp = dynamic_cast<const SphereSurface *>(s))
             return emit(out, "IfcSphericalSurface(#" + std::to_string(axis2(out, sp->f)) + "," +
                                  ifc_real(sp->r) + ")");
@@ -301,23 +418,50 @@ class BrepEmitter {
         return 0;
     }
 
+    // Gather a face's boundary vertices (world, pre-instance-transform) — used to size unbounded
+    // surfaces' generators (the cone-of-revolution) to the actual face extent.
+    static void gather_loop_pts(const LoopN &lp, std::vector<Vec3> &out) {
+        if (lp.is_poly) {
+            out.insert(out.end(), lp.polygon.begin(), lp.polygon.end());
+        } else {
+            for (const auto &e : lp.edges) {
+                out.push_back(e.e_start);
+                out.push_back(e.e_end);
+            }
+        }
+    }
+
     long face(std::string &out, const FaceSurfaceN &fc) {
-        long surf = surface(out, fc.surface.get());
-        if (!surf)
+        ++stats_.faces_in;
+        std::vector<Vec3> fpts;
+        for (const auto &b : fc.bounds)
+            if (b.loop)
+                gather_loop_pts(*b.loop, fpts);
+        long surf = fc.surface ? surface(out, fc.surface.get(), fpts) : 0;
+        if (!surf) {
+            stats_.drop(fc.surface ? "surface:unrepresentable" : "surface:null");
             return 0;
+        }
         std::vector<long> bounds;
         for (size_t i = 0; i < fc.bounds.size(); ++i) {
-            if (!fc.bounds[i].loop)
+            if (!fc.bounds[i].loop) {
+                stats_.drop("loop:null");
                 return 0;
+            }
             long lp = loop(out, *fc.bounds[i].loop);
-            if (!lp)
+            if (!lp) {
+                stats_.drop("loop:empty");
                 return 0;
+            }
             const char *kw = (i == 0) ? "IfcFaceOuterBound" : "IfcFaceBound";
             bounds.push_back(emit(out, std::string(kw) + "(#" + std::to_string(lp) + "," +
                                           ifc_bool(fc.bounds[i].orientation) + ")"));
         }
-        if (bounds.empty())
+        if (bounds.empty()) {
+            stats_.drop("face:no-bounds");
             return 0;
+        }
+        ++stats_.faces_out;
         return emit(out, "IfcAdvancedFace(" + refs(bounds) + ",#" + std::to_string(surf) + "," +
                              ifc_bool(fc.same_sense) + ")");
     }
