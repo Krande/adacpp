@@ -17,6 +17,7 @@
 #include "step_to_mesh_stream.h" // threaded OCC-free STEP->STL/OBJ core (parallel, baked, streaming)
 #include "ifc_emit.h"            // native IFC4 advanced-B-rep emitter (Phase 1, native STEP->IFC writer)
 #include "step_emit.h"           // native AP242 STEP advanced-B-rep emitter (native STEP->STEP writer)
+#include "ifc_reader.h"          // native IFC advanced-B-rep reader -> ng:: (native IFC->STEP path)
 
 #include "../diff/glb_diff_native.h" // GLB model-diff core (summary match + removed overlay)
 #include "../geom/neutral/ngeom_tessellate.h"
@@ -3198,6 +3199,79 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
     return fs;
 }
 
+// Native IFC->STEP (AP242): IfcResolver reads each product's analytic B-rep -> ng::, then the STEP
+// emitter re-writes it (instances baked). Serial (per-product resolve is cheap; the shared
+// IfcRepresentationMap brep is re-resolved per instance = baked). Round-trip with the STEP->IFC writer.
+static adacpp::ifc_emit::FileStats write_ifc_to_step_impl(const std::string &in_path, const std::string &out_path,
+                                                          double deflection, double angular_deg, long max_solids) {
+    using adacpp::ngeom::NgeomRoot;
+    using adacpp::step_emit::StepBrepEmitter;
+    adacpp::ifc_emit::FileStats fs;
+    auto idx = adacpp::step::StreamIndex::from_file(in_path);
+    if (!idx.ok())
+        return fs;
+    adacpp::ifc_read::IfcResolver r(idx);
+    fs.unit_scale = r.unit_scale();
+    std::vector<long> roots = r.proxy_roots();
+    if (max_solids > 0 && (long) roots.size() > max_solids)
+        roots.resize(max_solids);
+    std::FILE *fp = std::fopen(out_path.c_str(), "wb");
+    if (!fp)
+        return fs;
+    std::string buf;
+    buf.reserve(1 << 22);
+    std::string hdr = step_header_block(fs.unit_scale);
+    std::fwrite(hdr.data(), 1, hdr.size(), fp);
+    long nid = 13; // continue after the shared header block
+    auto flush = [&](bool force) {
+        if (buf.size() >= (4u << 20) || force) {
+            std::fwrite(buf.data(), 1, buf.size(), fp);
+            buf.clear();
+        }
+    };
+    for (long pid : roots) {
+        NgeomRoot root = r.resolve_product(pid);
+        if (root.faces.empty())
+            continue;
+        ++fs.solids_in;
+        size_t ninst = root.transforms.empty() ? 1 : root.transforms.size();
+        bool any = false;
+        for (size_t k = 0; k < ninst; ++k) {
+            double tf[16];
+            const double *tfp = nullptr;
+            if (!root.transforms.empty()) {
+                const std::array<float, 16> &M = root.transforms[k];
+                tf[0] = M[0]; tf[1] = M[4]; tf[2] = M[8]; tf[3] = M[12];
+                tf[4] = M[1]; tf[5] = M[5]; tf[6] = M[9]; tf[7] = M[13];
+                tf[8] = M[2]; tf[9] = M[6]; tf[10] = M[10]; tf[11] = M[14];
+                tfp = tf;
+            }
+            StepBrepEmitter em(nid, tfp, deflection, angular_deg);
+            if (emit_solid_step(em, buf, root, pid)) {
+                nid = em.current_id();
+                any = true;
+                const auto &s = em.stats();
+                fs.geom.faces_in += s.faces_in;
+                fs.geom.faces_out += s.faces_out;
+                fs.geom.faces_dropped += s.faces_dropped;
+                fs.geom.edges_analytic += s.edges_analytic;
+                fs.geom.edges_polyline_approx += s.edges_polyline_approx;
+                fs.geom.edges_degenerate += s.edges_degenerate;
+                for (const auto &[rk, rv] : s.drop_reasons)
+                    fs.geom.drop_reasons[rk] += rv;
+            }
+        }
+        if (any)
+            ++fs.solids_out;
+        flush(false);
+    }
+    const char *foot = "ENDSEC;\nEND-ISO-10303-21;\n";
+    buf += foot;
+    flush(true);
+    std::fclose(fp);
+    return fs;
+}
+
 void cad_module(nb::module_ &m) {
     // Kernel-agnostic mesh / color / group types live in cad — they're the
     // surface every backend (native OCCT, wasm OCCT, future CGAL) speaks.
@@ -3408,6 +3482,34 @@ void cad_module(nb::module_ &m) {
         "num_threads"_a = 0,
         "Native parallel STEP->STEP (AP242): re-export each solid's analytic B-rep as a "
         "MANIFOLD_SOLID_BREP part (instances baked), no OCC. Returns the losslessness audit dict.");
+
+    // Native IFC->STEP (AP242): read an IFC advanced-B-rep file -> ng:: -> STEP, no OCC.
+    m.def(
+        "stream_ifc_to_step",
+        [](const std::string &in_path, const std::string &out_path, double deflection, double angular_deg,
+           long max_solids) -> nb::dict {
+            adacpp::ifc_emit::FileStats fs =
+                write_ifc_to_step_impl(in_path, out_path, deflection, angular_deg, max_solids);
+            nb::dict d;
+            d["solids_in"] = fs.solids_in;
+            d["solids_out"] = fs.solids_out;
+            d["unit_scale"] = fs.unit_scale;
+            d["faces_in"] = fs.geom.faces_in;
+            d["faces_out"] = fs.geom.faces_out;
+            d["faces_dropped"] = fs.geom.faces_dropped;
+            d["edges_analytic"] = fs.geom.edges_analytic;
+            d["edges_polyline_approx"] = fs.geom.edges_polyline_approx;
+            d["edges_degenerate"] = fs.geom.edges_degenerate;
+            nb::dict reasons;
+            for (const auto &[k, v] : fs.geom.drop_reasons)
+                reasons[k.c_str()] = v;
+            d["drop_reasons"] = reasons;
+            return d;
+        },
+        "in_path"_a, "out_path"_a, "deflection"_a = 2.0, "angular_deg"_a = 20.0, "max_solids"_a = 0,
+        "Native IFC->STEP (AP242): read an IFC advanced-B-rep file (IfcAdvancedBrep + analytic "
+        "surfaces/curves + IfcMappedItem instancing) and re-export as STEP MANIFOLD_SOLID_BREP parts, "
+        "no OCC. Returns the losslessness audit dict.");
 
     m.def("stream_step_to_meshes", &stream_step_to_meshes_impl, "path"_a, "pipeline"_a = "libtess2",
           "deflection"_a = 0.0, "angular_deg"_a = 20.0,
