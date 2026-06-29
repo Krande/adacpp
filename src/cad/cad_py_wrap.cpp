@@ -3025,16 +3025,27 @@ static std::string step_header_block(double unit_scale) {
 }
 
 // Emit one solid instance (geometry baked by `em`'s transform) as a self-contained AP242 part:
-// MANIFOLD_SOLID_BREP -> ADVANCED_BREP_SHAPE_REPRESENTATION (placement #13, context #9) -> PRODUCT
-// chain -> SHAPE_DEFINITION_REPRESENTATION. Returns true if a brep was emitted.
+// MANIFOLD_SOLID_BREP / EXTRUDED_AREA_SOLID -> (ADVANCED_BREP_)SHAPE_REPRESENTATION (placement #13,
+// context #9) -> PRODUCT chain -> SHAPE_DEFINITION_REPRESENTATION. Returns true if a solid was emitted.
 static bool emit_solid_step(adacpp::step_emit::StepBrepEmitter &em, std::string &buf,
                             const adacpp::ngeom::NgeomRoot &root, long sid) {
     std::string nm =
         root.id.empty() ? ("solid_" + std::to_string(sid)) : adacpp::ifc_emit::ifc_str(root.id);
-    long brep = em.emit_manifold_brep(buf, root, nm);
-    if (!brep)
+    long solid = 0;
+    const char *rep_kw = "ADVANCED_BREP_SHAPE_REPRESENTATION";
+    if (root.extrusion) {
+        if (em.tf_rigid()) { // rigid instance -> native EXTRUDED_AREA_SOLID (procedural, compact)
+            solid = em.emit_extrusion(buf, *root.extrusion);
+            rep_kw = "SHAPE_REPRESENTATION";
+        } else { // scale/shear -> bake to a B-rep (Position can't carry a scale)
+            solid = em.emit_extrusion_baked(buf, *root.extrusion, nm);
+        }
+    } else {
+        solid = em.emit_manifold_brep(buf, root, nm);
+    }
+    if (!solid)
         return false;
-    long rep = em.emit_entity(buf, "ADVANCED_BREP_SHAPE_REPRESENTATION('" + nm + "',(#13,#" + std::to_string(brep) +
+    long rep = em.emit_entity(buf, std::string(rep_kw) + "('" + nm + "',(#13,#" + std::to_string(solid) +
                                        "),#9)");
     long product = em.emit_entity(buf, "PRODUCT('" + nm + "','" + nm + "','',(#3))");
     long pdf = em.emit_entity(buf, "PRODUCT_DEFINITION_FORMATION('','',#" + std::to_string(product) + ")");
@@ -3232,7 +3243,7 @@ static adacpp::ifc_emit::FileStats write_ifc_to_step_impl(const std::string &in_
     };
     for (long pid : roots) {
         NgeomRoot root = r.resolve_product(pid);
-        if (root.faces.empty()) {
+        if (root.faces.empty() && !root.extrusion) {
             ++fs.products_skipped; // a product whose geometry the analytic reader couldn't represent
             continue;
         }

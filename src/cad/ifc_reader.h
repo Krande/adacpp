@@ -96,6 +96,8 @@ class IfcResolver {
     // product had no resolvable advanced-brep (skipped by the caller).
     NgeomRoot resolve_product(long pid) {
         NgeomRoot root;
+        solid_src_ = 0;
+        mixed_ = false;
         const Instance *p = inst(pid);
         if (!p)
             return root;
@@ -116,6 +118,24 @@ class IfcResolver {
                 resolve_item(item.i, root);
             }
         }
+        // A product mixing >1 distinct solid (or brep+procedural) doesn't fit the single-solid root
+        // model — leave it for OCC rather than emit partial geometry.
+        if (mixed_) {
+            root.faces.clear();
+            root.extrusion = nullptr;
+        }
+        // Compose the product's world placement (IfcLocalPlacement chain) onto every instance — the
+        // geometry rep is in the element's local frame; ObjectPlacement positions it in the world.
+        if (!root.faces.empty() || root.extrusion) {
+            std::array<float, 16> objp = object_placement(ref_arg(*p, 5)); // ObjectPlacement = arg 5
+            if (!is_identity(objp)) {
+                if (root.transforms.empty())
+                    root.transforms.push_back(objp);
+                else
+                    for (auto &m : root.transforms)
+                        m = mat_mul(objp, m);
+            }
+        }
         return root;
     }
 
@@ -124,6 +144,8 @@ class IfcResolver {
     std::unordered_map<long, std::pair<std::string, Instance>> cache_;
     std::unordered_map<long, std::shared_ptr<Surface>> surf_cache_;
     std::string pread_scratch_;
+    long solid_src_ = 0;  // entity id of the one solid this product carries (mapped instances share it)
+    bool mixed_ = false;  // product has >1 distinct solid / mixes brep+procedural -> skip (OCC)
 
     const Instance *inst(long id) {
         if (id <= 0)
@@ -149,6 +171,8 @@ class IfcResolver {
         if (eq == std::string_view::npos)
             return {};
         size_t p = eq + 1;
+        while (p < s.size() && (s[p] == ' ' || s[p] == '\t')) // SPF allows whitespace after '='
+            ++p;
         if (p < s.size() && s[p] == '(')
             return {}; // complex instance — not a root type we scan
         size_t q = p;
@@ -420,20 +444,121 @@ class IfcResolver {
         }
         return fc->bounds.empty() ? nullptr : fc;
     }
+    // An IfcProfileDef -> a planar profile FaceSurfaceN (local XY, z=0, poly loop) for an extrusion's
+    // SweptArea. Supports IfcRectangleProfileDef + IfcArbitraryClosedProfileDef (polygonal OuterCurve);
+    // returns null for parametric/curved profiles not yet covered (-> the product is skipped -> OCC).
+    std::shared_ptr<FaceSurfaceN> profile_face(long pid) {
+        const Instance *in = inst(pid);
+        if (!in)
+            return nullptr;
+        std::vector<Vec3> poly;
+        if (iequals(in->type, "IFCRECTANGLEPROFILEDEF")) {
+            // (ProfileType, ProfileName, Position, XDim, YDim) — centred on Position (or origin if $).
+            double hx = (in->args.size() > 3 ? in->args[3].as_double() : 0.0) / 2;
+            double hy = (in->args.size() > 4 ? in->args[4].as_double() : 0.0) / 2;
+            if (hx <= 0 || hy <= 0)
+                return nullptr;
+            poly = {{-hx, -hy, 0}, {hx, -hy, 0}, {hx, hy, 0}, {-hx, hy, 0}};
+            apply_placement2d(ref_arg(*in, 2), poly);
+        } else if (iequals(in->type, "IFCARBITRARYCLOSEDPROFILEDEF")) {
+            poly = curve_points2d(ref_arg(*in, 2)); // (ProfileType, ProfileName, OuterCurve)
+        } else {
+            return nullptr;
+        }
+        if (poly.size() < 3)
+            return nullptr;
+        auto prof = std::make_shared<FaceSurfaceN>();
+        prof->surface = std::make_shared<PlaneSurface>(Frame{});
+        prof->same_sense = true;
+        auto lp = std::make_shared<LoopN>();
+        lp->is_poly = true;
+        lp->polygon = std::move(poly);
+        FaceBoundN fb;
+        fb.loop = lp;
+        fb.orientation = true;
+        prof->bounds.push_back(fb);
+        return prof;
+    }
+    // OuterCurve (IfcPolyline of IfcCartesianPoint, or IfcIndexedPolyCurve over an IfcCartesianPointList2D)
+    // -> the profile's 2D polygon (z=0), drop the closing duplicate point.
+    std::vector<Vec3> curve_points2d(long cid) {
+        std::vector<Vec3> pts;
+        const Instance *in = inst(cid);
+        if (!in)
+            return pts;
+        if (iequals(in->type, "IFCPOLYLINE")) {
+            if (!in->args.empty() && in->args[0].is_list())
+                for (const Value &pr : in->args[0].items)
+                    if (pr.is_ref()) {
+                        Vec3 p = point(pr.i);
+                        pts.push_back({p.x, p.y, 0});
+                    }
+        } else if (iequals(in->type, "IFCINDEXEDPOLYCURVE")) {
+            const Instance *pl = inst(ref_arg(*in, 0)); // IfcCartesianPointList2D(CoordList)
+            if (pl && !pl->args.empty() && pl->args[0].is_list())
+                for (const Value &row : pl->args[0].items)
+                    if (row.is_list() && row.items.size() >= 2)
+                        pts.push_back({row.items[0].as_double(), row.items[1].as_double(), 0});
+        }
+        if (pts.size() > 1 && (pts.front() - pts.back()).norm() < 1e-9)
+            pts.pop_back();
+        return pts;
+    }
+    // Translate/rotate a profile polygon by an IfcAxis2Placement2D (Location, RefDirection); $ = identity.
+    void apply_placement2d(long pid, std::vector<Vec3> &poly) {
+        const Instance *in = inst(pid);
+        if (!in)
+            return;
+        Vec3 loc = (in->args.size() > 0 && in->args[0].is_ref()) ? point(in->args[0].i) : Vec3{0, 0, 0};
+        double cx = 1, sx = 0;
+        if (in->args.size() > 1 && in->args[1].is_ref()) {
+            Vec3 rd = dir(in->args[1].i);
+            double n = std::hypot(rd.x, rd.y);
+            if (n > 1e-12) {
+                cx = rd.x / n;
+                sx = rd.y / n;
+            }
+        }
+        for (Vec3 &p : poly) {
+            double x = p.x, y = p.y;
+            p = {loc.x + cx * x - sx * y, loc.y + sx * x + cx * y, 0};
+        }
+    }
     // Append an IfcShapeRepresentation item's geometry to root: IfcAdvancedBrep, IfcFacetedBrep,
-    // IfcShellBasedSurfaceModel, or IfcMappedItem (a placed instance -> transform).
+    // IfcShellBasedSurfaceModel, IfcExtrudedAreaSolid, or IfcMappedItem (a placed instance -> transform).
     void resolve_item(long id, NgeomRoot &root) {
         const Instance *in = inst(id);
         if (!in)
             return;
         std::string_view t = in->type;
         if (iequals(t, "IFCADVANCEDBREP") || iequals(t, "IFCFACETEDBREP")) {
+            if (root.extrusion) { // brep mixed with a procedural solid -> skip the product
+                mixed_ = true;
+                return;
+            }
             const Instance *shell = inst(ref_arg(*in, 0)); // IfcClosedShell(CfsFaces)
             if (shell && !shell->args.empty() && shell->args[0].is_list())
                 for (const Value &fref : shell->args[0].items)
                     if (fref.is_ref())
                         if (auto f = face(fref.i))
                             root.faces.push_back(f);
+        } else if (iequals(t, "IFCEXTRUDEDAREASOLID")) {
+            // (SweptArea, Position, ExtrudedDirection, Depth). One extrusion per root; a 2nd distinct
+            // solid (or brep already present) => mixed -> skip. Mapped instances share the same id.
+            if (!root.faces.empty() || (solid_src_ && solid_src_ != id)) {
+                mixed_ = true;
+                return;
+            }
+            auto prof = profile_face(ref_arg(*in, 0));
+            if (!prof)
+                return; // unsupported profile -> product yields no geometry -> OCC fallback
+            auto ex = std::make_shared<ExtrusionN>();
+            ex->profile = prof;
+            ex->frame = (in->args.size() > 1 && in->args[1].is_ref()) ? axis2(in->args[1].i) : Frame{};
+            ex->direction = (in->args.size() > 2 && in->args[2].is_ref()) ? dir(in->args[2].i) : Vec3{0, 0, 1};
+            ex->depth = in->args.size() > 3 ? in->args[3].as_double() : 0.0;
+            root.extrusion = ex;
+            solid_src_ = id;
         } else if (iequals(t, "IFCMAPPEDITEM")) {
             // (MappingSource=IfcRepresentationMap, MappingTarget=IfcCartesianTransformationOperator3D)
             const Instance *rm = inst(ref_arg(*in, 0));
@@ -450,25 +575,83 @@ class IfcResolver {
             root.transforms.push_back(M);
         }
     }
-    // IfcCartesianTransformationOperator3D(Axis1,Axis2,LocalOrigin,Scale,Axis3) -> column-major glTF M.
+    // IfcCartesianTransformationOperator3D(Axis1,Axis2,LocalOrigin,Scale,Axis3[,Scale2,Scale3])
+    // -> column-major glTF M. Scale (arg3) scales all axes; the 3DNonUniform subtype adds Scale2(arg5),
+    // Scale3(arg6) so the axes scale independently. Default scale 1.
     std::array<float, 16> op_matrix(long id) {
         std::array<float, 16> M = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
         const Instance *in = inst(id);
         if (!in)
             return M;
+        auto unit = [](Vec3 v) {
+            double n = v.norm();
+            return n > 1e-12 ? Vec3{v.x / n, v.y / n, v.z / n} : v;
+        };
+        // The transform operator's axes are DIRECTIONs (orientation only) — normalize before scaling,
+        // else a non-unit ratio like (1,1,0) leaks an extra |.|=sqrt(2) into the scale.
         Vec3 ax{1, 0, 0}, ay{0, 1, 0}, az{0, 0, 1}, o{0, 0, 0};
         if (in->args.size() > 0 && in->args[0].is_ref())
-            ax = dir(in->args[0].i);
+            ax = unit(dir(in->args[0].i));
         if (in->args.size() > 1 && in->args[1].is_ref())
-            ay = dir(in->args[1].i);
+            ay = unit(dir(in->args[1].i));
         if (in->args.size() > 2 && in->args[2].is_ref())
             o = point(in->args[2].i);
         if (in->args.size() > 4 && in->args[4].is_ref())
-            az = dir(in->args[4].i);
+            az = unit(dir(in->args[4].i));
+        auto scale_at = [&](size_t i, double dflt) {
+            return (i < in->args.size() && (in->args[i].kind == adacpp::step::Kind::Real ||
+                                            in->args[i].kind == adacpp::step::Kind::Int))
+                       ? in->args[i].as_double()
+                       : dflt;
+        };
+        double s1 = scale_at(3, 1.0), s2 = s1, s3 = s1;
+        if (iequals(in->type, "IFCCARTESIANTRANSFORMATIONOPERATOR3DNONUNIFORM")) {
+            s2 = scale_at(5, 1.0);
+            s3 = scale_at(6, 1.0);
+        }
+        ax = ax * s1;
+        ay = ay * s2;
+        az = az * s3;
         // column-major glTF: col0=ax, col1=ay, col2=az, col3=origin
         M = {(float) ax.x, (float) ax.y, (float) ax.z, 0.0f, (float) ay.x, (float) ay.y, (float) ay.z, 0.0f,
              (float) az.x, (float) az.y, (float) az.z, 0.0f, (float) o.x,  (float) o.y,  (float) o.z,  1.0f};
         return M;
+    }
+    // 4x4 column-major (glTF) multiply R = A*B.
+    static std::array<float, 16> mat_mul(const std::array<float, 16> &A, const std::array<float, 16> &B) {
+        std::array<float, 16> R{};
+        for (int c = 0; c < 4; ++c)
+            for (int r = 0; r < 4; ++r) {
+                float s = 0;
+                for (int k = 0; k < 4; ++k)
+                    s += A[k * 4 + r] * B[c * 4 + k];
+                R[c * 4 + r] = s;
+            }
+        return R;
+    }
+    static bool is_identity(const std::array<float, 16> &M) {
+        static const std::array<float, 16> I = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        for (int i = 0; i < 16; ++i)
+            if (std::abs(M[i] - I[i]) > 1e-9f)
+                return false;
+        return true;
+    }
+    // IfcAxis2Placement3D -> column-major glTF matrix.
+    std::array<float, 16> axis2_mat(long id) {
+        Frame f = axis2(id);
+        return {(float) f.x.x, (float) f.x.y, (float) f.x.z, 0.0f, (float) f.y.x, (float) f.y.y, (float) f.y.z, 0.0f,
+                (float) f.z.x, (float) f.z.y, (float) f.z.z, 0.0f, (float) f.o.x, (float) f.o.y, (float) f.o.z, 1.0f};
+    }
+    // IfcLocalPlacement(PlacementRelTo, RelativePlacement) -> world matrix (recurse up the chain).
+    std::array<float, 16> object_placement(long id, int depth = 0) {
+        static const std::array<float, 16> I = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        const Instance *in = inst(id);
+        if (!in || depth > 64 || !iequals(in->type, "IFCLOCALPLACEMENT"))
+            return I;
+        std::array<float, 16> rel = (in->args.size() > 1 && in->args[1].is_ref()) ? axis2_mat(in->args[1].i) : I;
+        if (in->args.size() > 0 && in->args[0].is_ref())
+            return mat_mul(object_placement(in->args[0].i, depth + 1), rel);
+        return rel;
     }
 };
 

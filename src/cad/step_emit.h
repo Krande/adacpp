@@ -64,6 +64,85 @@ class StepBrepEmitter {
         return emit(out, "MANIFOLD_SOLID_BREP('" + name + "',#" + std::to_string(shell) + ")");
     }
 
+    // Emit an extruded-area solid -> EXTRUDED_AREA_SOLID id (0 on failure). The instance transform is
+    // baked into the Position (world frame = tf_ o ex.frame); the 2D profile points + the local extrude
+    // direction are emitted raw (relative to Position), matching the ng:: extrusion tessellation.
+    long emit_extrusion(std::string &out, const ExtrusionN &ex) {
+        if (!ex.profile || ex.profile->bounds.empty() || !ex.profile->bounds[0].loop)
+            return 0;
+        const LoopN &lp = *ex.profile->bounds[0].loop;
+        std::vector<Vec3> ring = lp.is_poly ? lp.polygon : lp.discretize(deflection_, angular_);
+        if (ring.size() > 1 && (ring.front() - ring.back()).norm() < 1e-12)
+            ring.pop_back();
+        if (ring.size() < 3)
+            return 0;
+        std::vector<long> pids;
+        pids.reserve(ring.size() + 1);
+        for (const Vec3 &p : ring)
+            pids.push_back(pt2d_raw(out, p.x, p.y));
+        pids.push_back(pids.front()); // close the profile polyline
+        long poly = emit(out, "POLYLINE(''," + refs(pids) + ")");
+        long prof = emit(out, "ARBITRARY_CLOSED_PROFILE_DEF(.AREA.,'',#" + std::to_string(poly) + ")");
+        Vec3 wo = tp(ex.frame.o), wz = td(ex.frame.z), wx = td(ex.frame.x); // world placement of the solid
+        long pos = emit(out, "AXIS2_PLACEMENT_3D('',#" + std::to_string(pt_raw(out, wo)) + ",#" +
+                                 std::to_string(dir_raw(out, wz)) + ",#" + std::to_string(dir_raw(out, wx)) + ")");
+        long ed = dir_raw(out, ex.direction); // local to Position
+        return emit(out, "EXTRUDED_AREA_SOLID('',#" + std::to_string(prof) + ",#" + std::to_string(pos) + ",#" +
+                             std::to_string(ed) + "," + ifc_real(ex.depth) + ")");
+    }
+
+    // True if the baked transform is rigid (orthonormal 3x3) — a scale/shear can't be carried by an
+    // EXTRUDED_AREA_SOLID's Position (rotation-only), so such instances are baked to B-rep instead.
+    bool tf_rigid() const {
+        if (!tf_)
+            return true;
+        const double *m = tf_;
+        double c0 = std::sqrt(m[0] * m[0] + m[4] * m[4] + m[8] * m[8]);
+        double c1 = std::sqrt(m[1] * m[1] + m[5] * m[5] + m[9] * m[9]);
+        double c2 = std::sqrt(m[2] * m[2] + m[6] * m[6] + m[10] * m[10]);
+        return std::abs(c0 - 1) < 1e-4 && std::abs(c1 - 1) < 1e-4 && std::abs(c2 - 1) < 1e-4;
+    }
+
+    // Bake an extrusion to a MANIFOLD_SOLID_BREP of planar faces (two caps + a side quad per profile
+    // edge), in the solid's frame-local world; pt() then bakes the full instance affine. Handles any
+    // instance transform (incl. non-uniform scale/shear). Returns the brep id (0 on failure).
+    long emit_extrusion_baked(std::string &out, const ExtrusionN &ex, const std::string &name) {
+        if (!ex.profile || ex.profile->bounds.empty() || !ex.profile->bounds[0].loop)
+            return 0;
+        const LoopN &lp = *ex.profile->bounds[0].loop;
+        std::vector<Vec3> ring = lp.is_poly ? lp.polygon : lp.discretize(deflection_, angular_);
+        if (ring.size() > 1 && (ring.front() - ring.back()).norm() < 1e-12)
+            ring.pop_back();
+        if (ring.size() < 3)
+            return 0;
+        const Frame &F = ex.frame;
+        Vec3 d = ex.direction * ex.depth;
+        std::vector<Vec3> bot, top;
+        bot.reserve(ring.size());
+        top.reserve(ring.size());
+        for (const Vec3 &p : ring) {
+            bot.push_back(F.to_world(p.x, p.y, 0));
+            top.push_back(F.to_world(p.x + d.x, p.y + d.y, d.z));
+        }
+        vcache_.clear();
+        std::vector<long> fids;
+        std::vector<Vec3> botr(bot.rbegin(), bot.rend()); // bottom cap reversed (outward normal)
+        if (long f = emit_plane_face(out, botr))
+            fids.push_back(f);
+        if (long f = emit_plane_face(out, top))
+            fids.push_back(f);
+        size_t n = ring.size();
+        for (size_t i = 0; i < n; ++i) {
+            std::vector<Vec3> quad = {bot[i], bot[(i + 1) % n], top[(i + 1) % n], top[i]};
+            if (long f = emit_plane_face(out, quad))
+                fids.push_back(f);
+        }
+        if (fids.size() < 4)
+            return 0;
+        long shell = emit(out, "CLOSED_SHELL(''," + refs(fids) + ")");
+        return emit(out, "MANIFOLD_SOLID_BREP('" + name + "',#" + std::to_string(shell) + ")");
+    }
+
   private:
     long nid_;
     const double *tf_;
@@ -104,6 +183,47 @@ class StepBrepEmitter {
     }
     long dir(std::string &out, const Vec3 &v) {
         return emit(out, "DIRECTION(''," + p3(td(v)) + ")");
+    }
+    long pt_raw(std::string &out, const Vec3 &p) { // already-world point, no tf_
+        return emit(out, "CARTESIAN_POINT(''," + p3(p) + ")");
+    }
+    long dir_raw(std::string &out, const Vec3 &v) {
+        return emit(out, "DIRECTION(''," + p3(v) + ")");
+    }
+    long pt2d_raw(std::string &out, double x, double y) { // 2D profile point
+        return emit(out, "CARTESIAN_POINT('',(" + ifc_real(x) + "," + ifc_real(y) + "))");
+    }
+    // ADVANCED_FACE(PLANE, POLY_LOOP) for a planar polygon (points baked via pt()); frame from the
+    // polygon's normal. Used by emit_extrusion_baked.
+    long emit_plane_face(std::string &out, const std::vector<Vec3> &poly) {
+        if (poly.size() < 3)
+            return 0;
+        Vec3 e1 = poly[1] - poly[0], nrm{0, 0, 1};
+        for (size_t i = 2; i < poly.size(); ++i) {
+            Vec3 c = e1.cross(poly[i] - poly[0]);
+            if (c.norm() > 1e-9) {
+                nrm = c;
+                break;
+            }
+        }
+        double nn = nrm.norm();
+        if (nn)
+            nrm = {nrm.x / nn, nrm.y / nn, nrm.z / nn};
+        double e1n = e1.norm();
+        Vec3 xa = e1n ? Vec3{e1.x / e1n, e1.y / e1n, e1.z / e1n} : Vec3{1, 0, 0};
+        Frame f;
+        f.o = poly[0];
+        f.z = nrm;
+        f.x = xa;
+        f.y = nrm.cross(xa);
+        long plane = emit(out, "PLANE('',#" + std::to_string(axis2(out, f)) + ")");
+        std::vector<long> pids;
+        pids.reserve(poly.size());
+        for (const Vec3 &p : poly)
+            pids.push_back(pt(out, p));
+        long loop = emit(out, "POLY_LOOP(''," + refs(pids) + ")");
+        long bound = emit(out, "FACE_OUTER_BOUND('',#" + std::to_string(loop) + ",.T.)");
+        return emit(out, "ADVANCED_FACE('',(#" + std::to_string(bound) + "),#" + std::to_string(plane) + ",.T.)");
     }
     long vertex(std::string &out, const Vec3 &p) {
         long long key = pkey(tp(p));

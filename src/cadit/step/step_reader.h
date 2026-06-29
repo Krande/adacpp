@@ -523,7 +523,8 @@ private:
         while (p < end && (std::isalnum((unsigned char) *p) || *p == '_'))
             ++p;
         std::string_view t(t0, p - t0);
-        if (t == "MANIFOLD_SOLID_BREP" || t == "SHELL_BASED_SURFACE_MODEL" || t == "BREP_WITH_VOIDS")
+        if (t == "MANIFOLD_SOLID_BREP" || t == "SHELL_BASED_SURFACE_MODEL" || t == "BREP_WITH_VOIDS" ||
+            t == "EXTRUDED_AREA_SOLID")
             lists.roots.push_back(id);
         else if (t == "STYLED_ITEM")
             lists.styled.push_back(id);
@@ -607,6 +608,13 @@ public:
         // SHELL_BASED_SURFACE_MODEL shell lists) — the crane's multi-shell solids segfaulted here,
         // while a single-shell MANIFOLD_SOLID_BREP (469826) happened to survive. Do not touch `in`
         // after this block.
+        if (in->type == "EXTRUDED_AREA_SOLID") {
+            // EXTRUDED_AREA_SOLID('', #profile, #position, #dir, depth) -> ng::ExtrusionN. Profile is
+            // 2D-local; position places it; dir is local to position. Mirrors emit_extrusion / the
+            // ng:: extrusion tessellation. (no shells)
+            root.extrusion = build_extrusion(in);
+            in = nullptr;
+        } else {
         std::vector<long> shell_ids;
         if (in->type == "MANIFOLD_SOLID_BREP") {
             if (in->args[1].is_ref())
@@ -626,6 +634,7 @@ public:
         in = nullptr; // shell_into below may clear parse_cache_ and invalidate `in`
         for (long shid : shell_ids)
             shell_into(shid, root.faces);
+        } // end B-rep branch
         auto cit = colour_map_.find(sid); // STYLED_ITEM colour usually targets the solid root
         if (cit != colour_map_.end()) {
             root.has_color = true;
@@ -719,7 +728,7 @@ private:
                 continue;
             }
             std::string_view t = in->type;
-            if (t == "MANIFOLD_SOLID_BREP" || t == "SHELL_BASED_SURFACE_MODEL")
+            if (t == "MANIFOLD_SOLID_BREP" || t == "SHELL_BASED_SURFACE_MODEL" || t == "EXTRUDED_AREA_SOLID")
                 tl.roots.push_back(id);
             else if (t == "STYLED_ITEM")
                 tl.styled.push_back(id);
@@ -854,6 +863,53 @@ private:
         if (in->args.size() > 3 && in->args[3].is_ref())
             ref = point(in->args[3].i);
         return ng::Frame::from_axis_ref(loc, axis, ref);
+    }
+
+    // ARBITRARY_CLOSED_PROFILE_DEF(.AREA.,'',#POLYLINE) -> planar profile FaceSurfaceN (z=0 poly loop).
+    // First cut: polygonal (POLYLINE) outer curves; other profile curves yield null (-> not extrudable).
+    std::shared_ptr<ng::FaceSurfaceN> profile_from_step(long pid) {
+        const Instance *in = inst(pid);
+        if (!in || in->type != "ARBITRARY_CLOSED_PROFILE_DEF" || in->args.size() < 3 || !in->args[2].is_ref())
+            return nullptr;
+        const Instance *cv = inst(in->args[2].i);
+        if (!cv || cv->type != "POLYLINE" || cv->args.size() < 2 || cv->args[1].kind != Kind::List)
+            return nullptr;
+        std::vector<ng::Vec3> poly;
+        for (const Value &pr : cv->args[1].items)
+            if (pr.is_ref()) {
+                ng::Vec3 p = point(pr.i);
+                poly.push_back({p.x, p.y, 0});
+            }
+        if (poly.size() > 1 && (poly.front() - poly.back()).norm() < 1e-9)
+            poly.pop_back();
+        if (poly.size() < 3)
+            return nullptr;
+        auto prof = std::make_shared<ng::FaceSurfaceN>();
+        prof->surface = std::make_shared<ng::PlaneSurface>(ng::Frame{});
+        prof->same_sense = true;
+        auto lp = std::make_shared<ng::LoopN>();
+        lp->is_poly = true;
+        lp->polygon = std::move(poly);
+        ng::FaceBoundN fb;
+        fb.loop = lp;
+        fb.orientation = true;
+        prof->bounds.push_back(fb);
+        return prof;
+    }
+
+    // EXTRUDED_AREA_SOLID('', #profile, #position, #dir, depth) -> ng::ExtrusionN (null if no profile).
+    std::shared_ptr<ng::ExtrusionN> build_extrusion(const Instance *in) {
+        if (!in || in->args.size() < 5)
+            return nullptr;
+        auto prof = profile_from_step(in->args[1].is_ref() ? in->args[1].i : 0);
+        if (!prof)
+            return nullptr;
+        auto ex = std::make_shared<ng::ExtrusionN>();
+        ex->profile = prof;
+        ex->frame = in->args[2].is_ref() ? placement(in->args[2].i) : ng::Frame{};
+        ex->direction = in->args[3].is_ref() ? point(in->args[3].i) : ng::Vec3{0, 0, 1}; // DIRECTION via point()
+        ex->depth = in->args[4].as_double();
+        return ex;
     }
 
     // --- B-spline helpers ----------------------------------------------------------------
