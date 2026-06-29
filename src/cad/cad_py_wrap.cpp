@@ -497,6 +497,9 @@ public:
         idx_ = std::make_unique<adacpp::step::StreamIndex>(adacpp::step::StreamIndex::from_file(path));
         r_ = std::make_unique<adacpp::step::Resolver>(*idx_);
         r_->build_metadata(idx_->lists);
+        // Single-threaded per-solid streaming → safe to bound parse_cache_ on giant shells (the
+        // 67 MB single solid in 469826); the multi-threaded mesh/glb path must NOT (race on re-parse).
+        r_->enable_parse_cache_bounding();
     }
     nb::tuple next() {
         using namespace adacpp::ngeom;

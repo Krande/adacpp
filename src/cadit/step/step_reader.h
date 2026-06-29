@@ -569,6 +569,12 @@ public:
 
     // Build the colour / product-name / transform / unit maps from the type-classified id lists,
     // then free the entities they parsed (the maps hold the results). Call once before resolving.
+    // Opt into bounding parse_cache_ during giant-shell resolves — single-threaded callers only
+    // (StepNgeomStream). See bound_parse_cache_.
+    void enable_parse_cache_bounding() {
+        bound_parse_cache_ = true;
+    }
+
     void build_metadata(const TypeLists &tl) {
         build_colour_map(tl.styled);
         build_product_name_map(tl.sdr);
@@ -732,6 +738,12 @@ private:
         Instance inst;
     };
     std::unordered_map<long, Parsed> parse_cache_;
+    // When set, shell_into() periodically drops parse_cache_ during a huge shell to bound memory
+    // (the parsed STEP statements pile up; the built ng:: geometry is retained separately). ONLY safe
+    // on the single-threaded StepNgeomStream path: the multi-threaded mesh/glb path (stream_step) would
+    // force extra concurrent re-parsing through the shared StreamIndex, which is not thread-safe under
+    // that load. Default off — multi-threaded callers leave the original (no-clear) behaviour.
+    bool bound_parse_cache_ = false;
     double unit_scale_ = 1.0;
     std::unordered_map<long, std::shared_ptr<ng::Surface>> surf_cache_;
     std::unordered_map<long, std::shared_ptr<ng::Curve>> curve_cache_;
@@ -1132,12 +1144,16 @@ private:
         if (in->type != "CLOSED_SHELL" && in->type != "OPEN_SHELL")
             return;
         if (in->args.size() > 1 && in->args[1].kind == Kind::List) {
-            // Copy the face refs out first: a giant shell (e.g. the 67 MB single solid in
-            // 469826) parses millions of sub-statements into parse_cache_; we periodically
-            // clear that intermediate cache to bound memory — which also frees `in`, so the
-            // loop must not dereference it. The built ng:: geometry stays in `out` and the
-            // surf/curve/face caches keep their dedup, so only re-referenced statements
-            // re-parse (rare for per-face B-rep entities).
+            if (!bound_parse_cache_) {
+                // Default (incl. the multi-threaded mesh/glb path): unchanged.
+                for (const Value &fr : in->args[1].items)
+                    if (fr.is_ref())
+                        out.push_back(face(fr.i));
+                return;
+            }
+            // Single-threaded bounded path (StepNgeomStream): copy the face refs out first (clearing
+            // frees `in`), then drop parse_cache_ every 1024 faces so a giant shell's parsed STEP
+            // statements don't pile up. Built ng:: geometry + surf/curve/face dedup caches persist.
             std::vector<long> face_ids;
             face_ids.reserve(in->args[1].items.size());
             for (const Value &fr : in->args[1].items)
