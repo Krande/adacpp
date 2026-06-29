@@ -1131,10 +1131,24 @@ private:
         }
         if (in->type != "CLOSED_SHELL" && in->type != "OPEN_SHELL")
             return;
-        if (in->args.size() > 1 && in->args[1].kind == Kind::List)
+        if (in->args.size() > 1 && in->args[1].kind == Kind::List) {
+            // Copy the face refs out first: a giant shell (e.g. the 67 MB single solid in
+            // 469826) parses millions of sub-statements into parse_cache_; we periodically
+            // clear that intermediate cache to bound memory — which also frees `in`, so the
+            // loop must not dereference it. The built ng:: geometry stays in `out` and the
+            // surf/curve/face caches keep their dedup, so only re-referenced statements
+            // re-parse (rare for per-face B-rep entities).
+            std::vector<long> face_ids;
+            face_ids.reserve(in->args[1].items.size());
             for (const Value &fr : in->args[1].items)
                 if (fr.is_ref())
-                    out.push_back(face(fr.i));
+                    face_ids.push_back(fr.i);
+            for (size_t i = 0; i < face_ids.size(); ++i) {
+                out.push_back(face(face_ids[i]));
+                if ((i & 1023u) == 1023u)
+                    parse_cache_.clear();
+            }
+        }
     }
 
     // --- presentation colours (STYLED_ITEM -> COLOUR_RGB) ---------------------------------
