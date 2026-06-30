@@ -115,9 +115,9 @@ inline Value classify_scalar(std::string_view tok) {
         return v;
     }
     double dv = 0.0;
-#if defined(__EMSCRIPTEN__)
-    // emscripten libc++ deletes floating-point std::from_chars; parse via strtod on a NUL-terminated
-    // copy (STEP reals are short, always C-locale '.'). endp==end keeps the "fully consumed" semantics.
+#if defined(__EMSCRIPTEN__) || defined(_LIBCPP_VERSION)
+    // libc++ (macOS/clang + emscripten) deletes floating-point std::from_chars; parse via strtod on a
+    // NUL-terminated copy (STEP reals are short, always C-locale '.'). endp==end keeps "fully consumed".
     const size_t nlen = (size_t) (ne - nb);
     char tmp[64];
     if (nlen < sizeof(tmp)) {
