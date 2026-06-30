@@ -50,6 +50,7 @@ enum : int {
     REVOLVED_AREA_SOLID = 51,
     BOOLEAN_RESULT = 52,
     SPHERE_SOLID = 53,
+    FIXED_REF_SWEPT_SOLID = 54,
     EDGE_CURVE = 60,
     ORIENTED_EDGE = 61,
     EDGE_LOOP = 62,
@@ -151,6 +152,7 @@ struct Slot {
     std::shared_ptr<ConnectedFaceSetN> cfs;
     std::shared_ptr<ExtrusionN> extrusion;
     std::shared_ptr<RevolveN> revolve;
+    std::shared_ptr<SweepN> sweep;
     std::shared_ptr<BooleanN> boolean;
     std::shared_ptr<SphereN> sphere;
     std::shared_ptr<OrientedEdgeN> oedge;
@@ -186,6 +188,8 @@ inline NgeomDoc decode(const uint8_t *data, size_t n) {
             it.extrusion = s.extrusion;
         else if (s.revolve)
             it.revolve = s.revolve;
+        else if (s.sweep)
+            it.sweep = s.sweep;
         else if (s.boolean)
             it.boolean = s.boolean;
         else if (s.cfs)
@@ -470,6 +474,23 @@ inline NgeomDoc decode(const uint8_t *data, size_t n) {
             slot.sphere = sp;
             break;
         }
+        case tag::FIXED_REF_SWEPT_SOLID: {
+            auto sw = std::make_shared<SweepN>();
+            sw->profile = S.at(r.i32()).face; // profile FACE_SURFACE
+            sw->frame = frame_at(r.i32());    // PLACEMENT3 (position)
+            int ns = r.i32();
+            std::vector<double> o = r.f64s(ns * 3), dx = r.f64s(ns * 3), dy = r.f64s(ns * 3);
+            sw->origin.resize(ns);
+            sw->dir_x.resize(ns);
+            sw->dir_y.resize(ns);
+            for (int i = 0; i < ns; ++i) {
+                sw->origin[i] = {o[3 * i], o[3 * i + 1], o[3 * i + 2]};
+                sw->dir_x[i] = {dx[3 * i], dx[3 * i + 1], dx[3 * i + 2]};
+                sw->dir_y[i] = {dy[3 * i], dy[3 * i + 1], dy[3 * i + 2]};
+            }
+            slot.sweep = sw;
+            break;
+        }
         default:
             break; // unknown tag -> skipped via nbytes below
         }
@@ -492,6 +513,8 @@ inline NgeomDoc decode(const uint8_t *data, size_t n) {
             root.extrusion = gs.extrusion;
         } else if (gs.revolve) {
             root.revolve = gs.revolve;
+        } else if (gs.sweep) {
+            root.sweep = gs.sweep;
         } else if (gs.boolean) {
             root.boolean = gs.boolean;
         } else if (gs.sphere) {

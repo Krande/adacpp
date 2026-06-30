@@ -1611,6 +1611,66 @@ void tessellate_revolve(const RevolveN &rv, const TessParams &tp, Mesh &mesh) {
     // Cone/Cylinder use full revolutions, so they are not generated here yet.
 }
 
+// FixedReferenceSweptAreaSolid -> sweep the profile along a precomputed field of per-station frames
+// (origin + dir_x/dir_y). Side walls connect consecutive profile rings; the first/last stations get
+// libtess2 end caps (profile triangulated in local UV, with holes). The directrix analytics (Fresnel
+// clothoid + vertical gradient + fixed-reference frame) are evaluated producer-side; no OCC here.
+void tessellate_sweep(const SweepN &sw, const TessParams &tp, Mesh &mesh) {
+    const size_t ns = sw.origin.size();
+    if (!sw.profile || ns < 2)
+        return;
+    const Frame &F = sw.frame;
+
+    // outer boundary ring (local UV) for the walls + all loops for the cap triangulation
+    std::vector<Vec3> ring;
+    std::vector<std::vector<Uv>> loops_uv;
+    for (const FaceBoundN &b : sw.profile->bounds) {
+        if (!b.loop)
+            continue;
+        std::vector<Vec3> r = b.loop->discretize(tp.deflection, tp.max_angle);
+        std::vector<Uv> uv;
+        uv.reserve(r.size());
+        for (const Vec3 &p : r)
+            uv.push_back({p.x, p.y});
+        if (uv.size() >= 3)
+            loops_uv.push_back(std::move(uv));
+        if (ring.empty())
+            ring = std::move(r); // outer loop drives the walls
+    }
+    if (ring.size() > 1 && (ring.front() - ring.back()).norm() < 1e-12)
+        ring.pop_back();
+    const size_t n = ring.size();
+    if (n < 2)
+        return;
+
+    // profile (u,v) at station j -> world point
+    auto P = [&](size_t j, double u, double v) -> Vec3 {
+        Vec3 local = sw.origin[j] + sw.dir_x[j] * u + sw.dir_y[j] * v;
+        return F.to_world(local.x, local.y, local.z);
+    };
+
+    for (size_t j = 0; j + 1 < ns; ++j) {
+        for (size_t i = 0; i < n; ++i) {
+            size_t i2 = (i + 1) % n;
+            Vec3 a = P(j, ring[i].x, ring[i].y), b = P(j, ring[i2].x, ring[i2].y);
+            Vec3 c = P(j + 1, ring[i2].x, ring[i2].y), d = P(j + 1, ring[i].x, ring[i].y);
+            emit_tri(mesh, a, b, c);
+            emit_tri(mesh, a, c, d);
+        }
+    }
+
+    Tess2Out cap = run_tess2(loops_uv, 1.0, 1.0);
+    if (cap.ok) {
+        for (const Tri &t : cap.tris) {
+            const Uv &u0 = cap.verts[t[0]], &u1 = cap.verts[t[1]], &u2 = cap.verts[t[2]];
+            // start cap (station 0) reversed so its normal faces backward along the sweep
+            emit_tri(mesh, P(0, u0[0], u0[1]), P(0, u2[0], u2[1]), P(0, u1[0], u1[1]));
+            // end cap (last station)
+            emit_tri(mesh, P(ns - 1, u0[0], u0[1]), P(ns - 1, u1[0], u1[1]), P(ns - 1, u2[0], u2[1]));
+        }
+    }
+}
+
 // Sphere primitive -> a UV (lat/long) sphere. Segment counts follow the deflection (angle_step),
 // so it honours the requested tolerance; pole quads collapse (emit_tri skips degenerates).
 void tessellate_sphere(const SphereN &sp, const TessParams &tp, Mesh &mesh) {
@@ -1657,6 +1717,9 @@ TessMesh tessellate_solid_item(const SolidItemN &it, const TessParams &tp) {
     } else if (it.revolve) {
         Mesh mesh(m);
         tessellate_revolve(*it.revolve, tp, mesh);
+    } else if (it.sweep) {
+        Mesh mesh(m);
+        tessellate_sweep(*it.sweep, tp, mesh);
     } else {
         for (const auto &f : it.faces)
             if (f)
@@ -1686,6 +1749,9 @@ TessMesh tessellate_doc(const NgeomDoc &doc, const TessParams &tp) {
         } else if (root.revolve) {
             Mesh m(mesh);
             tessellate_revolve(*root.revolve, tp, m);
+        } else if (root.sweep) {
+            Mesh m(mesh);
+            tessellate_sweep(*root.sweep, tp, m);
         } else if (root.boolean) {
             // CSG via Manifold (no-op on wasm until Manifold is wired there).
             append_mesh(mesh, tessellate_boolean_item(*root.boolean, tp));
