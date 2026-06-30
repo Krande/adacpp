@@ -19,6 +19,7 @@
 #endif
 #include <windows.h>
 //
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <direct.h>
@@ -134,5 +135,8 @@ inline long sysconf(int name) {
         return (long) si.dwPageSize;
     }
     return (long) CLOCKS_PER_SEC; // _SC_CLK_TCK et al.
+}
+inline int setenv(const char *name, const char *value, int /*overwrite*/) {
+    return _putenv_s(name, value); // _putenv_s always overwrites
 }
 #endif
