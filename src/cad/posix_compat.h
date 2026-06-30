@@ -45,6 +45,9 @@ using ssize_t = long long;
 #define MADV_RANDOM 1
 #define MADV_SEQUENTIAL 2
 #define MADV_DONTNEED 4
+#define MS_ASYNC 1
+#define MS_INVALIDATE 2
+#define MS_SYNC 4
 #define _SC_CLK_TCK 2
 #define _SC_PAGESIZE 30
 
@@ -106,6 +109,9 @@ inline int munmap(void *addr, size_t) {
 }
 inline int madvise(void *, size_t, int) {
     return 0; // no Windows equivalent — harmless no-op (loses only the RSS-trim hint)
+}
+inline int msync(void *addr, size_t length, int) {
+    return FlushViewOfFile(addr, length) ? 0 : -1; // flush a writable mapping to disk
 }
 
 inline char *mkdtemp(char *tmpl) {
