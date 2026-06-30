@@ -16,7 +16,7 @@
 #include <utility>
 #include <vector>
 
-#include <unistd.h>
+#include "../../cad/posix_compat.h"
 
 namespace adacpp::prof {
 

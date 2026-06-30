@@ -21,10 +21,7 @@
 #include <vector>
 
 #ifndef __EMSCRIPTEN__
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
+#include "../cad/posix_compat.h"
 #endif
 
 #include <json.hpp>

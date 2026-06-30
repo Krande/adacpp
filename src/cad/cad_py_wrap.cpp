@@ -52,11 +52,8 @@
 #include <utility>
 #include <vector>
 
-#include <fcntl.h>
-#include <malloc.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
+#include "posix_compat.h"
+#include "mem_trim.h"
 
 #include <Bnd_Box.hxx>
 #include <Bnd_OBB.hxx>
@@ -2926,7 +2923,7 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
                 L.stats.drop_reasons[k] += v;
             r.clear_geom_cache();
             if (++local % 128 == 0)
-                ::malloc_trim(0);
+                adacpp::mem_trim();
             flush(false);
         }
         flush(true);
@@ -3173,7 +3170,7 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
                 ++L.solids_out;
             r.clear_geom_cache();
             if (++local % 128 == 0)
-                ::malloc_trim(0);
+                adacpp::mem_trim();
             flush(false);
         }
         flush(true);

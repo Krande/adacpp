@@ -21,8 +21,8 @@
 #include <utility>
 #include <vector>
 
-#include <malloc.h>
-#include <unistd.h>
+#include "mem_trim.h"
+#include "posix_compat.h"
 
 #include "../cadit/step/step_reader.h"
 #include "../geom/neutral/ada_ext_schema.h" // GENERATED from the adapy ADA_EXT_data JSON schema
@@ -171,7 +171,7 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
                         busy_ms +=
                             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - b0).count();
                     if (++local % 128 == 0)
-                        ::malloc_trim(0); // return per-solid churn to the OS
+                        adacpp::mem_trim(); // return per-solid churn to the OS
                 }
                 prof.thread_done(t, busy_ms, (size_t) local);
             };

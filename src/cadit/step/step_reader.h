@@ -31,10 +31,7 @@
 #include <utility>
 #include <vector>
 
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
+#include "../../cad/posix_compat.h"
 
 #include "ngeom_bspline.h"  // BSplineCurve / BSplineSurface / expand_knots
 #include "ngeom_topology.h" // pulls ngeom_curves.h / ngeom_surfaces.h / ngeom_math.h

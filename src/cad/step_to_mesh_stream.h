@@ -23,8 +23,8 @@
 #include <thread>
 #include <vector>
 
-#include <malloc.h>
-#include <unistd.h>
+#include "mem_trim.h"
+#include "posix_compat.h"
 
 #include "../cadit/step/step_reader.h"
 #include "../geom/neutral/ngeom_profile.h"
@@ -250,7 +250,7 @@ inline long stream_step_to_mesh(const std::string &in_path, const std::string &o
             }
             r.clear_geom_cache();
             if (++local % 128 == 0)
-                ::malloc_trim(0);
+                adacpp::mem_trim();
         }
         lane.flush();
     };
