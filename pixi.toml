@@ -9,6 +9,9 @@ common = { features = ["common"], no-default-feature = true }
 wasm = { features = ["wasm", "common"], no-default-feature = true }
 conda = { features = ["conda"], no-default-feature = true }
 test = { features = ["test", "common"], no-default-feature = true }
+# Lean env for the standalone OCC-free STP2GLB CLI — only the build toolchain + CLI11 + git
+# (manifold FetchContent). NO occt/cgal/gmsh/ifcopenshell/python-dev.
+stp2glb = { features = ["stp2glb"], no-default-feature = true }
 
 [feature.conda.dependencies]
 rattler-build = "*"
@@ -81,6 +84,8 @@ lint = { cmd = "isort . && black . --config pyproject.toml && ruff check . --fix
 [feature.wasm.tasks]
 clean = { cmd = "rm -rf build-wasm && mkdir -p build-wasm" }
 wbuild = { cmd = "emcmake cmake . -B build-wasm -G Ninja -DBUILD_WASM=ON -DBUILD_PYTHON=OFF -DBUILD_TESTS=OFF -DBUILD_STP2GLB=OFF && cmake --build build-wasm", depends-on = ["clean"] }
+wbuild-stepglb = { cmd = "emcmake cmake . -B build-wasm-stepglb -G Ninja -DBUILD_WASM=ON -DBUILD_STEP_GLB_WASM=ON -DBUILD_PYTHON=OFF -DBUILD_TESTS=OFF -DBUILD_STP2GLB=OFF && cmake --build build-wasm-stepglb", description = "Build the OCC-free no-pyodide STEP->GLB embind wasm module (adacpp_step_glb.js + .wasm)" }
+wbuild-glbdiff = { cmd = "emcmake cmake . -B build-wasm-glbdiff -G Ninja -DBUILD_WASM=ON -DBUILD_GLB_DIFF_WASM=ON -DBUILD_PYTHON=OFF -DBUILD_TESTS=OFF -DBUILD_STP2GLB=OFF && cmake --build build-wasm-glbdiff", description = "Build the OCC-free in-browser GLB diff embind wasm module (adacpp_glb_diff.js + .wasm)" }
 xbuildenv-install = { cmd = "pyodide xbuildenv install 0.29.4", description = "Install the pyodide cross-build environment (Python 3.13 + emscripten 4.0.9)" }
 build-occt-wasm = { cmd = "emcmake cmake --preset wasm-pyodide -DPython_INCLUDE_DIR=\"$(pyodide config get python_include_dir)\" && cmake --build build/wasm-pyodide --target occt_external", description = "Cross-build + install ONLY the OCCT-wasm toolkits → build/wasm-pyodide/_deps/occt-install (the reusable base-image input)" }
 wbuild-pyodide = { cmd = "emcmake cmake --preset wasm-pyodide -DPython_INCLUDE_DIR=\"$(pyodide config get python_include_dir)\" && cmake --build build/wasm-pyodide", description = "Build the adacpp nanobind module for pyodide" }
@@ -127,11 +132,46 @@ install = { cmd = "cmake --preset pixi-test-linux && cmake --build build && cmak
     "build/STP2GLB",
     "build/_ada_cpp_ext_impl*.so",
 ] }
+# Build the native extension and assemble an importable adacpp package (python sources + the
+# freshly built abi3 .so) under build/dist, WITHOUT installing into a conda env. Point another
+# project's PYTHONPATH at build/dist to bridge a bleeding-edge adacpp (e.g. adapy's
+# tests-adacpp-dev env) and measure C++ changes without a reinstall. abi3 = stable ABI, so the
+# .so loads in any CPython 3.x.
+build-dist = { cmd = "cmake --preset pixi-test-linux && cmake --build build && rm -rf build/dist && mkdir -p build/dist && cp -r src/adacpp build/dist/adacpp && cp build/_ada_cpp_ext_impl.abi3.so build/dist/adacpp/ && echo \"bleeding-edge adacpp -> $PIXI_PROJECT_ROOT/build/dist  (bridge via PYTHONPATH)\"", description = "Build native ext + assemble an importable adacpp at build/dist for PYTHONPATH bridging", inputs = [
+    "CMakeLists.txt",
+    "CMakePresets.json",
+    "cmake/**/*.cmake",
+    "src/**/*.cpp",
+    "src/**/*.h",
+    "src/**/*.hpp",
+    "src/**/*.hxx",
+    "src/adacpp/**/*.py",
+], outputs = [
+    "build/dist/adacpp/_ada_cpp_ext_impl.abi3.so",
+] }
 stp2glb = { cmd = "STP2GLB", description = "Run the C++ tests" }
 
 [feature.test.target.win-64.activation.env]
 STP2GLB_EXE_DIR = "%CONDA_PREFIX%/Library/bin"
 SP_DIR = "%CONDA_PREFIX%/Lib/site-packages"
+
+[feature.stp2glb.dependencies]
+# Standalone OCC-free STP2GLB CLI build deps ONLY — no occt/cgal/gmsh/ifcopenshell/python-dev.
+cmake = "==3.30.3"
+ninja = "*"
+cxx-compiler = "*"
+cli11 = "*"
+# cmake FetchContent clones manifold (deps_manifold.cmake) at configure time; needs git on PATH.
+git = "*"
+
+[feature.stp2glb.target.linux-64.dependencies]
+gxx = "*"
+
+[feature.stp2glb.tasks]
+# Configure with BUILD_STP2GLB_STANDALONE=ON (skips OCCT/CGAL/gmsh/IFC/Python) and build only the
+# STP2GLB target. TINY_INCLUDE_DIR puts $CONDA_PREFIX/include (where CLI/CLI.hpp lives) on the include
+# path; CMAKE_PREFIX_PATH lets find_package(Threads) + manifold resolve against the lean env.
+build-stp2glb = { cmd = "cmake -S . -B build-stp2glb -G Ninja -DBUILD_STP2GLB_STANDALONE=ON -DBUILD_PYTHON=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DTINY_INCLUDE_DIR=$CONDA_PREFIX/include && cmake --build build-stp2glb --target STP2GLB && echo \"STP2GLB -> $PIXI_PROJECT_ROOT/build-stp2glb/STP2GLB\"", description = "Build ONLY the OCC-free standalone STP2GLB CLI (no OCCT/CGAL/gmsh/IFC/Python)" }
 
 [feature.test.target.linux-64.activation.env]
 STP2GLB_EXE_DIR = "$CONDA_PREFIX/bin"

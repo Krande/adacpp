@@ -1,0 +1,69 @@
+name: build-stp2glb
+
+# Build the standalone OCC-free STP2GLB CLI (no OCCT/CGAL/gmsh/IFC/Python) and publish the Linux
+# binary as a downloadable artifact. Runs on push/dispatch; on a tag push it also attaches the
+# binary to the GitHub release.
+on:
+  workflow_dispatch:
+
+  push:
+
+# Only one run per ref at a time.
+concurrency:
+  group: build-stp2glb-${{ github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write # needed to attach the binary to a release on tag pushes
+
+jobs:
+
+  build_stp2glb:
+    name: stp2glb-standalone
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -l {0}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+
+      - uses: prefix-dev/setup-pixi@v0.9.6
+        with:
+          pixi-version: latest
+          environments: stp2glb
+          cache: true
+
+      # Lean OCC-free build: no OCCT/CGAL/gmsh/IFC/Python compiled. The task configures with
+      # -DBUILD_STP2GLB_STANDALONE=ON -DBUILD_PYTHON=OFF and builds only the STP2GLB target.
+      - name: build standalone STP2GLB
+        run: |
+          pixi run -e stp2glb build-stp2glb
+
+      - name: sanity-check the binary (OCC-free)
+        run: |
+          bin=build-stp2glb/STP2GLB
+          test -x "$bin"
+          ./"$bin" --help
+          # Fail loudly if any OCCT toolkit (libTK*) leaked into the link.
+          if ldd "$bin" | grep -qiE 'libTK'; then
+            echo "ERROR: STP2GLB linked an OCCT toolkit (libTK*) — not OCC-free" >&2
+            ldd "$bin"
+            exit 1
+          fi
+          ldd "$bin" || true
+
+      - name: upload STP2GLB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: STP2GLB-linux-64
+          path: build-stp2glb/STP2GLB
+          if-no-files-found: error
+
+      # On a tag push, also attach the binary to the corresponding GitHub release.
+      - name: attach binary to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build-stp2glb/STP2GLB

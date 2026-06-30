@@ -56,8 +56,12 @@ inline int find_span(int n, int p, double u, const std::vector<double> &U) {
     return mid;
 }
 
-// de Boor on a pre-gathered control array d[0..p] = cp[span-p .. span] (homogeneous).
-inline HPoint deboor_gathered(int p, int span, double u, const std::vector<double> &U, std::vector<HPoint> d) {
+// de Boor IN PLACE on a caller-owned buffer d[0..p] = cp[span-p .. span] (homogeneous). Returns
+// d[p]. In-place (vs by-value vector) so callers can pass a stack array — no per-evaluation heap
+// allocation (point() is called millions of times during tessellation + uv() Newton inversion).
+// Max supported degree for the stack path; B-spline degrees are ~3, rarely past 10.
+inline constexpr int kDeBoorMaxDeg = 25;
+inline HPoint deboor_inplace(int p, int span, double u, const std::vector<double> &U, HPoint *d) {
     for (int r = 1; r <= p; ++r)
         for (int j = p; j >= r; --j) {
             double den = U[span + 1 + j - r] - U[span - p + j];
@@ -89,12 +93,20 @@ struct BSplineCurve : Curve {
             return ctrl.empty() ? Vec3{0, 0, 0} : ctrl[0];
         int p = std::min(degree, n); // guard degree>=n_ctrl (Rust geom.rs p=degree.min(n-1)+guards)
         int span = find_span(n, p, t, U);
-        std::vector<HPoint> d(p + 1);
+        if (p <= kDeBoorMaxDeg) {
+            HPoint d[kDeBoorMaxDeg + 1];
+            for (int j = 0; j <= p; ++j) {
+                int i = span - p + j;
+                d[j] = homog(ctrl[i], weights.empty() ? 1.0 : weights[i]);
+            }
+            return project(deboor_inplace(p, span, t, U, d));
+        }
+        std::vector<HPoint> d(p + 1); // pathological high degree
         for (int j = 0; j <= p; ++j) {
             int i = span - p + j;
             d[j] = homog(ctrl[i], weights.empty() ? 1.0 : weights[i]);
         }
-        return project(deboor_gathered(p, span, t, U, std::move(d)));
+        return project(deboor_inplace(p, span, t, U, d.data()));
     }
     Vec3 tangent(double t) const override {
         double lo, hi, per;
@@ -208,18 +220,32 @@ struct BSplineSurface : Surface {
         v = clampd(v, Uv[v_degree], Uv[nv]);
         int su = find_span(nu - 1, u_degree, u, Uu);
         int sv = find_span(nv - 1, v_degree, v, Uv);
-        std::vector<HPoint> tempV(v_degree + 1);
+        if (u_degree <= kDeBoorMaxDeg && v_degree <= kDeBoorMaxDeg) {
+            HPoint tempV[kDeBoorMaxDeg + 1]; // stack — point() runs millions of times in tessellation
+            HPoint du[kDeBoorMaxDeg + 1];
+            for (int l = 0; l <= v_degree; ++l) {
+                int vcol = sv - v_degree + l;
+                for (int k = 0; k <= u_degree; ++k) {
+                    int urow = su - u_degree + k;
+                    int idx = urow * nv + vcol;
+                    du[k] = homog(ctrl[idx], weights.empty() ? 1.0 : weights[idx]);
+                }
+                tempV[l] = deboor_inplace(u_degree, su, u, Uu, du);
+            }
+            return project(deboor_inplace(v_degree, sv, v, Uv, tempV));
+        }
+        std::vector<HPoint> tempV(v_degree + 1); // pathological high degree
+        std::vector<HPoint> du(u_degree + 1);
         for (int l = 0; l <= v_degree; ++l) {
             int vcol = sv - v_degree + l;
-            std::vector<HPoint> du(u_degree + 1);
             for (int k = 0; k <= u_degree; ++k) {
                 int urow = su - u_degree + k;
                 int idx = urow * nv + vcol;
                 du[k] = homog(ctrl[idx], weights.empty() ? 1.0 : weights[idx]);
             }
-            tempV[l] = deboor_gathered(u_degree, su, u, Uu, std::move(du));
+            tempV[l] = deboor_inplace(u_degree, su, u, Uu, du.data());
         }
-        return project(deboor_gathered(v_degree, sv, v, Uv, std::move(tempV)));
+        return project(deboor_inplace(v_degree, sv, v, Uv, tempV.data()));
     }
     Vec3 normal(double u, double v) const override {
         return fd_normal(u, v);

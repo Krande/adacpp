@@ -22,6 +22,19 @@ tessellate = _cad.tessellate
 tessellate_batch = _cad.tessellate_batch
 tessellate_box = _cad.tessellate_box
 tessellate_stream = _cad.tessellate_stream
+stream_step_to_meshes = _cad.stream_step_to_meshes
+stream_step_to_glb = _cad.stream_step_to_glb
+stream_step_to_mesh = _cad.stream_step_to_mesh
+step_emit_ifc_brep = _cad.step_emit_ifc_brep
+stream_step_to_step = _cad.stream_step_to_step
+stream_ifc_to_step = _cad.stream_ifc_to_step
+stream_step_to_ifc = _cad.stream_step_to_ifc
+glb_diff = _cad.glb_diff
+stream_step_to_glb_st = _cad.stream_step_to_glb_st
+stream_step_to_ngeom = _cad.stream_step_to_ngeom
+StepRootMeta = _cad.StepRootMeta
+StepNgeomStream = _cad.StepNgeomStream
+_step_index_parity = _cad._step_index_parity
 ifc_taxonomy_settings = _cad.ifc_taxonomy_settings
 meshopt_simplify_mesh = _cad.meshopt_simplify_mesh
 meshopt_encode_vertex_buffer = _cad.meshopt_encode_vertex_buffer
@@ -120,6 +133,14 @@ __all__ = [
     "tessellate_batch",
     "tessellate_box",
     "tessellate_stream",
+    "stream_step_to_meshes",
+    "stream_step_to_glb",
+    "stream_step_to_mesh",
+    "glb_diff",
+    "stream_step_to_glb_st",
+    "stream_step_to_ngeom",
+    "StepRootMeta",
+    "StepNgeomStream",
     "meshopt_simplify_mesh",
     "bbox",
     "obb",

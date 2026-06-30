@@ -3,8 +3,10 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "ngeom_curves.h"
@@ -292,10 +294,23 @@ struct NgeomRoot {
     std::shared_ptr<RevolveN> revolve;                // set if this root is a revolved solid
     std::shared_ptr<BooleanN> boolean;                // set if this root is a boolean result
     std::shared_ptr<SphereN> sphere;                  // set if this root is a sphere primitive
+    // Presentation colour (STYLED_ITEM -> COLOUR_RGB), populated by the native STEP reader; the
+    // NGEOM byte decoder leaves has_color=false (colour travels out-of-band on that path).
+    bool has_color = false;
+    float cr = 0.5f, cg = 0.5f, cb = 0.5f, ca = 1.0f; // rgba in 0..1 when has_color
+    // Per-instance world placement matrices (column-major, glTF order), from the assembly
+    // transform graph. Empty => a single identity instance (flat/baked files). N entries => the
+    // solid is placed N times. Populated by the native STEP reader only.
+    std::vector<std::array<float, 16>> transforms;
+    // Per-instance assembly path: root-first (rep_id, product_name) levels (last level = the
+    // solid's own product), parallel to transforms. Empty => the solid sits directly under the
+    // assembly root. Populated by the native STEP reader for the from_step part hierarchy.
+    std::vector<std::vector<std::pair<int, std::string>>> instance_paths;
 };
 
 struct NgeomDoc {
     std::vector<NgeomRoot> roots;
+    double unit_scale = 1.0; // file length unit -> metres (e.g. mm -> 0.001), from LENGTH_UNIT
 };
 
 } // namespace adacpp::ngeom

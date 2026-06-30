@@ -1,97 +1,101 @@
-// Check if the platform is Unix-based
-#if defined(__unix__) || defined(__unix)
+// Standalone OCC-free STEP -> GLB CLI. Drives the native threaded streaming pipeline
+// (adacpp::stream_step_to_glb) — the same OCC-free engine the wasm module and the python
+// `stream_step_to_glb` binding use. No OCCT, no nanobind, no Python: self-contained.
 
-#include <cstdint>
-
-#endif // Unix platform check
-
-#include <filesystem>
-#include "CLI/CLI.hpp"
-#include "config_structs.h"
 #include <chrono>
-#include "core/debug.h"
-#include "core/convert.h"
-#include "core/helpers.h"
-#include "config_utils.h"
+#include <cstdlib>
+#include <filesystem>
+#include <iomanip>
+#include <iostream>
+#include <string>
 
-void print_status(const GlobalConfig &config) {
-    std::cout << "STP2GLB Converter" << "\n";
-    std::cout << "STP File: " << config.stpFile << "\n";
-    std::cout << "GLB File: " << config.glbFile << "\n\n";
-    std::cout << "Tessellation Parameters: " << "\n";
-    std::cout << "Linear Deflection: " << config.linearDeflection << "\n";
-    std::cout << "Angular Deflection: " << config.angularDeflection << "\n";
-    std::cout << "Relative Deflection: " << config.relativeDeflection << "\n\n";
-    std::cout << "Debug Parameters: " << "\n";
-    std::cout << "Debug Mode: " << config.debug_mode << "\n";
-    std::cout << "Solid Only: " << config.solidOnly << "\n";
-    std::cout << "Max Geometry Num: " << config.max_geometry_num << "\n";
-    std::cout << "Tessellation Timeout: " << config.tessellation_timout << "\n\n";
+#include "CLI/CLI.hpp"
 
-    // Debug output
-    if (!config.filter_names_include.empty()) {
-        std::cout << "Included Filter Names:" << std::endl;
-        for (const auto &name : config.filter_names_include) {
-            std::cout << name << std::endl;
-        }
-    }
-    if (!config.filter_names_exclude.empty()) {
-        std::cout << "Excluded Filter Names:" << std::endl;
-        for (const auto &name : config.filter_names_exclude) {
-            std::cout << name << std::endl;
-        }
-    }
-}
+#include "../cad/step_to_glb_stream.h" // adacpp::stream_step_to_glb (threaded, OCC-free)
 
 int main(int argc, char *argv[]) {
-    CLI::App app{"STEP to GLB converter"};
-    app.add_option("--stp", "STEP filepath")->required();
-    app.add_option("--glb", "GLB filepath")->required();
+    CLI::App app{"STEP to GLB converter (OCC-free native streaming pipeline)"};
 
-    app.add_option("--lin-defl", "Linear deflection")->default_val(0.1)->check(CLI::Range(0.0, 1.0));
-    app.add_option("--ang-defl", "Angular deflection")->default_val(0.5)->check(CLI::Range(0.0, 1.0));
-    app.add_flag("--rel-defl", "Relative deflection");
+    std::string stp_file;
+    std::string glb_file;
+    double deflection = 2.0;
+    double angular_deg = 20.0;
+    int num_threads = 0;   // 0 = all hardware cores
+    bool meshopt = true;   // EXT_meshopt_compression baked inline by default
+    bool profile = false;  // enable the env-gated StepProfiler instrumentation
+    bool quiet = false;    // suppress the param echo + progress; keep errors + the final result line
+    std::string spill_dir; // empty => private auto-removed mkdtemp spill dir
 
-    app.add_flag("--debug", "Debug mode. Slower (and experimental), but provides more information about which STEP "
-                            "entities that failed to convert");
-    app.add_flag("--solid-only", "Solid only");
-    app.add_option("--max-geometry-num", "Maximum number of geometries to convert")->default_val(0);
-    app.add_option("--filter-names-include", "Include Filter name. Command separated list")->default_val("");
-    app.add_option("--filter-names-file-include", "Include Filter name file")->default_val("");
-    app.add_option("--filter-names-exclude", "Exclude Filter name. Command separated list")->default_val("");
-    app.add_option("--filter-names-file-exclude", "Exclude Filter name file")->default_val("");
-    app.add_option("--tessellation-timeout", "Tessellation timeout")->default_val(30);
+    app.add_option("--stp", stp_file, "STEP input filepath")->required();
+    app.add_option("--glb", glb_file, "GLB output filepath")->required();
+    // --lin-defl kept as an alias for backwards compatibility with the old OCCT CLI.
+    app.add_option("--deflection,--lin-defl", deflection, "Linear deflection")->default_val(2.0);
+    app.add_option("--angular-deg", angular_deg, "Angular deflection (degrees)")->default_val(20.0);
+    app.add_option("--num-threads", num_threads, "Worker threads (0 = all hardware cores)")->default_val(0);
+    app.add_flag("--meshopt,!--no-meshopt", meshopt, "Bake EXT_meshopt_compression inline (default ON)");
+    app.add_flag("--profile", profile, "Print [STEPPROF] phase/memory/per-solid timing to stderr (StepProfiler)");
+    app.add_flag("--quiet", quiet, "Suppress the param echo + progress; keep errors and the final result line");
+    app.add_option("--spill-dir", spill_dir,
+                   "Directory for the per-lane GLB spill files (created if missing, left in place); "
+                   "default = a private auto-removed /tmp dir");
 
     CLI11_PARSE(app, argc, argv);
-    GlobalConfig config;
 
+    // The profiler reads these env vars in its constructor (ngeom_profile.h). Set them BEFORE calling
+    // the engine so StepProfiler picks them up. --profile turns on both the phase summary and the
+    // per-solid timing breakdown.
+    if (profile) {
+        ::setenv("ADACPP_STEP_PROFILE", "1", 1);
+        ::setenv("ADACPP_STEP_SOLID_TIMING", "1", 1);
+    }
+
+    const unsigned hw = std::thread::hardware_concurrency();
+    const int resolved_threads = num_threads > 0 ? num_threads : (int) (hw > 1 ? hw : 1);
+
+    if (!quiet) {
+        std::cout << "STP2GLB Converter (OCC-free native streaming)\n";
+        std::cout << "STP File:           " << stp_file << "\n";
+        std::cout << "GLB File:           " << glb_file << "\n";
+        std::cout << "Linear Deflection:  " << deflection << "\n";
+        std::cout << "Angular Deflection: " << angular_deg << " deg\n";
+        std::cout << "Threads:            " << resolved_threads << (num_threads == 0 ? " (auto)" : "") << "\n";
+        std::cout << "Meshopt:            " << (meshopt ? "on" : "off") << "\n";
+        if (!spill_dir.empty())
+            std::cout << "Spill dir:          " << spill_dir << "\n";
+        std::cout << "\nStarting conversion...\n";
+    }
+
+    const auto start = std::chrono::high_resolution_clock::now();
+    long nsolids = -1;
     try {
-        config = process_parameters(app);
+        nsolids =
+            adacpp::stream_step_to_glb(stp_file, glb_file, deflection, angular_deg, num_threads, meshopt, spill_dir);
     } catch (const std::exception &ex) {
         std::cerr << "Error: " << ex.what() << "\n";
         return 1;
     }
+    const auto stop = std::chrono::high_resolution_clock::now();
+    const double seconds = std::chrono::duration<double>(stop - start).count();
 
-    print_status(config);
-    std::cout << "\n";
-    std::cout << "Starting conversion..." << "\n";
-
-    const auto start = std::chrono::high_resolution_clock::now();
-    try {
-        if (config.debug_mode == 1)
-            debug_stp_to_glb(config);
-        else {
-            convert_stp_to_glb(config);
-        }
-    } catch (std::exception &ex) {
-        std::cerr << "Error: " << ex.what() << "\n";
+    if (nsolids < 0) {
+        std::cerr << "Error: conversion failed (could not read input or write output)\n";
         return 1;
     }
 
-    const auto stop = std::chrono::high_resolution_clock::now();
-    const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
-    const double seconds = static_cast<double>(duration.count()) / 1e6;
-    std::cout << "STP converted in: " << std::fixed << std::setprecision(2) << seconds << " seconds" << "\n";
+    std::uintmax_t out_size = 0;
+    std::error_code ec;
+    if (std::filesystem::exists(glb_file, ec))
+        out_size = std::filesystem::file_size(glb_file, ec);
+
+    if (quiet) {
+        // One-line result: solids, output size, wall time.
+        std::cout << glb_file << "  solids=" << nsolids << "  bytes=" << out_size << "  " << std::fixed
+                  << std::setprecision(2) << seconds << "s\n";
+    } else {
+        std::cout << "Solids written:     " << nsolids << "\n";
+        std::cout << "Output size:        " << out_size << " bytes\n";
+        std::cout << "Converted in:       " << std::fixed << std::setprecision(2) << seconds << " seconds\n";
+    }
 
     return 0;
 }

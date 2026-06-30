@@ -8,8 +8,21 @@
 #include "../cadit/occt/step_writer.h"
 #include "../cadit/ifc/ngeom_taxonomy.h"
 #include "../geom/neutral/ngeom_decode.h"
+#include "../geom/neutral/ngeom_encode.h"
+#include "../geom/neutral/ada_ext_schema.h" // GENERATED from the adapy ADA_EXT_data JSON schema
+#include "../geom/neutral/ngeom_glb.h"
+#include "../geom/neutral/ngeom_profile.h"
+#include "step_to_glb_st.h"      // single-threaded, mmap-free STEP->GLB core (wasm/OPFS + native oracle)
+#include "step_to_glb_stream.h"  // threaded OCC-free STEP->GLB core (shared with the STP2GLB CLI)
+#include "step_to_mesh_stream.h" // threaded OCC-free STEP->STL/OBJ core (parallel, baked, streaming)
+#include "ifc_emit.h"            // native IFC4 advanced-B-rep emitter (Phase 1, native STEP->IFC writer)
+#include "step_emit.h"           // native AP242 STEP advanced-B-rep emitter (native STEP->STEP writer)
+#include "ifc_reader.h"          // native IFC advanced-B-rep reader -> ng:: (native IFC->STEP path)
+
+#include "../diff/glb_diff_native.h" // GLB model-diff core (summary match + removed overlay)
 #include "../geom/neutral/ngeom_tessellate.h"
 #include "../geom/neutral/ngeom_meshopt.h"
+#include "../cadit/step/step_reader.h"
 
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/array.h>
@@ -21,8 +34,12 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <functional>
+#include <map>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <deque>
 #include <tuple>
 #include <filesystem>
 #include <fstream>
@@ -31,8 +48,12 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
+
+#include "posix_compat.h"
+#include "mem_trim.h"
 
 #include <Bnd_Box.hxx>
 #include <Bnd_OBB.hxx>
@@ -402,6 +423,248 @@ Mesh tessellate_stream_impl(nb::bytes buffer, const std::string &pipeline, doubl
     Mesh mesh(0, std::move(tm.positions), std::move(tm.indices), {}, std::move(tm.normals));
     mesh.group_reference = std::move(groups);
     return mesh;
+}
+
+// Per-root metadata accompanying the NGEOM buffer from stream_step_to_ngeom: the data the
+// from_step hydrate path needs that the geometry buffer does NOT carry (colour, assembly
+// placement matrices, and the assembly path for the part hierarchy). Parallel to the buffer's
+// roots (same order).
+struct StepRootMeta {
+    std::string id;
+    bool has_color = false;
+    std::array<float, 4> color{0.5f, 0.5f, 0.5f, 1.0f};
+    std::vector<std::array<float, 16>> transforms;                        // per-instance world matrices
+    std::vector<std::vector<std::pair<int, std::string>>> instance_paths; // per-instance (rep_id, name) levels
+};
+
+// Native STEP -> NGEOM buffer + per-root metadata. Reads the .stp with the native C++ reader,
+// re-encodes the resolved neutral records to one NGEOM buffer (decodable by the adapy Python
+// deserializer into ada.geom.Geometry), and returns the per-root colour / transforms / assembly
+// paths alongside. The geometry sibling of stream_step_to_meshes for the from_step hydrate path.
+std::pair<nb::bytes, std::vector<StepRootMeta>> stream_step_to_ngeom_impl(const std::string &path) {
+    using namespace adacpp::ngeom;
+    std::ifstream f(path, std::ios::binary);
+    if (!f)
+        return {nb::bytes("", 0), {}};
+    std::stringstream ss;
+    ss << f.rdbuf();
+    std::string src = ss.str();
+
+    std::vector<adacpp::step::Instance> store;
+    NgeomDoc doc = adacpp::step::read_step_brep(src, store);
+    std::vector<uint8_t> buf = encode(doc);
+
+    std::vector<StepRootMeta> metas;
+    metas.reserve(doc.roots.size());
+    for (const NgeomRoot &r : doc.roots) {
+        StepRootMeta m;
+        m.id = r.id;
+        m.has_color = r.has_color;
+        m.color = {r.cr, r.cg, r.cb, r.ca};
+        m.transforms = r.transforms;
+        m.instance_paths = r.instance_paths;
+        metas.push_back(std::move(m));
+    }
+    return {nb::bytes(reinterpret_cast<const char *>(buf.data()), buf.size()), std::move(metas)};
+}
+
+// Debug/parity hook: build the offset index both ways (mmap scan vs the wasm-safe pread scan) and
+// report whether they are identical. Used to validate from_file_pread before it backs the wasm path.
+nb::dict step_index_parity_impl(const std::string &path) {
+    auto a = adacpp::step::StreamIndex::from_file(path);
+    auto b = adacpp::step::StreamIndex::from_file_pread(path);
+    nb::dict d;
+    d["n_mmap"] = (long) a.ids.size();
+    d["n_pread"] = (long) b.ids.size();
+    d["ids_match"] = (a.ids == b.ids);
+    d["offs_match"] = (a.offs == b.offs);
+    d["roots_match"] = (a.lists.roots == b.lists.roots);
+    d["units_match"] = (a.lists.units == b.lists.units);
+    d["styled_match"] = (a.lists.styled == b.lists.styled);
+    d["absr_match"] = (a.lists.absr == b.lists.absr);
+    d["srr_match"] = (a.lists.srr == b.lists.srr);
+    d["cdsr_match"] = (a.lists.cdsr == b.lists.cdsr);
+    d["sdr_match"] = (a.lists.sdr == b.lists.sdr);
+    return d;
+}
+
+// Streaming NGEOM emitter for the from_step hydrate path: resolve + encode ONE solid per __next__,
+// freeing each solid's working set after — so memory stays at the offset index (~12 B/instance) plus
+// a single solid, NOT the whole parsed model (stream_step_to_ngeom full-parses + OOMs on large files).
+// Python-iterable: each item is (one-root NGEOM buffer, StepRootMeta). The index + resolver live on the
+// heap so the resolver's index pointer stays valid even if Python moves the object.
+class StepNgeomStream {
+public:
+    explicit StepNgeomStream(const std::string &path) {
+        idx_ = std::make_unique<adacpp::step::StreamIndex>(adacpp::step::StreamIndex::from_file(path));
+        r_ = std::make_unique<adacpp::step::Resolver>(*idx_);
+        r_->build_metadata(idx_->lists);
+        // Single-threaded per-solid streaming → safe to bound parse_cache_ on giant shells (the
+        // 67 MB single solid in 469826); the multi-threaded mesh/glb path must NOT (race on re-parse).
+        r_->enable_parse_cache_bounding();
+    }
+    nb::tuple next() {
+        using namespace adacpp::ngeom;
+        const auto &roots = idx_->lists.roots;
+        while (cursor_ < roots.size()) {
+            NgeomRoot root = r_->resolve_root(roots[cursor_++]);
+            if (root.id.empty()) {
+                r_->clear_geom_cache();
+                continue;
+            }
+            StepRootMeta m;
+            m.id = root.id;
+            m.has_color = root.has_color;
+            m.color = {root.cr, root.cg, root.cb, root.ca};
+            m.transforms = root.transforms;
+            m.instance_paths = root.instance_paths;
+            NgeomDoc one;
+            one.roots.push_back(std::move(root));
+            std::vector<uint8_t> buf = encode(one);
+            r_->clear_geom_cache();
+            return nb::make_tuple(nb::bytes(reinterpret_cast<const char *>(buf.data()), buf.size()), std::move(m));
+        }
+        PyErr_SetNone(PyExc_StopIteration);
+        throw nb::python_error();
+    }
+
+private:
+    std::unique_ptr<adacpp::step::StreamIndex> idx_;
+    std::unique_ptr<adacpp::step::Resolver> r_;
+    size_t cursor_ = 0;
+};
+
+// Native STEP -> Mesh: stream the .stp with the native C++ reader (offset index + per-solid lazy
+// resolve, no OCC/Python), tessellate each solid as it streams, and append into ONE combined Mesh
+// with a GroupReference per root. Memory stays bounded on the parse side (the index + a single
+// solid), unlike the naive full-parse. The fully-native counterpart of tessellate_stream.
+Mesh stream_step_to_meshes_impl(const std::string &path, const std::string &pipeline, double deflection,
+                                double angular_deg) {
+    using namespace adacpp::ngeom;
+    (void) pipeline; // only the OCC-free libtess2 kernel is wired for the native path
+    adacpp::prof::StepProfiler prof("stream_step_to_meshes");
+
+    std::ifstream f(path, std::ios::binary);
+    if (!f)
+        return Mesh(0, {}, {});
+    std::stringstream ss;
+    ss << f.rdbuf();
+    std::string buf = ss.str();
+    prof.phase("read_file");
+
+    TessParams tp;
+    tp.deflection = deflection;
+    tp.max_angle = angular_deg * 3.14159265358979323846 / 180.0;
+
+    Mesh out(0, {}, {});
+    std::vector<GroupReference> groups;
+    adacpp::step::stream_step(buf, [&](const NgeomRoot &root, double) {
+        NgeomDoc one;
+        one.roots.push_back(root); // shares geometry shared_ptrs
+        TessMesh tm = tessellate_doc(one, tp);
+        if (tm.indices.empty())
+            return;
+        prof.solid(tm.indices.size() / 3);
+        uint32_t vstart = (uint32_t) (out.positions.size() / 3);
+        uint32_t istart = (uint32_t) out.indices.size();
+        out.positions.insert(out.positions.end(), tm.positions.begin(), tm.positions.end());
+        out.normals.insert(out.normals.end(), tm.normals.begin(), tm.normals.end());
+        for (uint32_t ix : tm.indices)
+            out.indices.push_back(vstart + ix);
+        groups.emplace_back((int) groups.size(), (int) istart, (int) tm.indices.size(), (int) vstart,
+                            (int) (tm.positions.size() / 3));
+    });
+    prof.phase("stream(resolve+tess)");
+    out.group_reference = std::move(groups);
+    return out;
+}
+
+// Native STEP -> GLB file: stream the .stp, tessellate each solid, bake its world transform(s) and
+// colour, and write a merge-by-colour GLB matching the adapy viewer's structure. The threaded core
+// now lives in step_to_glb_stream.h (adacpp::stream_step_to_glb) so the standalone OCC-free STP2GLB
+// CLI can reuse it without nanobind/OCCT. This thin wrapper keeps the existing python binding.
+int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_path, double deflection,
+                            double angular_deg, int num_threads, bool meshopt) {
+    return (int) adacpp::stream_step_to_glb(in_path, out_path, deflection, angular_deg, num_threads, meshopt);
+}
+
+// Threaded OCC-free STEP -> STL / OBJ (same reader + parallel tessellation as the GLB core, but bakes
+// world placements and streams triangles to a binary STL or Wavefront OBJ). Returns the triangle
+// count, or -1 on error. `fmt` is "stl" or "obj".
+long stream_step_to_mesh_impl(const std::string &in_path, const std::string &out_path, const std::string &fmt,
+                              double deflection, double angular_deg, int num_threads) {
+    adacpp::MeshFormat mf = (fmt == "obj" || fmt == "OBJ") ? adacpp::MeshFormat::OBJ : adacpp::MeshFormat::STL;
+    return adacpp::stream_step_to_mesh(in_path, out_path, mf, deflection, angular_deg, num_threads);
+}
+
+// GLB model diff: parse two GLBs into per-element summaries, match them, and emit colour ops keyed by
+// node_id (== frontend rangeId) + a removed-overlay GLB (ref-only geometry). One model parsed at a
+// time (never both full models resident). Returns {ops:[(node_id,status)], removed:[…], added:[…],
+// counts:{…}, overlay:bytes}. status: 0=unchanged 1=added 2=removed 3=modified.
+// Path-based + mmap'd so the multi-GB GLBs never enter RSS (file stays page-cache-backed) and never
+// round-trip through Python bytes. Memory model: summarise scene then ref, ONE mesh node decoded at a
+// time (peak = largest material chunk), only the KB-scale summary tables survive to match. The
+// removed overlay re-scans the ref and keeps ONLY the removed elements' triangles.
+nb::dict glb_diff_impl(const std::string &scene_path, const std::string &ref_path, const std::string &mode_s,
+                       double tol, uint32_t overlay_rgba) {
+    using namespace adacpp::gdiff;
+    Mode mode = Mode::NameThenCentroid;
+    if (mode_s == "byName")
+        mode = Mode::ByName;
+    else if (mode_s == "byGuid")
+        mode = Mode::ByGuid;
+    else if (mode_s == "byCentroid")
+        mode = Mode::ByCentroid;
+    else if (mode_s == "byProperty")
+        mode = Mode::ByProperty;
+
+    std::vector<ElementSummary> ss = summarize_glb_file(scene_path);
+    std::vector<ElementSummary> rs = summarize_glb_file(ref_path);
+
+    DiffResult res = diff_summaries(ss, rs, mode, tol);
+
+    // overlay: re-scan ref, gather ONLY the removed elements' triangles (bounded by the removed set).
+    std::string overlay;
+    if (!res.removed_node_ids.empty()) {
+        std::unordered_set<std::string> keep(res.removed_node_ids.begin(), res.removed_node_ids.end());
+        std::vector<float> tris;
+        summarize_glb_file(ref_path, &keep, &tris);
+        overlay = write_overlay_glb(tris, overlay_rgba);
+    }
+
+    nb::dict d;
+    nb::list ops;
+    for (const DiffOp &o : res.ops)
+        ops.append(nb::make_tuple(o.node_id, (int) o.status));
+    d["ops"] = ops;
+    nb::list rem, add;
+    for (const std::string &id : res.removed_node_ids)
+        rem.append(id);
+    for (const std::string &id : res.added_node_ids)
+        add.append(id);
+    d["removed"] = rem;
+    d["added"] = add;
+    nb::dict counts;
+    counts["added"] = res.n_added;
+    counts["removed"] = res.n_removed;
+    counts["modified"] = res.n_modified;
+    counts["unchanged"] = res.n_unchanged;
+    d["counts"] = counts;
+    d["overlay"] = nb::bytes(overlay.data(), overlay.size());
+    return d;
+}
+
+// Single-threaded, mmap-free STEP -> GLB (the wasm/OPFS core, exercised natively here as a parity
+// oracle). Creates a temp spill dir, runs step_to_glb_single, returns the triangle count.
+long stream_step_to_glb_st_impl(const std::string &in_path, const std::string &out_path, double deflection,
+                                double angular_deg, bool meshopt) {
+    char tmpl[] = "/tmp/adacpp_glbst_XXXXXX";
+    char *dir = ::mkdtemp(tmpl);
+    if (!dir)
+        return -1;
+    long n = adacpp::step_to_glb_single(in_path, out_path, dir, deflection, angular_deg, meshopt);
+    ::rmdir(dir);
+    return n;
 }
 
 // ----------------------------------------------------------------------------
@@ -2286,6 +2549,760 @@ nb::bytes meshopt_decode_index_sequence_impl(nb::bytes enc, size_t count, size_t
 
 } // namespace
 
+// Emit ONE solid's IFC into `buf` via `em` (its id counter must be pre-seeded — to a continuous
+// running id for the serial path, or to the solid's disjoint id block for the parallel path). Shared
+// by both writers. Flat solids (transforms empty) -> one IfcBuildingElementProxy; instanced solids ->
+// one IfcRepresentationMap + one IfcMappedItem+IfcCartesianTransformationOperator3D+proxy per world
+// placement (geometry shared). Appends every proxy id to `proxies`. guid_seed must be unique per
+// solid (instances use guid_seed+k; reserve a gap > max instances).
+using IfcPath = std::vector<std::pair<int, std::string>>; // root-first (rep_id, product_name) levels
+
+static void emit_solid_ifc(adacpp::ifc_emit::BrepEmitter &em, std::string &buf, const adacpp::ngeom::NgeomRoot &root,
+                           long sid, uint64_t guid_seed, std::vector<long> &proxies,
+                           std::vector<IfcPath> *proxy_paths) {
+    using namespace adacpp::ifc_emit;
+    long brep = em.emit_advanced_brep(buf, root);
+    if (!brep)
+        return;
+    std::string nm = root.id.empty() ? ("solid_" + std::to_string(sid)) : ifc_str(root.id);
+    auto record = [&](long proxy, size_t k) {
+        proxies.push_back(proxy);
+        if (proxy_paths)
+            proxy_paths->push_back(k < root.instance_paths.size() ? root.instance_paths[k] : IfcPath{});
+    };
+    // Proxy Name = the solid's own (leaf) product name; the assembly PATH is carried by proxy_paths
+    // and emitted as a nested IfcElementAssembly tree by emit_spatial_tree (aligned with the STEP->GLB
+    // product tree). Falls back to root.id when there's no path.
+    auto leaf_name = [&](size_t k) -> std::string {
+        if (k < root.instance_paths.size() && !root.instance_paths[k].empty()) {
+            const std::string &ln = root.instance_paths[k].back().second;
+            if (!ln.empty())
+                return ifc_str(ln);
+        }
+        return nm;
+    };
+    long mrep = em.emit_entity(buf, "IfcShapeRepresentation(#6,'Body','AdvancedBrep',(#" + std::to_string(brep) + "))");
+    if (root.transforms.empty()) {
+        long pds = em.emit_entity(buf, "IfcProductDefinitionShape($,$,(#" + std::to_string(mrep) + "))");
+        long proxy = em.emit_entity(buf, "IfcBuildingElementProxy('" + ifc_guid(guid_seed) + "',$,'" + leaf_name(0) +
+                                             "',$,$,#11,#" + std::to_string(pds) + ",$,$)");
+        record(proxy, 0);
+        return;
+    }
+    long repmap = em.emit_entity(buf, "IfcRepresentationMap(#4,#" + std::to_string(mrep) + ")");
+    int k = 0;
+    for (const auto &T : root.transforms) {
+        auto R = [](float v) { return ifc_real(v); };
+        auto D = [&](float a, float b, float cc) {
+            return em.emit_entity(buf, "IfcDirection((" + R(a) + "," + R(b) + "," + R(cc) + "))");
+        };
+        long axx = D(T[0], T[1], T[2]), axy = D(T[4], T[5], T[6]), axz = D(T[8], T[9], T[10]);
+        long org = em.emit_entity(buf, "IfcCartesianPoint((" + R(T[12]) + "," + R(T[13]) + "," + R(T[14]) + "))");
+        long op = em.emit_entity(buf, "IfcCartesianTransformationOperator3D(#" + std::to_string(axx) + ",#" +
+                                          std::to_string(axy) + ",#" + std::to_string(org) + ",1.,#" +
+                                          std::to_string(axz) + ")");
+        long mi = em.emit_entity(buf, "IfcMappedItem(#" + std::to_string(repmap) + ",#" + std::to_string(op) + ")");
+        long sr = em.emit_entity(buf, "IfcShapeRepresentation(#6,'Body','MappedRepresentation',(#" +
+                                          std::to_string(mi) + "))");
+        long pds = em.emit_entity(buf, "IfcProductDefinitionShape($,$,(#" + std::to_string(sr) + "))");
+        long proxy = em.emit_entity(buf, "IfcBuildingElementProxy('" + ifc_guid(guid_seed + 1 + k) + "',$,'" +
+                                             leaf_name(k) + "',$,$,#11,#" + std::to_string(pds) + ",$,$)");
+        record(proxy, k);
+        ++k;
+    }
+}
+
+// Emit the nested IfcElementAssembly tree from per-proxy assembly paths, aligned with the STEP->GLB
+// product tree (scene_from_step_stream._group_parent): assembly nodes keyed by the path's REP-ID
+// prefix (names repeat across branches), named by product name. The proxy (leaf) is aggregated under
+// its deepest assembly via IfcRelAggregates; assemblies nest via IfcRelAggregates; top-level elements
+// (top assemblies + path-less proxies) are contained in the storey (#14). `next_id` allocates entity
+// ids; appends SPF to `out`.
+static void emit_spatial_tree(std::string &out, const std::function<long()> &next_id, const std::vector<long> &proxies,
+                              const std::vector<IfcPath> &paths) {
+    using adacpp::ifc_emit::ifc_guid;
+    using adacpp::ifc_emit::ifc_str;
+    std::map<std::vector<int>, long> asm_id;    // rep-id prefix -> IfcElementAssembly id
+    std::map<long, std::vector<long>> children; // parent entity id -> child entity ids
+    const long STOREY = 14;
+    std::vector<long> storey_children;
+    uint64_t aguid = 0xE0000000ull; // assembly/rel GUID namespace (disjoint from header 0xF.. + proxies)
+
+    for (size_t i = 0; i < proxies.size(); ++i) {
+        const IfcPath &path = (i < paths.size()) ? paths[i] : IfcPath{};
+        // Intermediate assembly levels = path[0 .. n-2]; path.back() is the solid's own (leaf) product.
+        long parent = STOREY;
+        bool parent_is_storey = true;
+        std::vector<int> prefix;
+        for (size_t d = 0; d + 1 < path.size(); ++d) {
+            prefix.push_back(path[d].first);
+            auto it = asm_id.find(prefix);
+            long aid;
+            if (it == asm_id.end()) {
+                aid = next_id();
+                asm_id[prefix] = aid;
+                std::string an =
+                    path[d].second.empty() ? ("asm_" + std::to_string(path[d].first)) : ifc_str(path[d].second);
+                out += "#" + std::to_string(aid) + "=IFCELEMENTASSEMBLY('" + ifc_guid(aguid++) + "',$,'" + an +
+                       "',$,$,#11,$,$,.NOTDEFINED.,.NOTDEFINED.);\n";
+                (parent_is_storey ? storey_children : children[parent]).push_back(aid);
+            } else {
+                aid = it->second;
+            }
+            parent = aid;
+            parent_is_storey = false;
+        }
+        (parent_is_storey ? storey_children : children[parent]).push_back(proxies[i]);
+    }
+    for (const auto &[pid, kids] : children) {
+        std::string refs = "(";
+        for (size_t j = 0; j < kids.size(); ++j)
+            refs += (j ? ",#" : "#") + std::to_string(kids[j]);
+        refs += ")";
+        out += "#" + std::to_string(next_id()) + "=IFCRELAGGREGATES('" + ifc_guid(aguid++) + "',$,$,$,#" +
+               std::to_string(pid) + "," + refs + ");\n";
+    }
+    if (!storey_children.empty()) {
+        std::string refs = "(";
+        for (size_t j = 0; j < storey_children.size(); ++j)
+            refs += (j ? ",#" : "#") + std::to_string(storey_children[j]);
+        refs += ")";
+        out += "#" + std::to_string(next_id()) + "=IFCRELCONTAINEDINSPATIALSTRUCTURE('" + ifc_guid(aguid++) +
+               "',$,$,$," + refs + ",#" + std::to_string(STOREY) + ");\n";
+    }
+}
+
+// Shared IFC header + spatial block (ids #1..#13). schema = "IFC4X3_ADD2" | "IFC4".
+// The #7 length-unit line for the header. ng:: geometry is kept in the file's NATIVE units (the
+// mesh/glb path scales by unit_scale at bake time; the IFC writer emits native coords), so declare
+// the matching unit. unit_scale = metres per file-unit. SI prefixes cover m/mm/cm/dm/km/µm (≈ every
+// real STEP file); a non-SI scale (e.g. inch 0.0254) keeps METRE (no regression — was always METRE)
+// and is logged by the caller. Stays a SINGLE entity at #7 so the fixed #1..#13 header id layout holds.
+static std::string ifc_length_unit_line(double unit_scale) {
+    auto close = [](double a, double b) { return std::abs(a - b) <= 1e-9 * std::max(1.0, std::abs(b)); };
+    const char *prefix = nullptr; // null => plain METRE
+    if (close(unit_scale, 1e-3))
+        prefix = ".MILLI.";
+    else if (close(unit_scale, 1e-2))
+        prefix = ".CENTI.";
+    else if (close(unit_scale, 1e-1))
+        prefix = ".DECI.";
+    else if (close(unit_scale, 1e3))
+        prefix = ".KILO.";
+    else if (close(unit_scale, 1e-6))
+        prefix = ".MICRO.";
+    std::string pf = prefix ? prefix : "$";
+    return "#7=IFCSIUNIT(*,.LENGTHUNIT.," + pf + ",.METRE.);\n#8=IFCUNITASSIGNMENT((#7));\n";
+}
+
+static std::string ifc_header_block(const std::string &schema, double unit_scale) {
+    using adacpp::ifc_emit::ifc_guid;
+    std::string b;
+    b += "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION((''),'2;1');\n";
+    b += "FILE_NAME('','',(''),(''),'adacpp','','');\nFILE_SCHEMA(('" + schema + "'));\nENDSEC;\nDATA;\n";
+    // adapy's default spatial hierarchy: IfcProject -> IfcSite -> IfcBuilding -> IfcBuildingStorey,
+    // chained by IfcRelAggregates. Elements/assemblies are contained in the storey (#14). Reserved
+    // header ids #1..#17 (K) — keep in sync with the parallel writer's K + renumber threshold.
+    b += "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCDIRECTION((0.,0.,1.));\n#3=IFCDIRECTION((1.,0.,0.));\n"
+         "#4=IFCAXIS2PLACEMENT3D(#1,#2,#3);\n#5=IFCDIRECTION((1.,0.));\n"
+         "#6=IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-5,#4,#5);\n";
+    b += ifc_length_unit_line(unit_scale);
+    b += "#9=IFCPROJECT('" + ifc_guid(0xF0000001ull) + "',$,'adacpp STEP->IFC',$,$,$,$,(#6),#8);\n";
+    b += "#10=IFCAXIS2PLACEMENT3D(#1,$,$);\n#11=IFCLOCALPLACEMENT($,#10);\n";
+    b += "#12=IFCSITE('" + ifc_guid(0xF0000002ull) + "',$,'Site',$,$,#11,$,$,.ELEMENT.,$,$,$,$,$);\n";
+    b += "#13=IFCBUILDING('" + ifc_guid(0xF0000003ull) + "',$,'Building',$,$,#11,$,$,.ELEMENT.,$,$,$);\n";
+    b += "#14=IFCBUILDINGSTOREY('" + ifc_guid(0xF0000004ull) + "',$,'Storey',$,$,#11,$,$,.ELEMENT.,$);\n";
+    b += "#15=IFCRELAGGREGATES('" + ifc_guid(0xF0000005ull) + "',$,$,$,#9,(#12));\n";
+    b += "#16=IFCRELAGGREGATES('" + ifc_guid(0xF0000006ull) + "',$,$,$,#12,(#13));\n";
+    b += "#17=IFCRELAGGREGATES('" + ifc_guid(0xF0000007ull) + "',$,$,$,#13,(#14));\n";
+    return b;
+}
+
+// Phase 2 STEP->IFC file writer: drives the native reader (StreamIndex/Resolver) + the dep-free
+// ifc_emit::BrepEmitter. Lives here (not in ifc_emit.h) so the emitter header stays reader-free.
+// Streams to disk per chunk; bounds parse_cache_ (single-threaded -> safe per fc37d71).
+static adacpp::ifc_emit::FileStats write_ifc_file_impl(const std::string &in_path, const std::string &out_path,
+                                                       const std::string &schema, double deflection, double angular_deg,
+                                                       long max_solids) {
+    using namespace adacpp::ifc_emit;
+    FileStats fs;
+    auto idx = adacpp::step::StreamIndex::from_file(in_path);
+    adacpp::step::Resolver r(idx);
+    r.build_metadata(idx.lists);
+    r.enable_parse_cache_bounding();
+    fs.unit_scale = r.unit_scale();
+    std::FILE *fp = std::fopen(out_path.c_str(), "wb");
+    if (!fp)
+        return fs;
+    std::string buf;
+    buf.reserve(1 << 22);
+    auto flush = [&](bool force) {
+        if (buf.size() >= (4u << 20) || force) {
+            std::fwrite(buf.data(), 1, buf.size(), fp);
+            buf.clear();
+        }
+    };
+    buf += ifc_header_block(schema, r.unit_scale());
+    BrepEmitter em(100, nullptr, deflection, angular_deg);
+    std::vector<long> proxies;
+    std::vector<IfcPath> proxy_paths;
+    for (long sid : idx.lists.roots) {
+        if (max_solids > 0 && fs.solids_in >= max_solids)
+            break;
+        adacpp::ngeom::NgeomRoot root = r.resolve_root(sid);
+        ++fs.solids_in;
+        size_t before = proxies.size();
+        emit_solid_ifc(em, buf, root, sid, (uint64_t) fs.solids_in * 1000u, proxies, &proxy_paths);
+        if (proxies.size() > before)
+            ++fs.solids_out;
+        r.clear_geom_cache();
+        flush(false);
+    }
+    emit_spatial_tree(buf, [&]() { return em.alloc_id(); }, proxies, proxy_paths);
+    buf += "ENDSEC;\nEND-ISO-10303-21;\n";
+    flush(true);
+    std::fclose(fp);
+    fs.geom = em.stats();
+    return fs;
+}
+
+// Append `src` to `out`, adding `offset` to every entity id (#N defs + refs) WHOSE id > `keep_below`
+// — so references to the shared header block (#1..#keep_below, e.g. #4/#6/#11/#12) are left intact
+// while the solid's local ids are shifted to its reserved global block. Skips '#' inside
+// single-quoted SPF strings so a '#' in a name/GUID isn't mangled ('' is an escaped quote).
+static void renumber_into(std::string &out, const std::string &src, long offset, long keep_below) {
+    out.reserve(out.size() + src.size() + src.size() / 8);
+    bool in_str = false;
+    size_t i = 0, nsz = src.size();
+    while (i < nsz) {
+        char ch = src[i];
+        if (in_str) {
+            out += ch;
+            if (ch == '\'') {
+                if (i + 1 < nsz && src[i + 1] == '\'') {
+                    out += '\'';
+                    i += 2;
+                    continue;
+                }
+                in_str = false;
+            }
+            ++i;
+            continue;
+        }
+        if (ch == '\'') {
+            in_str = true;
+            out += ch;
+            ++i;
+            continue;
+        }
+        if (ch == '#' && i + 1 < nsz && src[i + 1] >= '0' && src[i + 1] <= '9') {
+            size_t j = i + 1;
+            long v = 0;
+            while (j < nsz && src[j] >= '0' && src[j] <= '9')
+                v = v * 10 + (src[j++] - '0');
+            out += '#';
+            out += std::to_string(v > keep_below ? v + offset : v);
+            i = j;
+            continue;
+        }
+        out += ch;
+        ++i;
+    }
+}
+
+// Phase 3: PARALLEL STEP->IFC. Mirrors the mesh/glb harness — one shared StreamIndex, per-worker
+// Resolver (copy_metadata_from), LPT scheduling, per-worker temp lanes. IFC's single global id space
+// is handled by giving solid at LPT-index i a DISJOINT id block [K + i*STRIDE, K + (i+1)*STRIDE)
+// (STRIDE sized from the max face count + slack; gaps are legal in SPF) — so workers never collide
+// and no renumbering pass is needed. NO parse_cache_ bounding (that races multi-threaded — the
+// fc37d71 segfault); per-worker clear_geom_cache() per solid bounds memory the safe way. Final pass
+// (single-threaded): header + concat lanes + one IfcRelContainedInSpatialStructure over all proxies.
+static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::string &in_path, const std::string &out_path,
+                                                                const std::string &schema, double deflection,
+                                                                double angular_deg, int num_threads, long max_solids) {
+    using namespace adacpp::ifc_emit;
+    using adacpp::ngeom::NgeomRoot;
+    FileStats fs;
+    auto idx = adacpp::step::StreamIndex::from_file(in_path);
+    adacpp::step::Resolver master(idx);
+    master.build_metadata(idx.lists);
+    fs.unit_scale = master.unit_scale();
+
+    std::vector<long> roots(idx.lists.roots.begin(), idx.lists.roots.end());
+    if (max_solids > 0 && (long) roots.size() > max_solids)
+        roots.resize(max_solids);
+    // LPT order (one solid_face_count pass) — load-balance the heavy solids first.
+    {
+        std::vector<std::pair<size_t, long>> cost;
+        cost.reserve(roots.size());
+        for (long sid : roots)
+            cost.emplace_back(master.solid_face_count(sid), sid);
+        master.clear_geom_cache();
+        std::sort(cost.begin(), cost.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+        for (size_t i = 0; i < cost.size(); ++i)
+            roots[i] = cost[i].second;
+    }
+    const long K = 17; // ids #1..#17 are the shared header block (Project/Site/Building/Storey + rels)
+    // Robust global id allocation: each solid is emitted with LOCAL ids (1..n), then a contiguous
+    // block of n ids is reserved atomically and the solid's text is renumbered by the block base.
+    // No STRIDE guessing, no overflow, compact ids — correct regardless of per-face entity counts.
+    std::atomic<long> id_counter{K + 1};
+
+    unsigned hw = std::thread::hardware_concurrency();
+    int nth = num_threads > 0 ? num_threads : (int) (hw > 1 ? hw : 1);
+    if (nth > (int) roots.size())
+        nth = std::max(1, (int) roots.size());
+
+    char tmpl[] = "/tmp/adacpp_ifc_XXXXXX";
+    char *dir = ::mkdtemp(tmpl);
+    if (!dir)
+        return fs;
+    std::string tdir = dir;
+    struct Lane {
+        std::FILE *fp = nullptr;
+        std::string path, buf;
+        std::vector<long> proxies;
+        std::vector<IfcPath> proxy_paths; // assembly path per proxy (parallel to proxies)
+        EmitStats stats;
+        long solids_out = 0;
+    };
+    std::vector<Lane> lanes(nth);
+    for (int t = 0; t < nth; ++t) {
+        lanes[t].path = tdir + "/lane_" + std::to_string(t) + ".ifc";
+        lanes[t].fp = std::fopen(lanes[t].path.c_str(), "wb");
+        lanes[t].buf.reserve(1 << 22);
+    }
+    std::atomic<size_t> next{0};
+    std::atomic<long> solids_in{0};
+
+    auto worker = [&](int t) {
+        adacpp::step::Resolver r(idx);
+        r.copy_metadata_from(master);
+        Lane &L = lanes[t];
+        std::string sb; // per-solid local-id buffer (renumbered into L.buf)
+        auto flush = [&](bool force) {
+            if (L.buf.size() >= (4u << 20) || force) {
+                std::fwrite(L.buf.data(), 1, L.buf.size(), L.fp);
+                L.buf.clear();
+            }
+        };
+        int local = 0;
+        for (;;) {
+            size_t i = next.fetch_add(1, std::memory_order_relaxed);
+            if (i >= roots.size())
+                break;
+            NgeomRoot root = r.resolve_root(roots[i]);
+            solids_in.fetch_add(1, std::memory_order_relaxed);
+            // Emit with LOCAL ids starting ABOVE the shared header block (K+1..), so shared refs
+            // (#1..#K) are distinguishable and left intact by renumber. Then reserve a contiguous
+            // global block of n ids atomically and shift the solid's local ids into it.
+            sb.clear();
+            BrepEmitter em(K, nullptr, deflection, angular_deg);
+            std::vector<long> local_proxies;
+            std::vector<IfcPath> local_paths;
+            emit_solid_ifc(em, sb, root, roots[i], (uint64_t) i * 1000u, local_proxies, &local_paths);
+            long n = em.current_id() - K; // local ids K+1..K+n
+            if (!local_proxies.empty()) {
+                long gbase = id_counter.fetch_add(n, std::memory_order_relaxed); // reserve [gbase, gbase+n-1]
+                long offset = gbase - (K + 1);                                   // local K+1 -> gbase
+                renumber_into(L.buf, sb, offset, K);
+                for (long p : local_proxies)
+                    L.proxies.push_back(p + offset);
+                for (auto &pth : local_paths)
+                    L.proxy_paths.push_back(std::move(pth));
+                ++L.solids_out;
+            }
+            const EmitStats &s = em.stats();
+            L.stats.faces_in += s.faces_in;
+            L.stats.faces_out += s.faces_out;
+            L.stats.faces_dropped += s.faces_dropped;
+            L.stats.edges_analytic += s.edges_analytic;
+            L.stats.edges_polyline_approx += s.edges_polyline_approx;
+            L.stats.edges_degenerate += s.edges_degenerate;
+            for (const auto &[k, v] : s.drop_reasons)
+                L.stats.drop_reasons[k] += v;
+            r.clear_geom_cache();
+            if (++local % 128 == 0)
+                adacpp::mem_trim();
+            flush(false);
+        }
+        flush(true);
+        std::fclose(L.fp);
+        L.fp = nullptr;
+    };
+    std::vector<std::thread> pool;
+    pool.reserve(nth - 1);
+    for (int t = 1; t < nth; ++t)
+        pool.emplace_back(worker, t);
+    worker(0);
+    for (std::thread &th : pool)
+        th.join();
+
+    // assemble: header + concat lanes (ids globally disjoint) + containment over all proxies.
+    std::FILE *out_fp = std::fopen(out_path.c_str(), "wb");
+    if (!out_fp) {
+        std::filesystem::remove_all(tdir);
+        return fs;
+    }
+    std::string hdr = ifc_header_block(schema, master.unit_scale());
+    std::fwrite(hdr.data(), 1, hdr.size(), out_fp);
+    std::vector<long> all_proxies;
+    std::vector<IfcPath> all_paths;
+    std::vector<char> io(1 << 20);
+    for (int t = 0; t < nth; ++t) {
+        Lane &L = lanes[t];
+        std::FILE *lf = std::fopen(L.path.c_str(), "rb");
+        if (lf) {
+            size_t n;
+            while ((n = std::fread(io.data(), 1, io.size(), lf)) > 0)
+                std::fwrite(io.data(), 1, n, out_fp);
+            std::fclose(lf);
+        }
+        all_proxies.insert(all_proxies.end(), L.proxies.begin(), L.proxies.end());
+        for (auto &pth : L.proxy_paths)
+            all_paths.push_back(std::move(pth));
+        fs.solids_out += L.solids_out;
+        fs.geom.faces_in += L.stats.faces_in;
+        fs.geom.faces_out += L.stats.faces_out;
+        fs.geom.faces_dropped += L.stats.faces_dropped;
+        fs.geom.edges_analytic += L.stats.edges_analytic;
+        fs.geom.edges_polyline_approx += L.stats.edges_polyline_approx;
+        fs.geom.edges_degenerate += L.stats.edges_degenerate;
+        for (const auto &[k, v] : L.stats.drop_reasons)
+            fs.geom.drop_reasons[k] += v;
+    }
+    fs.solids_in = solids_in.load();
+    // Nested IfcElementAssembly tree over all proxies (ids from the shared atomic counter).
+    std::string tree;
+    emit_spatial_tree(tree, [&]() { return id_counter.fetch_add(1); }, all_proxies, all_paths);
+    std::fwrite(tree.data(), 1, tree.size(), out_fp);
+    const char *foot = "ENDSEC;\nEND-ISO-10303-21;\n";
+    std::fwrite(foot, 1, std::strlen(foot), out_fp);
+    std::fclose(out_fp);
+    std::filesystem::remove_all(tdir);
+    return fs;
+}
+
+// AP242 STEP header + shared context block (ids #1..#13). unit_scale -> SI length prefix (matches the
+// IFC writer's mapping). K=13 reserved.
+static std::string step_header_block(double unit_scale) {
+    auto close = [](double a, double b) { return std::abs(a - b) <= 1e-9 * std::max(1.0, std::abs(b)); };
+    const char *prefix = "$"; // plain METRE
+    if (close(unit_scale, 1e-3))
+        prefix = ".MILLI.";
+    else if (close(unit_scale, 1e-2))
+        prefix = ".CENTI.";
+    else if (close(unit_scale, 1e-1))
+        prefix = ".DECI.";
+    else if (close(unit_scale, 1e3))
+        prefix = ".KILO.";
+    else if (close(unit_scale, 1e-6))
+        prefix = ".MICRO.";
+    std::string b;
+    b += "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('adacpp native STEP->STEP'),'2;1');\n";
+    b += "FILE_NAME('','',(''),(''),'adacpp','','');\n";
+    b += "FILE_SCHEMA(('AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF { 1 0 10303 442 1 1 4 }'));\n";
+    b += "ENDSEC;\nDATA;\n";
+    b += "#1=APPLICATION_CONTEXT('managed model based 3d engineering');\n";
+    b += "#2=APPLICATION_PROTOCOL_DEFINITION('international standard',"
+         "'ap242_managed_model_based_3d_engineering_mim_lf',2014,#1);\n";
+    b += "#3=PRODUCT_CONTEXT('',#1,'mechanical');\n#4=PRODUCT_DEFINITION_CONTEXT('part definition',#1,'design');\n";
+    b += "#5=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(" + std::string(prefix) + ",.METRE.));\n";
+    b += "#6=(NAMED_UNIT(*)PLANE_ANGLE_UNIT()SI_UNIT($,.RADIAN.));\n";
+    b += "#7=(NAMED_UNIT(*)SI_UNIT($,.STERADIAN.)SOLID_ANGLE_UNIT());\n";
+    b += "#8=UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-6),#5,'distance_accuracy_value','edge/vertex');\n";
+    b += "#9=(GEOMETRIC_REPRESENTATION_CONTEXT(3)GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#8))"
+         "GLOBAL_UNIT_ASSIGNED_CONTEXT((#5,#6,#7))REPRESENTATION_CONTEXT('Context','3D'));\n";
+    b += "#10=CARTESIAN_POINT('',(0.,0.,0.));\n#11=DIRECTION('',(0.,0.,1.));\n#12=DIRECTION('',(1.,0.,0.));\n";
+    b += "#13=AXIS2_PLACEMENT_3D('',#10,#11,#12);\n";
+    return b;
+}
+
+// Emit one solid instance (geometry baked by `em`'s transform) as a self-contained AP242 part:
+// MANIFOLD_SOLID_BREP / EXTRUDED_AREA_SOLID -> (ADVANCED_BREP_)SHAPE_REPRESENTATION (placement #13,
+// context #9) -> PRODUCT chain -> SHAPE_DEFINITION_REPRESENTATION. Returns true if a solid was emitted.
+static bool emit_solid_step(adacpp::step_emit::StepBrepEmitter &em, std::string &buf,
+                            const adacpp::ngeom::NgeomRoot &root, long sid) {
+    std::string nm = root.id.empty() ? ("solid_" + std::to_string(sid)) : adacpp::ifc_emit::ifc_str(root.id);
+    long solid = 0;
+    const char *rep_kw = "ADVANCED_BREP_SHAPE_REPRESENTATION";
+    if (root.extrusion) {
+        bool hollow = root.extrusion->profile && root.extrusion->profile->bounds.size() > 1;
+        if (em.tf_rigid() && !hollow) { // rigid, solid profile -> native EXTRUDED_AREA_SOLID
+            solid = em.emit_extrusion(buf, *root.extrusion);
+            rep_kw = "SHAPE_REPRESENTATION";
+        } else { // scale/shear or hollow profile -> bake to a B-rep (annular caps for voids)
+            solid = em.emit_extrusion_baked(buf, *root.extrusion, nm);
+        }
+    } else if (root.revolve) { // non-rigid revolves are dropped to OCC by the reader -> rigid here
+        solid = em.emit_revolve(buf, *root.revolve);
+        rep_kw = "SHAPE_REPRESENTATION";
+    } else if (root.boolean) { // CSG tree (BOOLEAN_RESULT), preserved not evaluated
+        solid = em.emit_boolean(buf, *root.boolean);
+        rep_kw = "SHAPE_REPRESENTATION";
+    } else {
+        solid = em.emit_manifold_brep(buf, root, nm);
+    }
+    if (!solid)
+        return false;
+    long rep = em.emit_entity(buf, std::string(rep_kw) + "('" + nm + "',(#13,#" + std::to_string(solid) + "),#9)");
+    long product = em.emit_entity(buf, "PRODUCT('" + nm + "','" + nm + "','',(#3))");
+    long pdf = em.emit_entity(buf, "PRODUCT_DEFINITION_FORMATION('','',#" + std::to_string(product) + ")");
+    long pd = em.emit_entity(buf, "PRODUCT_DEFINITION('design','',#" + std::to_string(pdf) + ",#4)");
+    long pds = em.emit_entity(buf, "PRODUCT_DEFINITION_SHAPE('','',#" + std::to_string(pd) + ")");
+    em.emit_entity(buf, "SHAPE_DEFINITION_REPRESENTATION(#" + std::to_string(pds) + ",#" + std::to_string(rep) + ")");
+    return true;
+}
+
+// Native parallel STEP->STEP (AP242). Mirrors the parallel IFC writer: shared StreamIndex, per-worker
+// Resolver, LPT, per-worker lanes, local ids -> atomic-reserve -> renumber. Instances are BAKED
+// (per-instance transform applied to the geometry) — v1 flat parts (no NAUO assembly tree). nth=1 =
+// serial. NO parse_cache_ bounding (per-worker clear_geom_cache per solid). Round-trip-lossless.
+static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_path, const std::string &out_path,
+                                                        double deflection, double angular_deg, int num_threads,
+                                                        long max_solids) {
+    using adacpp::ngeom::NgeomRoot;
+    using adacpp::step_emit::StepBrepEmitter;
+    adacpp::ifc_emit::FileStats fs;
+    auto idx = adacpp::step::StreamIndex::from_file(in_path);
+    adacpp::step::Resolver master(idx);
+    master.build_metadata(idx.lists);
+    fs.unit_scale = master.unit_scale();
+    std::vector<long> roots(idx.lists.roots.begin(), idx.lists.roots.end());
+    if (max_solids > 0 && (long) roots.size() > max_solids)
+        roots.resize(max_solids);
+    {
+        std::vector<std::pair<size_t, long>> cost;
+        cost.reserve(roots.size());
+        for (long sid : roots)
+            cost.emplace_back(master.solid_face_count(sid), sid);
+        master.clear_geom_cache();
+        std::sort(cost.begin(), cost.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+        for (size_t i = 0; i < cost.size(); ++i)
+            roots[i] = cost[i].second;
+    }
+    const long K = 13;
+    std::atomic<long> id_counter{K + 1};
+    unsigned hw = std::thread::hardware_concurrency();
+    int nth = num_threads > 0 ? num_threads : (int) (hw > 1 ? hw : 1);
+    if (nth > (int) roots.size())
+        nth = std::max(1, (int) roots.size());
+    char tmpl[] = "/tmp/adacpp_stp_XXXXXX";
+    char *dir = ::mkdtemp(tmpl);
+    if (!dir)
+        return fs;
+    std::string tdir = dir;
+    struct Lane {
+        std::FILE *fp = nullptr;
+        std::string path, buf;
+        adacpp::ifc_emit::EmitStats stats;
+        long solids_out = 0;
+    };
+    std::vector<Lane> lanes(nth);
+    for (int t = 0; t < nth; ++t) {
+        lanes[t].path = tdir + "/lane_" + std::to_string(t) + ".stp";
+        lanes[t].fp = std::fopen(lanes[t].path.c_str(), "wb");
+        lanes[t].buf.reserve(1 << 22);
+    }
+    std::atomic<size_t> next{0};
+    std::atomic<long> solids_in{0};
+    auto worker = [&](int t) {
+        adacpp::step::Resolver r(idx);
+        r.copy_metadata_from(master);
+        Lane &L = lanes[t];
+        std::string sb;
+        auto flush = [&](bool force) {
+            if (L.buf.size() >= (4u << 20) || force) {
+                std::fwrite(L.buf.data(), 1, L.buf.size(), L.fp);
+                L.buf.clear();
+            }
+        };
+        int local = 0;
+        for (;;) {
+            size_t i = next.fetch_add(1, std::memory_order_relaxed);
+            if (i >= roots.size())
+                break;
+            NgeomRoot root = r.resolve_root(roots[i]);
+            solids_in.fetch_add(1, std::memory_order_relaxed);
+            // One baked part per instance (or one identity part when flat).
+            size_t ninst = root.transforms.empty() ? 1 : root.transforms.size();
+            bool any = false;
+            for (size_t k = 0; k < ninst; ++k) {
+                double tf[16];
+                const double *tfp = nullptr;
+                if (!root.transforms.empty()) {
+                    // ng:: transforms are column-major glTF; StepBrepEmitter wants row-major.
+                    const std::array<float, 16> &M = root.transforms[k];
+                    tf[0] = M[0];
+                    tf[1] = M[4];
+                    tf[2] = M[8];
+                    tf[3] = M[12];
+                    tf[4] = M[1];
+                    tf[5] = M[5];
+                    tf[6] = M[9];
+                    tf[7] = M[13];
+                    tf[8] = M[2];
+                    tf[9] = M[6];
+                    tf[10] = M[10];
+                    tf[11] = M[14];
+                    tfp = tf;
+                }
+                sb.clear();
+                StepBrepEmitter em(K, tfp, deflection, angular_deg);
+                bool ok = emit_solid_step(em, sb, root, roots[i]);
+                long n = em.current_id() - K;
+                if (ok) {
+                    long gbase = id_counter.fetch_add(n, std::memory_order_relaxed);
+                    renumber_into(L.buf, sb, gbase - (K + 1), K);
+                    any = true;
+                    const auto &s = em.stats();
+                    L.stats.faces_in += s.faces_in;
+                    L.stats.faces_out += s.faces_out;
+                    L.stats.faces_dropped += s.faces_dropped;
+                    L.stats.edges_analytic += s.edges_analytic;
+                    L.stats.edges_polyline_approx += s.edges_polyline_approx;
+                    L.stats.edges_degenerate += s.edges_degenerate;
+                    for (const auto &[rk, rv] : s.drop_reasons)
+                        L.stats.drop_reasons[rk] += rv;
+                }
+            }
+            if (any)
+                ++L.solids_out;
+            r.clear_geom_cache();
+            if (++local % 128 == 0)
+                adacpp::mem_trim();
+            flush(false);
+        }
+        flush(true);
+        std::fclose(L.fp);
+        L.fp = nullptr;
+    };
+    std::vector<std::thread> pool;
+    pool.reserve(nth - 1);
+    for (int t = 1; t < nth; ++t)
+        pool.emplace_back(worker, t);
+    worker(0);
+    for (std::thread &th : pool)
+        th.join();
+    std::FILE *out_fp = std::fopen(out_path.c_str(), "wb");
+    if (!out_fp) {
+        std::filesystem::remove_all(tdir);
+        return fs;
+    }
+    std::string hdr = step_header_block(master.unit_scale());
+    std::fwrite(hdr.data(), 1, hdr.size(), out_fp);
+    std::vector<char> io(1 << 20);
+    for (int t = 0; t < nth; ++t) {
+        Lane &L = lanes[t];
+        if (std::FILE *lf = std::fopen(L.path.c_str(), "rb")) {
+            size_t n;
+            while ((n = std::fread(io.data(), 1, io.size(), lf)) > 0)
+                std::fwrite(io.data(), 1, n, out_fp);
+            std::fclose(lf);
+        }
+        fs.solids_out += L.solids_out;
+        fs.geom.faces_in += L.stats.faces_in;
+        fs.geom.faces_out += L.stats.faces_out;
+        fs.geom.faces_dropped += L.stats.faces_dropped;
+        fs.geom.edges_analytic += L.stats.edges_analytic;
+        fs.geom.edges_polyline_approx += L.stats.edges_polyline_approx;
+        fs.geom.edges_degenerate += L.stats.edges_degenerate;
+        for (const auto &[k, v] : L.stats.drop_reasons)
+            fs.geom.drop_reasons[k] += v;
+    }
+    fs.solids_in = solids_in.load();
+    const char *foot = "ENDSEC;\nEND-ISO-10303-21;\n";
+    std::fwrite(foot, 1, std::strlen(foot), out_fp);
+    std::fclose(out_fp);
+    std::filesystem::remove_all(tdir);
+    return fs;
+}
+
+// Native IFC->STEP (AP242): IfcResolver reads each product's analytic B-rep -> ng::, then the STEP
+// emitter re-writes it (instances baked). Serial (per-product resolve is cheap; the shared
+// IfcRepresentationMap brep is re-resolved per instance = baked). Round-trip with the STEP->IFC writer.
+static adacpp::ifc_emit::FileStats write_ifc_to_step_impl(const std::string &in_path, const std::string &out_path,
+                                                          double deflection, double angular_deg, long max_solids) {
+    using adacpp::ngeom::NgeomRoot;
+    using adacpp::step_emit::StepBrepEmitter;
+    adacpp::ifc_emit::FileStats fs;
+    auto idx = adacpp::step::StreamIndex::from_file(in_path);
+    if (!idx.ok())
+        return fs;
+    adacpp::ifc_read::IfcResolver r(idx);
+    fs.unit_scale = r.unit_scale();
+    std::vector<long> roots = r.proxy_roots();
+    if (max_solids > 0 && (long) roots.size() > max_solids)
+        roots.resize(max_solids);
+    fs.products_total = (long) roots.size();
+    std::FILE *fp = std::fopen(out_path.c_str(), "wb");
+    if (!fp)
+        return fs;
+    std::string buf;
+    buf.reserve(1 << 22);
+    std::string hdr = step_header_block(fs.unit_scale);
+    std::fwrite(hdr.data(), 1, hdr.size(), fp);
+    long nid = 13; // continue after the shared header block
+    auto flush = [&](bool force) {
+        if (buf.size() >= (4u << 20) || force) {
+            std::fwrite(buf.data(), 1, buf.size(), fp);
+            buf.clear();
+        }
+    };
+    for (long pid : roots) {
+        NgeomRoot root = r.resolve_product(pid);
+        if (root.faces.empty() && !root.extrusion && !root.revolve && !root.boolean) {
+            ++fs.products_skipped; // a product whose geometry the analytic reader couldn't represent
+            continue;
+        }
+        ++fs.solids_in;
+        size_t ninst = root.transforms.empty() ? 1 : root.transforms.size();
+        bool any = false;
+        for (size_t k = 0; k < ninst; ++k) {
+            double tf[16];
+            const double *tfp = nullptr;
+            if (!root.transforms.empty()) {
+                const std::array<float, 16> &M = root.transforms[k];
+                tf[0] = M[0];
+                tf[1] = M[4];
+                tf[2] = M[8];
+                tf[3] = M[12];
+                tf[4] = M[1];
+                tf[5] = M[5];
+                tf[6] = M[9];
+                tf[7] = M[13];
+                tf[8] = M[2];
+                tf[9] = M[6];
+                tf[10] = M[10];
+                tf[11] = M[14];
+                tfp = tf;
+            }
+            StepBrepEmitter em(nid, tfp, deflection, angular_deg);
+            if (emit_solid_step(em, buf, root, pid)) {
+                nid = em.current_id();
+                any = true;
+                const auto &s = em.stats();
+                fs.geom.faces_in += s.faces_in;
+                fs.geom.faces_out += s.faces_out;
+                fs.geom.faces_dropped += s.faces_dropped;
+                fs.geom.edges_analytic += s.edges_analytic;
+                fs.geom.edges_polyline_approx += s.edges_polyline_approx;
+                fs.geom.edges_degenerate += s.edges_degenerate;
+                for (const auto &[rk, rv] : s.drop_reasons)
+                    fs.geom.drop_reasons[rk] += rv;
+            }
+        }
+        if (any)
+            ++fs.solids_out;
+        flush(false);
+    }
+    const char *foot = "ENDSEC;\nEND-ISO-10303-21;\n";
+    buf += foot;
+    flush(true);
+    std::fclose(fp);
+    return fs;
+}
+
 void cad_module(nb::module_ &m) {
     // Kernel-agnostic mesh / color / group types live in cad — they're the
     // surface every backend (native OCCT, wasm OCCT, future CGAL) speaks.
@@ -2344,6 +3361,13 @@ void cad_module(nb::module_ &m) {
         .def_ro("mesh_type", &Mesh::mesh_type)
         .def_ro("color", &Mesh::color)
         .def_ro("groups", &Mesh::group_reference);
+
+    nb::class_<StepRootMeta>(m, "StepRootMeta")
+        .def_ro("id", &StepRootMeta::id)
+        .def_ro("has_color", &StepRootMeta::has_color)
+        .def_ro("color", &StepRootMeta::color)
+        .def_ro("transforms", &StepRootMeta::transforms)
+        .def_ro("instance_paths", &StepRootMeta::instance_paths);
 
     nb::class_<PcurveData>(m, "PcurveData")
         .def_ro("has_pcurve", &PcurveData::has_pcurve)
@@ -2405,6 +3429,177 @@ void cad_module(nb::module_ &m) {
           "'hybrid' (ifcopenshell taxonomy kernels). angular_deg in degrees. settings: "
           "ifcopenshell ConversionSettings overrides for the taxonomy paths, e.g. "
           "{'no-wire-intersection-check': True, 'precision': 1e-3} — see ifc_taxonomy_settings().");
+
+    // Phase 1 of the native streaming STEP->IFC writer (dap plan/v3/spec_native_streaming_ifc.md):
+    // emit ONE solid's IFC4 advanced-B-rep SPF lines from ng:: (no ada.geom). Test/parity entry —
+    // the full multi-threaded file writer is later phases.
+    m.def(
+        "step_emit_ifc_brep",
+        [](const std::string &path, size_t index, long start_id) -> std::string {
+            auto idx = adacpp::step::StreamIndex::from_file(path);
+            adacpp::step::Resolver r(idx);
+            r.build_metadata(idx.lists);
+            const auto &roots = idx.lists.roots;
+            if (index >= roots.size())
+                return "";
+            adacpp::ngeom::NgeomRoot root = r.resolve_root(roots[index]);
+            std::string out;
+            adacpp::ifc_emit::BrepEmitter em(start_id);
+            em.emit_advanced_brep(out, root);
+            return out;
+        },
+        "path"_a, "index"_a = 0, "start_id"_a = 100,
+        "Emit one solid's IFC4 IfcAdvancedBrep SPF lines (string) from the native NGEOM reader. "
+        "Phase 1 test entry for the native STEP->IFC writer; returns '' if the solid was skipped.");
+
+    // Phase 2: full single-threaded STEP->IFC file. Returns a dict with the losslessness audit
+    // (solids_in/out, faces_in/out/dropped, drop_reasons, edge approximation counts).
+    m.def(
+        "stream_step_to_ifc",
+        [](const std::string &in_path, const std::string &out_path, const std::string &schema, double deflection,
+           double angular_deg, long max_solids, int num_threads) -> nb::dict {
+            adacpp::ifc_emit::FileStats fs =
+                (num_threads == 1) ? write_ifc_file_impl(in_path, out_path, schema, deflection, angular_deg, max_solids)
+                                   : write_ifc_file_parallel_impl(in_path, out_path, schema, deflection, angular_deg,
+                                                                  num_threads, max_solids);
+            nb::dict d;
+            d["solids_in"] = fs.solids_in;
+            d["unit_scale"] = fs.unit_scale;
+            d["solids_out"] = fs.solids_out;
+            d["faces_in"] = fs.geom.faces_in;
+            d["faces_out"] = fs.geom.faces_out;
+            d["faces_dropped"] = fs.geom.faces_dropped;
+            d["edges_analytic"] = fs.geom.edges_analytic;
+            d["edges_polyline_approx"] = fs.geom.edges_polyline_approx;
+            d["edges_degenerate"] = fs.geom.edges_degenerate;
+            nb::dict reasons;
+            for (const auto &[k, v] : fs.geom.drop_reasons)
+                reasons[k.c_str()] = v;
+            d["drop_reasons"] = reasons;
+            return d;
+        },
+        "in_path"_a, "out_path"_a, "schema"_a = "IFC4X3_ADD2", "deflection"_a = 2.0, "angular_deg"_a = 20.0,
+        "max_solids"_a = 0, "num_threads"_a = 0,
+        "Native STEP->IFC: write a full IFC file (header + spatial block + "
+        "one IfcAdvancedBrep+proxy per solid). Returns the losslessness audit dict (solids_in/out, "
+        "faces_in/out/dropped, drop_reasons). schema: 'IFC4X3_ADD2' | 'IFC4'.");
+
+    // Native parallel STEP->STEP (AP242). Re-export the analytic B-rep per solid, instances baked,
+    // round-trip-lossless. Returns the same losslessness audit dict.
+    m.def(
+        "stream_step_to_step",
+        [](const std::string &in_path, const std::string &out_path, double deflection, double angular_deg,
+           long max_solids, int num_threads) -> nb::dict {
+            adacpp::ifc_emit::FileStats fs =
+                write_step_file_impl(in_path, out_path, deflection, angular_deg, num_threads, max_solids);
+            nb::dict d;
+            d["solids_in"] = fs.solids_in;
+            d["solids_out"] = fs.solids_out;
+            d["unit_scale"] = fs.unit_scale;
+            d["faces_in"] = fs.geom.faces_in;
+            d["faces_out"] = fs.geom.faces_out;
+            d["faces_dropped"] = fs.geom.faces_dropped;
+            d["edges_analytic"] = fs.geom.edges_analytic;
+            d["edges_polyline_approx"] = fs.geom.edges_polyline_approx;
+            d["edges_degenerate"] = fs.geom.edges_degenerate;
+            nb::dict reasons;
+            for (const auto &[k, v] : fs.geom.drop_reasons)
+                reasons[k.c_str()] = v;
+            d["drop_reasons"] = reasons;
+            return d;
+        },
+        "in_path"_a, "out_path"_a, "deflection"_a = 2.0, "angular_deg"_a = 20.0, "max_solids"_a = 0,
+        "num_threads"_a = 0,
+        "Native parallel STEP->STEP (AP242): re-export each solid's analytic B-rep as a "
+        "MANIFOLD_SOLID_BREP part (instances baked), no OCC. Returns the losslessness audit dict.");
+
+    // Native IFC->STEP (AP242): read an IFC advanced-B-rep file -> ng:: -> STEP, no OCC.
+    m.def(
+        "stream_ifc_to_step",
+        [](const std::string &in_path, const std::string &out_path, double deflection, double angular_deg,
+           long max_solids) -> nb::dict {
+            adacpp::ifc_emit::FileStats fs =
+                write_ifc_to_step_impl(in_path, out_path, deflection, angular_deg, max_solids);
+            nb::dict d;
+            d["solids_in"] = fs.solids_in;
+            d["solids_out"] = fs.solids_out;
+            d["products_total"] = fs.products_total;
+            d["products_skipped"] = fs.products_skipped;
+            d["unit_scale"] = fs.unit_scale;
+            d["faces_in"] = fs.geom.faces_in;
+            d["faces_out"] = fs.geom.faces_out;
+            d["faces_dropped"] = fs.geom.faces_dropped;
+            d["edges_analytic"] = fs.geom.edges_analytic;
+            d["edges_polyline_approx"] = fs.geom.edges_polyline_approx;
+            d["edges_degenerate"] = fs.geom.edges_degenerate;
+            nb::dict reasons;
+            for (const auto &[k, v] : fs.geom.drop_reasons)
+                reasons[k.c_str()] = v;
+            d["drop_reasons"] = reasons;
+            return d;
+        },
+        "in_path"_a, "out_path"_a, "deflection"_a = 2.0, "angular_deg"_a = 20.0, "max_solids"_a = 0,
+        "Native IFC->STEP (AP242): read an IFC advanced-B-rep file (IfcAdvancedBrep + analytic "
+        "surfaces/curves + IfcMappedItem instancing) and re-export as STEP MANIFOLD_SOLID_BREP parts, "
+        "no OCC. Returns the losslessness audit dict.");
+
+    m.def("stream_step_to_meshes", &stream_step_to_meshes_impl, "path"_a, "pipeline"_a = "libtess2",
+          "deflection"_a = 0.0, "angular_deg"_a = 20.0,
+          "Read a STEP file with the native C++ reader (no OCC, no Python) and tessellate every "
+          "solid into ONE combined Mesh with a GroupReference per root (node_id = root index). The "
+          "fully-native counterpart of tessellate_stream. pipeline: 'libtess2' is the only kernel "
+          "wired for this path. angular_deg in degrees.");
+
+    m.def("stream_step_to_glb", &stream_step_to_glb_impl, "in_path"_a, "out_path"_a, "deflection"_a = 0.0,
+          "angular_deg"_a = 20.0, "num_threads"_a = 0, "meshopt"_a = true,
+          "Native STEP -> GLB file: stream the .stp with the native reader (offset index + per-statement "
+          "pread, bounded memory), tessellate each solid across num_threads worker threads (0 = auto = "
+          "hardware_concurrency), each owning a spill lane joined at the end, bake world transform(s) + "
+          "colour, and write a merge-by-colour GLB matching the adapy viewer's structure. meshopt=true "
+          "(default) bakes EXT_meshopt_compression inline (no Python re-pack). Returns the number of "
+          "solids written (-1 on I/O error). angular_deg in degrees.");
+
+    m.def("stream_step_to_mesh", &stream_step_to_mesh_impl, "in_path"_a, "out_path"_a, "fmt"_a, "deflection"_a = 2.0,
+          "angular_deg"_a = 20.0, "num_threads"_a = 0,
+          "Native STEP -> STL/OBJ file: the SAME native reader + parallel tessellation as "
+          "stream_step_to_glb, but bakes each instance's world placement and streams triangles straight "
+          "to a binary STL (fmt='stl') or Wavefront OBJ (fmt='obj'). Bounded memory; no Python round-trip. "
+          "Returns the triangle count (-1 on I/O error). angular_deg in degrees.");
+
+    m.def("glb_diff", &glb_diff_impl, "scene_path"_a, "ref_path"_a, "mode"_a = "nameThenCentroid", "tol"_a = 1e-3,
+          "overlay_rgba"_a = 0xD50000FFu,
+          "Diff two GLB FILES (paths, so big GLBs never copy through Python bytes): summarise each one "
+          "model at a time (never both, geometry not retained), match by mode "
+          "('byName'|'byGuid'|'byCentroid'|'byProperty'|'nameThenCentroid'), and return "
+          "{ops:[(node_id,status)], removed:[node_id], added:[node_id], counts:{...}, overlay:bytes}. "
+          "status 0=unchanged 1=added 2=removed 3=modified; overlay is a red GLB of the ref-only geometry. "
+          "Handles EXT_meshopt_compression (the viewer GLB format).");
+
+    m.def("stream_step_to_glb_st", &stream_step_to_glb_st_impl, "in_path"_a, "out_path"_a, "deflection"_a = 2.0,
+          "angular_deg"_a = 20.0, "meshopt"_a = false,
+          "Single-threaded, mmap-free STEP -> GLB (the no-pyodide wasm/OPFS core, callable natively as a "
+          "parity oracle): from_file_pread scan + serial resolve/tessellate/spill + merge, NO std::thread "
+          "and NO mmap. Returns the triangle count (-1 on I/O error).");
+
+    m.def("stream_step_to_ngeom", &stream_step_to_ngeom_impl, "path"_a,
+          "Read a STEP file with the native C++ reader (no OCC, no Python) and return "
+          "(ngeom_buffer, [StepRootMeta]): the resolved geometry re-encoded to ONE NGEOM buffer "
+          "(decode with the adapy deserializer into ada.geom.Geometry) plus per-root metadata — "
+          "id, colour, per-instance world transforms, and assembly paths — parallel to the "
+          "buffer's roots. The geometry sibling of stream_step_to_meshes for the from_step "
+          "hydrate path (ada.geom.Geometry + assembly part hierarchy).");
+
+    nb::class_<StepNgeomStream>(m, "StepNgeomStream")
+        .def(nb::init<const std::string &>(), "path"_a,
+             "Streaming NGEOM emitter: iterate to get (one-solid NGEOM buffer, StepRootMeta) per solid, "
+             "with bounded memory (offset index + one solid) — the from_step hydrate path's large-file "
+             "counterpart to stream_step_to_ngeom (which full-parses).")
+        .def("__iter__", [](nb::object self) { return self; })
+        .def("__next__", &StepNgeomStream::next);
+
+    m.def("_step_index_parity", &step_index_parity_impl, "path"_a,
+          "Debug: build the STEP offset index via mmap scan and via the wasm-safe pread scan, returning "
+          "a dict of per-field equality (ids/offs/roots/units/styled/absr/srr/cdsr/sdr).");
 
     m.def(
         "ifc_taxonomy_settings",

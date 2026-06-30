@@ -10,12 +10,19 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "ngeom_bspline.h"
 #include "ngeom_topology.h"
 
 namespace adacpp::ngeom {
+
+// The bulk readers (f64s / i32s / vec3s) memcpy whole arrays straight out of the little-endian
+// wire buffer. That is byte-identical to the per-element loops only if Vec3 is exactly three
+// packed doubles and trivially copyable (so a vector<Vec3> matches the x,y,z,x,y,z... layout).
+static_assert(sizeof(Vec3) == 3 * sizeof(double), "Vec3 must be 3 packed doubles for bulk memcpy");
+static_assert(std::is_trivially_copyable<Vec3>::value, "Vec3 must be trivially copyable for memcpy");
 
 namespace tag {
 enum : int {
@@ -76,16 +83,33 @@ public:
         double x = f64(), y = f64(), z = f64();
         return {x, y, z};
     }
+    // Bulk readers: one bounds-check + one memcpy for the whole array (the wire is little-endian,
+    // matching the host on every target — x86/arm/wasm). Byte-identical to the per-element loops.
     std::vector<double> f64s(int n) {
         std::vector<double> v(n);
-        for (int i = 0; i < n; ++i)
-            v[i] = f64();
+        if (n > 0) {
+            need((size_t) n * 8);
+            std::memcpy(v.data(), p_, (size_t) n * 8);
+            p_ += (size_t) n * 8;
+        }
         return v;
     }
     std::vector<int> i32s(int n) {
         std::vector<int> v(n);
-        for (int i = 0; i < n; ++i)
-            v[i] = i32();
+        if (n > 0) {
+            need((size_t) n * 4);
+            std::memcpy(v.data(), p_, (size_t) n * 4);
+            p_ += (size_t) n * 4;
+        }
+        return v;
+    }
+    std::vector<Vec3> vec3s(int n) {
+        std::vector<Vec3> v(n);
+        if (n > 0) {
+            need((size_t) n * 24);
+            std::memcpy(v.data(), p_, (size_t) n * 24);
+            p_ += (size_t) n * 24;
+        }
         return v;
     }
     std::string str(int n) {
@@ -196,10 +220,7 @@ inline NgeomDoc decode(const uint8_t *data, size_t n) {
         }
         case tag::POLYLINE: {
             int np = r.i32();
-            std::vector<Vec3> pts(np);
-            for (int i = 0; i < np; ++i)
-                pts[i] = r.vec3();
-            slot.curve = std::make_shared<PolylineCurve>(std::move(pts));
+            slot.curve = std::make_shared<PolylineCurve>(r.vec3s(np));
             break;
         }
         case tag::HYPERBOLA: {
@@ -242,9 +263,7 @@ inline NgeomDoc decode(const uint8_t *data, size_t n) {
             r.i32(); // closed
             r.i32(); // self_intersect
             int nc = r.i32();
-            std::vector<Vec3> cp(nc);
-            for (int i = 0; i < nc; ++i)
-                cp[i] = r.vec3();
+            std::vector<Vec3> cp = r.vec3s(nc);
             int nk = r.i32();
             std::vector<double> kn = r.f64s(nk);
             std::vector<int> mu = r.i32s(nk);
@@ -299,9 +318,7 @@ inline NgeomDoc decode(const uint8_t *data, size_t n) {
             s->nu = r.i32();
             s->nv = r.i32();
             int ncp = s->nu * s->nv;
-            s->ctrl.resize(ncp);
-            for (int i = 0; i < ncp; ++i)
-                s->ctrl[i] = r.vec3();
+            s->ctrl = r.vec3s(ncp);
             int nuk = r.i32();
             std::vector<double> uk = r.f64s(nuk);
             std::vector<int> um = r.i32s(nuk);
@@ -387,9 +404,7 @@ inline NgeomDoc decode(const uint8_t *data, size_t n) {
             auto lp = std::make_shared<LoopN>();
             lp->is_poly = true;
             int np = r.i32();
-            lp->polygon.reserve(np);
-            for (int i = 0; i < np; ++i)
-                lp->polygon.push_back(r.vec3());
+            lp->polygon = r.vec3s(np);
             slot.loop = lp;
             break;
         }
