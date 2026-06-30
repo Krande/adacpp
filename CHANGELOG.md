@@ -2,6 +2,15 @@
 
 
 
+## v0.11.0 (2026-06-30)
+
+### Feature
+
+* feat: native dep-free STEP/IFC geometry pipeline (OCC-free reader, writers, full ng:: coverage) (#32)
+
+Co-authored-by: Claude Opus 4.8 &lt;noreply@anthropic.com&gt; ([`1e7ee04`](https://github.com/Krande/adacpp/commit/1e7ee041d02214d29036ed14a04745e952ebe078))
+
+
 ## v0.10.1 (2026-06-25)
 
 ### Fix
