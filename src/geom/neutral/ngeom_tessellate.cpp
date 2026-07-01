@@ -1740,70 +1740,74 @@ void append_mesh(TessMesh &dst, const TessMesh &src) {
 }
 } // namespace
 
+// Tessellate ONE root's geometry into `out` (no group bookkeeping — the caller records ranges).
+static void tessellate_one_root(const NgeomRoot &root, const TessParams &tp, TessMesh &out) {
+    if (root.extrusion) {
+        Mesh m(out);
+        tessellate_extrusion(*root.extrusion, tp, m);
+    } else if (root.revolve) {
+        Mesh m(out);
+        tessellate_revolve(*root.revolve, tp, m);
+    } else if (root.sweep) {
+        Mesh m(out);
+        tessellate_sweep(*root.sweep, tp, m);
+    } else if (root.boolean) {
+        // CSG via Manifold (no-op on wasm until Manifold is wired there).
+        append_mesh(out, tessellate_boolean_item(*root.boolean, tp));
+    } else if (root.sphere) {
+        Mesh m(out);
+        tessellate_sphere(*root.sphere, tp, m);
+    } else {
+        if (FDBG) {
+            size_t nnull = 0;
+            for (const auto &f : root.faces)
+                if (!f)
+                    ++nnull;
+            std::fprintf(stderr, "FDBG ROOT id=%s faces=%zu null=%zu\n", root.id.c_str(), root.faces.size(), nnull);
+        }
+        for (const auto &face : root.faces)
+            if (face)
+                tessellate_face(*face, tp, out);
+    }
+}
+
 TessMesh tessellate_doc(const NgeomDoc &doc, const TessParams &tp) {
     TessMesh mesh;
-    for (const NgeomRoot &root : doc.roots) {
+    const auto &roots = doc.roots;
+    // Opt-in parallelism (tp.threads>1): tessellate ROOTS across a thread pool into per-root local
+    // buffers, merged in root order. Roots are independent (each tessellate_face allocates its own
+    // libtess2 tessellator, no shared state); merging in order makes the output byte-identical to
+    // serial. Per-root parallelism is the right grain for the merge-preview generate, which streams
+    // one root PER PLATE (thousands of roots) so every plate is its own pickable BatchMesh group.
+    // Default (threads=1) keeps the serial path — the STEP->GLB process pool stays serial per call.
+    unsigned want = tp.threads > 1 ? (unsigned) tp.threads : 1u;
+    if (want <= 1 || roots.size() < 2) {
+        for (const NgeomRoot &root : roots) {
+            uint32_t first = (uint32_t) mesh.indices.size();
+            uint32_t vfirst = (uint32_t) (mesh.positions.size() / 3);
+            tessellate_one_root(root, tp, mesh);
+            mesh.groups.push_back({root.id, first, (uint32_t) mesh.indices.size() - first, vfirst,
+                                   (uint32_t) (mesh.positions.size() / 3) - vfirst});
+        }
+        return mesh;
+    }
+    std::vector<TessMesh> locals(roots.size());
+    std::atomic<size_t> next{0};
+    unsigned nthreads = std::min<unsigned>(want, (unsigned) roots.size());
+    std::vector<std::thread> pool;
+    pool.reserve(nthreads);
+    for (unsigned t = 0; t < nthreads; ++t)
+        pool.emplace_back([&]() {
+            for (size_t i = next.fetch_add(1); i < roots.size(); i = next.fetch_add(1))
+                tessellate_one_root(roots[i], tp, locals[i]);
+        });
+    for (std::thread &th : pool)
+        th.join();
+    for (size_t i = 0; i < roots.size(); ++i) {
         uint32_t first = (uint32_t) mesh.indices.size();
         uint32_t vfirst = (uint32_t) (mesh.positions.size() / 3);
-        if (root.extrusion) {
-            Mesh m(mesh);
-            tessellate_extrusion(*root.extrusion, tp, m);
-        } else if (root.revolve) {
-            Mesh m(mesh);
-            tessellate_revolve(*root.revolve, tp, m);
-        } else if (root.sweep) {
-            Mesh m(mesh);
-            tessellate_sweep(*root.sweep, tp, m);
-        } else if (root.boolean) {
-            // CSG via Manifold (no-op on wasm until Manifold is wired there).
-            append_mesh(mesh, tessellate_boolean_item(*root.boolean, tp));
-        } else if (root.sphere) {
-            Mesh m(mesh);
-            tessellate_sphere(*root.sphere, tp, m);
-        } else {
-            if (FDBG) {
-                size_t nnull = 0;
-                for (const auto &f : root.faces)
-                    if (!f)
-                        ++nnull;
-                std::fprintf(stderr, "FDBG ROOT id=%s faces=%zu null=%zu\n", root.id.c_str(), root.faces.size(), nnull);
-            }
-            // Faces are independent (each tessellate_face allocates its own libtess2
-            // tessellator, no shared state), so tessellate them into per-face local buffers
-            // across a thread pool and merge in order. A big single-root shell (a whole
-            // ship's ~7.5k plates) tessellated serially before — the dominant cost.
-            const auto &fs = root.faces;
-            const size_t nf = fs.size();
-            // Opt-in parallelism (tp.threads>1): tessellate this root's faces across a thread
-            // pool. A handful of EXPENSIVE faces (curved B-spline hull panels) is the heavy case,
-            // so there is no face-count threshold — any nf>=2 parallelises. Faces are independent
-            // (each allocates its own libtess2 tessellator, no shared state); results merge in
-            // order so the output is byte-identical to the serial path.
-            unsigned want = tp.threads > 1 ? (unsigned) tp.threads : 1u;
-            if (nf < 2 || want <= 1) {
-                for (const auto &face : fs)
-                    if (face)
-                        tessellate_face(*face, tp, mesh);
-            } else {
-                std::vector<TessMesh> locals(nf);
-                std::atomic<size_t> next{0};
-                unsigned nthreads = std::min<unsigned>(want, (unsigned) nf);
-                std::vector<std::thread> pool;
-                pool.reserve(nthreads);
-                for (unsigned t = 0; t < nthreads; ++t)
-                    pool.emplace_back([&]() {
-                        for (size_t i = next.fetch_add(1); i < nf; i = next.fetch_add(1))
-                            if (fs[i])
-                                tessellate_face(*fs[i], tp, locals[i]);
-                    });
-                for (std::thread &th : pool)
-                    th.join();
-                for (const TessMesh &lm : locals)
-                    if (!lm.positions.empty())
-                        append_mesh(mesh, lm);
-            }
-        }
-        mesh.groups.push_back({root.id, first, (uint32_t) mesh.indices.size() - first, vfirst,
+        append_mesh(mesh, locals[i]);
+        mesh.groups.push_back({roots[i].id, first, (uint32_t) mesh.indices.size() - first, vfirst,
                                (uint32_t) (mesh.positions.size() / 3) - vfirst});
     }
     return mesh;
