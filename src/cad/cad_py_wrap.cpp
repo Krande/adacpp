@@ -3218,6 +3218,152 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
     return fs;
 }
 
+// Cross-format parity in ONE native parse: resolve every root a single time and run BOTH the
+// STEP->IFC and STEP->STEP emitters over it, tallying each format's losslessness (solids/faces
+// in-vs-out + drop reasons + placed-instance count) WITHOUT writing any output file. This is the
+// fan-out of the two write_*_file_impl above: they each re-parse + re-resolve the whole model and
+// serialise multi-GB output just so the parity check can count it; here the expensive per-solid
+// resolve_root is shared and nothing is serialised to disk. Bounded memory (one resolved solid +
+// a per-solid throwaway buffer per worker), parallel across roots.
+struct ParityFormat {
+    long solids_out = 0; // roots that emitted at least one solid in this format
+    long instances = 0;  // placed occurrences written (proxies / baked parts) — the parity metric
+    adacpp::ifc_emit::EmitStats geom;
+    void merge(const ParityFormat &o) {
+        solids_out += o.solids_out;
+        instances += o.instances;
+        geom.faces_in += o.geom.faces_in;
+        geom.faces_out += o.geom.faces_out;
+        geom.faces_dropped += o.geom.faces_dropped;
+        geom.edges_analytic += o.geom.edges_analytic;
+        geom.edges_polyline_approx += o.geom.edges_polyline_approx;
+        geom.edges_degenerate += o.geom.edges_degenerate;
+        for (const auto &[k, v] : o.geom.drop_reasons)
+            geom.drop_reasons[k] += v;
+    }
+};
+
+static void accum_geom(adacpp::ifc_emit::EmitStats &dst, const adacpp::ifc_emit::EmitStats &s) {
+    dst.faces_in += s.faces_in;
+    dst.faces_out += s.faces_out;
+    dst.faces_dropped += s.faces_dropped;
+    dst.edges_analytic += s.edges_analytic;
+    dst.edges_polyline_approx += s.edges_polyline_approx;
+    dst.edges_degenerate += s.edges_degenerate;
+    for (const auto &[k, v] : s.drop_reasons)
+        dst.drop_reasons[k] += v;
+}
+
+static void step_parity_impl(const std::string &in_path, double deflection, double angular_deg, int num_threads,
+                             long max_solids, long &solids_in_out, long &total_instances_out, double &unit_scale_out,
+                             ParityFormat &ifc_out, ParityFormat &step_out) {
+    using adacpp::ngeom::NgeomRoot;
+    using adacpp::step_emit::StepBrepEmitter;
+    using namespace adacpp::ifc_emit;
+    auto idx = adacpp::step::StreamIndex::from_file(in_path);
+    adacpp::step::Resolver master(idx);
+    master.build_metadata(idx.lists);
+    unit_scale_out = master.unit_scale();
+    std::vector<long> roots(idx.lists.roots.begin(), idx.lists.roots.end());
+    if (max_solids > 0 && (long) roots.size() > max_solids)
+        roots.resize(max_solids);
+    {
+        std::vector<std::pair<size_t, long>> cost;
+        cost.reserve(roots.size());
+        for (long sid : roots)
+            cost.emplace_back(master.solid_face_count(sid), sid);
+        master.clear_geom_cache();
+        std::sort(cost.begin(), cost.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+        for (size_t i = 0; i < cost.size(); ++i)
+            roots[i] = cost[i].second;
+    }
+    unsigned hw = std::thread::hardware_concurrency();
+    int nth = num_threads > 0 ? num_threads : (int) (hw > 1 ? hw : 1);
+    if (nth > (int) roots.size())
+        nth = std::max(1, (int) roots.size());
+    std::vector<ParityFormat> ifc_lanes(nth), step_lanes(nth);
+    std::atomic<size_t> next{0};
+    std::atomic<long> solids_in{0};
+    std::atomic<long> total_instances{0}; // every placed occurrence in the source (the parity baseline)
+    auto worker = [&](int t) {
+        adacpp::step::Resolver r(idx);
+        r.copy_metadata_from(master);
+        ParityFormat &LI = ifc_lanes[t];
+        ParityFormat &LS = step_lanes[t];
+        std::string sb; // per-solid throwaway (emitters write here; we only read their stats)
+        int local = 0;
+        for (;;) {
+            size_t i = next.fetch_add(1, std::memory_order_relaxed);
+            if (i >= roots.size())
+                break;
+            NgeomRoot root = r.resolve_root(roots[i]); // the shared parse — resolved ONCE, both formats
+            solids_in.fetch_add(1, std::memory_order_relaxed);
+            total_instances.fetch_add((long) (root.transforms.empty() ? 1 : root.transforms.size()),
+                                      std::memory_order_relaxed);
+
+            // ── IFC: geometry once + one proxy per instance (IfcMappedItem) ──
+            sb.clear();
+            BrepEmitter emi(17, nullptr, deflection, angular_deg);
+            std::vector<long> proxies;
+            emit_solid_ifc(emi, sb, root, roots[i], (uint64_t) i * 1000u, proxies, nullptr);
+            if (!proxies.empty())
+                ++LI.solids_out;
+            LI.instances += (long) proxies.size();
+            accum_geom(LI.geom, emi.stats());
+
+            // ── STEP: one baked part per instance (matches write_step_file_impl) ──
+            size_t ninst = root.transforms.empty() ? 1 : root.transforms.size();
+            bool any = false;
+            for (size_t k = 0; k < ninst; ++k) {
+                double tf[16];
+                const double *tfp = nullptr;
+                if (!root.transforms.empty()) {
+                    const std::array<float, 16> &M = root.transforms[k];
+                    tf[0] = M[0];
+                    tf[1] = M[4];
+                    tf[2] = M[8];
+                    tf[3] = M[12];
+                    tf[4] = M[1];
+                    tf[5] = M[5];
+                    tf[6] = M[9];
+                    tf[7] = M[13];
+                    tf[8] = M[2];
+                    tf[9] = M[6];
+                    tf[10] = M[10];
+                    tf[11] = M[14];
+                    tfp = tf;
+                }
+                sb.clear();
+                StepBrepEmitter ems(13, tfp, deflection, angular_deg);
+                if (emit_solid_step(ems, sb, root, roots[i])) {
+                    any = true;
+                    ++LS.instances;
+                    accum_geom(LS.geom, ems.stats());
+                }
+            }
+            if (any)
+                ++LS.solids_out;
+
+            r.clear_geom_cache();
+            if (++local % 128 == 0)
+                adacpp::mem_trim();
+        }
+    };
+    std::vector<std::thread> pool;
+    pool.reserve(nth - 1);
+    for (int t = 1; t < nth; ++t)
+        pool.emplace_back(worker, t);
+    worker(0);
+    for (std::thread &th : pool)
+        th.join();
+    for (int t = 0; t < nth; ++t) {
+        ifc_out.merge(ifc_lanes[t]);
+        step_out.merge(step_lanes[t]);
+    }
+    solids_in_out = solids_in.load();
+    total_instances_out = total_instances.load();
+}
+
 // Native IFC->STEP (AP242): IfcResolver reads each product's analytic B-rep -> ng::, then the STEP
 // emitter re-writes it (instances baked). Serial (per-product resolve is cheap; the shared
 // IfcRepresentationMap brep is re-resolved per instance = baked). Round-trip with the STEP->IFC writer.
@@ -3512,6 +3658,45 @@ void cad_module(nb::module_ &m) {
         "num_threads"_a = 0,
         "Native parallel STEP->STEP (AP242): re-export each solid's analytic B-rep as a "
         "MANIFOLD_SOLID_BREP part (instances baked), no OCC. Returns the losslessness audit dict.");
+
+    // Cross-format parity in ONE parse (the fan-out of stream_step_to_ifc + stream_step_to_step):
+    // resolve each root once, run both emitters, count what each format preserves — no file output.
+    m.def(
+        "step_parity",
+        [](const std::string &in_path, double deflection, double angular_deg, long max_solids,
+           int num_threads) -> nb::dict {
+            long solids_in = 0, total_instances = 0;
+            double unit_scale = 1.0;
+            ParityFormat ifc_fmt, step_fmt;
+            step_parity_impl(in_path, deflection, angular_deg, num_threads, max_solids, solids_in, total_instances,
+                             unit_scale, ifc_fmt, step_fmt);
+            auto fmt_dict = [](const ParityFormat &f) {
+                nb::dict d;
+                d["solids_out"] = f.solids_out;
+                d["instances"] = f.instances;
+                d["faces_in"] = f.geom.faces_in;
+                d["faces_out"] = f.geom.faces_out;
+                d["faces_dropped"] = f.geom.faces_dropped;
+                nb::dict reasons;
+                for (const auto &[k, v] : f.geom.drop_reasons)
+                    reasons[k.c_str()] = v;
+                d["drop_reasons"] = reasons;
+                return d;
+            };
+            nb::dict d;
+            d["solids_in"] = solids_in;
+            d["total_instances"] = total_instances; // source placed-instance count == the parity baseline
+            d["unit_scale"] = unit_scale;
+            d["ifc"] = fmt_dict(ifc_fmt);
+            d["step"] = fmt_dict(step_fmt);
+            return d;
+        },
+        "in_path"_a, "deflection"_a = 2.0, "angular_deg"_a = 20.0, "max_solids"_a = 0, "num_threads"_a = 0,
+        "Cross-format STEP parity in a single native parse: resolve every root once and run both the "
+        "STEP->IFC and STEP->STEP emitters over it, returning {solids_in, unit_scale, ifc:{...}, step:{...}} "
+        "where each format dict is {solids_out, instances, faces_in, faces_out, faces_dropped, drop_reasons}. "
+        "No output file is written — the fan-out of stream_step_to_ifc + stream_step_to_step for the parity "
+        "check, so the expensive per-solid resolve is shared and nothing is serialised to disk.");
 
     // Native IFC->STEP (AP242): read an IFC advanced-B-rep file -> ng:: -> STEP, no OCC.
     m.def(
