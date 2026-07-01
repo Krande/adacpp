@@ -382,7 +382,7 @@ Mesh tessellate_box_impl(float dx, float dy, float dz) {
 // to its own instance id). pipeline: "libtess2" (OCC-free neutral path) | "occ" | "cgal"
 // | "hybrid" (ifcopenshell taxonomy kernels). angular is in DEGREES.
 Mesh tessellate_stream_impl(nb::bytes buffer, const std::string &pipeline, double deflection, double angular_deg,
-                            nb::dict settings) {
+                            nb::dict settings, int threads) {
     using namespace adacpp::ngeom;
     NgeomDoc doc;
     try {
@@ -403,6 +403,7 @@ Mesh tessellate_stream_impl(nb::bytes buffer, const std::string &pipeline, doubl
         TessParams tp;
         tp.deflection = deflection;
         tp.max_angle = angular_deg * 3.14159265358979323846 / 180.0;
+        tp.threads = threads;  // >1 => parallelise a root's faces (opt-in; default serial)
         tm = tessellate_doc(doc, tp);
     } else {
         // taxonomy kernels; accept "occ"/"cgal"/"hybrid" or "taxonomy-<k>"
@@ -3584,7 +3585,7 @@ void cad_module(nb::module_ &m) {
           "buffer. linear_deflection<=0 selects a per-shape bbox heuristic.");
 
     m.def("tessellate_stream", &tessellate_stream_impl, "buffer"_a, "pipeline"_a = "libtess2", "deflection"_a = 0.0,
-          "angular_deg"_a = 20.0, "settings"_a = nb::dict(),
+          "angular_deg"_a = 20.0, "settings"_a = nb::dict(), "threads"_a = 1,
           "Decode an NGEOM stream buffer (adapy ada.geom, neutral schema) and tessellate "
           "every instance into ONE combined Mesh with a GroupReference per root "
           "(node_id = root index). pipeline: 'libtess2' (OCC-free) | 'occ' | 'cgal' | "

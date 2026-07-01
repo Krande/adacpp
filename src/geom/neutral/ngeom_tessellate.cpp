@@ -1,6 +1,8 @@
 #include "ngeom_tessellate.h"
 
 #include <algorithm>
+#include <atomic>
+#include <thread>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -1766,9 +1768,40 @@ TessMesh tessellate_doc(const NgeomDoc &doc, const TessParams &tp) {
                         ++nnull;
                 std::fprintf(stderr, "FDBG ROOT id=%s faces=%zu null=%zu\n", root.id.c_str(), root.faces.size(), nnull);
             }
-            for (const auto &face : root.faces)
-                if (face)
-                    tessellate_face(*face, tp, mesh);
+            // Faces are independent (each tessellate_face allocates its own libtess2
+            // tessellator, no shared state), so tessellate them into per-face local buffers
+            // across a thread pool and merge in order. A big single-root shell (a whole
+            // ship's ~7.5k plates) tessellated serially before — the dominant cost.
+            const auto &fs = root.faces;
+            const size_t nf = fs.size();
+            // Opt-in parallelism (tp.threads>1): tessellate this root's faces across a thread
+            // pool. A handful of EXPENSIVE faces (curved B-spline hull panels) is the heavy case,
+            // so there is no face-count threshold — any nf>=2 parallelises. Faces are independent
+            // (each allocates its own libtess2 tessellator, no shared state); results merge in
+            // order so the output is byte-identical to the serial path.
+            unsigned want = tp.threads > 1 ? (unsigned) tp.threads : 1u;
+            if (nf < 2 || want <= 1) {
+                for (const auto &face : fs)
+                    if (face)
+                        tessellate_face(*face, tp, mesh);
+            } else {
+                std::vector<TessMesh> locals(nf);
+                std::atomic<size_t> next{0};
+                unsigned nthreads = std::min<unsigned>(want, (unsigned) nf);
+                std::vector<std::thread> pool;
+                pool.reserve(nthreads);
+                for (unsigned t = 0; t < nthreads; ++t)
+                    pool.emplace_back([&]() {
+                        for (size_t i = next.fetch_add(1); i < nf; i = next.fetch_add(1))
+                            if (fs[i])
+                                tessellate_face(*fs[i], tp, locals[i]);
+                    });
+                for (std::thread &th : pool)
+                    th.join();
+                for (const TessMesh &lm : locals)
+                    if (!lm.positions.empty())
+                        append_mesh(mesh, lm);
+            }
         }
         mesh.groups.push_back({root.id, first, (uint32_t) mesh.indices.size() - first, vfirst,
                                (uint32_t) (mesh.positions.size() / 3) - vfirst});

@@ -18,6 +18,10 @@ namespace adacpp::ngeom {
 struct TessParams {
     double deflection = 0.0; // chord tolerance for boundary discretization (0 => auto)
     double max_angle = 0.35; // ~20 deg, max turn between boundary samples
+    int threads = 1;         // >1 tessellates a root's faces across a thread pool. Default 1
+                             // (serial) so callers already parallelising across roots/solids
+                             // (the STEP->GLB process pool) don't oversubscribe; a single
+                             // whole-model call (merge-preview generate) opts into all cores.
 };
 
 struct TessMesh {
