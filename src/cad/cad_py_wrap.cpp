@@ -1852,10 +1852,21 @@ static ShapeHandle bounds_trimmed_analytic_face(const Handle(Geom_Surface) & sur
     if (bounds.empty())
         throw std::runtime_error(std::string(who) + ": no bounds");
 
+    // A kind-6 record is a 2D pcurve laid on `surf` (3D derived as surface(pcurve(t))) — this is
+    // how a boundary whose edges do NOT lie on the surface (a cylinder trimmed by a diagonal
+    // joint cut, whose edges are chords/helices) is put ON the surface so BRepMesh tessellates it
+    // curved; without pcurves such a face meshed flat/degenerate. Mirrors build_advanced_face_bspline.
+    bool has_pcurve = false;
     auto wire_of = [&](const std::vector<std::vector<double>> &edges) -> TopoDS_Wire {
         BRepBuilderAPI_MakeWire wm;
-        for (const auto &rec : edges)
-            wm.Add(edge_from_record(rec));
+        for (const auto &rec : edges) {
+            if (!rec.empty() && std::lround(rec[0]) == 6) {
+                wm.Add(edge_from_pcurve(rec, surf));
+                has_pcurve = true;
+            } else {
+                wm.Add(edge_from_record(rec));
+            }
+        }
         wm.Build();
         if (!wm.IsDone())
             throw std::runtime_error(std::string(who) + ": wire build failed");
@@ -1868,6 +1879,11 @@ static ShapeHandle bounds_trimmed_analytic_face(const Handle(Geom_Surface) & sur
     if (!fm.IsDone())
         throw std::runtime_error(std::string(who) + ": MakeFace failed");
     TopoDS_Face face = fm.Face();
+
+    // pcurve-built edges carry no 3D curve yet — materialise them from surface(pcurve(t)) so
+    // sewing/tessellation have real 3D geometry (mirrors the B-spline face path).
+    if (has_pcurve)
+        BRepLib::BuildCurves3d(face);
 
     ShapeFix_Face fixer(face);
     fixer.Perform();
