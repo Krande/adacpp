@@ -15,11 +15,11 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha || github.ref }}
 
-      - uses: prefix-dev/setup-pixi@v0.9.6  # https://github.com/prefix-dev/setup-pixi
+      - uses: prefix-dev/setup-pixi@v0.10.0  # https://github.com/prefix-dev/setup-pixi
         with:
           pixi-version: latest
           cache: true
@@ -42,11 +42,11 @@ jobs:
           { name: macOS, distver: macos-15, pkg_dir: 'osx-arm64' }
         ]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha || github.ref }}
 
-      - uses: prefix-dev/setup-pixi@v0.9.6
+      - uses: prefix-dev/setup-pixi@v0.10.0
         with:
           pixi-version: latest
           environments: conda
