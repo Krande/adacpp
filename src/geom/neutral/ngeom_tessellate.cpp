@@ -365,6 +365,14 @@ void refine_uv(const Surface &s, std::vector<Uv> &verts, std::vector<Tri> &tris,
         pts3[i] = s.point(verts[i][0], verts[i][1]);
     bool check_dev = dynamic_cast<const PlaneSurface *>(&s) == nullptr;
 
+    // deflection <= 0 means "auto": derive a scale-relative chord tolerance from the surface's
+    // characteristic size instead of refining toward zero deviation (dev > 0 splits every curved
+    // edge up to the 300k budget — catastrophic on a large B-spline patch, e.g. a coarse 6x6 cubic
+    // exploding to ~1M tris). Mirrors the auto-guard the primitive builders already use
+    // (tessellate_sphere/cylinder: `defl = tp.deflection > 0 ? tp.deflection : r * 0.01`).
+    if (defl <= 0.0)
+        defl = std::max(s.approx_size() * 0.005, 1e-4);
+
     double approx_area = 0;
     for (const Tri &t : tris) {
         Vec3 a = pts3[t[0]], b = pts3[t[1]], c = pts3[t[2]];
