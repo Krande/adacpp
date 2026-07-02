@@ -54,6 +54,7 @@
 
 #include "posix_compat.h"
 #include "mem_trim.h"
+#include "effective_concurrency.h"
 
 #include <Bnd_Box.hxx>
 #include <Bnd_OBB.hxx>
@@ -2865,8 +2866,7 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
     // No STRIDE guessing, no overflow, compact ids — correct regardless of per-face entity counts.
     std::atomic<long> id_counter{K + 1};
 
-    unsigned hw = std::thread::hardware_concurrency();
-    int nth = num_threads > 0 ? num_threads : (int) (hw > 1 ? hw : 1);
+    int nth = num_threads > 0 ? num_threads : (int) adacpp::effective_concurrency();
     if (nth > (int) roots.size())
         nth = std::max(1, (int) roots.size());
 
@@ -3100,8 +3100,7 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
     }
     const long K = 13;
     std::atomic<long> id_counter{K + 1};
-    unsigned hw = std::thread::hardware_concurrency();
-    int nth = num_threads > 0 ? num_threads : (int) (hw > 1 ? hw : 1);
+    int nth = num_threads > 0 ? num_threads : (int) adacpp::effective_concurrency();
     if (nth > (int) roots.size())
         nth = std::max(1, (int) roots.size());
     char tmpl[] = "/tmp/adacpp_stp_XXXXXX";
@@ -3294,8 +3293,7 @@ static void step_parity_impl(const std::string &in_path, double deflection, doub
         for (size_t i = 0; i < cost.size(); ++i)
             roots[i] = cost[i].second;
     }
-    unsigned hw = std::thread::hardware_concurrency();
-    int nth = num_threads > 0 ? num_threads : (int) (hw > 1 ? hw : 1);
+    int nth = num_threads > 0 ? num_threads : (int) adacpp::effective_concurrency();
     if (nth > (int) roots.size())
         nth = std::max(1, (int) roots.size());
     std::vector<ParityFormat> ifc_lanes(nth), step_lanes(nth);
@@ -3756,7 +3754,8 @@ void cad_module(nb::module_ &m) {
           "angular_deg"_a = 20.0, "num_threads"_a = 0, "meshopt"_a = true,
           "Native STEP -> GLB file: stream the .stp with the native reader (offset index + per-statement "
           "pread, bounded memory), tessellate each solid across num_threads worker threads (0 = auto = "
-          "hardware_concurrency), each owning a spill lane joined at the end, bake world transform(s) + "
+          "hardware_concurrency clamped to the cgroup cpu quota), each owning a spill lane joined at the "
+          "end, bake world transform(s) + "
           "colour, and write a merge-by-colour GLB matching the adapy viewer's structure. meshopt=true "
           "(default) bakes EXT_meshopt_compression inline (no Python re-pack). Returns the number of "
           "solids written (-1 on I/O error). angular_deg in degrees.");

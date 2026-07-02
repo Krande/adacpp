@@ -3,7 +3,8 @@
 // the nanobind Python binding AND the standalone STP2GLB CLI without dragging in OCCT or nanobind.
 //
 // Stream the .stp with the native reader (offset index + per-statement pread, bounded memory),
-// tessellate each solid across `num_threads` worker threads (0 = auto = hardware_concurrency), bake
+// tessellate each solid across `num_threads` worker threads (0 = auto = hardware_concurrency clamped
+// to the cgroup cpu quota, see effective_concurrency.h), bake
 // each placement's world transform + colour, and write a merge-by-colour GLB matching the adapy
 // viewer's structure. `meshopt=true` bakes EXT_meshopt_compression inline. Returns the number of
 // solids written, or -1 on I/O error.
@@ -22,6 +23,7 @@
 #include <vector>
 
 #include "mem_trim.h"
+#include "effective_concurrency.h"
 #include "posix_compat.h"
 
 #include "../cadit/step/step_reader.h"
@@ -58,8 +60,7 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
     master.build_metadata(idx.lists);
     prof.phase("metadata");
 
-    unsigned hw = std::thread::hardware_concurrency();
-    int nthreads = num_threads > 0 ? num_threads : (int) (hw > 1 ? hw : 1);
+    int nthreads = num_threads > 0 ? num_threads : (int) adacpp::effective_concurrency();
 
     // LPT scheduling: order roots heaviest-first (by a cheap face-count proxy, no geometry built) so
     // the big solids start while every thread is still busy — the dynamic queue then fills the tail
