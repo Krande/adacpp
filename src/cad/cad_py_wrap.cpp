@@ -41,6 +41,7 @@
 #include <cstdint>
 #include <deque>
 #include <tuple>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -1152,17 +1153,37 @@ std::vector<std::array<double, 3>> vertex_points_impl(const ShapeHandle &sh) {
 // faces are b-spline AdvancedFaces that don't bound a volume. Returns whatever
 // the sewer yields (a shell, or a compound of shells/faces if disjoint).
 ShapeHandle sew_faces_impl(const std::vector<ShapeHandle> &faces, double tolerance) {
+    // BRepBuilderAPI_Sewing's candidate matching is quadratic in the number of
+    // free edges, with per-candidate B-spline curve evaluation — a single-body
+    // shell of ~5k spline faces (SESAM hull skin) takes >10 min single-threaded.
+    // Sewing only stitches shared edges (connectivity); tessellation, entity
+    // counting and B-rep export all work face-per-face. Above the cap, return a
+    // plain compound of the faces instead of sewing. ADACPP_SEW_MAX_FACES overrides.
+    size_t sew_max = 1000;
+    if (const char *env = std::getenv("ADACPP_SEW_MAX_FACES"))
+        sew_max = (size_t) std::strtoul(env, nullptr, 10);
+    size_t n_valid = 0;
+    for (const auto &f : faces)
+        if (!f.topods().IsNull())
+            ++n_valid;
+    if (n_valid == 0)
+        throw std::runtime_error("sew_faces: no faces");
+    if (n_valid > sew_max) {
+        TopoDS_Compound comp;
+        BRep_Builder builder;
+        builder.MakeCompound(comp);
+        for (const auto &f : faces)
+            if (!f.topods().IsNull())
+                builder.Add(comp, f.topods());
+        return ShapeHandle(comp);
+    }
     BRepBuilderAPI_Sewing sewer(tolerance > 0.0 ? tolerance : 1e-6);
-    int added = 0;
     for (const auto &f : faces) {
         const TopoDS_Shape s = f.topods();
         if (s.IsNull())
             continue;
         sewer.Add(s);
-        ++added;
     }
-    if (added == 0)
-        throw std::runtime_error("sew_faces: no faces");
     sewer.Perform();
     const TopoDS_Shape sewn = sewer.SewedShape();
     if (sewn.IsNull())
