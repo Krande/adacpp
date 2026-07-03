@@ -3018,6 +3018,8 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
                 adacpp::mem_trim();
             flush(false);
         }
+        if (r.degenerate_faces_skipped_ > 0)
+            L.stats.drop_reasons["face:degenerate-skipped(read)"] += r.degenerate_faces_skipped_;
         flush(true);
         std::fclose(L.fp);
         L.fp = nullptr;
@@ -3264,6 +3266,8 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
                 adacpp::mem_trim();
             flush(false);
         }
+        if (r.degenerate_faces_skipped_ > 0)
+            L.stats.drop_reasons["face:degenerate-skipped(read)"] += r.degenerate_faces_skipped_;
         flush(true);
         std::fclose(L.fp);
         L.fp = nullptr;
@@ -3437,6 +3441,12 @@ static void step_parity_impl(const std::string &in_path, double deflection, doub
             r.clear_geom_cache();
             if (++local % 128 == 0)
                 adacpp::mem_trim();
+        }
+        // Read-side skips (zero-area `$`-surface faces) — informational, not a
+        // faces_dropped leg: the face carries no geometry in the source.
+        if (r.degenerate_faces_skipped_ > 0) {
+            LI.geom.drop_reasons["face:degenerate-skipped(read)"] += r.degenerate_faces_skipped_;
+            LS.geom.drop_reasons["face:degenerate-skipped(read)"] += r.degenerate_faces_skipped_;
         }
     };
     std::vector<std::thread> pool;

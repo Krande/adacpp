@@ -808,6 +808,12 @@ private:
     std::unordered_map<long, std::shared_ptr<ng::Curve>> curve_cache_;
     std::unordered_map<long, std::shared_ptr<ng::FaceSurfaceN>> face_cache_;
 
+public:
+    // Zero-area faces with a `$` surface skipped at read time (see face()).
+    long degenerate_faces_skipped_ = 0;
+
+private:
+
     struct RGBA {
         float r, g, b, a;
     };
@@ -1267,7 +1273,37 @@ private:
         return b;
     }
 
+    // Best-effort plane through a loop's sampled points (Newell). Null when the
+    // loop is zero-area — e.g. two collinear LINE edges between the same two
+    // vertices, a sliver face some exporters emit with a `$` surface.
+    std::shared_ptr<ng::Surface> plane_from_loop(const ng::LoopN &lp) {
+        std::vector<ng::Vec3> pts = lp.discretize(1e-2, 0.5);
+        if (pts.size() >= 2 && (pts.front() - pts.back()).norm() < 1e-9)
+            pts.pop_back();
+        if (pts.size() < 3)
+            return nullptr;
+        ng::Vec3 c{0, 0, 0};
+        for (const ng::Vec3 &p : pts)
+            c = c + p;
+        c = c * (1.0 / double(pts.size()));
+        ng::Vec3 n{0, 0, 0};
+        double perimeter = 0;
+        for (size_t i = 0; i < pts.size(); ++i) {
+            ng::Vec3 a = pts[i] - c, b = pts[(i + 1) % pts.size()] - c;
+            n = n + a.cross(b);
+            perimeter += (b - a).norm();
+        }
+        // |n| = 2*area; degenerate when the loop's area vanishes vs its extent.
+        if (perimeter <= 0 || n.norm() <= 1e-9 * perimeter * perimeter)
+            return nullptr;
+        return std::make_shared<ng::PlaneSurface>(ng::Frame::from_axis_ref(c, n, ng::Vec3{0, 0, 0}));
+    }
+
     // ADVANCED_FACE / FACE_SURFACE('',(#bound,...),#surface,same_sense).
+    // A face whose surface is `$` (unset) gets a plane fitted through its outer
+    // loop when the loop has area; a zero-area loop means the face carries no
+    // geometry at all -> returns null and the shell skips it (what OCC's
+    // ShapeFix does on import), instead of an ERR-ing surface:null drop later.
     std::shared_ptr<ng::FaceSurfaceN> face(long id) {
         auto c = face_cache_.find(id);
         if (c != face_cache_.end())
@@ -1282,6 +1318,14 @@ private:
             if (in->args[2].is_ref())
                 f->surface = surface(in->args[2].i);
             f->same_sense = enum_true(in->args[3]);
+            if (!f->surface && !f->bounds.empty() && f->bounds[0].loop) {
+                f->surface = plane_from_loop(*f->bounds[0].loop);
+                if (!f->surface) {
+                    ++degenerate_faces_skipped_;
+                    face_cache_[id] = nullptr;
+                    return nullptr;
+                }
+            }
         }
         face_cache_[id] = f;
         return f;
@@ -1305,7 +1349,8 @@ private:
                 // Default (incl. the multi-threaded mesh/glb path): unchanged.
                 for (const Value &fr : in->args[1].items)
                     if (fr.is_ref())
-                        out.push_back(face(fr.i));
+                        if (auto fp = face(fr.i))
+                            out.push_back(fp);
                 return;
             }
             // Single-threaded bounded path (StepNgeomStream): copy the face refs out first (clearing
@@ -1317,7 +1362,8 @@ private:
                 if (fr.is_ref())
                     face_ids.push_back(fr.i);
             for (size_t i = 0; i < face_ids.size(); ++i) {
-                out.push_back(face(face_ids[i]));
+                if (auto fp = face(face_ids[i]))
+                    out.push_back(fp);
                 if ((i & 1023u) == 1023u)
                     parse_cache_.clear();
             }
