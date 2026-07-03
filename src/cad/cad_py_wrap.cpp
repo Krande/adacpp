@@ -385,15 +385,25 @@ Mesh tessellate_box_impl(float dx, float dy, float dz) {
 // GroupReference per root (node_id = root index in serialization order; adapy maps it back
 // to its own instance id). pipeline: "libtess2" (OCC-free neutral path) | "occ" | "cgal"
 // | "hybrid" (ifcopenshell taxonomy kernels). angular is in DEGREES.
-Mesh tessellate_stream_impl(nb::bytes buffer, const std::string &pipeline, double deflection, double angular_deg,
+Mesh tessellate_stream_impl(nb::object buffer, const std::string &pipeline, double deflection, double angular_deg,
                             nb::dict settings, int threads) {
     using namespace adacpp::ngeom;
+    // Accept any buffer-protocol object (bytes, memoryview, the capsule-owned numpy
+    // arrays StepNgeomStream/IfcNgeomStream yield) so a lazy ShapeStore blob reaches
+    // the kernel with zero copies end-to-end.
+    Py_buffer view{};
+    if (PyObject_GetBuffer(buffer.ptr(), &view, PyBUF_SIMPLE) != 0) {
+        PyErr_Clear();
+        return Mesh(0, {}, {}); // not a buffer -> empty mesh
+    }
     NgeomDoc doc;
     try {
-        doc = decode(reinterpret_cast<const uint8_t *>(buffer.c_str()), buffer.size());
+        doc = decode(static_cast<const uint8_t *>(view.buf), (size_t) view.len);
     } catch (const std::exception &) {
+        PyBuffer_Release(&view);
         return Mesh(0, {}, {}); // malformed buffer -> empty mesh
     }
+    PyBuffer_Release(&view); // decode copies what it keeps; the view is no longer needed
 
     // ifcopenshell ConversionSettings overrides (taxonomy paths only). Any
     // python scalar is stringified; the C++ side parses per the setting type.
@@ -436,11 +446,22 @@ Mesh tessellate_stream_impl(nb::bytes buffer, const std::string &pipeline, doubl
 // roots (same order).
 struct StepRootMeta {
     std::string id;
+    std::string guid; // IFC GlobalId (IfcNgeomStream); empty on the STEP path
     bool has_color = false;
     std::array<float, 4> color{0.5f, 0.5f, 0.5f, 1.0f};
     std::vector<std::array<float, 16>> transforms;                        // per-instance world matrices
     std::vector<std::vector<std::pair<int, std::string>>> instance_paths; // per-instance (rep_id, name) levels
 };
+
+// Hand a just-encoded NGEOM buffer to Python WITHOUT the nb::bytes memcpy: move the vector to the
+// heap and expose it as a capsule-owned read-only numpy uint8 array. The consumer (adapy's lazy
+// ShapeStore) retains the arriving object as-is, so the buffer is allocated exactly once.
+static nb::object ngeom_buffer_to_ndarray(std::vector<uint8_t> &&buf) {
+    auto *heap = new std::vector<uint8_t>(std::move(buf));
+    nb::capsule owner(heap, [](void *p) noexcept { delete static_cast<std::vector<uint8_t> *>(p); });
+    size_t shape[1] = {heap->size()};
+    return nb::cast(nb::ndarray<nb::numpy, const uint8_t, nb::ndim<1>>(heap->data(), 1, shape, owner));
+}
 
 // Native STEP -> NGEOM buffer + per-root metadata. Reads the .stp with the native C++ reader,
 // re-encodes the resolved neutral records to one NGEOM buffer (decodable by the adapy Python
@@ -527,7 +548,7 @@ public:
             one.roots.push_back(std::move(root));
             std::vector<uint8_t> buf = encode(one);
             r_->clear_geom_cache();
-            return nb::make_tuple(nb::bytes(reinterpret_cast<const char *>(buf.data()), buf.size()), std::move(m));
+            return nb::make_tuple(ngeom_buffer_to_ndarray(std::move(buf)), std::move(m));
         }
         PyErr_SetNone(PyExc_StopIteration);
         throw nb::python_error();
@@ -536,6 +557,62 @@ public:
 private:
     std::unique_ptr<adacpp::step::StreamIndex> idx_;
     std::unique_ptr<adacpp::step::Resolver> r_;
+    size_t cursor_ = 0;
+};
+
+// Streaming per-product IFC -> NGEOM: the IFC sibling of StepNgeomStream, built on the dep-free
+// IfcResolver (no ifcopenshell, no OCC). One product is resolved + encoded per __next__ and the
+// resolver's statement cache is cleared between products, so memory stays at the offset index plus
+// a single product. Yields (one-root NGEOM buffer, StepRootMeta) with meta.guid = the product's
+// IFC GlobalId. Geometry is in FILE units — apply .unit_scale (metres per unit) on the consumer
+// side. Products the analytic resolver can't represent (tessellated face sets, mixed multi-solid
+// reps) are skipped and counted in .products_skipped so the consumer can fall back per-file.
+// NOTE v1 carries no colour (IfcStyledItem unresolved) and no spatial path (IfcRelAggregates /
+// IfcRelContainedInSpatialStructure not walked) — geometry/guid/name/placement only.
+class IfcNgeomStream {
+public:
+    explicit IfcNgeomStream(const std::string &path) {
+        idx_ = std::make_unique<adacpp::step::StreamIndex>(adacpp::step::StreamIndex::from_file(path));
+        r_ = std::make_unique<adacpp::ifc_read::IfcResolver>(*idx_);
+        roots_ = r_->proxy_roots();
+        unit_scale_ = r_->unit_scale();
+    }
+    double unit_scale() const { return unit_scale_; }
+    long products_total() const { return (long) roots_.size(); }
+    long products_skipped() const { return skipped_; }
+    nb::tuple next() {
+        using namespace adacpp::ngeom;
+        while (cursor_ < roots_.size()) {
+            long pid = roots_[cursor_++];
+            NgeomRoot root = r_->resolve_product(pid);
+            std::string guid = r_->product_guid(pid);
+            r_->clear_cache(); // bounded memory: statement/surface caches don't grow across products
+            if (root.faces.empty() && !root.extrusion && !root.revolve && !root.boolean) {
+                ++skipped_;
+                continue;
+            }
+            StepRootMeta m;
+            m.id = root.id;
+            m.guid = std::move(guid);
+            m.has_color = root.has_color;
+            m.color = {root.cr, root.cg, root.cb, root.ca};
+            m.transforms = root.transforms;
+            m.instance_paths = root.instance_paths;
+            NgeomDoc one;
+            one.roots.push_back(std::move(root));
+            std::vector<uint8_t> buf = encode(one);
+            return nb::make_tuple(ngeom_buffer_to_ndarray(std::move(buf)), std::move(m));
+        }
+        PyErr_SetNone(PyExc_StopIteration);
+        throw nb::python_error();
+    }
+
+private:
+    std::unique_ptr<adacpp::step::StreamIndex> idx_;
+    std::unique_ptr<adacpp::ifc_read::IfcResolver> r_;
+    std::vector<long> roots_;
+    double unit_scale_ = 1.0;
+    long skipped_ = 0;
     size_t cursor_ = 0;
 };
 
@@ -3610,6 +3687,7 @@ void cad_module(nb::module_ &m) {
 
     nb::class_<StepRootMeta>(m, "StepRootMeta")
         .def_ro("id", &StepRootMeta::id)
+        .def_ro("guid", &StepRootMeta::guid)
         .def_ro("has_color", &StepRootMeta::has_color)
         .def_ro("color", &StepRootMeta::color)
         .def_ro("transforms", &StepRootMeta::transforms)
@@ -3882,6 +3960,19 @@ void cad_module(nb::module_ &m) {
              "counterpart to stream_step_to_ngeom (which full-parses).")
         .def("__iter__", [](nb::object self) { return self; })
         .def("__next__", &StepNgeomStream::next);
+
+    nb::class_<IfcNgeomStream>(m, "IfcNgeomStream")
+        .def(nb::init<const std::string &>(), "path"_a,
+             "Streaming per-product IFC -> NGEOM (dep-free: no ifcopenshell, no OCC). Iterate to get "
+             "(one-root NGEOM buffer, StepRootMeta) per product with bounded memory; meta.guid is the "
+             "product GlobalId. Geometry is in FILE units — apply .unit_scale (metres per unit). "
+             "Unrepresentable products (tessellated/mixed reps) are skipped and counted in "
+             ".products_skipped. v1 carries no colour and no spatial hierarchy.")
+        .def("__iter__", [](nb::object self) { return self; })
+        .def("__next__", &IfcNgeomStream::next)
+        .def_prop_ro("unit_scale", &IfcNgeomStream::unit_scale)
+        .def_prop_ro("products_total", &IfcNgeomStream::products_total)
+        .def_prop_ro("products_skipped", &IfcNgeomStream::products_skipped);
 
     m.def("_step_index_parity", &step_index_parity_impl, "path"_a,
           "Debug: build the STEP offset index via mmap scan and via the wasm-safe pread scan, returning "

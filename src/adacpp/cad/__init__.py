@@ -35,6 +35,7 @@ stream_step_to_glb_st = _cad.stream_step_to_glb_st
 stream_step_to_ngeom = _cad.stream_step_to_ngeom
 StepRootMeta = _cad.StepRootMeta
 StepNgeomStream = _cad.StepNgeomStream
+IfcNgeomStream = _cad.IfcNgeomStream
 _step_index_parity = _cad._step_index_parity
 ifc_taxonomy_settings = _cad.ifc_taxonomy_settings
 meshopt_simplify_mesh = _cad.meshopt_simplify_mesh
@@ -143,6 +144,7 @@ __all__ = [
     "step_parity",
     "StepRootMeta",
     "StepNgeomStream",
+    "IfcNgeomStream",
     "meshopt_simplify_mesh",
     "bbox",
     "obb",

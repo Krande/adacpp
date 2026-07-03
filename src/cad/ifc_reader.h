@@ -171,6 +171,21 @@ public:
         return root;
     }
 
+    // The product's IFC GlobalId (arg 0 of any rooted entity). Empty when unparsable.
+    std::string product_guid(long pid) {
+        const Instance *p = inst(pid);
+        if (p && !p->args.empty() && p->args[0].kind == adacpp::step::Kind::Str)
+            return std::string(p->args[0].s);
+        return {};
+    }
+
+    // Drop the statement/surface caches — called between products by the streaming
+    // per-product consumer (IfcNgeomStream) so memory stays bounded on large files.
+    void clear_cache() {
+        cache_.clear();
+        surf_cache_.clear();
+    }
+
 private:
     const StreamIndex &idx_;
     std::unordered_map<long, std::pair<std::string, Instance>> cache_;
