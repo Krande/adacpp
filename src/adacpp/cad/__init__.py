@@ -29,6 +29,7 @@ step_emit_ifc_brep = _cad.step_emit_ifc_brep
 stream_step_to_step = _cad.stream_step_to_step
 stream_ifc_to_step = _cad.stream_ifc_to_step
 stream_step_to_ifc = _cad.stream_step_to_ifc
+step_parity = _cad.step_parity
 glb_diff = _cad.glb_diff
 stream_step_to_glb_st = _cad.stream_step_to_glb_st
 stream_step_to_ngeom = _cad.stream_step_to_ngeom
@@ -139,6 +140,7 @@ __all__ = [
     "glb_diff",
     "stream_step_to_glb_st",
     "stream_step_to_ngeom",
+    "step_parity",
     "StepRootMeta",
     "StepNgeomStream",
     "meshopt_simplify_mesh",

@@ -41,6 +41,7 @@
 #include <cstdint>
 #include <deque>
 #include <tuple>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -54,6 +55,7 @@
 
 #include "posix_compat.h"
 #include "mem_trim.h"
+#include "effective_concurrency.h"
 
 #include <Bnd_Box.hxx>
 #include <Bnd_OBB.hxx>
@@ -85,6 +87,8 @@
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <ShapeFix_Face.hxx>
 #include <ShapeFix_Shape.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <Geom2dAPI_ProjectPointOnCurve.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
 #include <Geom_SurfaceOfRevolution.hxx>
@@ -382,7 +386,7 @@ Mesh tessellate_box_impl(float dx, float dy, float dz) {
 // to its own instance id). pipeline: "libtess2" (OCC-free neutral path) | "occ" | "cgal"
 // | "hybrid" (ifcopenshell taxonomy kernels). angular is in DEGREES.
 Mesh tessellate_stream_impl(nb::bytes buffer, const std::string &pipeline, double deflection, double angular_deg,
-                            nb::dict settings) {
+                            nb::dict settings, int threads) {
     using namespace adacpp::ngeom;
     NgeomDoc doc;
     try {
@@ -403,6 +407,7 @@ Mesh tessellate_stream_impl(nb::bytes buffer, const std::string &pipeline, doubl
         TessParams tp;
         tp.deflection = deflection;
         tp.max_angle = angular_deg * 3.14159265358979323846 / 180.0;
+        tp.threads = threads;  // >1 => parallelise a root's faces (opt-in; default serial)
         tm = tessellate_doc(doc, tp);
     } else {
         // taxonomy kernels; accept "occ"/"cgal"/"hybrid" or "taxonomy-<k>"
@@ -1150,17 +1155,37 @@ std::vector<std::array<double, 3>> vertex_points_impl(const ShapeHandle &sh) {
 // faces are b-spline AdvancedFaces that don't bound a volume. Returns whatever
 // the sewer yields (a shell, or a compound of shells/faces if disjoint).
 ShapeHandle sew_faces_impl(const std::vector<ShapeHandle> &faces, double tolerance) {
+    // BRepBuilderAPI_Sewing's candidate matching is quadratic in the number of
+    // free edges, with per-candidate B-spline curve evaluation — a single-body
+    // shell of ~5k spline faces (SESAM hull skin) takes >10 min single-threaded.
+    // Sewing only stitches shared edges (connectivity); tessellation, entity
+    // counting and B-rep export all work face-per-face. Above the cap, return a
+    // plain compound of the faces instead of sewing. ADACPP_SEW_MAX_FACES overrides.
+    size_t sew_max = 1000;
+    if (const char *env = std::getenv("ADACPP_SEW_MAX_FACES"))
+        sew_max = (size_t) std::strtoul(env, nullptr, 10);
+    size_t n_valid = 0;
+    for (const auto &f : faces)
+        if (!f.topods().IsNull())
+            ++n_valid;
+    if (n_valid == 0)
+        throw std::runtime_error("sew_faces: no faces");
+    if (n_valid > sew_max) {
+        TopoDS_Compound comp;
+        BRep_Builder builder;
+        builder.MakeCompound(comp);
+        for (const auto &f : faces)
+            if (!f.topods().IsNull())
+                builder.Add(comp, f.topods());
+        return ShapeHandle(comp);
+    }
     BRepBuilderAPI_Sewing sewer(tolerance > 0.0 ? tolerance : 1e-6);
-    int added = 0;
     for (const auto &f : faces) {
         const TopoDS_Shape s = f.topods();
         if (s.IsNull())
             continue;
         sewer.Add(s);
-        ++added;
     }
-    if (added == 0)
-        throw std::runtime_error("sew_faces: no faces");
     sewer.Perform();
     const TopoDS_Shape sewn = sewer.SewedShape();
     if (sewn.IsNull())
@@ -1699,9 +1724,19 @@ Handle(Geom_BSplineSurface) make_bspline_surface(int u_degree, int v_degree,
 
 // Build a face edge from a 2D pcurve record (kind 6) laid on `surf`:
 //   [6, degree, rational, closed, n_poles, <2*n_poles uv>, n_knots, <knots>,
-//    <mults>, <n_poles weights if rational>]
+//    <mults>, <n_poles weights if rational>,
+//    <optional tail: 1, t0, t1  |  2, t0, t1, sx, sy, sz, ex, ey, ez>]
 // The 3D parametrization is derived by OCCT from surface(pcurve(t)), so 2D/3D
 // stay consistent — the SAT-pcurve path adapy's make_face_from_geom prefers.
+// The optional tail is the owning edge's trim. SAT pcurves typically span the
+// FULL underlying curve, so without a trim the edge overshoots its segment and
+// the boundary wire fails to connect. Preferred trim (flag 2): the edge's
+// declared 3D vertices, projected point -> surface UV -> pcurve param — exact
+// regardless of parameterization. Fallback (flag 1 or failed projection): the
+// edge's curve-params, tried directly and negated (per the ACIS SAT spec a
+// reversed-sense edge stores its params as (-b, -a) of the true range [a, b]);
+// note an ACIS bs2 pcurve is a fit approximation with its own parameterization,
+// so curve-params can land slightly off (cm-scale) — hence the projection path.
 TopoDS_Edge edge_from_pcurve(const std::vector<double> &e, const Handle(Geom_Surface) & surf) {
     const int degree = static_cast<int>(std::lround(e[1]));
     const bool rational = std::lround(e[2]) != 0;
@@ -1729,7 +1764,49 @@ TopoDS_Edge edge_from_pcurve(const std::vector<double> &e, const Handle(Geom_Sur
     } else {
         c2d = new Geom2d_BSplineCurve(poles, knots, mults, degree, closed);
     }
-    return BRepBuilderAPI_MakeEdge(c2d, surf, c2d->FirstParameter(), c2d->LastParameter()).Edge();
+    const double cf = c2d->FirstParameter(), cl = c2d->LastParameter();
+    double lo = cf, hi = cl;
+    bool trimmed = false;
+    const std::size_t tail = e.size() - i;
+    const int flag = tail >= 3 ? static_cast<int>(std::lround(e[i])) : 0;
+
+    if (flag == 2 && tail >= 9) {
+        // Geometric trim: declared 3D vertex -> surface UV -> pcurve param.
+        const gp_Pnt ps(e[i + 3], e[i + 4], e[i + 5]), pe(e[i + 6], e[i + 7], e[i + 8]);
+        try {
+            GeomAPI_ProjectPointOnSurf prj_s(ps, surf), prj_e(pe, surf);
+            if (prj_s.NbPoints() > 0 && prj_e.NbPoints() > 0) {
+                Standard_Real us, vs, ue, ve;
+                prj_s.LowerDistanceParameters(us, vs);
+                prj_e.LowerDistanceParameters(ue, ve);
+                Geom2dAPI_ProjectPointOnCurve p2s(gp_Pnt2d(us, vs), c2d), p2e(gp_Pnt2d(ue, ve), c2d);
+                if (p2s.NbPoints() > 0 && p2e.NbPoints() > 0) {
+                    const double ta = p2s.LowerDistanceParameter(), tb = p2e.LowerDistanceParameter();
+                    lo = std::max(std::min(ta, tb), cf);
+                    hi = std::min(std::max(ta, tb), cl);
+                    trimmed = hi - lo > 1e-12;
+                }
+            }
+        } catch (const Standard_Failure &) {
+            // projection failed — fall through to the param-range trim below
+        }
+    }
+    if (!trimmed && flag >= 1) {
+        const double t0 = e[i + 1], t1 = e[i + 2];
+        const double a = std::min(t0, t1), b = std::max(t0, t1);
+        const double tolp = 1e-9 + 1e-6 * (cl - cf);
+        if (a >= cf - tolp && b <= cl + tolp) {
+            lo = std::max(a, cf);
+            hi = std::min(b, cl);
+        } else if (-b >= cf - tolp && -a <= cl + tolp) { // ACIS reversed-sense edge: params negated
+            lo = std::max(-b, cf);
+            hi = std::min(-a, cl);
+        } else {
+            lo = cf; // trim doesn't map into this pcurve's range — keep the full range
+            hi = cl;
+        }
+    }
+    return BRepBuilderAPI_MakeEdge(c2d, surf, lo, hi).Edge();
 }
 
 ShapeHandle build_bspline_surface_face_impl(int u_degree, int v_degree,
@@ -1852,10 +1929,21 @@ static ShapeHandle bounds_trimmed_analytic_face(const Handle(Geom_Surface) & sur
     if (bounds.empty())
         throw std::runtime_error(std::string(who) + ": no bounds");
 
+    // A kind-6 record is a 2D pcurve laid on `surf` (3D derived as surface(pcurve(t))) — this is
+    // how a boundary whose edges do NOT lie on the surface (a cylinder trimmed by a diagonal
+    // joint cut, whose edges are chords/helices) is put ON the surface so BRepMesh tessellates it
+    // curved; without pcurves such a face meshed flat/degenerate. Mirrors build_advanced_face_bspline.
+    bool has_pcurve = false;
     auto wire_of = [&](const std::vector<std::vector<double>> &edges) -> TopoDS_Wire {
         BRepBuilderAPI_MakeWire wm;
-        for (const auto &rec : edges)
-            wm.Add(edge_from_record(rec));
+        for (const auto &rec : edges) {
+            if (!rec.empty() && std::lround(rec[0]) == 6) {
+                wm.Add(edge_from_pcurve(rec, surf));
+                has_pcurve = true;
+            } else {
+                wm.Add(edge_from_record(rec));
+            }
+        }
         wm.Build();
         if (!wm.IsDone())
             throw std::runtime_error(std::string(who) + ": wire build failed");
@@ -1868,6 +1956,11 @@ static ShapeHandle bounds_trimmed_analytic_face(const Handle(Geom_Surface) & sur
     if (!fm.IsDone())
         throw std::runtime_error(std::string(who) + ": MakeFace failed");
     TopoDS_Face face = fm.Face();
+
+    // pcurve-built edges carry no 3D curve yet — materialise them from surface(pcurve(t)) so
+    // sewing/tessellation have real 3D geometry (mirrors the B-spline face path).
+    if (has_pcurve)
+        BRepLib::BuildCurves3d(face);
 
     ShapeFix_Face fixer(face);
     fixer.Perform();
@@ -2848,8 +2941,7 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
     // No STRIDE guessing, no overflow, compact ids — correct regardless of per-face entity counts.
     std::atomic<long> id_counter{K + 1};
 
-    unsigned hw = std::thread::hardware_concurrency();
-    int nth = num_threads > 0 ? num_threads : (int) (hw > 1 ? hw : 1);
+    int nth = num_threads > 0 ? num_threads : (int) adacpp::effective_concurrency();
     if (nth > (int) roots.size())
         nth = std::max(1, (int) roots.size());
 
@@ -2926,6 +3018,8 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
                 adacpp::mem_trim();
             flush(false);
         }
+        if (r.degenerate_faces_skipped_ > 0)
+            L.stats.drop_reasons["face:degenerate-skipped(read)"] += r.degenerate_faces_skipped_;
         flush(true);
         std::fclose(L.fp);
         L.fp = nullptr;
@@ -3083,8 +3177,7 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
     }
     const long K = 13;
     std::atomic<long> id_counter{K + 1};
-    unsigned hw = std::thread::hardware_concurrency();
-    int nth = num_threads > 0 ? num_threads : (int) (hw > 1 ? hw : 1);
+    int nth = num_threads > 0 ? num_threads : (int) adacpp::effective_concurrency();
     if (nth > (int) roots.size())
         nth = std::max(1, (int) roots.size());
     char tmpl[] = "/tmp/adacpp_stp_XXXXXX";
@@ -3173,6 +3266,8 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
                 adacpp::mem_trim();
             flush(false);
         }
+        if (r.degenerate_faces_skipped_ > 0)
+            L.stats.drop_reasons["face:degenerate-skipped(read)"] += r.degenerate_faces_skipped_;
         flush(true);
         std::fclose(L.fp);
         L.fp = nullptr;
@@ -3216,6 +3311,157 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
     std::fclose(out_fp);
     std::filesystem::remove_all(tdir);
     return fs;
+}
+
+// Cross-format parity in ONE native parse: resolve every root a single time and run BOTH the
+// STEP->IFC and STEP->STEP emitters over it, tallying each format's losslessness (solids/faces
+// in-vs-out + drop reasons + placed-instance count) WITHOUT writing any output file. This is the
+// fan-out of the two write_*_file_impl above: they each re-parse + re-resolve the whole model and
+// serialise multi-GB output just so the parity check can count it; here the expensive per-solid
+// resolve_root is shared and nothing is serialised to disk. Bounded memory (one resolved solid +
+// a per-solid throwaway buffer per worker), parallel across roots.
+struct ParityFormat {
+    long solids_out = 0; // roots that emitted at least one solid in this format
+    long instances = 0;  // placed occurrences written (proxies / baked parts) — the parity metric
+    adacpp::ifc_emit::EmitStats geom;
+    void merge(const ParityFormat &o) {
+        solids_out += o.solids_out;
+        instances += o.instances;
+        geom.faces_in += o.geom.faces_in;
+        geom.faces_out += o.geom.faces_out;
+        geom.faces_dropped += o.geom.faces_dropped;
+        geom.edges_analytic += o.geom.edges_analytic;
+        geom.edges_polyline_approx += o.geom.edges_polyline_approx;
+        geom.edges_degenerate += o.geom.edges_degenerate;
+        for (const auto &[k, v] : o.geom.drop_reasons)
+            geom.drop_reasons[k] += v;
+    }
+};
+
+static void accum_geom(adacpp::ifc_emit::EmitStats &dst, const adacpp::ifc_emit::EmitStats &s) {
+    dst.faces_in += s.faces_in;
+    dst.faces_out += s.faces_out;
+    dst.faces_dropped += s.faces_dropped;
+    dst.edges_analytic += s.edges_analytic;
+    dst.edges_polyline_approx += s.edges_polyline_approx;
+    dst.edges_degenerate += s.edges_degenerate;
+    for (const auto &[k, v] : s.drop_reasons)
+        dst.drop_reasons[k] += v;
+}
+
+static void step_parity_impl(const std::string &in_path, double deflection, double angular_deg, int num_threads,
+                             long max_solids, long &solids_in_out, long &total_instances_out, double &unit_scale_out,
+                             ParityFormat &ifc_out, ParityFormat &step_out) {
+    using adacpp::ngeom::NgeomRoot;
+    using adacpp::step_emit::StepBrepEmitter;
+    using namespace adacpp::ifc_emit;
+    auto idx = adacpp::step::StreamIndex::from_file(in_path);
+    adacpp::step::Resolver master(idx);
+    master.build_metadata(idx.lists);
+    unit_scale_out = master.unit_scale();
+    std::vector<long> roots(idx.lists.roots.begin(), idx.lists.roots.end());
+    if (max_solids > 0 && (long) roots.size() > max_solids)
+        roots.resize(max_solids);
+    {
+        std::vector<std::pair<size_t, long>> cost;
+        cost.reserve(roots.size());
+        for (long sid : roots)
+            cost.emplace_back(master.solid_face_count(sid), sid);
+        master.clear_geom_cache();
+        std::sort(cost.begin(), cost.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+        for (size_t i = 0; i < cost.size(); ++i)
+            roots[i] = cost[i].second;
+    }
+    int nth = num_threads > 0 ? num_threads : (int) adacpp::effective_concurrency();
+    if (nth > (int) roots.size())
+        nth = std::max(1, (int) roots.size());
+    std::vector<ParityFormat> ifc_lanes(nth), step_lanes(nth);
+    std::atomic<size_t> next{0};
+    std::atomic<long> solids_in{0};
+    std::atomic<long> total_instances{0}; // every placed occurrence in the source (the parity baseline)
+    auto worker = [&](int t) {
+        adacpp::step::Resolver r(idx);
+        r.copy_metadata_from(master);
+        ParityFormat &LI = ifc_lanes[t];
+        ParityFormat &LS = step_lanes[t];
+        std::string sb; // per-solid throwaway (emitters write here; we only read their stats)
+        int local = 0;
+        for (;;) {
+            size_t i = next.fetch_add(1, std::memory_order_relaxed);
+            if (i >= roots.size())
+                break;
+            NgeomRoot root = r.resolve_root(roots[i]); // the shared parse — resolved ONCE, both formats
+            solids_in.fetch_add(1, std::memory_order_relaxed);
+            total_instances.fetch_add((long) (root.transforms.empty() ? 1 : root.transforms.size()),
+                                      std::memory_order_relaxed);
+
+            // ── IFC: geometry once + one proxy per instance (IfcMappedItem) ──
+            sb.clear();
+            BrepEmitter emi(17, nullptr, deflection, angular_deg);
+            std::vector<long> proxies;
+            emit_solid_ifc(emi, sb, root, roots[i], (uint64_t) i * 1000u, proxies, nullptr);
+            if (!proxies.empty())
+                ++LI.solids_out;
+            LI.instances += (long) proxies.size();
+            accum_geom(LI.geom, emi.stats());
+
+            // ── STEP: one baked part per instance (matches write_step_file_impl) ──
+            size_t ninst = root.transforms.empty() ? 1 : root.transforms.size();
+            bool any = false;
+            for (size_t k = 0; k < ninst; ++k) {
+                double tf[16];
+                const double *tfp = nullptr;
+                if (!root.transforms.empty()) {
+                    const std::array<float, 16> &M = root.transforms[k];
+                    tf[0] = M[0];
+                    tf[1] = M[4];
+                    tf[2] = M[8];
+                    tf[3] = M[12];
+                    tf[4] = M[1];
+                    tf[5] = M[5];
+                    tf[6] = M[9];
+                    tf[7] = M[13];
+                    tf[8] = M[2];
+                    tf[9] = M[6];
+                    tf[10] = M[10];
+                    tf[11] = M[14];
+                    tfp = tf;
+                }
+                sb.clear();
+                StepBrepEmitter ems(13, tfp, deflection, angular_deg);
+                if (emit_solid_step(ems, sb, root, roots[i])) {
+                    any = true;
+                    ++LS.instances;
+                    accum_geom(LS.geom, ems.stats());
+                }
+            }
+            if (any)
+                ++LS.solids_out;
+
+            r.clear_geom_cache();
+            if (++local % 128 == 0)
+                adacpp::mem_trim();
+        }
+        // Read-side skips (zero-area `$`-surface faces) — informational, not a
+        // faces_dropped leg: the face carries no geometry in the source.
+        if (r.degenerate_faces_skipped_ > 0) {
+            LI.geom.drop_reasons["face:degenerate-skipped(read)"] += r.degenerate_faces_skipped_;
+            LS.geom.drop_reasons["face:degenerate-skipped(read)"] += r.degenerate_faces_skipped_;
+        }
+    };
+    std::vector<std::thread> pool;
+    pool.reserve(nth - 1);
+    for (int t = 1; t < nth; ++t)
+        pool.emplace_back(worker, t);
+    worker(0);
+    for (std::thread &th : pool)
+        th.join();
+    for (int t = 0; t < nth; ++t) {
+        ifc_out.merge(ifc_lanes[t]);
+        step_out.merge(step_lanes[t]);
+    }
+    solids_in_out = solids_in.load();
+    total_instances_out = total_instances.load();
 }
 
 // Native IFC->STEP (AP242): IfcResolver reads each product's analytic B-rep -> ng::, then the STEP
@@ -3422,7 +3668,7 @@ void cad_module(nb::module_ &m) {
           "buffer. linear_deflection<=0 selects a per-shape bbox heuristic.");
 
     m.def("tessellate_stream", &tessellate_stream_impl, "buffer"_a, "pipeline"_a = "libtess2", "deflection"_a = 0.0,
-          "angular_deg"_a = 20.0, "settings"_a = nb::dict(),
+          "angular_deg"_a = 20.0, "settings"_a = nb::dict(), "threads"_a = 1,
           "Decode an NGEOM stream buffer (adapy ada.geom, neutral schema) and tessellate "
           "every instance into ONE combined Mesh with a GroupReference per root "
           "(node_id = root index). pipeline: 'libtess2' (OCC-free) | 'occ' | 'cgal' | "
@@ -3513,6 +3759,45 @@ void cad_module(nb::module_ &m) {
         "Native parallel STEP->STEP (AP242): re-export each solid's analytic B-rep as a "
         "MANIFOLD_SOLID_BREP part (instances baked), no OCC. Returns the losslessness audit dict.");
 
+    // Cross-format parity in ONE parse (the fan-out of stream_step_to_ifc + stream_step_to_step):
+    // resolve each root once, run both emitters, count what each format preserves — no file output.
+    m.def(
+        "step_parity",
+        [](const std::string &in_path, double deflection, double angular_deg, long max_solids,
+           int num_threads) -> nb::dict {
+            long solids_in = 0, total_instances = 0;
+            double unit_scale = 1.0;
+            ParityFormat ifc_fmt, step_fmt;
+            step_parity_impl(in_path, deflection, angular_deg, num_threads, max_solids, solids_in, total_instances,
+                             unit_scale, ifc_fmt, step_fmt);
+            auto fmt_dict = [](const ParityFormat &f) {
+                nb::dict d;
+                d["solids_out"] = f.solids_out;
+                d["instances"] = f.instances;
+                d["faces_in"] = f.geom.faces_in;
+                d["faces_out"] = f.geom.faces_out;
+                d["faces_dropped"] = f.geom.faces_dropped;
+                nb::dict reasons;
+                for (const auto &[k, v] : f.geom.drop_reasons)
+                    reasons[k.c_str()] = v;
+                d["drop_reasons"] = reasons;
+                return d;
+            };
+            nb::dict d;
+            d["solids_in"] = solids_in;
+            d["total_instances"] = total_instances; // source placed-instance count == the parity baseline
+            d["unit_scale"] = unit_scale;
+            d["ifc"] = fmt_dict(ifc_fmt);
+            d["step"] = fmt_dict(step_fmt);
+            return d;
+        },
+        "in_path"_a, "deflection"_a = 2.0, "angular_deg"_a = 20.0, "max_solids"_a = 0, "num_threads"_a = 0,
+        "Cross-format STEP parity in a single native parse: resolve every root once and run both the "
+        "STEP->IFC and STEP->STEP emitters over it, returning {solids_in, unit_scale, ifc:{...}, step:{...}} "
+        "where each format dict is {solids_out, instances, faces_in, faces_out, faces_dropped, drop_reasons}. "
+        "No output file is written — the fan-out of stream_step_to_ifc + stream_step_to_step for the parity "
+        "check, so the expensive per-solid resolve is shared and nothing is serialised to disk.");
+
     // Native IFC->STEP (AP242): read an IFC advanced-B-rep file -> ng:: -> STEP, no OCC.
     m.def(
         "stream_ifc_to_step",
@@ -3554,7 +3839,8 @@ void cad_module(nb::module_ &m) {
           "angular_deg"_a = 20.0, "num_threads"_a = 0, "meshopt"_a = true,
           "Native STEP -> GLB file: stream the .stp with the native reader (offset index + per-statement "
           "pread, bounded memory), tessellate each solid across num_threads worker threads (0 = auto = "
-          "hardware_concurrency), each owning a spill lane joined at the end, bake world transform(s) + "
+          "hardware_concurrency clamped to the cgroup cpu quota), each owning a spill lane joined at the "
+          "end, bake world transform(s) + "
           "colour, and write a merge-by-colour GLB matching the adapy viewer's structure. meshopt=true "
           "(default) bakes EXT_meshopt_compression inline (no Python re-pack). Returns the number of "
           "solids written (-1 on I/O error). angular_deg in degrees.");

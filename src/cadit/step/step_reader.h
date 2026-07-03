@@ -552,7 +552,12 @@ private:
             lists.roots.push_back(id);
         else if (t == "STYLED_ITEM")
             lists.styled.push_back(id);
-        else if (t == "ADVANCED_BREP_SHAPE_REPRESENTATION")
+        else if (t == "ADVANCED_BREP_SHAPE_REPRESENTATION" || t == "SHAPE_REPRESENTATION" ||
+                 t == "MANIFOLD_SURFACE_SHAPE_REPRESENTATION" || t == "FACETED_BREP_SHAPE_REPRESENTATION" ||
+                 t == "GEOMETRICALLY_BOUNDED_SURFACE_SHAPE_REPRESENTATION")
+            // Every rep type that can carry geometry roots — OCC writes shell models under a
+            // plain SHAPE_REPRESENTATION. build_transform_map classifies geometry reps vs
+            // placement reps by whether the items actually contain roots.
             lists.absr.push_back(id);
         else if (t == "SHAPE_REPRESENTATION_RELATIONSHIP")
             lists.srr.push_back(id);
@@ -763,7 +768,9 @@ private:
                 tl.roots.push_back(id);
             else if (t == "STYLED_ITEM")
                 tl.styled.push_back(id);
-            else if (t == "ADVANCED_BREP_SHAPE_REPRESENTATION")
+            else if (t == "ADVANCED_BREP_SHAPE_REPRESENTATION" || t == "SHAPE_REPRESENTATION" ||
+                     t == "MANIFOLD_SURFACE_SHAPE_REPRESENTATION" || t == "FACETED_BREP_SHAPE_REPRESENTATION" ||
+                     t == "GEOMETRICALLY_BOUNDED_SURFACE_SHAPE_REPRESENTATION")
                 tl.absr.push_back(id);
             else if (t == "SHAPE_REPRESENTATION_RELATIONSHIP")
                 tl.srr.push_back(id);
@@ -807,6 +814,12 @@ private:
     std::unordered_map<long, std::shared_ptr<ng::Surface>> surf_cache_;
     std::unordered_map<long, std::shared_ptr<ng::Curve>> curve_cache_;
     std::unordered_map<long, std::shared_ptr<ng::FaceSurfaceN>> face_cache_;
+
+public:
+    // Zero-area faces with a `$` surface skipped at read time (see face()).
+    long degenerate_faces_skipped_ = 0;
+
+private:
 
     struct RGBA {
         float r, g, b, a;
@@ -1267,7 +1280,37 @@ private:
         return b;
     }
 
+    // Best-effort plane through a loop's sampled points (Newell). Null when the
+    // loop is zero-area — e.g. two collinear LINE edges between the same two
+    // vertices, a sliver face some exporters emit with a `$` surface.
+    std::shared_ptr<ng::Surface> plane_from_loop(const ng::LoopN &lp) {
+        std::vector<ng::Vec3> pts = lp.discretize(1e-2, 0.5);
+        if (pts.size() >= 2 && (pts.front() - pts.back()).norm() < 1e-9)
+            pts.pop_back();
+        if (pts.size() < 3)
+            return nullptr;
+        ng::Vec3 c{0, 0, 0};
+        for (const ng::Vec3 &p : pts)
+            c = c + p;
+        c = c * (1.0 / double(pts.size()));
+        ng::Vec3 n{0, 0, 0};
+        double perimeter = 0;
+        for (size_t i = 0; i < pts.size(); ++i) {
+            ng::Vec3 a = pts[i] - c, b = pts[(i + 1) % pts.size()] - c;
+            n = n + a.cross(b);
+            perimeter += (b - a).norm();
+        }
+        // |n| = 2*area; degenerate when the loop's area vanishes vs its extent.
+        if (perimeter <= 0 || n.norm() <= 1e-9 * perimeter * perimeter)
+            return nullptr;
+        return std::make_shared<ng::PlaneSurface>(ng::Frame::from_axis_ref(c, n, ng::Vec3{0, 0, 0}));
+    }
+
     // ADVANCED_FACE / FACE_SURFACE('',(#bound,...),#surface,same_sense).
+    // A face whose surface is `$` (unset) gets a plane fitted through its outer
+    // loop when the loop has area; a zero-area loop means the face carries no
+    // geometry at all -> returns null and the shell skips it (what OCC's
+    // ShapeFix does on import), instead of an ERR-ing surface:null drop later.
     std::shared_ptr<ng::FaceSurfaceN> face(long id) {
         auto c = face_cache_.find(id);
         if (c != face_cache_.end())
@@ -1282,6 +1325,14 @@ private:
             if (in->args[2].is_ref())
                 f->surface = surface(in->args[2].i);
             f->same_sense = enum_true(in->args[3]);
+            if (!f->surface && !f->bounds.empty() && f->bounds[0].loop) {
+                f->surface = plane_from_loop(*f->bounds[0].loop);
+                if (!f->surface) {
+                    ++degenerate_faces_skipped_;
+                    face_cache_[id] = nullptr;
+                    return nullptr;
+                }
+            }
         }
         face_cache_[id] = f;
         return f;
@@ -1305,7 +1356,8 @@ private:
                 // Default (incl. the multi-threaded mesh/glb path): unchanged.
                 for (const Value &fr : in->args[1].items)
                     if (fr.is_ref())
-                        out.push_back(face(fr.i));
+                        if (auto fp = face(fr.i))
+                            out.push_back(fp);
                 return;
             }
             // Single-threaded bounded path (StepNgeomStream): copy the face refs out first (clearing
@@ -1317,7 +1369,8 @@ private:
                 if (fr.is_ref())
                     face_ids.push_back(fr.i);
             for (size_t i = 0; i < face_ids.size(); ++i) {
-                out.push_back(face(face_ids[i]));
+                if (auto fp = face(face_ids[i]))
+                    out.push_back(fp);
                 if ((i & 1023u) == 1023u)
                     parse_cache_.clear();
             }
@@ -1654,19 +1707,35 @@ private:
     void build_transform_map(const std::vector<long> &root_ids, const std::vector<long> &absr_ids,
                              const std::vector<long> &srr_ids, const std::vector<long> &cdsr_ids) {
         std::unordered_set<long> root_set(root_ids.begin(), root_ids.end());
-        // ABSR items -> solid (geom rep of each solid); collect the ABSR id set.
+        // Geometry-rep items -> solid. `absr_ids` holds every rep type that can carry
+        // geometry (ABSR, plain SHAPE_REPRESENTATION, ...); a rep counts as a geometry
+        // rep only when its items actually contain a root — a plain SHAPE_REPRESENTATION
+        // holding just axis placements is a placement rep and must stay OUT of the set,
+        // or the SHAPE_REPRESENTATION_RELATIONSHIP side-picking below flips.
+        // Two passes: specific rep types (ABSR & co.) claim their roots first; a plain
+        // SHAPE_REPRESENTATION only maps roots nothing else claimed — an aggregating
+        // root-level SR (AS1's 'design' listing every solid) must not steal a solid
+        // from its own product's rep, or every solid names/paths as the assembly root.
         std::unordered_set<long> absr_set;
         std::unordered_map<long, long> geomrep_of_solid;
-        for (long id : absr_ids) {
-            const Instance *in = inst(id);
-            if (!in || in->complex)
-                continue;
-            absr_set.insert(id);
-            if (in->args.size() < 2 || in->args[1].kind != Kind::List)
-                continue;
-            for (const Value &it : in->args[1].items)
-                if (it.is_ref() && root_set.count(it.i))
-                    geomrep_of_solid[it.i] = id;
+        for (int pass = 0; pass < 2; ++pass) {
+            for (long id : absr_ids) {
+                const Instance *in = inst(id);
+                if (!in || in->complex)
+                    continue;
+                if ((in->type == "SHAPE_REPRESENTATION") != (pass == 1))
+                    continue;
+                if (in->args.size() < 2 || in->args[1].kind != Kind::List)
+                    continue;
+                bool has_root = false;
+                for (const Value &it : in->args[1].items)
+                    if (it.is_ref() && root_set.count(it.i)) {
+                        geomrep_of_solid.emplace(it.i, id);
+                        has_root = true;
+                    }
+                if (has_root)
+                    absr_set.insert(id);
+            }
         }
         // Standalone SHAPE_REPRESENTATION_RELATIONSHIP: the non-ABSR side is the placement rep.
         std::unordered_map<long, long> place_rep_of_geom;

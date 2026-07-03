@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "mem_trim.h"
+#include "effective_concurrency.h"
 #include "posix_compat.h"
 
 #include "../cadit/step/step_reader.h"
@@ -174,8 +175,7 @@ inline long stream_step_to_mesh(const std::string &in_path, const std::string &o
     master.build_metadata(idx.lists);
     prof.phase("metadata");
 
-    unsigned hw = std::thread::hardware_concurrency();
-    int nthreads = num_threads > 0 ? num_threads : (int) (hw > 1 ? hw : 1);
+    int nthreads = num_threads > 0 ? num_threads : (int) adacpp::effective_concurrency();
 
     // LPT: heaviest solids first so big ones start while every thread is busy.
     std::vector<long> roots(idx.lists.roots.begin(), idx.lists.roots.end());

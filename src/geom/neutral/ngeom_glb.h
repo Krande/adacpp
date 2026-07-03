@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <map>
@@ -276,8 +277,9 @@ inline std::array<int, 4> colour_key(const std::array<float, 4> &c) {
 // ATTRIBUTES — then emitted as buffer 0 = compressed data, buffer 1 = fallback (no bytes), bufferViews
 // carrying the EXT extension. Round-trips every buffer; returns false on any encode/verify failure so
 // the caller falls back to the raw writer. Peak memory = all compressed buffers + one material's raw.
-template <class Provider>
-inline bool glb_write_framed_meshopt(const std::string &path, const std::vector<MatHeader> &hdrs, Provider &&provide,
+template <class ProvideIdx, class ProvidePos>
+inline bool glb_write_framed_meshopt(const std::string &path, const std::vector<MatHeader> &hdrs,
+                                     ProvideIdx &&provide_idx, ProvidePos &&provide_pos,
                                      const std::string &scene_extras, const std::string &ada_ext) {
     auto a4 = [](uint32_t n) { return (n + 3u) & ~3u; };
     struct Enc {
@@ -286,6 +288,19 @@ inline bool glb_write_framed_meshopt(const std::string &path, const std::vector<
     std::vector<Enc> enc(hdrs.size());
     uint32_t coff = 0, uoff = 0;
     static const char z[4] = {0, 0, 0, 0};
+    // Per-buffer encode-roundtrip self-check budget. The verify decodes the just-encoded buffer into
+    // a FULL second copy (di/dv) purely to memcmp — which doubles peak RSS on a big single-material
+    // model (Valve Hall STEP->GLB peaked ~3.1 GB, ~1 GB of it these decode copies) and pushed the
+    // capped worker OOM. Verify buffers up to the budget (keeps CI/fixtures + typical models checked);
+    // skip it for the oversized buffers where the copy is the memory problem. ADA_MESHOPT_VERIFY_MAX_BYTES
+    // overrides (0 = never verify, e.g. a memory-pinned worker). Default 256 MiB.
+    size_t verify_max = (size_t) 256u << 20;
+    if (const char *e = std::getenv("ADA_MESHOPT_VERIFY_MAX_BYTES")) {
+        char *end = nullptr;
+        unsigned long long v = std::strtoull(e, &end, 10);
+        if (end != e)
+            verify_max = (size_t) v;
+    }
     // Spill each material's compressed regions to a temp file as we go (one material resident at a
     // time) rather than accumulating every material's compressed buffers — peak memory ~one material.
     std::string tmp = path + ".moptmp";
@@ -295,22 +310,28 @@ inline bool glb_write_framed_meshopt(const std::string &path, const std::vector<
             return false;
         for (size_t i = 0; i < hdrs.size(); ++i) {
             const MatHeader &h = hdrs[i];
-            std::vector<float> pos;
+            // Indices FIRST — load, encode, free — before positions are ever materialised, so a single
+            // large merged material never holds its positions AND indices resident at once. That doubled
+            // peak RSS (Valve Hall STEP->GLB merges to ONE material of ~1.4 GB) and OOM'd the capped
+            // worker. Peak is now max(idx, pos) per material, not their sum.
             std::vector<uint32_t> idx;
-            provide(i, pos, idx);
+            provide_idx(i, idx);
             auto cidx = ::ngeom::meshopt_encode_indices(idx.data(), idx.size(), h.vert_count);
             if (cidx.empty())
                 return false;
-            { // verify + free the index buffer before touching positions
+            // verify (small buffers only — the decode is a full second copy) before freeing indices
+            if ((size_t) idx.size() * 4 <= verify_max) {
                 auto di = ::ngeom::meshopt_decode_indices(cidx.data(), cidx.size(), idx.size(), 4);
                 if (di.size() != idx.size() * 4 || std::memcmp(di.data(), idx.data(), di.size()) != 0)
                     return false;
             }
             std::vector<uint32_t>().swap(idx);
+            std::vector<float> pos;
+            provide_pos(i, pos);
             auto cpos = ::ngeom::meshopt_encode_vertices(pos.data(), h.vert_count, 12);
             if (cpos.empty())
                 return false;
-            {
+            if ((size_t) h.vert_count * 12 <= verify_max) {
                 auto dv = ::ngeom::meshopt_decode_vertices(cpos.data(), cpos.size(), h.vert_count, 12);
                 if (dv.size() != (size_t) h.vert_count * 12 || std::memcmp(dv.data(), pos.data(), dv.size()) != 0)
                     return false;
@@ -480,12 +501,8 @@ inline bool write_glb(const std::string &path, const std::vector<GlbSolid> &soli
         }
     std::string extras = build_scene_extras(per_mat);
     if (meshopt && glb_write_framed_meshopt(
-                       path, hdrs,
-                       [&](size_t i, std::vector<float> &pos, std::vector<uint32_t> &idx) {
-                           pos = bufs[i]->pos;
-                           idx = bufs[i]->idx;
-                       },
-                       extras, ""))
+                       path, hdrs, [&](size_t i, std::vector<uint32_t> &idx) { idx = bufs[i]->idx; },
+                       [&](size_t i, std::vector<float> &pos) { pos = bufs[i]->pos; }, extras, ""))
         return true;
     static const char z[4] = {0, 0, 0, 0};
     return glb_write_framed(path, hdrs, extras, "", [&](std::ofstream &out) {
@@ -648,32 +665,43 @@ inline bool write_glb_merged(const std::string &path, const std::vector<GlbSpill
     // meshopt: read one material at a time from the spill lanes (positions concatenated, indices
     // re-offset by the cumulative vertex base across lanes — exactly the raw merge, into vectors),
     // encode + bake EXT_meshopt_compression. Falls through to the raw writer on any failure.
-    if (meshopt && glb_write_framed_meshopt(
-                       path, hdrs,
-                       [&](size_t mi, std::vector<float> &pos, std::vector<uint32_t> &idx) {
-                           const std::array<int, 4> &key = keys[mi];
-                           uint32_t vbase = 0;
-                           for (GlbSpillWriter *l : lanes) {
-                               auto it = l->mats().find(key);
-                               if (it == l->mats().end())
-                                   continue;
-                               const auto &m = it->second;
-                               size_t nf = (size_t) m.vert_count * 3, old = pos.size();
-                               pos.resize(old + nf);
-                               std::ifstream pf(m.pos_path, std::ios::binary);
-                               pf.read(reinterpret_cast<char *>(pos.data() + old), (std::streamsize) (nf * 4));
-                               std::ifstream xf(m.idx_path, std::ios::binary);
-                               std::vector<uint32_t> rb(1u << 16);
-                               while (xf) {
-                                   xf.read(reinterpret_cast<char *>(rb.data()), (std::streamsize) (rb.size() * 4));
-                                   size_t got = (size_t) (xf.gcount() / 4);
-                                   for (size_t k = 0; k < got; ++k)
-                                       idx.push_back(rb[k] + vbase);
-                               }
-                               vbase += m.vert_count;
-                           }
-                       },
-                       extras, ada_ext))
+    // Two providers (indices, positions) read one attribute at a time from the spill lanes so the
+    // meshopt writer never holds a material's positions AND indices resident together — see the
+    // idx-first ordering in glb_write_framed_meshopt. Indices are re-offset by the cumulative vertex
+    // base across lanes (the raw-merge order); positions are a plain concat.
+    auto provide_idx = [&](size_t mi, std::vector<uint32_t> &idx) {
+        const std::array<int, 4> &key = keys[mi];
+        uint32_t vbase = 0;
+        for (GlbSpillWriter *l : lanes) {
+            auto it = l->mats().find(key);
+            if (it == l->mats().end())
+                continue;
+            const auto &m = it->second;
+            std::ifstream xf(m.idx_path, std::ios::binary);
+            std::vector<uint32_t> rb(1u << 16);
+            while (xf) {
+                xf.read(reinterpret_cast<char *>(rb.data()), (std::streamsize) (rb.size() * 4));
+                size_t got = (size_t) (xf.gcount() / 4);
+                for (size_t k = 0; k < got; ++k)
+                    idx.push_back(rb[k] + vbase);
+            }
+            vbase += m.vert_count;
+        }
+    };
+    auto provide_pos = [&](size_t mi, std::vector<float> &pos) {
+        const std::array<int, 4> &key = keys[mi];
+        for (GlbSpillWriter *l : lanes) {
+            auto it = l->mats().find(key);
+            if (it == l->mats().end())
+                continue;
+            const auto &m = it->second;
+            size_t nf = (size_t) m.vert_count * 3, old = pos.size();
+            pos.resize(old + nf);
+            std::ifstream pf(m.pos_path, std::ios::binary);
+            pf.read(reinterpret_cast<char *>(pos.data() + old), (std::streamsize) (nf * 4));
+        }
+    };
+    if (meshopt && glb_write_framed_meshopt(path, hdrs, provide_idx, provide_pos, extras, ada_ext))
         return true;
     static const char z[4] = {0, 0, 0, 0};
     return glb_write_framed(path, hdrs, extras, ada_ext, [&](std::ofstream &out) {

@@ -263,12 +263,26 @@ struct RevolveN {
     double angle = 0; // 0 => full revolution
 };
 
+// A fixed-reference swept-area solid (IfcFixedReferenceSweptAreaSolid over an alignment directrix):
+// a planar profile face swept along a precomputed field of per-station frames. A profile point
+// (u, v) at station j maps to the local point `origin[j] + u*dir_x[j] + v*dir_y[j]`, then placed by
+// `frame`. The analytic directrix (line/clothoid/arc + vertical gradient) is evaluated producer-side
+// (adapy) into these frames, so the kernel only rings + caps them (no OCC, no Frenet roll here).
+struct SweepN {
+    std::shared_ptr<FaceSurfaceN> profile; // planar profile face (local UV, z=0)
+    Frame frame;                           // placement of the swept solid
+    std::vector<Vec3> origin;              // per-station directrix point (local)
+    std::vector<Vec3> dir_x;               // per-station profile local-x axis in 3D (fixed-ref "up")
+    std::vector<Vec3> dir_y;               // per-station profile local-y axis in 3D (lateral)
+};
+
 struct BooleanN; // fwd (recursive)
 
 // One operand of a boolean (or a root): any of the supported solids.
 struct SolidItemN {
     std::shared_ptr<ExtrusionN> extrusion;
     std::shared_ptr<RevolveN> revolve;
+    std::shared_ptr<SweepN> sweep;
     std::shared_ptr<BooleanN> boolean;
     std::vector<std::shared_ptr<FaceSurfaceN>> faces; // shell operand
 };
@@ -292,6 +306,7 @@ struct NgeomRoot {
     std::vector<std::shared_ptr<FaceSurfaceN>> faces; // flattened (a CFS expands to its faces)
     std::shared_ptr<ExtrusionN> extrusion;            // set if this root is an extruded solid
     std::shared_ptr<RevolveN> revolve;                // set if this root is a revolved solid
+    std::shared_ptr<SweepN> sweep;                    // set if this root is a fixed-ref swept solid
     std::shared_ptr<BooleanN> boolean;                // set if this root is a boolean result
     std::shared_ptr<SphereN> sphere;                  // set if this root is a sphere primitive
     // Presentation colour (STYLED_ITEM -> COLOUR_RGB), populated by the native STEP reader; the

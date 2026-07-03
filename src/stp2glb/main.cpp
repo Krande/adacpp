@@ -49,8 +49,7 @@ int main(int argc, char *argv[]) {
         ::setenv("ADACPP_STEP_SOLID_TIMING", "1", 1);
     }
 
-    const unsigned hw = std::thread::hardware_concurrency();
-    const int resolved_threads = num_threads > 0 ? num_threads : (int) (hw > 1 ? hw : 1);
+    const int resolved_threads = num_threads > 0 ? num_threads : (int) adacpp::effective_concurrency();
 
     if (!quiet) {
         std::cout << "STP2GLB Converter (OCC-free native streaming)\n";
