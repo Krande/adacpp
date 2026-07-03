@@ -2,6 +2,17 @@
 
 
 
+## v0.12.0 (2026-07-03)
+
+### Feature
+
+* feat: native IFC4x3 alignment swept-area solid (no OCC) (#33)
+
+Signed-off-by: dependabot[bot] &lt;support@github.com&gt;
+Co-authored-by: Claude Opus 4.8 &lt;noreply@anthropic.com&gt;
+Co-authored-by: dependabot[bot] &lt;49699333+dependabot[bot]@users.noreply.github.com&gt; ([`037d026`](https://github.com/Krande/adacpp/commit/037d026323d02fdb4cf6a79cf21cda2c8ed64011))
+
+
 ## v0.11.0 (2026-06-30)
 
 ### Feature
