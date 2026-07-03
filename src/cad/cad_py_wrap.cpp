@@ -458,6 +458,11 @@ struct StepRootMeta {
 // ShapeStore) retains the arriving object as-is, so the buffer is allocated exactly once.
 static nb::object ngeom_buffer_to_ndarray(std::vector<uint8_t> &&buf) {
     auto *heap = new std::vector<uint8_t>(std::move(buf));
+    // The encoder's growth-doubling leaves real capacity slack (~20% across the crane's
+    // 7291 blobs); the consumer retains these long-term, so trade one bounded realloc
+    // now for an exact-size resident buffer. Still ahead of nb::bytes: no slack case
+    // reallocates nothing, and the vector+copy never coexist with a PyBytes duplicate.
+    heap->shrink_to_fit();
     nb::capsule owner(heap, [](void *p) noexcept { delete static_cast<std::vector<uint8_t> *>(p); });
     size_t shape[1] = {heap->size()};
     return nb::cast(nb::ndarray<nb::numpy, const uint8_t, nb::ndim<1>>(heap->data(), 1, shape, owner));
