@@ -552,7 +552,12 @@ private:
             lists.roots.push_back(id);
         else if (t == "STYLED_ITEM")
             lists.styled.push_back(id);
-        else if (t == "ADVANCED_BREP_SHAPE_REPRESENTATION")
+        else if (t == "ADVANCED_BREP_SHAPE_REPRESENTATION" || t == "SHAPE_REPRESENTATION" ||
+                 t == "MANIFOLD_SURFACE_SHAPE_REPRESENTATION" || t == "FACETED_BREP_SHAPE_REPRESENTATION" ||
+                 t == "GEOMETRICALLY_BOUNDED_SURFACE_SHAPE_REPRESENTATION")
+            // Every rep type that can carry geometry roots — OCC writes shell models under a
+            // plain SHAPE_REPRESENTATION. build_transform_map classifies geometry reps vs
+            // placement reps by whether the items actually contain roots.
             lists.absr.push_back(id);
         else if (t == "SHAPE_REPRESENTATION_RELATIONSHIP")
             lists.srr.push_back(id);
@@ -763,7 +768,9 @@ private:
                 tl.roots.push_back(id);
             else if (t == "STYLED_ITEM")
                 tl.styled.push_back(id);
-            else if (t == "ADVANCED_BREP_SHAPE_REPRESENTATION")
+            else if (t == "ADVANCED_BREP_SHAPE_REPRESENTATION" || t == "SHAPE_REPRESENTATION" ||
+                     t == "MANIFOLD_SURFACE_SHAPE_REPRESENTATION" || t == "FACETED_BREP_SHAPE_REPRESENTATION" ||
+                     t == "GEOMETRICALLY_BOUNDED_SURFACE_SHAPE_REPRESENTATION")
                 tl.absr.push_back(id);
             else if (t == "SHAPE_REPRESENTATION_RELATIONSHIP")
                 tl.srr.push_back(id);
@@ -1700,19 +1707,35 @@ private:
     void build_transform_map(const std::vector<long> &root_ids, const std::vector<long> &absr_ids,
                              const std::vector<long> &srr_ids, const std::vector<long> &cdsr_ids) {
         std::unordered_set<long> root_set(root_ids.begin(), root_ids.end());
-        // ABSR items -> solid (geom rep of each solid); collect the ABSR id set.
+        // Geometry-rep items -> solid. `absr_ids` holds every rep type that can carry
+        // geometry (ABSR, plain SHAPE_REPRESENTATION, ...); a rep counts as a geometry
+        // rep only when its items actually contain a root — a plain SHAPE_REPRESENTATION
+        // holding just axis placements is a placement rep and must stay OUT of the set,
+        // or the SHAPE_REPRESENTATION_RELATIONSHIP side-picking below flips.
+        // Two passes: specific rep types (ABSR & co.) claim their roots first; a plain
+        // SHAPE_REPRESENTATION only maps roots nothing else claimed — an aggregating
+        // root-level SR (AS1's 'design' listing every solid) must not steal a solid
+        // from its own product's rep, or every solid names/paths as the assembly root.
         std::unordered_set<long> absr_set;
         std::unordered_map<long, long> geomrep_of_solid;
-        for (long id : absr_ids) {
-            const Instance *in = inst(id);
-            if (!in || in->complex)
-                continue;
-            absr_set.insert(id);
-            if (in->args.size() < 2 || in->args[1].kind != Kind::List)
-                continue;
-            for (const Value &it : in->args[1].items)
-                if (it.is_ref() && root_set.count(it.i))
-                    geomrep_of_solid[it.i] = id;
+        for (int pass = 0; pass < 2; ++pass) {
+            for (long id : absr_ids) {
+                const Instance *in = inst(id);
+                if (!in || in->complex)
+                    continue;
+                if ((in->type == "SHAPE_REPRESENTATION") != (pass == 1))
+                    continue;
+                if (in->args.size() < 2 || in->args[1].kind != Kind::List)
+                    continue;
+                bool has_root = false;
+                for (const Value &it : in->args[1].items)
+                    if (it.is_ref() && root_set.count(it.i)) {
+                        geomrep_of_solid.emplace(it.i, id);
+                        has_root = true;
+                    }
+                if (has_root)
+                    absr_set.insert(id);
+            }
         }
         // Standalone SHAPE_REPRESENTATION_RELATIONSHIP: the non-ABSR side is the placement rep.
         std::unordered_map<long, long> place_rep_of_geom;
