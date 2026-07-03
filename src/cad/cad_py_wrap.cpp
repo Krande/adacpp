@@ -87,6 +87,8 @@
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <ShapeFix_Face.hxx>
 #include <ShapeFix_Shape.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <Geom2dAPI_ProjectPointOnCurve.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
 #include <Geom_SurfaceOfRevolution.hxx>
@@ -1722,9 +1724,19 @@ Handle(Geom_BSplineSurface) make_bspline_surface(int u_degree, int v_degree,
 
 // Build a face edge from a 2D pcurve record (kind 6) laid on `surf`:
 //   [6, degree, rational, closed, n_poles, <2*n_poles uv>, n_knots, <knots>,
-//    <mults>, <n_poles weights if rational>]
+//    <mults>, <n_poles weights if rational>,
+//    <optional tail: 1, t0, t1  |  2, t0, t1, sx, sy, sz, ex, ey, ez>]
 // The 3D parametrization is derived by OCCT from surface(pcurve(t)), so 2D/3D
 // stay consistent — the SAT-pcurve path adapy's make_face_from_geom prefers.
+// The optional tail is the owning edge's trim. SAT pcurves typically span the
+// FULL underlying curve, so without a trim the edge overshoots its segment and
+// the boundary wire fails to connect. Preferred trim (flag 2): the edge's
+// declared 3D vertices, projected point -> surface UV -> pcurve param — exact
+// regardless of parameterization. Fallback (flag 1 or failed projection): the
+// edge's curve-params, tried directly and negated (per the ACIS SAT spec a
+// reversed-sense edge stores its params as (-b, -a) of the true range [a, b]);
+// note an ACIS bs2 pcurve is a fit approximation with its own parameterization,
+// so curve-params can land slightly off (cm-scale) — hence the projection path.
 TopoDS_Edge edge_from_pcurve(const std::vector<double> &e, const Handle(Geom_Surface) & surf) {
     const int degree = static_cast<int>(std::lround(e[1]));
     const bool rational = std::lround(e[2]) != 0;
@@ -1752,7 +1764,49 @@ TopoDS_Edge edge_from_pcurve(const std::vector<double> &e, const Handle(Geom_Sur
     } else {
         c2d = new Geom2d_BSplineCurve(poles, knots, mults, degree, closed);
     }
-    return BRepBuilderAPI_MakeEdge(c2d, surf, c2d->FirstParameter(), c2d->LastParameter()).Edge();
+    const double cf = c2d->FirstParameter(), cl = c2d->LastParameter();
+    double lo = cf, hi = cl;
+    bool trimmed = false;
+    const std::size_t tail = e.size() - i;
+    const int flag = tail >= 3 ? static_cast<int>(std::lround(e[i])) : 0;
+
+    if (flag == 2 && tail >= 9) {
+        // Geometric trim: declared 3D vertex -> surface UV -> pcurve param.
+        const gp_Pnt ps(e[i + 3], e[i + 4], e[i + 5]), pe(e[i + 6], e[i + 7], e[i + 8]);
+        try {
+            GeomAPI_ProjectPointOnSurf prj_s(ps, surf), prj_e(pe, surf);
+            if (prj_s.NbPoints() > 0 && prj_e.NbPoints() > 0) {
+                Standard_Real us, vs, ue, ve;
+                prj_s.LowerDistanceParameters(us, vs);
+                prj_e.LowerDistanceParameters(ue, ve);
+                Geom2dAPI_ProjectPointOnCurve p2s(gp_Pnt2d(us, vs), c2d), p2e(gp_Pnt2d(ue, ve), c2d);
+                if (p2s.NbPoints() > 0 && p2e.NbPoints() > 0) {
+                    const double ta = p2s.LowerDistanceParameter(), tb = p2e.LowerDistanceParameter();
+                    lo = std::max(std::min(ta, tb), cf);
+                    hi = std::min(std::max(ta, tb), cl);
+                    trimmed = hi - lo > 1e-12;
+                }
+            }
+        } catch (const Standard_Failure &) {
+            // projection failed — fall through to the param-range trim below
+        }
+    }
+    if (!trimmed && flag >= 1) {
+        const double t0 = e[i + 1], t1 = e[i + 2];
+        const double a = std::min(t0, t1), b = std::max(t0, t1);
+        const double tolp = 1e-9 + 1e-6 * (cl - cf);
+        if (a >= cf - tolp && b <= cl + tolp) {
+            lo = std::max(a, cf);
+            hi = std::min(b, cl);
+        } else if (-b >= cf - tolp && -a <= cl + tolp) { // ACIS reversed-sense edge: params negated
+            lo = std::max(-b, cf);
+            hi = std::min(-a, cl);
+        } else {
+            lo = cf; // trim doesn't map into this pcurve's range — keep the full range
+            hi = cl;
+        }
+    }
+    return BRepBuilderAPI_MakeEdge(c2d, surf, lo, hi).Edge();
 }
 
 ShapeHandle build_bspline_surface_face_impl(int u_degree, int v_degree,
