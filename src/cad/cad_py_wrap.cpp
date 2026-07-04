@@ -592,7 +592,13 @@ public:
             NgeomRoot root = r_->resolve_product(pid);
             std::string guid = r_->product_guid(pid);
             r_->clear_cache(); // bounded memory: statement/surface caches don't grow across products
-            if (root.faces.empty() && !root.extrusion && !root.revolve && !root.boolean) {
+            if (root.faces.empty()) {
+                // No face-set geometry. NOTE this also skips procedural roots
+                // (extrusion/revolve/boolean, e.g. a mapped extruded solid):
+                // Encoder::encode carries faces only, so yielding such a root
+                // would hand the consumer a silently-EMPTY buffer. Count it
+                // skipped and let the consumer's kernel fallback handle the
+                // product until the encoder learns tags 50-52.
                 ++skipped_;
                 continue;
             }
