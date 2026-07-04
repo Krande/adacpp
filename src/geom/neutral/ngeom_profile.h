@@ -198,11 +198,72 @@ public:
         }
         if (timing_ && !timed_.empty())
             dump_solid_timing();
+
+        // Machine-readable sibling of the pretty lines above: ONE compact JSON line a
+        // log-capturing consumer (the adapy audit worker) can parse into structured
+        // metrics without scraping the human format. Keys mirror the printed fields.
+        {
+            std::string j = "{\"label\":\"";
+            j += label_;
+            j += "\",\"wall_ms\":" + fmt_num(wall);
+            j += ",\"peak_rss_mb\":" + fmt_num(hwm);
+            j += ",\"cpu_s\":" + fmt_num(cpu, 2);
+            j += ",\"parallelism\":" + fmt_num(wall_s > 0 ? cpu / wall_s : 0.0, 2);
+            j += ",\"vctx\":" + std::to_string(e.vctx - snap0_.vctx);
+            j += ",\"nvctx\":" + std::to_string(e.nvctx - snap0_.nvctx);
+            j += ",\"disk_read_mb\":" + fmt_num((e.read_bytes - snap0_.read_bytes) / 1e6);
+            j += ",\"majflt\":" + std::to_string(e.majflt - snap0_.majflt);
+            j += ",\"solids\":" + std::to_string(n_solids_);
+            j += ",\"tris\":" + std::to_string(total_tris_);
+            j += ",\"max_tris_solid\":" + std::to_string(max_tris_);
+            j += ",\"phases\":[";
+            for (size_t i = 0; i < phases_.size(); ++i) {
+                if (i)
+                    j += ",";
+                j += "{\"name\":\"";
+                j += phases_[i].name;
+                j += "\",\"ms\":" + fmt_num(phases_[i].ms) + ",\"rss_mb\":" + fmt_num(phases_[i].rss_mb) + "}";
+            }
+            j += "]";
+            if (!notes_.empty()) {
+                j += ",\"notes\":{";
+                for (size_t i = 0; i < notes_.size(); ++i) {
+                    if (i)
+                        j += ",";
+                    j += "\"";
+                    j += notes_[i].first;
+                    j += "\":" + fmt_num(notes_[i].second);
+                }
+                j += "}";
+            }
+            if (!threads_.empty()) {
+                j += ",\"threads\":[";
+                for (size_t i = 0; i < threads_.size(); ++i) {
+                    if (i)
+                        j += ",";
+                    j += "{\"tid\":" + std::to_string(threads_[i].tid) +
+                         ",\"solids\":" + std::to_string(threads_[i].solids) +
+                         ",\"busy_ms\":" + fmt_num(threads_[i].busy_ms) + "}";
+                }
+                j += "]";
+            }
+            j += "}";
+            std::fprintf(stderr, "[STEPPROF-JSON] %s\n", j.c_str());
+        }
     }
 
 private:
     static double ms(clock::time_point a, clock::time_point b) {
         return std::chrono::duration<double, std::milli>(b - a).count();
+    }
+    // %.<prec>f without locale surprises — JSON must always use '.' decimals.
+    static std::string fmt_num(double v, int prec = 0) {
+        char b[64];
+        std::snprintf(b, sizeof(b), "%.*f", prec, v);
+        for (char *p = b; *p; ++p)
+            if (*p == ',')
+                *p = '.';
+        return std::string(b);
     }
     struct Phase {
         const char *name;

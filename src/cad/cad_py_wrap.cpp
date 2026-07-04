@@ -526,16 +526,34 @@ nb::dict step_index_parity_impl(const std::string &path) {
 // heap so the resolver's index pointer stays valid even if Python moves the object.
 class StepNgeomStream {
 public:
-    explicit StepNgeomStream(const std::string &path) {
+    explicit StepNgeomStream(const std::string &path) : prof_("step_ngeom_stream") {
         idx_ = std::make_unique<adacpp::step::StreamIndex>(adacpp::step::StreamIndex::from_file(path));
+        prof_.phase("scan_index");
         r_ = std::make_unique<adacpp::step::Resolver>(*idx_);
         r_->build_metadata(idx_->lists);
         // Single-threaded per-solid streaming → safe to bound parse_cache_ on giant shells (the
         // 67 MB single solid in 469826); the multi-threaded mesh/glb path must NOT (race on re-parse).
         r_->enable_parse_cache_bounding();
+        prof_.phase("metadata");
+    }
+    ~StepNgeomStream() {
+        // The iterate phase spans the whole consumption window (incl. the Python
+        // consumer's time between __next__ calls); resolve_encode_ms is the pure
+        // C++ share, so the gap between them is the consumer's own cost.
+        if (prof_.on()) {
+            prof_.phase("iterate(incl_consumer)");
+            prof_.note("resolve_encode_ms", work_ms_);
+        }
     }
     nb::tuple next() {
         using namespace adacpp::ngeom;
+        // Zero cost when profiling is off: one bool test, no clock reads.
+        const bool on = prof_.on();
+        auto t0 = on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        auto charge = [&] {
+            if (on)
+                work_ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        };
         const auto &roots = idx_->lists.roots;
         while (cursor_ < roots.size()) {
             NgeomRoot root = r_->resolve_root(roots[cursor_++]);
@@ -543,6 +561,7 @@ public:
                 r_->clear_geom_cache();
                 continue;
             }
+            prof_.solid(root.faces.size());
             StepRootMeta m;
             m.id = root.id;
             m.has_color = root.has_color;
@@ -553,13 +572,18 @@ public:
             one.roots.push_back(std::move(root));
             std::vector<uint8_t> buf = encode(one);
             r_->clear_geom_cache();
-            return nb::make_tuple(ngeom_buffer_to_ndarray(std::move(buf)), std::move(m));
+            nb::tuple out = nb::make_tuple(ngeom_buffer_to_ndarray(std::move(buf)), std::move(m));
+            charge();
+            return out;
         }
+        charge();
         PyErr_SetNone(PyExc_StopIteration);
         throw nb::python_error();
     }
 
 private:
+    adacpp::prof::StepProfiler prof_; // declared first → destroyed last (summary sees the notes)
+    double work_ms_ = 0;
     std::unique_ptr<adacpp::step::StreamIndex> idx_;
     std::unique_ptr<adacpp::step::Resolver> r_;
     size_t cursor_ = 0;
@@ -576,17 +600,33 @@ private:
 // IfcRelContainedInSpatialStructure not walked) — geometry/guid/name/placement only.
 class IfcNgeomStream {
 public:
-    explicit IfcNgeomStream(const std::string &path) {
+    explicit IfcNgeomStream(const std::string &path) : prof_("ifc_ngeom_stream") {
         idx_ = std::make_unique<adacpp::step::StreamIndex>(adacpp::step::StreamIndex::from_file(path));
+        prof_.phase("scan_index");
         r_ = std::make_unique<adacpp::ifc_read::IfcResolver>(*idx_);
         roots_ = r_->proxy_roots();
         unit_scale_ = r_->unit_scale();
+        prof_.phase("metadata");
+    }
+    ~IfcNgeomStream() {
+        if (prof_.on()) {
+            prof_.phase("iterate(incl_consumer)");
+            prof_.note("resolve_encode_ms", work_ms_);
+            prof_.note("products_skipped", (double) skipped_);
+        }
     }
     double unit_scale() const { return unit_scale_; }
     long products_total() const { return (long) roots_.size(); }
     long products_skipped() const { return skipped_; }
     nb::tuple next() {
         using namespace adacpp::ngeom;
+        // Zero cost when profiling is off: one bool test, no clock reads.
+        const bool on = prof_.on();
+        auto t0 = on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        auto charge = [&] {
+            if (on)
+                work_ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        };
         while (cursor_ < roots_.size()) {
             long pid = roots_[cursor_++];
             NgeomRoot root = r_->resolve_product(pid);
@@ -602,6 +642,7 @@ public:
                 ++skipped_;
                 continue;
             }
+            prof_.solid(root.faces.size());
             StepRootMeta m;
             m.id = root.id;
             m.guid = std::move(guid);
@@ -612,13 +653,18 @@ public:
             NgeomDoc one;
             one.roots.push_back(std::move(root));
             std::vector<uint8_t> buf = encode(one);
-            return nb::make_tuple(ngeom_buffer_to_ndarray(std::move(buf)), std::move(m));
+            nb::tuple out = nb::make_tuple(ngeom_buffer_to_ndarray(std::move(buf)), std::move(m));
+            charge();
+            return out;
         }
+        charge();
         PyErr_SetNone(PyExc_StopIteration);
         throw nb::python_error();
     }
 
 private:
+    adacpp::prof::StepProfiler prof_; // declared first → destroyed last (summary sees the notes)
+    double work_ms_ = 0;
     std::unique_ptr<adacpp::step::StreamIndex> idx_;
     std::unique_ptr<adacpp::ifc_read::IfcResolver> r_;
     std::vector<long> roots_;
@@ -2907,11 +2953,14 @@ static adacpp::ifc_emit::FileStats write_ifc_file_impl(const std::string &in_pat
                                                        long max_solids) {
     using namespace adacpp::ifc_emit;
     FileStats fs;
+    adacpp::prof::StepProfiler prof("stream_step_to_ifc(st)");
     auto idx = adacpp::step::StreamIndex::from_file(in_path);
+    prof.phase("scan_index");
     adacpp::step::Resolver r(idx);
     r.build_metadata(idx.lists);
     r.enable_parse_cache_bounding();
     fs.unit_scale = r.unit_scale();
+    prof.phase("metadata");
     std::FILE *fp = std::fopen(out_path.c_str(), "wb");
     if (!fp)
         return fs;
@@ -2932,6 +2981,7 @@ static adacpp::ifc_emit::FileStats write_ifc_file_impl(const std::string &in_pat
             break;
         adacpp::ngeom::NgeomRoot root = r.resolve_root(sid);
         ++fs.solids_in;
+        prof.solid(root.faces.size());
         size_t before = proxies.size();
         emit_solid_ifc(em, buf, root, sid, (uint64_t) fs.solids_in * 1000u, proxies, &proxy_paths);
         if (proxies.size() > before)
@@ -2939,10 +2989,12 @@ static adacpp::ifc_emit::FileStats write_ifc_file_impl(const std::string &in_pat
         r.clear_geom_cache();
         flush(false);
     }
+    prof.phase("resolve+emit");
     emit_spatial_tree(buf, [&]() { return em.alloc_id(); }, proxies, proxy_paths);
     buf += "ENDSEC;\nEND-ISO-10303-21;\n";
     flush(true);
     std::fclose(fp);
+    prof.phase("spatial_tree+write");
     fs.geom = em.stats();
     return fs;
 }
@@ -3004,10 +3056,13 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
     using namespace adacpp::ifc_emit;
     using adacpp::ngeom::NgeomRoot;
     FileStats fs;
+    adacpp::prof::StepProfiler prof("stream_step_to_ifc(par)");
     auto idx = adacpp::step::StreamIndex::from_file(in_path);
+    prof.phase("scan_index");
     adacpp::step::Resolver master(idx);
     master.build_metadata(idx.lists);
     fs.unit_scale = master.unit_scale();
+    prof.phase("metadata");
 
     std::vector<long> roots(idx.lists.roots.begin(), idx.lists.roots.end());
     if (max_solids > 0 && (long) roots.size() > max_solids)
@@ -3023,6 +3078,7 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
         for (size_t i = 0; i < cost.size(); ++i)
             roots[i] = cost[i].second;
     }
+    prof.phase("lpt_order");
     const long K = 17; // ids #1..#17 are the shared header block (Project/Site/Building/Storey + rels)
     // Robust global id allocation: each solid is emitted with LOCAL ids (1..n), then a contiguous
     // block of n ids is reserved atomically and the solid's text is renumbered by the block base.
@@ -3056,6 +3112,11 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
     std::atomic<long> solids_in{0};
 
     auto worker = [&](int t) {
+        // All profiling costs vanish when ADACPP_STEP_PROFILE is unset: prof.solid()
+        // early-returns on one bool, and the per-thread timestamps are guarded here.
+        const bool prof_on = prof.on();
+        auto w0 = prof_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        size_t w_solids = 0;
         adacpp::step::Resolver r(idx);
         r.copy_metadata_from(master);
         Lane &L = lanes[t];
@@ -3073,6 +3134,8 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
                 break;
             NgeomRoot root = r.resolve_root(roots[i]);
             solids_in.fetch_add(1, std::memory_order_relaxed);
+            prof.solid(root.faces.size());
+            ++w_solids;
             // Emit with LOCAL ids starting ABOVE the shared header block (K+1..), so shared refs
             // (#1..#K) are distinguishable and left intact by renumber. Then reserve a contiguous
             // global block of n ids atomically and shift the solid's local ids into it.
@@ -3111,6 +3174,9 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
         flush(true);
         std::fclose(L.fp);
         L.fp = nullptr;
+        if (prof_on)
+            prof.thread_done(
+                t, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - w0).count(), w_solids);
     };
     std::vector<std::thread> pool;
     pool.reserve(nth - 1);
@@ -3119,6 +3185,7 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
     worker(0);
     for (std::thread &th : pool)
         th.join();
+    prof.phase("emit_lanes(parallel)");
 
     // assemble: header + concat lanes (ids globally disjoint) + containment over all proxies.
     std::FILE *out_fp = std::fopen(out_path.c_str(), "wb");
@@ -3162,6 +3229,7 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
     std::fwrite(foot, 1, std::strlen(foot), out_fp);
     std::fclose(out_fp);
     std::filesystem::remove_all(tdir);
+    prof.phase("assemble+write");
     return fs;
 }
 
@@ -3246,10 +3314,13 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
     using adacpp::ngeom::NgeomRoot;
     using adacpp::step_emit::StepBrepEmitter;
     adacpp::ifc_emit::FileStats fs;
+    adacpp::prof::StepProfiler prof("stream_step_to_step");
     auto idx = adacpp::step::StreamIndex::from_file(in_path);
+    prof.phase("scan_index");
     adacpp::step::Resolver master(idx);
     master.build_metadata(idx.lists);
     fs.unit_scale = master.unit_scale();
+    prof.phase("metadata");
     std::vector<long> roots(idx.lists.roots.begin(), idx.lists.roots.end());
     if (max_solids > 0 && (long) roots.size() > max_solids)
         roots.resize(max_solids);
@@ -3263,6 +3334,7 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
         for (size_t i = 0; i < cost.size(); ++i)
             roots[i] = cost[i].second;
     }
+    prof.phase("lpt_order");
     const long K = 13;
     std::atomic<long> id_counter{K + 1};
     int nth = num_threads > 0 ? num_threads : (int) adacpp::effective_concurrency();
@@ -3288,6 +3360,11 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
     std::atomic<size_t> next{0};
     std::atomic<long> solids_in{0};
     auto worker = [&](int t) {
+        // All profiling costs vanish when ADACPP_STEP_PROFILE is unset: prof.solid()
+        // early-returns on one bool, and the per-thread timestamps are guarded here.
+        const bool prof_on = prof.on();
+        auto w0 = prof_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        size_t w_solids = 0;
         adacpp::step::Resolver r(idx);
         r.copy_metadata_from(master);
         Lane &L = lanes[t];
@@ -3305,6 +3382,8 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
                 break;
             NgeomRoot root = r.resolve_root(roots[i]);
             solids_in.fetch_add(1, std::memory_order_relaxed);
+            prof.solid(root.faces.size());
+            ++w_solids;
             // One baked part per instance (or one identity part when flat).
             size_t ninst = root.transforms.empty() ? 1 : root.transforms.size();
             bool any = false;
@@ -3359,6 +3438,9 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
         flush(true);
         std::fclose(L.fp);
         L.fp = nullptr;
+        if (prof_on)
+            prof.thread_done(
+                t, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - w0).count(), w_solids);
     };
     std::vector<std::thread> pool;
     pool.reserve(nth - 1);
@@ -3367,6 +3449,7 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
     worker(0);
     for (std::thread &th : pool)
         th.join();
+    prof.phase("emit_lanes(parallel)");
     std::FILE *out_fp = std::fopen(out_path.c_str(), "wb");
     if (!out_fp) {
         std::filesystem::remove_all(tdir);
@@ -3398,6 +3481,7 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
     std::fwrite(foot, 1, std::strlen(foot), out_fp);
     std::fclose(out_fp);
     std::filesystem::remove_all(tdir);
+    prof.phase("assemble+write");
     return fs;
 }
 
@@ -3560,7 +3644,9 @@ static adacpp::ifc_emit::FileStats write_ifc_to_step_impl(const std::string &in_
     using adacpp::ngeom::NgeomRoot;
     using adacpp::step_emit::StepBrepEmitter;
     adacpp::ifc_emit::FileStats fs;
+    adacpp::prof::StepProfiler prof("stream_ifc_to_step");
     auto idx = adacpp::step::StreamIndex::from_file(in_path);
+    prof.phase("scan_index");
     if (!idx.ok())
         return fs;
     adacpp::ifc_read::IfcResolver r(idx);
@@ -3569,6 +3655,7 @@ static adacpp::ifc_emit::FileStats write_ifc_to_step_impl(const std::string &in_
     if (max_solids > 0 && (long) roots.size() > max_solids)
         roots.resize(max_solids);
     fs.products_total = (long) roots.size();
+    prof.phase("metadata");
     std::FILE *fp = std::fopen(out_path.c_str(), "wb");
     if (!fp)
         return fs;
@@ -3590,6 +3677,7 @@ static adacpp::ifc_emit::FileStats write_ifc_to_step_impl(const std::string &in_
             continue;
         }
         ++fs.solids_in;
+        prof.solid(root.faces.size());
         size_t ninst = root.transforms.empty() ? 1 : root.transforms.size();
         bool any = false;
         for (size_t k = 0; k < ninst; ++k) {
@@ -3630,10 +3718,12 @@ static adacpp::ifc_emit::FileStats write_ifc_to_step_impl(const std::string &in_
             ++fs.solids_out;
         flush(false);
     }
+    prof.phase("resolve+emit");
     const char *foot = "ENDSEC;\nEND-ISO-10303-21;\n";
     buf += foot;
     flush(true);
     std::fclose(fp);
+    prof.phase("write_tail");
     return fs;
 }
 
