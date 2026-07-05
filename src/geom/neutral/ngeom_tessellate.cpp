@@ -776,9 +776,18 @@ bool tessellate_unbounded(const Surface &s, const TessParams &tp, bool same_sens
         v1 = TWO_PI;
     } else if (const auto *b = dynamic_cast<const BSplineSurface *>(&s)) {
         b->domain(u0, u1, v0, v1);
+        // Full-domain B-spline via the knot-span grid + deflection refinement (budgeted),
+        // NOT the raw parameter-step grid below: u/v parameter scales are unrelated, and
+        // `dv = min(v_step, du)` explodes when one span is degenerate. Real case (Valve
+        // Hall, a 6-face 'DC Voltage Divider' body): a slit-bounded deg-7x7 patch with
+        // u-domain 6.5e-8 wide clamped dv to 6.5e-8 over v-range 0.5 -> nv = 7.8M rows
+        // -> 62.4M triangles from ONE face, 114 s of a 123 s conversion.
+        return tessellate_uv_grid(s, u0, u1, v0, v1, tp, same_sense, mesh);
     } else {
         return false;
     }
+    // Angular parameter grid for the closed quadrics (u/v are both angles here, so the
+    // isotropy clamp is sound).
     double du = s.u_step(tp.deflection, tp.max_angle);
     double dv = std::min(s.v_step(tp.deflection, tp.max_angle), du);
     int nu = std::max(4, (int) std::ceil((u1 - u0) / du));
@@ -1773,6 +1782,35 @@ static void tessellate_one_root(const NgeomRoot &root, const TessParams &tp, Tes
                     ++nnull;
             std::fprintf(stderr, "FDBG ROOT id=%s faces=%zu null=%zu\n", root.id.c_str(), root.faces.size(), nnull);
         }
+        // Face-parallel path for a single HUGE face-set root (tp.threads > 1): one
+        // 61k-face solid otherwise pins a lone worker for the whole conversion tail
+        // (469826: 54 s on one thread while the other three idle after 20 s). Faces
+        // are independent (each tessellate_face builds its own libtess2 tessellator);
+        // per-face local meshes merged in face order keep the output identical to
+        // the serial loop. The 64-face floor keeps small solids on the cheap path.
+        if (tp.threads > 1 && root.faces.size() >= 64) {
+            const size_t n = root.faces.size();
+            std::vector<TessMesh> locals(n);
+            std::atomic<size_t> next{0};
+            TessParams tpl = tp;
+            tpl.threads = 1; // no nested pools inside a face
+            unsigned nt = std::min<unsigned>((unsigned) tp.threads, (unsigned) n);
+            std::vector<std::thread> pool;
+            pool.reserve(nt - 1);
+            auto face_worker = [&]() {
+                for (size_t i = next.fetch_add(1); i < n; i = next.fetch_add(1))
+                    if (root.faces[i])
+                        tessellate_face(*root.faces[i], tpl, locals[i]);
+            };
+            for (unsigned t = 1; t < nt; ++t)
+                pool.emplace_back(face_worker);
+            face_worker();
+            for (std::thread &th : pool)
+                th.join();
+            for (const TessMesh &lm : locals)
+                append_mesh(out, lm);
+            return;
+        }
         for (const auto &face : root.faces)
             if (face)
                 tessellate_face(*face, tp, out);
@@ -1802,12 +1840,14 @@ TessMesh tessellate_doc(const NgeomDoc &doc, const TessParams &tp) {
     std::vector<TessMesh> locals(roots.size());
     std::atomic<size_t> next{0};
     unsigned nthreads = std::min<unsigned>(want, (unsigned) roots.size());
+    TessParams tp1 = tp;
+    tp1.threads = 1; // roots already saturate the pool — no nested face pools per root
     std::vector<std::thread> pool;
     pool.reserve(nthreads);
     for (unsigned t = 0; t < nthreads; ++t)
         pool.emplace_back([&]() {
             for (size_t i = next.fetch_add(1); i < roots.size(); i = next.fetch_add(1))
-                tessellate_one_root(roots[i], tp, locals[i]);
+                tessellate_one_root(roots[i], tp1, locals[i]);
         });
     for (std::thread &th : pool)
         th.join();

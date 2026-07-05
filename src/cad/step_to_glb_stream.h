@@ -65,16 +65,35 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
     // LPT scheduling: order roots heaviest-first (by a cheap face-count proxy, no geometry built) so
     // the big solids start while every thread is still busy — the dynamic queue then fills the tail
     // with small ones instead of one thread chewing a giant solid alone at the end.
+    //
+    // HUGE roots (face count >= threshold) go further: LPT can start them early, but a single
+    // 61k-face solid still pins ONE worker for the whole conversion (469826: one solid busy 54 s
+    // while the other threads idle after 20 s). Those roots — a prefix of the sorted order — are
+    // processed FIRST, one at a time, with tessellate_doc's face-level pool using every thread.
     std::vector<long> roots(idx.lists.roots.begin(), idx.lists.roots.end());
+    size_t n_huge = 0;
     if (nthreads > 1) {
+        constexpr size_t HUGE_FACES = 2048;
         std::vector<std::pair<size_t, long>> cost;
         cost.reserve(roots.size());
-        for (long sid : roots)
-            cost.emplace_back(master.solid_face_count(sid), sid);
+        size_t total_faces = 0;
+        for (long sid : roots) {
+            size_t fc = master.solid_face_count(sid);
+            total_faces += fc;
+            cost.emplace_back(fc, sid);
+        }
         master.clear_geom_cache();
         std::sort(cost.begin(), cost.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
         for (size_t i = 0; i < cost.size(); ++i)
             roots[i] = cost[i].second;
+        // Tail-dominance test, not absolute size: phase A serializes resolve between its
+        // face-pool bursts, so routing merely-large solids through it SLOWS a well-balanced
+        // file (crane: 7291 solids, many 2-4k faces, pool efficiency already 3.5x -> phase A
+        // cost it 26%). Only a root bigger than a thread's fair share of the whole file can
+        // outlast the pool no matter how LPT schedules it.
+        const size_t fair_share = total_faces / (size_t) nthreads;
+        while (n_huge < cost.size() && cost[n_huge].first >= HUGE_FACES && cost[n_huge].first >= fair_share)
+            ++n_huge;
         prof.phase("lpt_order");
     }
 
@@ -101,11 +120,87 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
             std::deque<adacpp::glb::GlbSpillWriter> lanes;
             for (int t = 0; t < nthreads; ++t)
                 lanes.emplace_back(spill, t);
-            std::atomic<size_t> next{0};
-            // Each worker pulls roots off a shared counter (dynamic balancing handles the dense-solid
-            // long tail), resolving with its OWN caches + a copy of the shared metadata, into its lane.
+            std::atomic<size_t> next{n_huge};
+            const bool tprof = prof.on(); // gate ALL per-solid clock reads -> zero cost in prod
+            // One root: resolve with the caller's resolver, tessellate (``tpp.threads`` > 1 runs
+            // tessellate_doc's face-level pool), bake + spill into the caller's lane. Shared by the
+            // huge-prefix phase and the per-solid worker pool.
+            auto process_root = [&](adacpp::step::Resolver &r, adacpp::glb::GlbSpillWriter &lane, size_t i,
+                                    const TessParams &tpp) {
+                NgeomRoot root = r.resolve_root(roots[i]);
+                if (root.id.empty())
+                    return;
+                size_t fc = root.faces.size();
+                NgeomDoc one;
+                one.roots.push_back(std::move(root));
+                std::chrono::steady_clock::time_point tt0;
+                if (tprof)
+                    tt0 = std::chrono::steady_clock::now();
+                TessMesh tm = tessellate_doc(one, tpp);
+                if (tprof && prof.timing())
+                    prof.solid_timed(
+                        roots[i], fc,
+                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tt0).count());
+                if (tm.indices.empty())
+                    return;
+                prof.solid(tm.indices.size() / 3);
+                const NgeomRoot &rr = one.roots[0];
+                adacpp::glb::GlbSolid gs;
+                gs.positions = std::move(tm.positions);
+                gs.indices = std::move(tm.indices);
+                gs.color = {rr.cr, rr.cg, rr.cb, rr.ca}; // grey default when !has_color
+                gs.transforms = rr.transforms;
+                gs.id = rr.id; // fallback leaf name
+                // gid = the solid's own product name (last level of its assembly path);
+                // the writer names each placement gid / gid/k+1. Fall back to the solid name.
+                if (!rr.instance_paths.empty() && !rr.instance_paths[0].empty())
+                    gs.product_name = rr.instance_paths[0].back().second;
+                gs.instance_paths = rr.instance_paths; // all placements, parallel to transforms
+                // Convert the file's length unit (e.g. mm) to metres — adapy's default unit,
+                // and what the viewer assumes. Without this the GLB is e.g. 1000x oversized,
+                // which (besides looking wrong) defeats the viewer's edge-overlay spatial-hash
+                // vertex welding (only valid for coordinates within ~1e5 units) -> its weldMap
+                // overflows V8's 2^24 Map cap ("Map maximum size exceeded"). Scale local
+                // positions + each instance transform's translation; rotation is unitless.
+                const double usc = r.unit_scale();
+                if (usc != 1.0) {
+                    const float s = (float) usc;
+                    for (float &p : gs.positions)
+                        p *= s;
+                    for (auto &M : gs.transforms) {
+                        M[12] *= s;
+                        M[13] *= s;
+                        M[14] *= s;
+                    }
+                }
+                lane.add(gs); // spilled to disk immediately
+                nwritten.fetch_add(1, std::memory_order_relaxed);
+            };
+            // Phase A — the huge prefix, one root at a time BEFORE the pool starts: every thread
+            // works the same solid's faces (tessellate_doc face pool), so a lone 61k-face monster
+            // no longer pins one worker for the conversion's whole tail.
+            if (n_huge > 0) {
+                TessParams tph = tp;
+                tph.threads = nthreads;
+                adacpp::step::Resolver r0(idx);
+                r0.copy_metadata_from(master);
+                double busy_ms = 0;
+                std::chrono::steady_clock::time_point b0;
+                if (tprof)
+                    b0 = std::chrono::steady_clock::now();
+                for (size_t i = 0; i < n_huge; ++i) {
+                    process_root(r0, lanes[0], i, tph);
+                    r0.clear_geom_cache();
+                }
+                if (tprof)
+                    busy_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - b0).count();
+                prof.thread_done(-1, busy_ms, n_huge); // tid -1 = the huge-prefix phase
+                adacpp::mem_trim();
+            }
+            // Phase B — each worker pulls the remaining roots off the shared counter (dynamic
+            // balancing handles the dense-solid long tail), resolving with its OWN caches + a copy
+            // of the shared metadata, into its lane.
             auto worker = [&](int t) {
-                const bool tprof = prof.on(); // gate ALL per-solid clock reads -> zero cost in prod
                 adacpp::step::Resolver r(idx);
                 r.copy_metadata_from(master);
                 adacpp::glb::GlbSpillWriter &lane = lanes[t];
@@ -118,55 +213,7 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
                     std::chrono::steady_clock::time_point b0;
                     if (tprof)
                         b0 = std::chrono::steady_clock::now();
-                    NgeomRoot root = r.resolve_root(roots[i]);
-                    if (!root.id.empty()) {
-                        size_t fc = root.faces.size();
-                        NgeomDoc one;
-                        one.roots.push_back(std::move(root));
-                        std::chrono::steady_clock::time_point tt0;
-                        if (tprof)
-                            tt0 = std::chrono::steady_clock::now();
-                        TessMesh tm = tessellate_doc(one, tp);
-                        if (tprof && prof.timing())
-                            prof.solid_timed(
-                                roots[i], fc,
-                                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tt0)
-                                    .count());
-                        if (!tm.indices.empty()) {
-                            prof.solid(tm.indices.size() / 3);
-                            const NgeomRoot &rr = one.roots[0];
-                            adacpp::glb::GlbSolid gs;
-                            gs.positions = std::move(tm.positions);
-                            gs.indices = std::move(tm.indices);
-                            gs.color = {rr.cr, rr.cg, rr.cb, rr.ca}; // grey default when !has_color
-                            gs.transforms = rr.transforms;
-                            gs.id = rr.id; // fallback leaf name
-                            // gid = the solid's own product name (last level of its assembly path);
-                            // the writer names each placement gid / gid/k+1. Fall back to the solid name.
-                            if (!rr.instance_paths.empty() && !rr.instance_paths[0].empty())
-                                gs.product_name = rr.instance_paths[0].back().second;
-                            gs.instance_paths = rr.instance_paths; // all placements, parallel to transforms
-                            // Convert the file's length unit (e.g. mm) to metres — adapy's default unit,
-                            // and what the viewer assumes. Without this the GLB is e.g. 1000x oversized,
-                            // which (besides looking wrong) defeats the viewer's edge-overlay spatial-hash
-                            // vertex welding (only valid for coordinates within ~1e5 units) -> its weldMap
-                            // overflows V8's 2^24 Map cap ("Map maximum size exceeded"). Scale local
-                            // positions + each instance transform's translation; rotation is unitless.
-                            const double usc = r.unit_scale();
-                            if (usc != 1.0) {
-                                const float s = (float) usc;
-                                for (float &p : gs.positions)
-                                    p *= s;
-                                for (auto &M : gs.transforms) {
-                                    M[12] *= s;
-                                    M[13] *= s;
-                                    M[14] *= s;
-                                }
-                            }
-                            lane.add(gs); // spilled to disk immediately
-                            nwritten.fetch_add(1, std::memory_order_relaxed);
-                        }
-                    }
+                    process_root(r, lane, i, tp);
                     r.clear_geom_cache();
                     if (tprof)
                         busy_ms +=

@@ -98,7 +98,14 @@ public:
     using clock = std::chrono::steady_clock;
     explicit StepProfiler(const char *label)
         : on_(std::getenv("ADACPP_STEP_PROFILE") != nullptr),
-          timing_(std::getenv("ADACPP_STEP_SOLID_TIMING") != nullptr), label_(label) {
+          // Per-solid timing rides along whenever profiling is on: the cost is two
+          // steady_clock reads + one 24-byte row per solid behind the mutex prof.solid()
+          // already takes — negligible against a solid's resolve+tessellate. It is what
+          // identifies the monster solid of a slow conversion without a local re-run;
+          // ADACPP_STEP_SOLID_TIMING still enables it standalone.
+          timing_(std::getenv("ADACPP_STEP_PROFILE") != nullptr ||
+                  std::getenv("ADACPP_STEP_SOLID_TIMING") != nullptr),
+          label_(label) {
         on_ = on_ || timing_;
         if (on_) {
             t0_ = last_ = clock::now();
@@ -246,6 +253,28 @@ public:
                          ",\"busy_ms\":" + fmt_num(threads_[i].busy_ms) + "}";
                 }
                 j += "]";
+            }
+            if (!timed_.empty()) {
+                // The 10 slowest solids (>= 100 ms — sub-100ms rows are never the story), so the
+                // audit's convert_meta names the monster solid without a local re-run.
+                std::vector<size_t> order(timed_.size());
+                for (size_t i = 0; i < order.size(); ++i)
+                    order[i] = i;
+                std::sort(order.begin(), order.end(),
+                          [&](size_t a, size_t b) { return timed_[a].ms > timed_[b].ms; });
+                std::string rows;
+                size_t emitted = 0;
+                for (size_t r = 0; r < order.size() && emitted < 10; ++r) {
+                    const SolidTime &ts = timed_[order[r]];
+                    if (ts.ms < 100.0)
+                        break;
+                    if (emitted++)
+                        rows += ",";
+                    rows += "{\"id\":" + std::to_string(ts.id) + ",\"faces\":" + std::to_string(ts.faces) +
+                            ",\"ms\":" + fmt_num(ts.ms) + "}";
+                }
+                if (!rows.empty())
+                    j += ",\"slowest_solids\":[" + rows + "]";
             }
             j += "}";
             std::fprintf(stderr, "[STEPPROF-JSON] %s\n", j.c_str());
