@@ -1530,6 +1530,8 @@ void tessellate_extrusion(const ExtrusionN &ex, const TessParams &tp, Mesh &mesh
     const Frame &F = ex.frame;
     const Vec3 d = ex.direction * ex.depth;
 
+    const auto cp0 = mesh.checkpoint(); // this extrusion's triangle range starts here
+
     std::vector<std::vector<Uv>> loops_uv;
     for (const FaceBoundN &b : ex.profile->bounds) {
         if (!b.loop)
@@ -1569,6 +1571,28 @@ void tessellate_extrusion(const ExtrusionN &ex, const TessParams &tp, Mesh &mesh
             Vec3 t1 = F.to_world(p1.x + d.x, p1.y + d.y, p1.z + d.z);
             emit_tri(mesh, b0, b1, t1);
             emit_tri(mesh, b0, t1, t0);
+        }
+    }
+
+    // Outward-facing normals: emit_tri derives each normal from its winding, so if the profile
+    // loop's discretized orientation is CW the whole extrusion comes out inside-out (negative
+    // signed volume) and shades dark. Flip every triangle in this extrusion's range when that
+    // happens — same guard as tessellate_revolve, robust to the incoming loop orientation.
+    {
+        auto &pos = mesh.m.positions;
+        auto &nrm = mesh.m.normals;
+        const size_t vbeg = cp0[0] / 3, vend = pos.size() / 3;
+        auto Pv = [&](size_t k) -> Vec3 { return {pos[3 * k], pos[3 * k + 1], pos[3 * k + 2]}; };
+        double sv = 0.0;
+        for (size_t k = vbeg; k + 2 < vend; k += 3)
+            sv += Pv(k).dot(Pv(k + 1).cross(Pv(k + 2)));
+        if (sv < 0.0) {
+            for (size_t k = vbeg; k + 2 < vend; k += 3) {
+                for (int c = 0; c < 3; ++c)
+                    std::swap(pos[3 * (k + 1) + c], pos[3 * (k + 2) + c]);
+                for (int c = 0; c < 9; ++c)
+                    nrm[3 * k + c] = -nrm[3 * k + c];
+            }
         }
     }
 }
