@@ -256,7 +256,12 @@ static void append_shape_triangles(const TopoDS_Shape &shape_in, double linear_d
         const double dz = zmax - zmin;
         linear_deflection = std::sqrt(dx * dx + dy * dy + dz * dz) * 0.05;
     }
-    BRepMesh_IncrementalMesh(shape, linear_deflection);
+    // Angular deflection 0.2 rad (~11.5deg), not OCC's loose 0.5 default: a large-radius
+    // arc (e.g. a curved beam swept on a 7 m radius) otherwise facets into a handful of
+    // segments — the linear deflection alone can't keep it smooth because the sag tolerance
+    // scales with radius. Caps the segment span so revolves/pipes/quadrics read as curved.
+    BRepMesh_IncrementalMesh(shape, linear_deflection, /*relative=*/Standard_False,
+                             /*angular=*/0.2, /*parallel=*/Standard_True);
 
     // BRepMesh grids nothing when a face is missing its 2D p-curves (the parametric
     // representation it triangulates against) — common for imported B-reps: a bspline/NURBS
@@ -278,7 +283,8 @@ static void append_shape_triangles(const TopoDS_Shape &shape_in, double linear_d
             const TopoDS_Shape fixed = sf.Shape();
             if (!fixed.IsNull()) {
                 shape = fixed;
-                BRepMesh_IncrementalMesh(shape, linear_deflection);
+                BRepMesh_IncrementalMesh(shape, linear_deflection, /*relative=*/Standard_False,
+                                         /*angular=*/0.2, /*parallel=*/Standard_True);
             }
         }
     }
@@ -1047,9 +1053,11 @@ nb::bytes write_glb_bytes_impl(const ShapeHandle &sh, double linear_deflection) 
         linear_deflection = 0.1;
 
     // RWGltf needs a triangulation per face; mesh in-place on the shape.
+    // Angular 0.2 rad (~11.5deg) rather than OCC's loose 0.5 default so large-radius
+    // arcs (curved beams, big pipes) stay smooth — see append_shape_triangles.
     BRepMesh_IncrementalMesh(shape, linear_deflection,
                              /*relative=*/Standard_False,
-                             /*angular=*/0.5,
+                             /*angular=*/0.2,
                              /*parallel=*/Standard_True);
 
     // Wrap the shape in a CAF document — RWGltf_CafWriter consumes one.
