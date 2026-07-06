@@ -1588,11 +1588,19 @@ void tessellate_revolve(const RevolveN &rv, const TessParams &tp, Mesh &mesh) {
     const double ang = (rv.angle != 0.0) ? rv.angle : TWO_PI;
 
     std::vector<Vec3> ring;
+    std::vector<std::vector<Uv>> loops_uv; // all profile loops (outer + holes) for the end caps
     for (const FaceBoundN &b : rv.profile->bounds) {
         if (!b.loop)
             continue;
-        ring = b.loop->discretize(tp.deflection, tp.max_angle);
-        break; // outer loop; revolved profiles with holes are not expected
+        std::vector<Vec3> r = b.loop->discretize(tp.deflection, tp.max_angle);
+        std::vector<Uv> uv;
+        uv.reserve(r.size());
+        for (const Vec3 &p : r)
+            uv.push_back({p.x, p.y});
+        if (uv.size() >= 3)
+            loops_uv.push_back(std::move(uv));
+        if (ring.empty())
+            ring = std::move(r); // outer loop drives the side walls
     }
     if (ring.size() > 1 && (ring.front() - ring.back()).norm() < 1e-12)
         ring.pop_back();
@@ -1617,6 +1625,7 @@ void tessellate_revolve(const RevolveN &rv, const TessParams &tp, Mesh &mesh) {
             R[j][i] = F.to_world(pr.x, pr.y, pr.z);
         }
     }
+    const auto cp0 = mesh.checkpoint(); // this revolve's triangle range starts here
     for (int j = 0; j < nseg; ++j) {
         const auto &A = R[j];
         const auto &B = R[j + 1];
@@ -1626,8 +1635,47 @@ void tessellate_revolve(const RevolveN &rv, const TessParams &tp, Mesh &mesh) {
             emit_tri(mesh, A[i], B[i2], B[i]);
         }
     }
-    // NOTE: partial revolutions (angle < 2pi) would also need the two profile end caps; adapy's
-    // Cone/Cylinder use full revolutions, so they are not generated here yet.
+
+    // Partial revolution (angle < 2pi): cap the two open ends with the triangulated
+    // profile at th=0 and th=ang, so a swept beam is a closed solid instead of an open
+    // tube. A full turn (cylinder/cone) closes on itself and needs no caps. Mirrors
+    // tessellate_sweep's start/end-cap handling (start reversed so its normal faces out).
+    if (ang < TWO_PI - 1e-6 && !loops_uv.empty()) {
+        auto Pr = [&](double th, double u, double v) -> Vec3 {
+            Vec3 pr = rotate_about({u, v, 0.0}, axo, axd, th);
+            return F.to_world(pr.x, pr.y, pr.z);
+        };
+        Tess2Out cap = run_tess2(loops_uv, 1.0, 1.0);
+        if (cap.ok) {
+            for (const Tri &t : cap.tris) {
+                const Uv &u0 = cap.verts[t[0]], &u1 = cap.verts[t[1]], &u2 = cap.verts[t[2]];
+                emit_tri(mesh, Pr(0.0, u0[0], u0[1]), Pr(0.0, u2[0], u2[1]), Pr(0.0, u1[0], u1[1]));
+                emit_tri(mesh, Pr(ang, u0[0], u0[1]), Pr(ang, u1[0], u1[1]), Pr(ang, u2[0], u2[1]));
+            }
+        }
+    }
+
+    // Outward-facing normals: emit_tri derives each normal from its winding, so if the
+    // profile loop was CW the whole revolve comes out inside-out (negative signed volume)
+    // and shades dark. Flip every triangle in this revolve's range when that happens —
+    // handles walls + caps together regardless of the incoming loop orientation.
+    {
+        auto &pos = mesh.m.positions;
+        auto &nrm = mesh.m.normals;
+        const size_t vbeg = cp0[0] / 3, vend = pos.size() / 3;
+        auto Pv = [&](size_t k) -> Vec3 { return {pos[3 * k], pos[3 * k + 1], pos[3 * k + 2]}; };
+        double sv = 0.0;
+        for (size_t k = vbeg; k + 2 < vend; k += 3)
+            sv += Pv(k).dot(Pv(k + 1).cross(Pv(k + 2)));
+        if (sv < 0.0) {
+            for (size_t k = vbeg; k + 2 < vend; k += 3) {
+                for (int c = 0; c < 3; ++c)
+                    std::swap(pos[3 * (k + 1) + c], pos[3 * (k + 2) + c]);
+                for (int c = 0; c < 9; ++c)
+                    nrm[3 * k + c] = -nrm[3 * k + c];
+            }
+        }
+    }
 }
 
 // FixedReferenceSweptAreaSolid -> sweep the profile along a precomputed field of per-station frames
