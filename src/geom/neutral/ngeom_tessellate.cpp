@@ -1831,6 +1831,10 @@ void append_mesh(TessMesh &dst, const TessMesh &src) {
 
 // Tessellate ONE root's geometry into `out` (no group bookkeeping — the caller records ranges).
 static void tessellate_one_root(const NgeomRoot &root, const TessParams &tp, TessMesh &out) {
+    // Publish the model scale for this worker thread so the curvature functions (angle_step ->
+    // adaptive_max_angle) can relax density on small features without a signature change. Constant
+    // for the whole call, so setting it per root (idempotent) is safe under the root/face pools.
+    tls_model_scale() = tp.model_scale;
     if (root.extrusion) {
         Mesh m(out);
         tessellate_extrusion(*root.extrusion, tp, m);

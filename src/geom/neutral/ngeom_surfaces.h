@@ -15,8 +15,38 @@
 
 namespace adacpp::ngeom {
 
+// Model bbox diagonal for the in-flight tessellation, published per-thread so the pure
+// curvature function angle_step() can read it without threading the parameter through every
+// Surface::u_step/v_step signature. 0 => adaptive density OFF (fixed max_angle). Set once per
+// root by tessellate_one_root from TessParams::model_scale (constant across a whole call).
+inline double &tls_model_scale() {
+    static thread_local double s = 0.0;
+    return s;
+}
+
+// The angular ceiling actually applied for a surface of radius `r`. In adaptive mode
+// (model_scale>0) the fixed `max_angle` is relaxed toward a coarse cap for surfaces small
+// relative to the model: their facets are sub-pixel, so the chord-sag term already wants them
+// coarse and we simply stop the fixed angle from forcing them fine. "Small" is judged against
+// the model scale (NOT an absolute size or `defl`), so a standalone small part — where the
+// surface is a large fraction of the whole model — stays fine, while the same-radius feature
+// inside a large assembly coarsens. model_scale==0 returns max_angle unchanged.
+inline double adaptive_max_angle(double r, double max_angle) {
+    double ms = tls_model_scale();
+    if (ms <= 0.0 || r <= 1e-12)
+        return max_angle;
+    // Surfaces at/above ~1% of the model diagonal keep the fine angle; below that the ceiling
+    // ramps linearly toward a coarse cap (~40deg => >=9 facets around a full turn) as r shrinks.
+    const double r_ref = 0.01 * ms;
+    if (r >= r_ref)
+        return max_angle;
+    const double coarse_cap = std::max(max_angle, 40.0 * PI / 180.0);
+    double t = r / r_ref; // (0,1): smaller => more relaxed
+    return max_angle + (coarse_cap - max_angle) * (1.0 - t);
+}
+
 // Angular sampling step (radians) so a circular arc of radius r is approximated within chord
-// sag `defl`, clamped to [2deg, max_angle]. Ported from geom.rs angle_step — the
+// sag `defl`, clamped to [2deg, effective max_angle]. Ported from geom.rs angle_step — the
 // curvature-driven density that drives grid resolution on quadric/swept surfaces.
 inline double angle_step(double r, double defl, double max_angle) {
     if (r < 1e-12)
@@ -24,7 +54,7 @@ inline double angle_step(double r, double defl, double max_angle) {
     double ratio = clampd(1.0 - defl / r, -1.0, 1.0);
     double a = 2.0 * std::acos(ratio);
     double lo = 2.0 * PI / 180.0;
-    double hi = std::max(max_angle, lo);
+    double hi = std::max(adaptive_max_angle(r, max_angle), lo);
     return clampd(a, lo, hi);
 }
 

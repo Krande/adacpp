@@ -40,7 +40,8 @@ namespace adacpp {
 //               caller can inspect the intermediate spill files. The lane temp files inside it are
 //               still cleaned up by GlbSpillWriter's destructor; only the user-supplied dir survives.
 inline long stream_step_to_glb(const std::string &in_path, const std::string &out_path, double deflection,
-                               double angular_deg, int num_threads, bool meshopt, const std::string &spill_dir = "") {
+                               double angular_deg, int num_threads, bool meshopt, const std::string &spill_dir = "",
+                               double model_scale = 0.0) {
     using namespace adacpp::ngeom;
     adacpp::prof::StepProfiler prof("stream_step_to_glb");
 
@@ -54,6 +55,7 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
     TessParams tp;
     tp.deflection = deflection;
     tp.max_angle = angular_deg * 3.14159265358979323846 / 180.0;
+    tp.model_scale = model_scale; // >0 => adaptive per-surface density; the per-solid tpp copies inherit it
 
     // Metadata (colour/transform/path maps) once; workers copy these read-only maps.
     adacpp::step::Resolver master(idx);

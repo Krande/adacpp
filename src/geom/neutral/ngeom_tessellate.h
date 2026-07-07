@@ -22,6 +22,12 @@ struct TessParams {
                              // (serial) so callers already parallelising across roots/solids
                              // (the STEP->GLB process pool) don't oversubscribe; a single
                              // whole-model call (merge-preview generate) opts into all cores.
+    double model_scale = 0.0; // model bbox diagonal (world units). 0 => OFF: the fixed max_angle
+                              // governs every surface (explicit-global-angle mode). >0 => ADAPTIVE:
+                              // the angular ceiling is relaxed for surfaces whose radius is small
+                              // relative to model_scale (imperceptible facets), so dense assemblies
+                              // of tiny curved features (bolts/pins) don't blow the triangle budget
+                              // while large visible surfaces keep the fine max_angle.
 };
 
 struct TessMesh {

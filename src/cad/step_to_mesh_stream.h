@@ -157,7 +157,7 @@ inline void bake(const std::array<float, 16> &M, float usc, const float p[3], fl
 // Returns the number of triangles written, or -1 on I/O error.
 inline long stream_step_to_mesh(const std::string &in_path, const std::string &out_path, MeshFormat fmt,
                                 double deflection, double angular_deg, int num_threads,
-                                const std::string &spill_dir = "") {
+                                const std::string &spill_dir = "", double model_scale = 0.0) {
     using namespace adacpp::ngeom;
     static const std::array<float, 16> kIdentity = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     adacpp::prof::StepProfiler prof("stream_step_to_mesh");
@@ -170,6 +170,7 @@ inline long stream_step_to_mesh(const std::string &in_path, const std::string &o
     TessParams tp;
     tp.deflection = deflection;
     tp.max_angle = angular_deg * 3.14159265358979323846 / 180.0;
+    tp.model_scale = model_scale; // >0 => adaptive per-surface density
 
     adacpp::step::Resolver master(idx);
     master.build_metadata(idx.lists);
