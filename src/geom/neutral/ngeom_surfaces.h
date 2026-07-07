@@ -51,10 +51,16 @@ inline double adaptive_max_angle(double r, double max_angle) {
 inline double angle_step(double r, double defl, double max_angle) {
     if (r < 1e-12)
         return max_angle;
-    double ratio = clampd(1.0 - defl / r, -1.0, 1.0);
-    double a = 2.0 * std::acos(ratio);
     double lo = 2.0 * PI / 180.0;
     double hi = std::max(adaptive_max_angle(r, max_angle), lo);
+    // defl <= 0 means "angular-only, no chord-deflection constraint" — use the coarsest allowed
+    // step (max_angle, curvature-relaxed). The deflection formula gives a = 2*acos(1) = 0 for
+    // defl=0, which clamped UP to the 2-degree floor instead — so every quadric was tessellated at
+    // 2 degrees (5x finer than max_angle), e.g. a small torus blowing up to ~29k triangles.
+    if (defl <= 0.0)
+        return hi;
+    double ratio = clampd(1.0 - defl / r, -1.0, 1.0);
+    double a = 2.0 * std::acos(ratio);
     return clampd(a, lo, hi);
 }
 
