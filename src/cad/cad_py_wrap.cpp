@@ -3369,7 +3369,9 @@ static std::string step_header_block(double unit_scale) {
 // Emit one solid instance (geometry baked by `em`'s transform) as a self-contained AP242 part:
 // MANIFOLD_SOLID_BREP / EXTRUDED_AREA_SOLID -> (ADVANCED_BREP_)SHAPE_REPRESENTATION (placement #13,
 // context #9) -> PRODUCT chain -> SHAPE_DEFINITION_REPRESENTATION. Returns true if a solid was emitted.
-static bool emit_solid_step(adacpp::step_emit::StepBrepEmitter &em, std::string &buf,
+// Returns the leaf PRODUCT_DEFINITION id (0 on failure) so the caller can hang a NEXT_ASSEMBLY_USAGE_
+// OCCURRENCE assembly tree off it; treat nonzero as success.
+static long emit_solid_step(adacpp::step_emit::StepBrepEmitter &em, std::string &buf,
                             const adacpp::ngeom::NgeomRoot &root, long sid) {
     std::string nm = root.id.empty() ? ("solid_" + std::to_string(sid)) : adacpp::ifc_emit::ifc_str(root.id);
     long solid = 0;
@@ -3398,14 +3400,56 @@ static bool emit_solid_step(adacpp::step_emit::StepBrepEmitter &em, std::string 
         solid = em.emit_manifold_brep(buf, root, nm);
     }
     if (!solid)
-        return false;
+        return 0;
     long rep = em.emit_entity(buf, std::string(rep_kw) + "('" + nm + "',(#13,#" + std::to_string(solid) + "),#9)");
     long product = em.emit_entity(buf, "PRODUCT('" + nm + "','" + nm + "','',(#3))");
     long pdf = em.emit_entity(buf, "PRODUCT_DEFINITION_FORMATION('','',#" + std::to_string(product) + ")");
     long pd = em.emit_entity(buf, "PRODUCT_DEFINITION('design','',#" + std::to_string(pdf) + ",#4)");
     long pds = em.emit_entity(buf, "PRODUCT_DEFINITION_SHAPE('','',#" + std::to_string(pd) + ")");
     em.emit_entity(buf, "SHAPE_DEFINITION_REPRESENTATION(#" + std::to_string(pds) + ",#" + std::to_string(rep) + ")");
-    return true;
+    return pd;
+}
+
+// Emit a NEXT_ASSEMBLY_USAGE_OCCURRENCE assembly tree from per-leaf (product_definition, path): each
+// intermediate path level becomes an assembly PRODUCT_DEFINITION, linked to its children (assemblies or
+// leaf solids) by a NAUO — the STEP counterpart of emit_spatial_tree, so the IFC/STEP hierarchy round-
+// trips. Assembly nodes carry no own shape (grouping only); placements stay baked into the leaf geometry.
+using IfcPath2 = std::vector<std::pair<int, std::string>>;
+static void emit_step_assembly_tree(adacpp::step_emit::StepBrepEmitter &em, std::string &buf,
+                                    const std::vector<long> &leaf_pds, const std::vector<IfcPath2> &paths) {
+    using adacpp::ifc_emit::ifc_str;
+    std::map<std::vector<int>, long> asm_pd; // rep-id prefix -> assembly PRODUCT_DEFINITION id
+    auto asm_node = [&](const std::vector<int> &prefix, const std::string &name) -> long {
+        auto it = asm_pd.find(prefix);
+        if (it != asm_pd.end())
+            return it->second;
+        std::string nm = name.empty() ? ("asm_" + std::to_string(prefix.back())) : ifc_str(name);
+        long product = em.emit_entity(buf, "PRODUCT('" + nm + "','" + nm + "','',(#3))");
+        long pdf = em.emit_entity(buf, "PRODUCT_DEFINITION_FORMATION('','',#" + std::to_string(product) + ")");
+        long pd = em.emit_entity(buf, "PRODUCT_DEFINITION('design','',#" + std::to_string(pdf) + ",#4)");
+        asm_pd[prefix] = pd;
+        return pd;
+    };
+    auto nauo = [&](long parent_pd, long child_pd, const std::string &nm) {
+        em.emit_entity(buf, "NEXT_ASSEMBLY_USAGE_OCCURRENCE('','" + nm + "','',#" + std::to_string(parent_pd) + ",#" +
+                                std::to_string(child_pd) + ",$)");
+    };
+    for (size_t i = 0; i < leaf_pds.size(); ++i) {
+        if (!leaf_pds[i])
+            continue;
+        const IfcPath2 &path = (i < paths.size()) ? paths[i] : IfcPath2{};
+        long parent_pd = 0;
+        std::vector<int> prefix;
+        for (size_t d = 0; d + 1 < path.size(); ++d) {
+            prefix.push_back(path[d].first);
+            long apd = asm_node(prefix, path[d].second);
+            if (parent_pd)
+                nauo(parent_pd, apd, path[d].second);
+            parent_pd = apd;
+        }
+        if (parent_pd) // hang the leaf solid under its deepest assembly (top-level leaves stay roots)
+            nauo(parent_pd, leaf_pds[i], path.empty() ? "" : path.back().second);
+    }
 }
 
 // Native parallel STEP->STEP (AP242). Mirrors the parallel IFC writer: shared StreamIndex, per-worker
@@ -3774,6 +3818,8 @@ static adacpp::ifc_emit::FileStats write_ifc_to_step_impl(const std::string &in_
             buf.clear();
         }
     };
+    std::vector<long> leaf_pds;     // per emitted solid: its PRODUCT_DEFINITION id (for the NAUO tree)
+    std::vector<IfcPath2> leaf_paths; // parallel: the solid's assembly path
     for (long pid : roots) {
         NgeomRoot root = r.resolve_product(pid);
         if (root.faces.empty() && !root.extrusion && !root.revolve && !root.boolean && !root.sweep && !root.sphere) {
@@ -3804,9 +3850,12 @@ static adacpp::ifc_emit::FileStats write_ifc_to_step_impl(const std::string &in_
                 tfp = tf;
             }
             StepBrepEmitter em(nid, tfp, deflection, angular_deg);
-            if (emit_solid_step(em, buf, root, pid)) {
+            long pd = emit_solid_step(em, buf, root, pid);
+            if (pd) {
                 nid = em.current_id();
                 any = true;
+                leaf_pds.push_back(pd);
+                leaf_paths.push_back(k < root.instance_paths.size() ? root.instance_paths[k] : IfcPath2{});
                 const auto &s = em.stats();
                 fs.geom.faces_in += s.faces_in;
                 fs.geom.faces_out += s.faces_out;
@@ -3823,6 +3872,9 @@ static adacpp::ifc_emit::FileStats write_ifc_to_step_impl(const std::string &in_
         flush(false);
     }
     prof.phase("resolve+emit");
+    // NAUO assembly tree over all emitted leaves (STEP counterpart of the IFC spatial tree).
+    StepBrepEmitter emtree(nid, nullptr, deflection, angular_deg);
+    emit_step_assembly_tree(emtree, buf, leaf_pds, leaf_paths);
     const char *foot = "ENDSEC;\nEND-ISO-10303-21;\n";
     buf += foot;
     flush(true);
