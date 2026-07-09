@@ -32,7 +32,7 @@ public:
             // procedural root carries real geometry — previously only CONNECTED_FACE_SET was emitted,
             // so such a root became an empty buffer and the IfcNgeomStream consumer dropped it.
             int gi = -1;
-            if (root.extrusion || root.revolve || root.boolean || root.sphere)
+            if (root.extrusion || root.revolve || root.boolean || root.sphere || root.sweep)
                 gi = solid_root(root);
             if (gi < 0) {
                 std::vector<uint8_t> body;

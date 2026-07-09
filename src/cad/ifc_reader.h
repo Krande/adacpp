@@ -801,7 +801,7 @@ private:
             mixed_ = true;
             return false;
         }
-        if ((root.extrusion || root.revolve || root.boolean) && solid_src_ != id) {
+        if ((root.extrusion || root.revolve || root.boolean || root.sweep) && solid_src_ != id) {
             mixed_ = true;
             return false;
         }
@@ -809,7 +809,7 @@ private:
         return true;
     }
     static bool solid_ok(const SolidItemN &it) {
-        return it.extrusion || it.revolve || it.boolean || !it.faces.empty();
+        return it.extrusion || it.revolve || it.boolean || it.sweep || !it.faces.empty();
     }
     // Resolve an IfcSolidModel / IfcCsgPrimitive3D / IfcBooleanResult / IfcHalfSpaceSolid into a
     // SolidItemN (the boolean-operand form). `ref*` = a sibling-operand bbox to bound a half-space.
@@ -954,8 +954,145 @@ private:
         } else if (iequals(t, "IFCADVANCEDFACE") || iequals(t, "IFCFACESURFACE") || iequals(t, "IFCFACE")) {
             if (auto f = face(id)) // a bare face as the representation item
                 out.faces.push_back(f);
+        } else if (iequals(t, "IFCSWEPTDISKSOLID")) {
+            // (Directrix, Radius, InnerRadius, StartParam, EndParam) — a disk/annulus swept along the
+            // 3D directrix (rebar, pipes). Trim params ignored (full directrix).
+            std::vector<Vec3> dp = directrix_points(ref_arg(*in, 0));
+            double radius = ad(in, 1);
+            double inner = (in->args.size() > 2 && (in->args[2].kind == adacpp::step::Kind::Real ||
+                                                    in->args[2].kind == adacpp::step::Kind::Int))
+                               ? in->args[2].as_double()
+                               : 0.0;
+            out.sweep = mk_swept_disk(dp, radius, inner);
         }
         return out;
+    }
+    // A 3-point 3D circular arc (fit the plane through the points, circumcircle, sweep a->b via m).
+    static std::vector<Vec3> arc_poly_3d(const Vec3 &a, const Vec3 &m, const Vec3 &b) {
+        Vec3 ab = b - a, am = m - a, nrm = ab.cross(am);
+        if (nrm.norm() < 1e-12)
+            return {a, m, b};
+        Vec3 n = nrm.normalized();
+        double abab = ab.dot(ab), amam = am.dot(am), abam = ab.dot(am);
+        double d = 2.0 * (abab * amam - abam * abam);
+        if (std::abs(d) < 1e-18)
+            return {a, m, b};
+        Vec3 c = a + ab * ((amam * (abab - abam)) / d) + am * ((abab * (amam - abam)) / d);
+        double r = (a - c).norm();
+        Vec3 u = (a - c).normalized(), v = n.cross(u);
+        auto ang = [&](const Vec3 &p) { Vec3 rp = p - c; return std::atan2(rp.dot(v), rp.dot(u)); };
+        double ta = ang(a), tm = ang(m), tb = ang(b);
+        auto wrap = [](double x) {
+            while (x < 0)
+                x += 2 * PI;
+            while (x >= 2 * PI)
+                x -= 2 * PI;
+            return x;
+        };
+        double dab = wrap(tb - ta), dam = wrap(tm - ta);
+        double sweep = (dam <= dab) ? dab : dab - 2 * PI;
+        int ns = std::max(2, (int) std::ceil(std::abs(sweep) / (2 * PI) * 64));
+        std::vector<Vec3> out;
+        out.reserve(ns + 1);
+        for (int i = 0; i <= ns; ++i) {
+            double th = ta + sweep * i / ns;
+            out.push_back(c + u * (r * std::cos(th)) + v * (r * std::sin(th)));
+        }
+        return out;
+    }
+    // A 3D directrix curve -> ordered polyline. Covers IfcPolyline, IfcIndexedPolyCurve (3D, arc-aware),
+    // and IfcCompositeCurve (chained parent curves). Other bases yield empty (-> the sweep is skipped).
+    std::vector<Vec3> directrix_points(long cid) {
+        const Instance *in = inst(cid);
+        if (!in)
+            return {};
+        std::string_view t = in->type;
+        auto push = [](std::vector<Vec3> &pts, const Vec3 &p) {
+            if (pts.empty() || (pts.back() - p).norm() > 1e-9)
+                pts.push_back(p);
+        };
+        if (iequals(t, "IFCPOLYLINE"))
+            return point_list(in->args.empty() ? Value{} : in->args[0]);
+        if (iequals(t, "IFCINDEXEDPOLYCURVE")) {
+            std::vector<Vec3> coords = point_list_3d(ref_arg(*in, 0)), pts;
+            auto at = [&](long i) { return (i >= 1 && (size_t) i < coords.size()) ? coords[i] : Vec3{0, 0, 0}; };
+            const Value *segs = (in->args.size() > 1 && in->args[1].is_list()) ? &in->args[1] : nullptr;
+            if (segs && !segs->items.empty()) {
+                for (size_t k = 0; k + 1 < segs->items.size(); k += 2) {
+                    const Value &kw = segs->items[k], &al = segs->items[k + 1];
+                    if (kw.kind != adacpp::step::Kind::Keyword || !al.is_list() || al.items.empty() ||
+                        !al.items[0].is_list())
+                        continue;
+                    const auto &ix = al.items[0].items;
+                    if (iequals(kw.s, "IFCARCINDEX") && ix.size() == 3) {
+                        for (const Vec3 &q : arc_poly_3d(at(ix[0].i), at(ix[1].i), at(ix[2].i)))
+                            push(pts, q);
+                    } else
+                        for (const Value &iv : ix)
+                            push(pts, at(iv.kind == adacpp::step::Kind::Int ? iv.i : (long) iv.as_double()));
+                }
+            } else
+                for (size_t i = 1; i < coords.size(); ++i)
+                    push(pts, coords[i]);
+            return pts;
+        }
+        if (iequals(t, "IFCCOMPOSITECURVE") && !in->args.empty() && in->args[0].is_list()) {
+            std::vector<Vec3> pts;
+            for (const Value &sref : in->args[0].items)
+                if (sref.is_ref()) {
+                    const Instance *seg = inst(sref.i); // IfcCompositeCurveSegment(Transition,Same,ParentCurve)
+                    if (seg && seg->args.size() > 2 && seg->args[2].is_ref())
+                        for (const Vec3 &p : directrix_points(seg->args[2].i))
+                            push(pts, p);
+                }
+            return pts;
+        }
+        return {};
+    }
+    // Disk/annulus swept along a directrix -> SweepN with rotation-minimising (parallel-transport)
+    // per-station frames, so the circular profile doesn't twist. Mirrors adapy's _sweep_frames.
+    std::shared_ptr<SweepN> mk_swept_disk(const std::vector<Vec3> &pts, double radius, double inner) {
+        if (pts.size() < 2 || radius <= 0)
+            return nullptr;
+        int n = (int) pts.size();
+        std::vector<Vec3> tan(n);
+        for (int i = 0; i < n; ++i) {
+            Vec3 tv = (i == 0) ? pts[1] - pts[0] : (i == n - 1) ? pts[n - 1] - pts[n - 2] : pts[i + 1] - pts[i - 1];
+            tan[i] = tv.norm() > 1e-12 ? tv.normalized() : Vec3{0, 0, 1};
+        }
+        auto sw = std::make_shared<SweepN>();
+        sw->frame = Frame{}; // origin/dir_x/dir_y are already world
+        sw->origin.resize(n);
+        sw->dir_x.resize(n);
+        sw->dir_y.resize(n);
+        Vec3 up = std::abs(tan[0].z) < 0.9 ? Vec3{0, 0, 1} : Vec3{1, 0, 0};
+        Vec3 dx = (up - tan[0] * tan[0].dot(up)).normalized();
+        for (int i = 0; i < n; ++i) {
+            if (i > 0) { // parallel-transport dx across the tangent turn (Rodrigues)
+                Vec3 axis = tan[i - 1].cross(tan[i]);
+                double s = axis.norm(), cth = tan[i - 1].dot(tan[i]);
+                if (s > 1e-9) {
+                    axis = axis * (1.0 / s);
+                    double ang = std::atan2(s, cth);
+                    dx = dx * std::cos(ang) + axis.cross(dx) * std::sin(ang) +
+                         axis * (axis.dot(dx) * (1 - std::cos(ang)));
+                }
+            }
+            Vec3 ortho = dx - tan[i] * tan[i].dot(dx);
+            if (ortho.norm() < 1e-9) { // dx drifted parallel to the tangent — reseed perpendicular
+                Vec3 up = std::abs(tan[i].z) < 0.9 ? Vec3{0, 0, 1} : Vec3{1, 0, 0};
+                ortho = up - tan[i] * tan[i].dot(up);
+            }
+            dx = ortho.normalized();
+            sw->origin[i] = pts[i];
+            sw->dir_x[i] = dx;
+            sw->dir_y[i] = tan[i].cross(dx);
+        }
+        std::vector<std::vector<Vec3>> holes;
+        if (inner > 1e-9)
+            holes.push_back(circle_poly(inner));
+        sw->profile = make_profile(circle_poly(radius), holes);
+        return sw->profile ? sw : nullptr;
     }
     // IfcCartesianPointList3D(CoordList) -> 1-based point array (index 0 is a placeholder).
     std::vector<Vec3> point_list_3d(long id) {
@@ -1119,6 +1256,7 @@ private:
             root.extrusion = it.extrusion;
             root.revolve = it.revolve;
             root.boolean = it.boolean;
+            root.sweep = it.sweep;
         }
     }
     // IfcCartesianTransformationOperator3D(Axis1,Axis2,LocalOrigin,Scale,Axis3[,Scale2,Scale3])
