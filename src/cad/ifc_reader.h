@@ -261,6 +261,63 @@ public:
         return false;
     }
 
+    // Spatial hierarchy. IfcRelContainedInSpatialStructure(.., RelatedElements=arg4 list,
+    // RelatingStructure=arg5) puts products in a storey/space; IfcRelAggregates(.., RelatingObject=arg4,
+    // RelatedObjects=arg5 list) nests storey->building->site->project (and sub-assemblies). Build both
+    // reverse maps once (persistent; clear_cache must not wipe them) so a product can walk up to root.
+    void build_rel_maps() {
+        if (rel_maps_built_)
+            return;
+        rel_maps_built_ = true;
+        std::string scratch;
+        for (long id : idx_.ids) {
+            std::string_view t = type_of(id, scratch);
+            if (iequals(t, "IFCRELCONTAINEDINSPATIALSTRUCTURE")) {
+                const Instance *in = inst(id);
+                if (!in || in->args.size() < 6)
+                    continue;
+                long structure = ref_arg(*in, 5);
+                if (in->args[4].is_list())
+                    for (const Value &e : in->args[4].items)
+                        if (e.is_ref())
+                            contained_of_[e.i] = structure;
+            } else if (iequals(t, "IFCRELAGGREGATES")) {
+                const Instance *in = inst(id);
+                if (!in || in->args.size() < 6)
+                    continue;
+                long parent = ref_arg(*in, 4);
+                if (in->args[5].is_list())
+                    for (const Value &e : in->args[5].items)
+                        if (e.is_ref())
+                            parent_of_[e.i] = parent;
+            }
+        }
+    }
+    // Root-first (id, name) levels from IfcProject down to the product — the assembly path the adapy
+    // consumer turns into the scene tree. One path (IFC products are single-instance here).
+    std::vector<std::pair<int, std::string>> product_path(long pid, const Instance &p) {
+        build_rel_maps();
+        auto next_up = [&](long id) -> long {
+            auto a = parent_of_.find(id);
+            if (a != parent_of_.end())
+                return a->second;
+            auto c = contained_of_.find(id);
+            return c != contained_of_.end() ? c->second : 0;
+        };
+        std::vector<std::pair<int, std::string>> path;
+        path.push_back({(int) pid, name_of(p)}); // deepest level = the product itself
+        std::unordered_set<long> seen{pid};
+        long up = next_up(pid);
+        int guard = 0;
+        while (up > 0 && seen.insert(up).second && guard++ < 64) {
+            const Instance *s = inst(up);
+            path.push_back({(int) up, s ? name_of(*s) : std::string()});
+            up = next_up(up);
+        }
+        std::reverse(path.begin(), path.end()); // root-first
+        return path;
+    }
+
     // Build the NgeomRoot for a product id (faces + name + per-instance transforms). Empty faces => the
     // product had no resolvable advanced-brep (skipped by the caller).
     NgeomRoot resolve_product(long pid) {
@@ -352,6 +409,13 @@ public:
                         break;
                     }
         }
+        // Spatial-structure path (Project -> Site -> Storey -> product), for the scene tree. Only emit
+        // when there's a real ancestor chain (size>1); a bare product level carries no hierarchy.
+        {
+            auto path = product_path(pid, *p);
+            if (path.size() > 1)
+                root.instance_paths.push_back(std::move(path));
+        }
         // A product mixing >1 distinct solid (or brep+procedural) doesn't fit the single-solid root
         // model — leave it for OCC rather than emit partial geometry.
         if (mixed_) {
@@ -409,6 +473,9 @@ private:
     double angle_scale_ = 0.0; // radians per model plane-angle unit (0 => not yet computed)
     std::unordered_map<long, std::array<float, 4>> colour_map_; // rep-item id -> rgba (IfcStyledItem)
     bool colour_map_built_ = false;
+    std::unordered_map<long, long> contained_of_; // product -> containing spatial element (IfcRelContained…)
+    std::unordered_map<long, long> parent_of_;    // child -> aggregating parent (IfcRelAggregates)
+    bool rel_maps_built_ = false;
 
     const Instance *inst(long id) {
         if (id <= 0)
