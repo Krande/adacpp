@@ -17,6 +17,7 @@
 
 #include "ngeom_boolean.h" // OCC-free CSG (Manifold) for boolean roots
 #include "ngeom_bspline.h"
+#include "ngeom_weld.h" // vertex weld + crease-angle smooth normals (per root)
 #include "ngeom_surfaces.h"
 #include "tesselator.h" // vendored libtess2 (fails soft via setjmp/longjmp -> tessTesselate
                         // returns 0 on any sweep error; no panic to guard against, unlike the original wasm build)
@@ -1922,12 +1923,23 @@ TessMesh tessellate_doc(const NgeomDoc &doc, const TessParams &tp) {
     // serial. Per-root parallelism is the right grain for the merge-preview generate, which streams
     // one root PER PLATE (thousands of roots) so every plate is its own pickable BatchMesh group.
     // Default (threads=1) keeps the serial path — the STEP->GLB process pool stays serial per call.
+    // Weld each ROOT independently (a shared index buffer + crease-angle smooth normals), then append
+    // — per-root keeps group boundaries + picking intact (never merges verts across solids). Skips
+    // LINES (curve bodies). tp.weld=false leaves the raw flat-shaded soup.
+    auto weld_root = [&](TessMesh &rm) {
+        if (tp.weld && rm.mesh_type == MeshType::TRIANGLES && !rm.indices.empty())
+            weld_mesh(rm.positions, rm.indices, rm.normals);
+    };
     unsigned want = tp.threads > 1 ? (unsigned) tp.threads : 1u;
     if (want <= 1 || roots.size() < 2) {
         for (const NgeomRoot &root : roots) {
+            TessMesh rm;
+            tessellate_one_root(root, tp, rm);
+            weld_root(rm);
             uint32_t first = (uint32_t) mesh.indices.size();
             uint32_t vfirst = (uint32_t) (mesh.positions.size() / 3);
-            tessellate_one_root(root, tp, mesh);
+            mesh.mesh_type = rm.mesh_type; // single-root streaming: propagate LINES/TRIANGLES
+            append_mesh(mesh, rm);
             mesh.groups.push_back({root.id, first, (uint32_t) mesh.indices.size() - first, vfirst,
                                    (uint32_t) (mesh.positions.size() / 3) - vfirst});
         }
@@ -1942,8 +1954,10 @@ TessMesh tessellate_doc(const NgeomDoc &doc, const TessParams &tp) {
     pool.reserve(nthreads);
     for (unsigned t = 0; t < nthreads; ++t)
         pool.emplace_back([&]() {
-            for (size_t i = next.fetch_add(1); i < roots.size(); i = next.fetch_add(1))
+            for (size_t i = next.fetch_add(1); i < roots.size(); i = next.fetch_add(1)) {
                 tessellate_one_root(roots[i], tp1, locals[i]);
+                weld_root(locals[i]);
+            }
         });
     for (std::thread &th : pool)
         th.join();

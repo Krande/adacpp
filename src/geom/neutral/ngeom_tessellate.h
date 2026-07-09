@@ -23,6 +23,9 @@ struct TessParams {
                              // (serial) so callers already parallelising across roots/solids
                              // (the STEP->GLB process pool) don't oversubscribe; a single
                              // whole-model call (merge-preview generate) opts into all cores.
+    bool weld = true;         // weld coincident vertices + rebuild a shared index buffer with crease-angle
+                              // smooth normals (ngeom_weld.h) per root, turning the flat-shaded triangle
+                              // soup into a compact indexed mesh (matches OCC density). Off => raw soup.
     double model_scale = 0.0; // model bbox diagonal (world units). 0 => OFF: the fixed max_angle
                               // governs every surface (explicit-global-angle mode). >0 => ADAPTIVE:
                               // the angular ceiling is relaxed for surfaces whose radius is small
