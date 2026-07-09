@@ -24,6 +24,7 @@ tessellate_box = _cad.tessellate_box
 tessellate_stream = _cad.tessellate_stream
 stream_step_to_meshes = _cad.stream_step_to_meshes
 stream_step_to_glb = _cad.stream_step_to_glb
+stream_ifc_to_glb = _cad.stream_ifc_to_glb
 stream_step_to_mesh = _cad.stream_step_to_mesh
 step_emit_ifc_brep = _cad.step_emit_ifc_brep
 stream_step_to_step = _cad.stream_step_to_step

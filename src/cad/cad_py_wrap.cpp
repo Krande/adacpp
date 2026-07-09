@@ -15,6 +15,7 @@
 #include "../geom/neutral/ngeom_profile.h"
 #include "step_to_glb_st.h"      // single-threaded, mmap-free STEP->GLB core (wasm/OPFS + native oracle)
 #include "step_to_glb_stream.h"  // threaded OCC-free STEP->GLB core (shared with the STP2GLB CLI)
+#include "ifc_to_glb_stream.h"   // native OCC-free IFC->GLB core (IfcResolver)
 #include "step_to_mesh_stream.h" // threaded OCC-free STEP->STL/OBJ core (parallel, baked, streaming)
 #include "ifc_emit.h"            // native IFC4 advanced-B-rep emitter (Phase 1, native STEP->IFC writer)
 #include "step_emit.h"           // native AP242 STEP advanced-B-rep emitter (native STEP->STEP writer)
@@ -737,6 +738,14 @@ int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_p
                             double angular_deg, int num_threads, bool meshopt, double model_scale) {
     return (int) adacpp::stream_step_to_glb(in_path, out_path, deflection, angular_deg, num_threads, meshopt,
                                             /*spill_dir=*/"", model_scale);
+}
+
+// Native OCC-free IFC -> GLB (IfcResolver: geometry + colour + spatial tree, baked to metres). v1
+// single-threaded. Returns the number of products written, or -1 on error.
+int stream_ifc_to_glb_impl(const std::string &in_path, const std::string &out_path, double deflection,
+                           double angular_deg, bool meshopt, double model_scale) {
+    return (int) adacpp::stream_ifc_to_glb(in_path, out_path, deflection, angular_deg, meshopt,
+                                           /*spill_dir=*/"", model_scale);
 }
 
 // Threaded OCC-free STEP -> STL / OBJ (same reader + parallel tessellation as the GLB core, but bakes
@@ -4083,6 +4092,13 @@ void cad_module(nb::module_ &m) {
           "colour, and write a merge-by-colour GLB matching the adapy viewer's structure. meshopt=true "
           "(default) bakes EXT_meshopt_compression inline (no Python re-pack). Returns the number of "
           "solids written (-1 on I/O error). angular_deg in degrees.");
+
+    m.def("stream_ifc_to_glb", &stream_ifc_to_glb_impl, "in_path"_a, "out_path"_a, "deflection"_a = 0.0,
+          "angular_deg"_a = 20.0, "meshopt"_a = true, "model_scale"_a = 0.0,
+          "Native IFC -> GLB file (no ifcopenshell, no OCC): IfcResolver resolves each product's "
+          "geometry + presentation colour + spatial-structure path, libtess2 tessellates, baked to "
+          "metres into a merge-by-colour GLB matching the viewer. Single-threaded v1; curve-only "
+          "bodies (alignment axes) skipped. Returns products written (-1 on error).");
 
     m.def("stream_step_to_mesh", &stream_step_to_mesh_impl, "in_path"_a, "out_path"_a, "fmt"_a, "deflection"_a = 2.0,
           "angular_deg"_a = 20.0, "num_threads"_a = 0, "model_scale"_a = 0.0,
