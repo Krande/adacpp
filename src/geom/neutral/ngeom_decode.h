@@ -58,6 +58,7 @@ enum : int {
     FACE_BOUND = 64,
     FACE_SURFACE = 65,
     CONNECTED_FACE_SET = 66,
+    CURVE_SET = 67, // a curve-only body: N polylines (GL_LINES). C++-only (not in the Python codec).
 };
 }
 
@@ -155,6 +156,7 @@ struct Slot {
     std::shared_ptr<SweepN> sweep;
     std::shared_ptr<BooleanN> boolean;
     std::shared_ptr<SphereN> sphere;
+    std::vector<std::vector<Vec3>> polylines;
     std::shared_ptr<OrientedEdgeN> oedge;
     // EDGE_CURVE intermediate
     Vec3 e_start, e_end;
@@ -439,6 +441,19 @@ inline NgeomDoc decode(const uint8_t *data, size_t n) {
             slot.cfs = c;
             break;
         }
+        case tag::CURVE_SET: {
+            int np = r.i32();
+            slot.polylines.reserve(np);
+            for (int i = 0; i < np; ++i) {
+                int npts = r.i32();
+                std::vector<Vec3> line;
+                line.reserve(npts);
+                for (int j = 0; j < npts; ++j)
+                    line.push_back(r.vec3());
+                slot.polylines.push_back(std::move(line));
+            }
+            break;
+        }
         case tag::EXTRUDED_AREA_SOLID: {
             auto ex = std::make_shared<ExtrusionN>();
             ex->profile = S.at(r.i32()).face; // profile FACE_SURFACE
@@ -519,6 +534,8 @@ inline NgeomDoc decode(const uint8_t *data, size_t n) {
             root.boolean = gs.boolean;
         } else if (gs.sphere) {
             root.sphere = gs.sphere;
+        } else if (!gs.polylines.empty()) {
+            root.polylines = gs.polylines;
         } else if (gs.face) {
             root.faces.push_back(gs.face);
         } else if (gs.cfs) {

@@ -1850,6 +1850,26 @@ static void tessellate_one_root(const NgeomRoot &root, const TessParams &tp, Tes
     } else if (root.sphere) {
         Mesh m(out);
         tessellate_sphere(*root.sphere, tp, m);
+    } else if (!root.polylines.empty()) {
+        // Curve-only body -> GL_LINES: emit each polyline's points as a line strip (index pairs).
+        out.mesh_type = MeshType::LINES;
+        for (const auto &line : root.polylines) {
+            if (line.size() < 2)
+                continue;
+            uint32_t base = (uint32_t) (out.positions.size() / 3);
+            for (const Vec3 &p : line) {
+                out.positions.push_back((float) p.x);
+                out.positions.push_back((float) p.y);
+                out.positions.push_back((float) p.z);
+                out.normals.push_back(0.0f);
+                out.normals.push_back(0.0f);
+                out.normals.push_back(1.0f);
+            }
+            for (uint32_t i = 0; i + 1 < line.size(); ++i) {
+                out.indices.push_back(base + i);
+                out.indices.push_back(base + i + 1);
+            }
+        }
     } else {
         if (FDBG) {
             size_t nnull = 0;

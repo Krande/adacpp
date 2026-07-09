@@ -377,6 +377,7 @@ struct NgeomRoot {
     std::shared_ptr<SweepN> sweep;                    // set if this root is a fixed-ref swept solid
     std::shared_ptr<BooleanN> boolean;                // set if this root is a boolean result
     std::shared_ptr<SphereN> sphere;                  // set if this root is a sphere primitive
+    std::vector<std::vector<Vec3>> polylines;         // set if this root is a curve-only body (GL_LINES)
     // Presentation colour (STYLED_ITEM -> COLOUR_RGB), populated by the native STEP reader; the
     // NGEOM byte decoder leaves has_color=false (colour travels out-of-band on that path).
     bool has_color = false;

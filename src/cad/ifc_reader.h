@@ -1335,6 +1335,23 @@ private:
         // composite/segmented curve of IfcCurveSegments (line/arc/clothoid/cosine-spiral transitions).
         if (iequals(t, "IFCGRADIENTCURVE") || iequals(t, "IFCSEGMENTEDREFERENCECURVE"))
             return alignment_gradient_points(cid);
+        if (iequals(t, "IFCCURVESEGMENT")) { // a single alignment segment (IfcAlignmentSegment axis)
+            double L = 0.0;
+            std::vector<double> meas;
+            for (const Value &a : in->args)
+                if (a.is_list() && !a.items.empty() && numeric(a.items[0]))
+                    meas.push_back(a.items[0].as_double());
+            if (meas.size() >= 2)
+                L = std::abs(meas[1]);
+            std::vector<Vec3> pts;
+            if (L > 1e-9)
+                for (int i = 0; i <= 24; ++i) {
+                    Vec3 gp, gt;
+                    if (alignment_seg_eval(in, L * i / 24, gp, gt))
+                        pts.push_back(gp);
+                }
+            return pts;
+        }
         if ((iequals(t, "IFCCOMPOSITECURVE")) && !in->args.empty() && in->args[0].is_list()) {
             // alignment composite: its segments are IfcCurveSegment (not IfcCompositeCurveSegment)
             for (const Value &sref : in->args[0].items)
@@ -1549,6 +1566,18 @@ private:
             // transform operator -> a world-placement matrix appended to root.transforms.
             std::array<float, 16> M = op_matrix(ref_arg(*in, 1));
             root.transforms.push_back(M);
+            return;
+        }
+        // Curve-only body (alignment axis / reference curve / a bare curve rep item) -> a polyline
+        // rendered as GL_LINES. Reuse the directrix sampler (handles gradient/segmented/composite/
+        // polyline/indexed + alignment clothoid/cant).
+        if (iequals(in->type, "IFCGRADIENTCURVE") || iequals(in->type, "IFCSEGMENTEDREFERENCECURVE") ||
+            iequals(in->type, "IFCCOMPOSITECURVE") || iequals(in->type, "IFCPOLYLINE") ||
+            iequals(in->type, "IFCINDEXEDPOLYCURVE") || iequals(in->type, "IFCTRIMMEDCURVE") ||
+            iequals(in->type, "IFCCURVESEGMENT")) {
+            std::vector<Vec3> pts = directrix_points(id);
+            if (pts.size() >= 2)
+                root.polylines.push_back(std::move(pts));
             return;
         }
         SolidItemN it = resolve_solid_item(id);

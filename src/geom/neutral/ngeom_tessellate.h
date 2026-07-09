@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "../MeshType.h"
 #include "ngeom_topology.h"
 
 namespace adacpp::ngeom {
@@ -43,6 +44,9 @@ struct TessMesh {
         uint32_t vertex_count = 0;
     };
     std::vector<Group> groups;
+    // Primitive topology of `indices`: TRIANGLES for solids/faces, LINES for curve-only bodies
+    // (index pairs). A single stream blob is one root, so it is homogeneous.
+    MeshType mesh_type = MeshType::TRIANGLES;
 };
 
 // Tessellate one neutral face, appending into `out`. Returns true if it produced triangles.

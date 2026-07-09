@@ -442,7 +442,7 @@ Mesh tessellate_stream_impl(nb::object buffer, const std::string &pipeline, doub
         groups.emplace_back((int) i, (int) g.first_index, (int) g.index_count, (int) g.first_vertex,
                             (int) g.vertex_count);
     }
-    Mesh mesh(0, std::move(tm.positions), std::move(tm.indices), {}, std::move(tm.normals));
+    Mesh mesh(0, std::move(tm.positions), std::move(tm.indices), {}, std::move(tm.normals), tm.mesh_type);
     mesh.group_reference = std::move(groups);
     return mesh;
 }
@@ -643,7 +643,8 @@ public:
             // in addition to face sets, so a procedural root carries real geometry. Only a root with
             // NO encodable geometry (empty faces + not one of those solids — e.g. an alignment sweep
             // or an unsupported product) still yields nothing; skip it for the kernel fallback.
-            bool has_solid = root.extrusion || root.revolve || root.boolean || root.sphere || root.sweep;
+            bool has_solid = root.extrusion || root.revolve || root.boolean || root.sphere || root.sweep ||
+                             !root.polylines.empty();
             if (root.faces.empty() && !has_solid) {
                 ++skipped_;
                 continue;
