@@ -176,8 +176,13 @@ public:
         // (arg 2) -> IfcShapeRepresentation.Items (arg 3).
         long rep = ref_arg(*p, 6);
         const Instance *pds = inst(rep);
-        if (!pds || pds->args.size() < 3)
+        if (!pds || pds->args.size() < 3) {
+            // No (resolvable) Representation -> an intentionally geometry-less container/spatial product
+            // (e.g. an IfcElementAssembly aggregating rebars, reached via the is_product_type fast path).
+            // Recognized, not an unsupported skip -> the stream won't waste an OCC fallback on it.
+            root.recognized_empty = true;
             return root;
+        }
         // IfcShapeRepresentation: (ContextOfItems, RepresentationIdentifier, RepresentationType, Items).
         // A product may carry several reps: "Body"/"Facetation"/"Tessellation" are the 3D shape;
         // "Axis" is a reference curve (render only when there is NO body — an alignment segment IS
@@ -1748,6 +1753,8 @@ private:
             std::vector<Vec3> pts = directrix_points(id);
             if (pts.size() >= 2)
                 root.polylines.push_back(std::move(pts));
+            else
+                root.recognized_empty = true; // recognized curve, but degenerate (e.g. zero-length segment)
             return;
         }
         SolidItemN it = resolve_solid_item(id);

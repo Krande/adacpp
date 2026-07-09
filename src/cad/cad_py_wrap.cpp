@@ -646,7 +646,10 @@ public:
             bool has_solid = root.extrusion || root.revolve || root.boolean || root.sphere || root.sweep ||
                              !root.polylines.empty();
             if (root.faces.empty() && !has_solid) {
-                ++skipped_;
+                // recognized_empty => a degenerate product we DID understand (zero-length curve marker);
+                // don't count it as an unsupported skip (that would drive a wasted OCC fallback).
+                if (!root.recognized_empty)
+                    ++skipped_;
                 continue;
             }
             prof_.solid(root.faces.size());
