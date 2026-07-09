@@ -3386,6 +3386,12 @@ static bool emit_solid_step(adacpp::step_emit::StepBrepEmitter &em, std::string 
     } else if (root.revolve) { // non-rigid revolves are dropped to OCC by the reader -> rigid here
         solid = em.emit_revolve(buf, *root.revolve);
         rep_kw = "SHAPE_REPRESENTATION";
+    } else if (root.sweep) { // disk/annulus swept along a directrix -> SWEPT_DISK_SOLID
+        solid = em.emit_swept_disk(buf, *root.sweep);
+        rep_kw = "SHAPE_REPRESENTATION";
+    } else if (root.sphere) { // CSG sphere primitive
+        solid = em.emit_sphere(buf, *root.sphere);
+        rep_kw = "SHAPE_REPRESENTATION";
     } else if (root.boolean) { // CSG tree (BOOLEAN_RESULT), preserved not evaluated
         solid = em.emit_boolean(buf, *root.boolean);
         rep_kw = "SHAPE_REPRESENTATION";
@@ -3771,7 +3777,7 @@ static adacpp::ifc_emit::FileStats write_ifc_to_step_impl(const std::string &in_
     };
     for (long pid : roots) {
         NgeomRoot root = r.resolve_product(pid);
-        if (root.faces.empty() && !root.extrusion && !root.revolve && !root.boolean) {
+        if (root.faces.empty() && !root.extrusion && !root.revolve && !root.boolean && !root.sweep && !root.sphere) {
             ++fs.products_skipped; // a product whose geometry the analytic reader couldn't represent
             continue;
         }

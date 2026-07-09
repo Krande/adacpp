@@ -118,12 +118,53 @@ public:
                              std::to_string(ax) + "," + ifc_real(rv.angle) + ")");
     }
 
+    // A disk/annulus swept along a directrix -> SWEPT_DISK_SOLID (radius recovered from the circular
+    // profile; directrix = origin[] baked to world via frame o tf). Matches the ng:: swept-disk.
+    long emit_swept_disk(std::string &out, const SweepN &sw) {
+        if (sw.origin.size() < 2 || !sw.profile || sw.profile->bounds.empty() || !sw.profile->bounds[0].loop)
+            return 0;
+        const LoopN &lp = *sw.profile->bounds[0].loop;
+        std::vector<Vec3> ring = lp.is_poly ? lp.polygon : lp.discretize(deflection_, angular_);
+        if (ring.size() < 3)
+            return 0;
+        Vec3 c{0, 0, 0};
+        for (const Vec3 &p : ring)
+            c = c + p;
+        c = c * (1.0 / (double) ring.size());
+        double radius = (ring[0] - c).norm();
+        if (radius <= 1e-9)
+            return 0;
+        double inner = 0.0;
+        if (sw.profile->bounds.size() > 1 && sw.profile->bounds[1].loop) {
+            const LoopN &ih = *sw.profile->bounds[1].loop;
+            std::vector<Vec3> il = ih.is_poly ? ih.polygon : ih.discretize(deflection_, angular_);
+            if (il.size() >= 3)
+                inner = (il[0] - c).norm();
+        }
+        std::vector<long> dids;
+        dids.reserve(sw.origin.size());
+        for (const Vec3 &o : sw.origin)
+            dids.push_back(pt_raw(out, tp(sw.frame.to_world(o.x, o.y, o.z))));
+        long directrix = emit(out, "POLYLINE(''," + refs(dids) + ")");
+        std::string inner_s = inner > 1e-9 ? ifc_real(inner) : "$";
+        return emit(out, "SWEPT_DISK_SOLID('',#" + std::to_string(directrix) + "," + ifc_real(radius) + "," + inner_s +
+                             ",$,$)");
+    }
+    // A sphere -> CSG_SOLID over a SPHERE primitive (centre baked to world).
+    long emit_sphere(std::string &out, const SphereN &sp) {
+        long ctr = pt_raw(out, tp(sp.frame.o));
+        long sph = emit(out, "SPHERE(''," + ifc_real(sp.radius) + ",#" + std::to_string(ctr) + ")");
+        return emit(out, "CSG_SOLID('',#" + std::to_string(sph) + ")");
+    }
+
     // Emit a boolean-operand solid -> its STEP id (0 if unrepresentable). Recursive for nested booleans.
     long emit_solid_item(std::string &out, const SolidItemN &it) {
         if (it.extrusion)
             return emit_extrusion(out, *it.extrusion);
         if (it.revolve)
             return emit_revolve(out, *it.revolve);
+        if (it.sweep)
+            return emit_swept_disk(out, *it.sweep);
         if (it.boolean)
             return emit_boolean(out, *it.boolean);
         return 0; // brep-faces operands not emitted here (rare in CSG) -> caller drops to OCC
