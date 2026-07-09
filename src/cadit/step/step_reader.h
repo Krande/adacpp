@@ -116,6 +116,7 @@ struct TypeLists {
     std::vector<long> srr;    // SHAPE_REPRESENTATION_RELATIONSHIP
     std::vector<long> cdsr;   // CONTEXT_DEPENDENT_SHAPE_REPRESENTATION
     std::vector<long> sdr;    // SHAPE_DEFINITION_REPRESENTATION
+    std::vector<long> nauo;   // NEXT_ASSEMBLY_USAGE_OCCURRENCE (product-tree assembly)
     std::vector<long> units;  // LENGTH_UNIT complex / SI_UNIT
 };
 
@@ -606,6 +607,8 @@ private:
             lists.cdsr.push_back(id);
         else if (t == "SHAPE_DEFINITION_REPRESENTATION")
             lists.sdr.push_back(id);
+        else if (t == "NEXT_ASSEMBLY_USAGE_OCCURRENCE")
+            lists.nauo.push_back(id);
         else if (t == "SI_UNIT")
             lists.units.push_back(id);
     }
@@ -687,7 +690,7 @@ public:
         build_colour_map(tl.styled);
         build_product_name_map(tl.sdr);
         unit_scale_ = detect_unit_scale(tl.units); // BEFORE build_transform_map — its rep_factor needs it
-        build_transform_map(tl.roots, tl.absr, tl.srr, tl.cdsr);
+        build_transform_map(tl.roots, tl.absr, tl.srr, tl.cdsr, tl.nauo, tl.sdr);
         clear_geom_cache();
     }
 
@@ -859,6 +862,8 @@ private:
                 tl.cdsr.push_back(id);
             else if (t == "SHAPE_DEFINITION_REPRESENTATION")
                 tl.sdr.push_back(id);
+            else if (t == "NEXT_ASSEMBLY_USAGE_OCCURRENCE")
+                tl.nauo.push_back(id);
             else if (t == "SI_UNIT")
                 tl.units.push_back(id);
         }
@@ -1806,7 +1811,8 @@ private:
     }
 
     void build_transform_map(const std::vector<long> &root_ids, const std::vector<long> &absr_ids,
-                             const std::vector<long> &srr_ids, const std::vector<long> &cdsr_ids) {
+                             const std::vector<long> &srr_ids, const std::vector<long> &cdsr_ids,
+                             const std::vector<long> &nauo_ids = {}, const std::vector<long> &sdr_ids = {}) {
         std::unordered_set<long> root_set(root_ids.begin(), root_ids.end());
         // Geometry-rep items -> solid. `absr_ids` holds every rep type that can carry
         // geometry (ABSR, plain SHAPE_REPRESENTATION, ...); a rep counts as a geometry
@@ -1923,6 +1929,74 @@ private:
                 }
             if (nontrivial || mats.size() > 1) // skip pure-identity single instance
                 xform_map_[sid] = std::move(mats);
+        }
+
+        // NAUO product-assembly tree. A STEP file written with baked per-leaf geometry (e.g. our own
+        // IFC->STEP emit) carries no CDSR placement graph, so world_matrices() gives every solid a
+        // flat single-level path and the spatial hierarchy collapses on re-import. Recover it from the
+        // PRODUCT-level NEXT_ASSEMBLY_USAGE_OCCURRENCE chain: rep -> leaf PD (via SDR), child PD ->
+        // parent PD (via NAUO), walk to the assembly root and override the solid's path with the full
+        // ancestor chain (leaf level kept as the solid's own (geom_rep, product_name) for consistency
+        // with the CDSR-derived paths, so the IFC writer zones identically).
+        if (!nauo_ids.empty()) {
+            std::unordered_map<long, long> rep_pd; // rep -> leaf PRODUCT_DEFINITION
+            for (long id : sdr_ids) {
+                const Instance *in = inst(id); // SHAPE_DEFINITION_REPRESENTATION(#pds, #rep)
+                if (!in || in->complex || in->args.size() < 2 || !in->args[0].is_ref() || !in->args[1].is_ref())
+                    continue;
+                const Instance *pds = inst(in->args[0].i); // PRODUCT_DEFINITION_SHAPE(name, desc, #pd)
+                if (pds && pds->args.size() > 2 && pds->args[2].is_ref())
+                    rep_pd[in->args[1].i] = pds->args[2].i;
+            }
+            std::unordered_map<long, long> nauo_parent; // child PD -> parent PD
+            for (long id : nauo_ids) {
+                const Instance *in = inst(id); // NAUO(id,name,desc,#relating_pd,#related_pd,ref)
+                if (!in || in->complex || in->args.size() < 5 || !in->args[3].is_ref() || !in->args[4].is_ref())
+                    continue;
+                nauo_parent[in->args[4].i] = in->args[3].i; // related(child) -> relating(parent)
+            }
+            auto pd_name = [&](long pd_id) -> std::string {
+                const Instance *pd = inst(pd_id);
+                const Instance *pdf = (pd && pd->args.size() > 2 && pd->args[2].is_ref()) ? inst(pd->args[2].i) : nullptr;
+                const Instance *prod = (pdf && pdf->args.size() > 2 && pdf->args[2].is_ref()) ? inst(pdf->args[2].i) : nullptr;
+                if (prod && prod->args.size() >= 2)
+                    for (int k : {1, 0}) // PRODUCT(id, name, ...): prefer name, fall back to id
+                        if (prod->args[k].kind == Kind::Str) {
+                            std::string nm = unescape(prod->args[k].s);
+                            const char *ws = " \t\n\r\f\v";
+                            size_t a = nm.find_first_not_of(ws), b = nm.find_last_not_of(ws);
+                            if (a != std::string::npos)
+                                return nm.substr(a, b - a + 1);
+                        }
+                return "asm_" + std::to_string(pd_id);
+            };
+            for (long sid : root_ids) {
+                auto git = geomrep_of_solid.find(sid);
+                if (git == geomrep_of_solid.end())
+                    continue;
+                auto rit = rep_pd.find(git->second);
+                if (rit == rep_pd.end())
+                    continue;
+                // Walk the ancestor PD chain above the leaf PD (root-first, excluding the leaf).
+                std::vector<std::pair<long, std::string>> ancestors;
+                std::unordered_set<long> seen;
+                long cur = rit->second; // leaf PD
+                seen.insert(cur);
+                int guard = 0;
+                for (auto pit = nauo_parent.find(cur); pit != nauo_parent.end() && guard++ < 64;
+                     pit = nauo_parent.find(cur)) {
+                    cur = pit->second;
+                    if (!seen.insert(cur).second)
+                        break; // cycle guard
+                    ancestors.push_back({cur, pd_name(cur)});
+                }
+                if (ancestors.empty())
+                    continue; // no assembly nesting -> keep the flat path
+                std::reverse(ancestors.begin(), ancestors.end()); // root-first
+                Path path = std::move(ancestors);
+                path.push_back(path_level(git->second)); // leaf: solid's own (geom_rep, product_name)
+                path_map_[sid] = {std::move(path)};
+            }
         }
     }
 };
