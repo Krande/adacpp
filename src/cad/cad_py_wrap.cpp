@@ -2806,6 +2806,17 @@ static void emit_solid_ifc(adacpp::ifc_emit::BrepEmitter &em, std::string &buf, 
     long brep = em.emit_advanced_brep(buf, root);
     if (!brep)
         return;
+    // Presentation colour: style the shared brep item so it colours every (mapped) instance. The
+    // NgeomRoot already carries the colour resolved by the STEP/IFC reader (has_color/cr/cg/cb/ca) —
+    // emit it as IfcStyledItem -> IfcSurfaceStyle -> IfcColourRgb (was dropped; the viewer fell back
+    // to grey). Matches adapy's add_colour + the Python streaming writer.
+    if (root.has_color) {
+        auto R = [](float v) { return adacpp::ifc_emit::ifc_real(v); };
+        long col = em.emit_entity(buf, "IfcColourRgb($," + R(root.cr) + "," + R(root.cg) + "," + R(root.cb) + ")");
+        long sh = em.emit_entity(buf, "IfcSurfaceStyleShading(#" + std::to_string(col) + "," + R(1.0f - root.ca) + ")");
+        long ss = em.emit_entity(buf, "IfcSurfaceStyle($,.BOTH.,(#" + std::to_string(sh) + "))");
+        em.emit_entity(buf, "IfcStyledItem(#" + std::to_string(brep) + ",(#" + std::to_string(ss) + "),$)");
+    }
     std::string nm = root.id.empty() ? ("solid_" + std::to_string(sid)) : ifc_str(root.id);
     auto record = [&](long proxy, size_t k) {
         proxies.push_back(proxy);
