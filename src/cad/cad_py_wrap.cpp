@@ -605,8 +605,9 @@ private:
 // IFC GlobalId. Geometry is in FILE units — apply .unit_scale (metres per unit) on the consumer
 // side. Products the analytic resolver can't represent (tessellated face sets, mixed multi-solid
 // reps) are skipped and counted in .products_skipped so the consumer can fall back per-file.
-// NOTE v1 carries no colour (IfcStyledItem unresolved) and no spatial path (IfcRelAggregates /
-// IfcRelContainedInSpatialStructure not walked) — geometry/guid/name/placement only.
+// meta now carries colour (IfcStyledItem -> IfcColourRgb) + the spatial-structure path
+// (IfcRelContainedInSpatialStructure + IfcRelAggregates walk -> instance_paths), alongside
+// geometry/guid/name/placement — so a native reader gets the full tree + colours.
 class IfcNgeomStream {
 public:
     explicit IfcNgeomStream(const std::string &path) : prof_("ifc_ngeom_stream") {
@@ -3034,6 +3035,67 @@ static adacpp::ifc_emit::FileStats write_ifc_file_impl(const std::string &in_pat
     return fs;
 }
 
+// Native IFC writer from NGEOM blobs (the lazy ShapeStore form) + their out-of-band metadata (colour,
+// world transforms, spatial paths). The ada-object-model counterpart of write_ifc_file_impl (which
+// reads a STEP file): decode each blob to its NgeomRoot(s), re-attach the passed metadata (the blob
+// carries geometry + root.id only), and emit the SAME IfcAdvancedBrep + IfcStyledItem + spatial tree.
+// This is what makes a fully native Assembly.to_ifc(writer="native") possible — no STEP round-trip.
+static adacpp::ifc_emit::FileStats
+blobs_to_ifc_impl(const std::vector<nb::bytes> &blobs, const std::vector<std::array<float, 4>> &colors,
+                  const std::vector<std::vector<std::array<float, 16>>> &transforms,
+                  const std::vector<std::vector<std::vector<std::pair<int, std::string>>>> &paths,
+                  const std::string &out_path, const std::string &schema, double unit_scale) {
+    using namespace adacpp::ifc_emit;
+    FileStats fs;
+    fs.unit_scale = unit_scale;
+    std::FILE *fp = std::fopen(out_path.c_str(), "wb");
+    if (!fp)
+        return fs;
+    std::string buf;
+    buf.reserve(1 << 22);
+    auto flush = [&](bool force) {
+        if (buf.size() >= (4u << 20) || force) {
+            std::fwrite(buf.data(), 1, buf.size(), fp);
+            buf.clear();
+        }
+    };
+    buf += ifc_header_block(schema, unit_scale);
+    BrepEmitter em(100, nullptr, 2.0, 20.0);
+    std::vector<long> proxies;
+    std::vector<IfcPath> proxy_paths;
+    long sid = 0;
+    for (size_t i = 0; i < blobs.size(); ++i) {
+        adacpp::ngeom::NgeomDoc doc =
+            adacpp::ngeom::decode(reinterpret_cast<const uint8_t *>(blobs[i].c_str()), blobs[i].size());
+        for (adacpp::ngeom::NgeomRoot &root : doc.roots) {
+            ++sid;
+            ++fs.solids_in;
+            if (i < colors.size() && colors[i][3] >= 0.0f) { // alpha<0 sentinel => no colour
+                root.has_color = true;
+                root.cr = colors[i][0];
+                root.cg = colors[i][1];
+                root.cb = colors[i][2];
+                root.ca = colors[i][3];
+            }
+            if (i < transforms.size())
+                root.transforms = transforms[i];
+            if (i < paths.size())
+                root.instance_paths = paths[i];
+            size_t before = proxies.size();
+            emit_solid_ifc(em, buf, root, sid, (uint64_t) sid * 1000u, proxies, &proxy_paths);
+            if (proxies.size() > before)
+                ++fs.solids_out;
+        }
+        flush(false);
+    }
+    emit_spatial_tree(buf, [&]() { return em.alloc_id(); }, proxies, proxy_paths);
+    buf += "ENDSEC;\nEND-ISO-10303-21;\n";
+    flush(true);
+    std::fclose(fp);
+    fs.geom = em.stats();
+    return fs;
+}
+
 // Append `src` to `out`, adding `offset` to every entity id (#N defs + refs) WHOSE id > `keep_below`
 // — so references to the shared header block (#1..#keep_below, e.g. #4/#6/#11/#12) are left intact
 // while the solid's local ids are shifted to its reserved global block. Skips '#' inside
@@ -3977,6 +4039,34 @@ void cad_module(nb::module_ &m) {
         "Native STEP->IFC: write a full IFC file (header + spatial block + "
         "one IfcAdvancedBrep+proxy per solid). Returns the losslessness audit dict (solids_in/out, "
         "faces_in/out/dropped, drop_reasons). schema: 'IFC4X3_ADD2' | 'IFC4'.");
+
+    m.def(
+        "blobs_to_ifc",
+        [](const std::vector<nb::bytes> &blobs, const std::vector<std::array<float, 4>> &colors,
+           const std::vector<std::vector<std::array<float, 16>>> &transforms,
+           const std::vector<std::vector<std::vector<std::pair<int, std::string>>>> &paths,
+           const std::string &out_path, const std::string &schema, double unit_scale) -> nb::dict {
+            adacpp::ifc_emit::FileStats fs =
+                blobs_to_ifc_impl(blobs, colors, transforms, paths, out_path, schema, unit_scale);
+            nb::dict d;
+            d["solids_in"] = fs.solids_in;
+            d["solids_out"] = fs.solids_out;
+            d["unit_scale"] = fs.unit_scale;
+            d["faces_in"] = fs.geom.faces_in;
+            d["faces_out"] = fs.geom.faces_out;
+            d["faces_dropped"] = fs.geom.faces_dropped;
+            nb::dict reasons;
+            for (const auto &[k, v] : fs.geom.drop_reasons)
+                reasons[k.c_str()] = v;
+            d["drop_reasons"] = reasons;
+            return d;
+        },
+        "blobs"_a, "colors"_a, "transforms"_a, "paths"_a, "out_path"_a, "schema"_a = "IFC4X3_ADD2",
+        "unit_scale"_a = 1.0,
+        "Native IFC writer from NGEOM blobs (the lazy ShapeStore form) + parallel per-shape metadata: "
+        "colors (rgba; alpha<0 => none), transforms (per-shape 4x4 world placements), paths (per-shape "
+        "instance_paths). Decodes each blob, re-attaches the metadata, and emits IfcAdvancedBrep + "
+        "IfcStyledItem + spatial tree — the fully-native Assembly.to_ifc backend. Returns the audit dict.");
 
     // Native parallel STEP->STEP (AP242). Re-export the analytic B-rep per solid, instances baked,
     // round-trip-lossless. Returns the same losslessness audit dict.
