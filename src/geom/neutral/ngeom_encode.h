@@ -124,6 +124,19 @@ private:
         put_f64(b, sp->radius);
         return add(tag::SPHERE_SOLID, std::move(b));
     }
+    int sweep_rec(const std::shared_ptr<SweepN> &sw) {
+        std::vector<uint8_t> b;
+        put_i32(b, face(sw->profile));
+        put_i32(b, placement3(sw->frame));
+        put_i32(b, (int) sw->origin.size());
+        for (const Vec3 &v : sw->origin)
+            put_v3(b, v);
+        for (const Vec3 &v : sw->dir_x)
+            put_v3(b, v);
+        for (const Vec3 &v : sw->dir_y)
+            put_v3(b, v);
+        return add(tag::FIXED_REF_SWEPT_SOLID, std::move(b));
+    }
     int boolean_rec(const std::shared_ptr<BooleanN> &bn) {
         std::vector<uint8_t> b;
         put_i32(b, bn->op);
@@ -140,6 +153,8 @@ private:
             return revolve_rec(it.revolve);
         if (it.boolean)
             return boolean_rec(it.boolean);
+        if (it.sweep)
+            return sweep_rec(it.sweep);
         if (!it.faces.empty()) {
             std::vector<uint8_t> b;
             put_i32(b, (int) it.faces.size());
@@ -158,7 +173,9 @@ private:
             return boolean_rec(root.boolean);
         if (root.sphere)
             return sphere_rec(root.sphere);
-        return -1; // sweep (tag 54) not emitted here — falls back to faces
+        if (root.sweep)
+            return sweep_rec(root.sweep);
+        return -1;
     }
     static void rle_knots(const std::vector<double> &U, std::vector<double> &knots, std::vector<int> &mults) {
         for (size_t i = 0; i < U.size();) {

@@ -643,7 +643,7 @@ public:
             // in addition to face sets, so a procedural root carries real geometry. Only a root with
             // NO encodable geometry (empty faces + not one of those solids — e.g. an alignment sweep
             // or an unsupported product) still yields nothing; skip it for the kernel fallback.
-            bool has_solid = root.extrusion || root.revolve || root.boolean || root.sphere;
+            bool has_solid = root.extrusion || root.revolve || root.boolean || root.sphere || root.sweep;
             if (root.faces.empty() && !has_solid) {
                 ++skipped_;
                 continue;
