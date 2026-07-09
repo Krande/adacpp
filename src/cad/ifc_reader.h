@@ -490,14 +490,27 @@ private:
         return nullptr;
     }
     std::shared_ptr<FaceSurfaceN> face(long id) {
-        const Instance *in = inst(id); // IfcAdvancedFace(Bounds, FaceSurface, SameSense)
-        if (!in || !iequals(in->type, "IFCADVANCEDFACE"))
+        const Instance *in = inst(id);
+        if (!in)
+            return nullptr;
+        // IfcAdvancedFace / IfcFaceSurface (Bounds, FaceSurface, SameSense) carry an analytic surface;
+        // a plain IfcFace (Bounds) is a bare polygon — placeholder plane, the tessellator fits the
+        // real plane from the poly loop (face-based surface models, shells).
+        bool analytic = iequals(in->type, "IFCADVANCEDFACE") || iequals(in->type, "IFCFACESURFACE");
+        bool plain = iequals(in->type, "IFCFACE");
+        if (!analytic && !plain)
             return nullptr;
         auto fc = std::make_shared<FaceSurfaceN>();
-        fc->surface = surface(ref_arg(*in, 1));
-        if (!fc->surface)
-            return nullptr;
-        fc->same_sense = !(in->args.size() > 2 && in->args[2].kind == adacpp::step::Kind::Enum && in->args[2].s == "F");
+        if (analytic) {
+            fc->surface = surface(ref_arg(*in, 1));
+            if (!fc->surface)
+                return nullptr;
+            fc->same_sense =
+                !(in->args.size() > 2 && in->args[2].kind == adacpp::step::Kind::Enum && in->args[2].s == "F");
+        } else {
+            fc->surface = std::make_shared<PlaneSurface>(Frame{});
+            fc->same_sense = true;
+        }
         if (in->args.empty() || !in->args[0].is_list())
             return nullptr;
         for (const Value &bref : in->args[0].items) {
@@ -897,8 +910,76 @@ private:
         } else if (iequals(t, "IFCHALFSPACESOLID")) {
             if (auto ex = mk_halfspace(in, refmin, refmax))
                 out.extrusion = ex;
+        } else if (iequals(t, "IFCPOLYGONALFACESET")) {
+            // (Coordinates=IfcCartesianPointList3D, Closed, Faces=IfcIndexedPolygonalFace[], PnIndex)
+            std::vector<Vec3> pts = point_list_3d(ref_arg(*in, 0));
+            if (in->args.size() > 2 && in->args[2].is_list())
+                for (const Value &fref : in->args[2].items)
+                    if (fref.is_ref()) {
+                        const Instance *pf = inst(fref.i); // IfcIndexedPolygonalFace(CoordIndex[, Inner])
+                        if (!pf || pf->args.empty() || !pf->args[0].is_list())
+                            continue;
+                        std::vector<Vec3> poly;
+                        for (const Value &iv : pf->args[0].items)
+                            push_pt(poly, pts, iv);
+                        if (auto f = make_profile(poly))
+                            out.faces.push_back(f);
+                    }
+        } else if (iequals(t, "IFCTRIANGULATEDFACESET")) {
+            // (Coordinates, Normals, Closed, CoordIndex=list of (i,j,k) triples, PnIndex)
+            std::vector<Vec3> pts = point_list_3d(ref_arg(*in, 0));
+            if (in->args.size() > 3 && in->args[3].is_list())
+                for (const Value &tri : in->args[3].items)
+                    if (tri.is_list() && tri.items.size() >= 3) {
+                        std::vector<Vec3> poly;
+                        for (const Value &iv : tri.items)
+                            push_pt(poly, pts, iv);
+                        if (poly.size() >= 3)
+                            if (auto f = make_profile(poly))
+                                out.faces.push_back(f);
+                    }
+        } else if (iequals(t, "IFCSHELLBASEDSURFACEMODEL")) { // (SbsmBoundary = shells)
+            if (!in->args.empty() && in->args[0].is_list())
+                for (const Value &sh : in->args[0].items)
+                    if (sh.is_ref())
+                        add_shell_faces(sh.i, out);
+        } else if (iequals(t, "IFCFACEBASEDSURFACEMODEL")) { // (FbsmFaces = IfcConnectedFaceSet[])
+            if (!in->args.empty() && in->args[0].is_list())
+                for (const Value &cfs : in->args[0].items)
+                    if (cfs.is_ref())
+                        add_shell_faces(cfs.i, out);
+        } else if (iequals(t, "IFCCONNECTEDFACESET") || iequals(t, "IFCOPENSHELL") ||
+                   iequals(t, "IFCCLOSEDSHELL")) {
+            add_shell_faces(id, out);
+        } else if (iequals(t, "IFCADVANCEDFACE") || iequals(t, "IFCFACESURFACE") || iequals(t, "IFCFACE")) {
+            if (auto f = face(id)) // a bare face as the representation item
+                out.faces.push_back(f);
         }
         return out;
+    }
+    // IfcCartesianPointList3D(CoordList) -> 1-based point array (index 0 is a placeholder).
+    std::vector<Vec3> point_list_3d(long id) {
+        std::vector<Vec3> pts{{0, 0, 0}};
+        const Instance *pl = inst(id);
+        if (pl && !pl->args.empty() && pl->args[0].is_list())
+            for (const Value &row : pl->args[0].items)
+                if (row.is_list() && row.items.size() >= 3)
+                    pts.push_back({row.items[0].as_double(), row.items[1].as_double(), row.items[2].as_double()});
+        return pts;
+    }
+    static void push_pt(std::vector<Vec3> &poly, const std::vector<Vec3> &pts, const Value &iv) {
+        long ix = (iv.kind == adacpp::step::Kind::Int) ? iv.i : (long) iv.as_double(); // 1-based CoordIndex
+        if (ix >= 1 && (size_t) ix < pts.size())
+            poly.push_back(pts[ix]);
+    }
+    // A shell (IfcClosedShell/IfcOpenShell/IfcConnectedFaceSet): CfsFaces (arg 0) is a list of IfcFace.
+    void add_shell_faces(long shell_id, SolidItemN &out) {
+        const Instance *sh = inst(shell_id);
+        if (sh && !sh->args.empty() && sh->args[0].is_list())
+            for (const Value &fref : sh->args[0].items)
+                if (fref.is_ref())
+                    if (auto f = face(fref.i))
+                        out.faces.push_back(f);
     }
     // IfcBooleanResult(Operator, FirstOperand, SecondOperand) -> ng::BooleanN (null if an operand can't
     // be resolved). op: 0 difference / 1 union / 2 intersection. The 1st operand bounds a half-space 2nd.
