@@ -632,6 +632,39 @@ private:
         }
         return p;
     }
+    // A 3-point (start, mid, end) circular arc in the z=0 plane, discretized to a polyline (matches
+    // the adapy Python reader's IfcArcIndex -> ArcLine, which the tessellator later rings). Falls
+    // back to the chord [a, m, b] when the three points are collinear (degenerate circumcircle).
+    static std::vector<Vec3> arc_poly_2d(const Vec3 &a, const Vec3 &m, const Vec3 &b) {
+        double ax = a.x, ay = a.y, mx = m.x, my = m.y, bx = b.x, by = b.y;
+        double d = 2.0 * (ax * (my - by) + mx * (by - ay) + bx * (ay - my));
+        if (std::abs(d) < 1e-12)
+            return {a, m, b};
+        double a2 = ax * ax + ay * ay, m2 = mx * mx + my * my, b2 = bx * bx + by * by;
+        double ux = (a2 * (my - by) + m2 * (by - ay) + b2 * (ay - my)) / d;
+        double uy = (a2 * (bx - mx) + m2 * (ax - bx) + b2 * (mx - ax)) / d;
+        double r = std::hypot(ax - ux, ay - uy);
+        double ta = std::atan2(ay - uy, ax - ux);
+        double tm = std::atan2(my - uy, mx - ux);
+        double tb = std::atan2(by - uy, bx - ux);
+        auto wrap = [](double x) {
+            while (x < 0)
+                x += 2.0 * PI;
+            while (x >= 2.0 * PI)
+                x -= 2.0 * PI;
+            return x;
+        };
+        double dab = wrap(tb - ta), dam = wrap(tm - ta);
+        double sweep = (dam <= dab) ? dab : dab - 2.0 * PI; // the direction a->b passing through m
+        int n = std::max(2, (int) std::ceil(std::abs(sweep) / (2.0 * PI) * 64.0));
+        std::vector<Vec3> out;
+        out.reserve(n + 1);
+        for (int i = 0; i <= n; ++i) {
+            double t = ta + sweep * i / n;
+            out.push_back({ux + r * std::cos(t), uy + r * std::sin(t), 0});
+        }
+        return out;
+    }
     // OuterCurve (IfcPolyline of IfcCartesianPoint, or IfcIndexedPolyCurve over an IfcCartesianPointList2D)
     // -> the profile's 2D polygon (z=0), drop the closing duplicate point.
     std::vector<Vec3> curve_points2d(long cid) {
@@ -639,19 +672,52 @@ private:
         const Instance *in = inst(cid);
         if (!in)
             return pts;
+        auto push = [&](const Vec3 &p) {
+            if (pts.empty() || (pts.back() - p).norm() > 1e-9)
+                pts.push_back(p);
+        };
         if (iequals(in->type, "IFCPOLYLINE")) {
             if (!in->args.empty() && in->args[0].is_list())
                 for (const Value &pr : in->args[0].items)
                     if (pr.is_ref()) {
                         Vec3 p = point(pr.i);
-                        pts.push_back({p.x, p.y, 0});
+                        push({p.x, p.y, 0});
                     }
         } else if (iequals(in->type, "IFCINDEXEDPOLYCURVE")) {
             const Instance *pl = inst(ref_arg(*in, 0)); // IfcCartesianPointList2D(CoordList)
+            std::vector<Vec3> coords{{0, 0, 0}};        // 1-based: coords[0] is a placeholder
             if (pl && !pl->args.empty() && pl->args[0].is_list())
                 for (const Value &row : pl->args[0].items)
                     if (row.is_list() && row.items.size() >= 2)
-                        pts.push_back({row.items[0].as_double(), row.items[1].as_double(), 0});
+                        coords.push_back({row.items[0].as_double(), row.items[1].as_double(), 0});
+            auto at = [&](long i1) -> Vec3 {
+                return (i1 >= 1 && (size_t) i1 < coords.size()) ? coords[i1] : Vec3{0, 0, 0};
+            };
+            // Segments (arg 1): a list of typed [Keyword, ((indices))] pairs. IfcLineIndex is a
+            // polyline through ALL its points; IfcArcIndex is a 3-point circular arc (discretized).
+            // Ignoring them (the old behaviour) collapsed every arc to the chord between listed
+            // points — sharp corners on filleted profiles. Absent Segments -> the raw coord polygon.
+            const Value *segs = (in->args.size() > 1 && in->args[1].is_list()) ? &in->args[1] : nullptr;
+            if (segs && !segs->items.empty()) {
+                for (size_t k = 0; k + 1 < segs->items.size(); k += 2) {
+                    const Value &kw = segs->items[k];
+                    const Value &al = segs->items[k + 1];
+                    if (kw.kind != adacpp::step::Kind::Keyword || !al.is_list() || al.items.empty() ||
+                        !al.items[0].is_list())
+                        continue;
+                    const std::vector<Value> &ix = al.items[0].items;
+                    if (iequals(kw.s, "IFCARCINDEX") && ix.size() == 3) {
+                        for (const Vec3 &q : arc_poly_2d(at(ix[0].i), at(ix[1].i), at(ix[2].i)))
+                            push(q);
+                    } else {
+                        for (const Value &iv : ix)
+                            push(at(iv.kind == adacpp::step::Kind::Int ? iv.i : (long) iv.as_double()));
+                    }
+                }
+            } else {
+                for (size_t i = 1; i < coords.size(); ++i)
+                    push(coords[i]);
+            }
         }
         if (pts.size() > 1 && (pts.front() - pts.back()).norm() < 1e-9)
             pts.pop_back();
