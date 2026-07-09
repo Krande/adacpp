@@ -100,19 +100,41 @@ public:
     // Emit the root's faces as one IfcClosedShell -> IfcAdvancedBrep. Returns the IfcAdvancedBrep id,
     // or 0 if any face used non-emittable geometry (solid skipped wholesale, matching the Python).
     long emit_advanced_brep(std::string &out, const NgeomRoot &root) {
+        return emit_faces_brep(out, root.faces);
+    }
+
+    // Emit a NgeomRoot as its native IFC solid — advanced-brep for face sets, else the ANALYTIC form
+    // (IfcExtrudedAreaSolid / IfcRevolvedAreaSolid / IfcSweptDiskSolid / IfcCsgSolid(sphere) /
+    // IfcBooleanResult) — the inverse of the IFC reader, so a native round-trip keeps the CSG analytic
+    // (never tessellated). Sets `rep_type` to the matching IfcShapeRepresentation.RepresentationType.
+    // Returns the solid item id, or 0 if unrepresentable.
+    long emit_solid(std::string &out, const NgeomRoot &root, std::string &rep_type) {
         vcache_.clear();
-        std::vector<long> face_ids;
-        face_ids.reserve(root.faces.size());
-        for (const auto &fc : root.faces) {
-            long fid = face(out, *fc);
-            if (fid)
-                face_ids.push_back(fid); // a dropped face is counted in stats_ (no silent skip),
-                                         // but never sinks the whole solid — keep every good face
+        if (!root.faces.empty()) {
+            rep_type = "AdvancedBrep";
+            return emit_faces_brep(out, root.faces);
         }
-        if (face_ids.empty())
-            return 0;
-        long shell = emit(out, "IfcClosedShell(" + refs(face_ids) + ")");
-        return emit(out, "IfcAdvancedBrep(#" + std::to_string(shell) + ")");
+        if (root.extrusion) {
+            rep_type = "SweptSolid";
+            return emit_extrusion(out, *root.extrusion);
+        }
+        if (root.revolve) {
+            rep_type = "SweptSolid";
+            return emit_revolve(out, *root.revolve);
+        }
+        if (root.sphere) {
+            rep_type = "CSG";
+            return emit_sphere(out, *root.sphere);
+        }
+        if (root.boolean) {
+            rep_type = "CSG";
+            return emit_boolean(out, *root.boolean);
+        }
+        if (root.sweep) {
+            rep_type = "AdvancedSweptSolid";
+            return emit_swept_disk(out, *root.sweep);
+        }
+        return 0;
     }
 
 private:
@@ -121,6 +143,141 @@ private:
     double deflection_, angular_;
     EmitStats stats_;
     std::unordered_map<long long, long> vcache_; // rounded-point key -> IfcVertexPoint id
+
+    // faces -> IfcClosedShell -> IfcAdvancedBrep (shared by root faces + boolean shell operands).
+    long emit_faces_brep(std::string &out, const std::vector<std::shared_ptr<FaceSurfaceN>> &faces) {
+        std::vector<long> face_ids;
+        face_ids.reserve(faces.size());
+        for (const auto &fc : faces) {
+            long fid = fc ? face(out, *fc) : 0;
+            if (fid)
+                face_ids.push_back(fid); // dropped faces counted in stats_; never sink the whole solid
+        }
+        if (face_ids.empty())
+            return 0;
+        long shell = emit(out, "IfcClosedShell(" + refs(face_ids) + ")");
+        return emit(out, "IfcAdvancedBrep(#" + std::to_string(shell) + ")");
+    }
+
+    // -- analytic solids (inverse of the IFC reader) -------------------------
+    long pt2d(std::string &out, const Vec3 &p) { // profile points are LOCAL (z=0), never baked by tf_
+        return emit(out, "IfcCartesianPoint((" + ifc_real(p.x) + "," + ifc_real(p.y) + "))");
+    }
+    // Closed 2D polyline of a loop's outline (first point repeated per IFC profile rule).
+    long polyline2d(std::string &out, const std::vector<Vec3> &pts) {
+        std::vector<long> ids;
+        ids.reserve(pts.size() + 1);
+        for (const Vec3 &p : pts)
+            ids.push_back(pt2d(out, p));
+        if (pts.size() >= 2 && (pts.front() - pts.back()).norm() > 1e-9)
+            ids.push_back(ids.front());
+        return emit(out, "IfcPolyline(" + refs(ids) + ")");
+    }
+    long polyline3d(std::string &out, const std::vector<Vec3> &pts) {
+        std::vector<long> ids;
+        ids.reserve(pts.size());
+        for (const Vec3 &p : pts)
+            ids.push_back(pt(out, p));
+        return emit(out, "IfcPolyline(" + refs(ids) + ")");
+    }
+    // planar profile face -> IfcArbitraryClosedProfileDef (+ voids). 0 if no usable outer loop.
+    long profile_def(std::string &out, const FaceSurfaceN &pf) {
+        if (pf.bounds.empty() || !pf.bounds[0].loop)
+            return 0;
+        std::vector<Vec3> outer = pf.bounds[0].loop->discretize(deflection_, angular_);
+        if (outer.size() < 3)
+            return 0;
+        long curve = polyline2d(out, outer);
+        std::vector<long> holes;
+        for (size_t i = 1; i < pf.bounds.size(); ++i) {
+            if (!pf.bounds[i].loop)
+                continue;
+            std::vector<Vec3> h = pf.bounds[i].loop->discretize(deflection_, angular_);
+            if (h.size() >= 3)
+                holes.push_back(polyline2d(out, h));
+        }
+        if (!holes.empty())
+            return emit(out, "IfcArbitraryProfileDefWithVoids(.AREA.,$,#" + std::to_string(curve) + "," +
+                                 refs(holes) + ")");
+        return emit(out, "IfcArbitraryClosedProfileDef(.AREA.,$,#" + std::to_string(curve) + ")");
+    }
+    long emit_extrusion(std::string &out, const ExtrusionN &ex) {
+        if (!ex.profile)
+            return 0;
+        long prof = profile_def(out, *ex.profile);
+        if (!prof)
+            return 0;
+        long pos = axis2(out, ex.frame), edir = dir(out, ex.direction);
+        return emit(out, "IfcExtrudedAreaSolid(#" + std::to_string(prof) + ",#" + std::to_string(pos) + ",#" +
+                             std::to_string(edir) + "," + ifc_real(ex.depth) + ")");
+    }
+    long emit_revolve(std::string &out, const RevolveN &rv) {
+        if (!rv.profile)
+            return 0;
+        long prof = profile_def(out, *rv.profile);
+        if (!prof)
+            return 0;
+        long pos = axis2(out, rv.frame), ax = axis1(out, rv.axis_origin, rv.axis_dir);
+        double angle = rv.angle > 1e-9 ? rv.angle : TWO_PI; // 0 => full revolution
+        return emit(out, "IfcRevolvedAreaSolid(#" + std::to_string(prof) + ",#" + std::to_string(pos) + ",#" +
+                             std::to_string(ax) + "," + ifc_real(angle) + ")");
+    }
+    long emit_sphere(std::string &out, const SphereN &sp) {
+        long pos = axis2(out, sp.frame);
+        long prim = emit(out, "IfcSphere(#" + std::to_string(pos) + "," + ifc_real(sp.radius) + ")");
+        return emit(out, "IfcCsgSolid(#" + std::to_string(prim) + ")");
+    }
+    // A disk/annulus swept along a directrix -> IfcSweptDiskSolid(Directrix, Radius, InnerRadius). The
+    // radius is recovered from the circular profile; origin[] (frame-applied) is the directrix.
+    long emit_swept_disk(std::string &out, const SweepN &sw) {
+        if (sw.origin.size() < 2 || !sw.profile || sw.profile->bounds.empty() || !sw.profile->bounds[0].loop)
+            return 0;
+        std::vector<Vec3> ring = sw.profile->bounds[0].loop->discretize(deflection_, angular_);
+        if (ring.size() < 3)
+            return 0;
+        Vec3 c{0, 0, 0};
+        for (const Vec3 &p : ring)
+            c = c + p;
+        c = c * (1.0 / (double) ring.size());
+        double radius = (ring[0] - c).norm();
+        if (radius <= 1e-9)
+            return 0;
+        double inner = 0.0;
+        if (sw.profile->bounds.size() > 1 && sw.profile->bounds[1].loop) {
+            std::vector<Vec3> ih = sw.profile->bounds[1].loop->discretize(deflection_, angular_);
+            if (ih.size() >= 3)
+                inner = (ih[0] - c).norm();
+        }
+        std::vector<Vec3> dpts;
+        dpts.reserve(sw.origin.size());
+        for (const Vec3 &o : sw.origin)
+            dpts.push_back(sw.frame.to_world(o.x, o.y, o.z));
+        long directrix = polyline3d(out, dpts);
+        std::string inner_s = inner > 1e-9 ? ("," + ifc_real(inner)) : ",$";
+        return emit(out, "IfcSweptDiskSolid(#" + std::to_string(directrix) + "," + ifc_real(radius) + inner_s +
+                             ",$,$)");
+    }
+    long emit_solid_operand(std::string &out, const SolidItemN &it) {
+        if (it.extrusion)
+            return emit_extrusion(out, *it.extrusion);
+        if (it.revolve)
+            return emit_revolve(out, *it.revolve);
+        if (it.sweep)
+            return emit_swept_disk(out, *it.sweep);
+        if (it.boolean)
+            return emit_boolean(out, *it.boolean);
+        if (!it.faces.empty())
+            return emit_faces_brep(out, it.faces);
+        return 0;
+    }
+    long emit_boolean(std::string &out, const BooleanN &b) {
+        long a = emit_solid_operand(out, b.a), bb = emit_solid_operand(out, b.b);
+        if (!a || !bb)
+            return 0;
+        const char *op = b.op == 1 ? ".UNION." : (b.op == 2 ? ".INTERSECTION." : ".DIFFERENCE.");
+        return emit(out, std::string("IfcBooleanResult(") + op + ",#" + std::to_string(a) + ",#" +
+                             std::to_string(bb) + ")");
+    }
 
     long emit(std::string &out, const std::string &body) {
         ++nid_;

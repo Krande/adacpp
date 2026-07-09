@@ -2813,10 +2813,11 @@ static void emit_solid_ifc(adacpp::ifc_emit::BrepEmitter &em, std::string &buf, 
                            long sid, uint64_t guid_seed, std::vector<long> &proxies,
                            std::vector<IfcPath> *proxy_paths) {
     using namespace adacpp::ifc_emit;
-    long brep = em.emit_advanced_brep(buf, root);
-    if (!brep)
+    std::string rep_type = "AdvancedBrep";
+    long solid = em.emit_solid(buf, root, rep_type); // brep for face sets, else the analytic IFC solid
+    if (!solid)
         return;
-    // Presentation colour: style the shared brep item so it colours every (mapped) instance. The
+    // Presentation colour: style the shared solid item so it colours every (mapped) instance. The
     // NgeomRoot already carries the colour resolved by the STEP/IFC reader (has_color/cr/cg/cb/ca) —
     // emit it as IfcStyledItem -> IfcSurfaceStyle -> IfcColourRgb (was dropped; the viewer fell back
     // to grey). Matches adapy's add_colour + the Python streaming writer.
@@ -2825,7 +2826,7 @@ static void emit_solid_ifc(adacpp::ifc_emit::BrepEmitter &em, std::string &buf, 
         long col = em.emit_entity(buf, "IfcColourRgb($," + R(root.cr) + "," + R(root.cg) + "," + R(root.cb) + ")");
         long sh = em.emit_entity(buf, "IfcSurfaceStyleShading(#" + std::to_string(col) + "," + R(1.0f - root.ca) + ")");
         long ss = em.emit_entity(buf, "IfcSurfaceStyle($,.BOTH.,(#" + std::to_string(sh) + "))");
-        em.emit_entity(buf, "IfcStyledItem(#" + std::to_string(brep) + ",(#" + std::to_string(ss) + "),$)");
+        em.emit_entity(buf, "IfcStyledItem(#" + std::to_string(solid) + ",(#" + std::to_string(ss) + "),$)");
     }
     std::string nm = root.id.empty() ? ("solid_" + std::to_string(sid)) : ifc_str(root.id);
     auto record = [&](long proxy, size_t k) {
@@ -2844,7 +2845,8 @@ static void emit_solid_ifc(adacpp::ifc_emit::BrepEmitter &em, std::string &buf, 
         }
         return nm;
     };
-    long mrep = em.emit_entity(buf, "IfcShapeRepresentation(#6,'Body','AdvancedBrep',(#" + std::to_string(brep) + "))");
+    long mrep =
+        em.emit_entity(buf, "IfcShapeRepresentation(#6,'Body','" + rep_type + "',(#" + std::to_string(solid) + "))");
     if (root.transforms.empty()) {
         long pds = em.emit_entity(buf, "IfcProductDefinitionShape($,$,(#" + std::to_string(mrep) + "))");
         long proxy = em.emit_entity(buf, "IfcBuildingElementProxy('" + ifc_guid(guid_seed) + "',$,'" + leaf_name(0) +
