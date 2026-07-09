@@ -964,8 +964,62 @@ private:
                                ? in->args[2].as_double()
                                : 0.0;
             out.sweep = mk_swept_disk(dp, radius, inner);
+        } else if (iequals(t, "IFCFIXEDREFERENCESWEPTAREASOLID")) {
+            // (SweptArea, Position, Directrix, StartParam, EndParam, FixedReference)
+            auto prof = profile_face(ref_arg(*in, 0));
+            Frame pos = axis2(ref_arg(*in, 1));
+            std::vector<Vec3> dp = directrix_points(ref_arg(*in, 2));
+            Vec3 fref = (in->args.size() > 5 && in->args[5].is_ref()) ? dir(in->args[5].i) : Vec3{0, 0, 1};
+            out.sweep = mk_fixed_ref_swept(prof, dp, pos, fref);
+        } else if (iequals(t, "IFCSECTIONEDSOLIDHORIZONTAL")) {
+            // (Directrix, CrossSections, CrossSectionPositions, FixedAxisVertical). Uniform sections
+            // (all CrossSections identical) sweep like a fixed-vertical-reference solid; varying
+            // sections aren't a single SweepN -> skipped.
+            std::vector<Vec3> dp = directrix_points(ref_arg(*in, 0));
+            long sec0 = -1;
+            bool uniform = true;
+            if (in->args.size() > 1 && in->args[1].is_list())
+                for (const Value &s : in->args[1].items)
+                    if (s.is_ref()) {
+                        if (sec0 < 0)
+                            sec0 = s.i;
+                        else if (s.i != sec0)
+                            uniform = false;
+                    }
+            if (uniform && sec0 >= 0)
+                out.sweep = mk_fixed_ref_swept(profile_face(sec0), dp, Frame{}, Vec3{0, 0, 1});
         }
         return out;
+    }
+    // Fixed-reference sweep: the profile's local-x tracks a FIXED reference direction (projected
+    // perpendicular to the tangent), not a rotation-minimising frame. Used by
+    // IfcFixedReferenceSweptAreaSolid + (with a vertical reference) IfcSectionedSolidHorizontal.
+    std::shared_ptr<SweepN> mk_fixed_ref_swept(std::shared_ptr<FaceSurfaceN> profile, const std::vector<Vec3> &pts,
+                                               const Frame &pos, Vec3 fref) {
+        if (!profile || pts.size() < 2)
+            return nullptr;
+        int n = (int) pts.size();
+        Vec3 fr = fref.norm() > 1e-9 ? fref.normalized() : Vec3{0, 0, 1};
+        auto sw = std::make_shared<SweepN>();
+        sw->frame = pos;
+        sw->profile = profile;
+        sw->origin.resize(n);
+        sw->dir_x.resize(n);
+        sw->dir_y.resize(n);
+        for (int i = 0; i < n; ++i) {
+            Vec3 tv = (i == 0) ? pts[1] - pts[0] : (i == n - 1) ? pts[n - 1] - pts[n - 2] : pts[i + 1] - pts[i - 1];
+            Vec3 t = tv.norm() > 1e-12 ? tv.normalized() : Vec3{1, 0, 0};
+            Vec3 dx = fr - t * t.dot(fr);
+            if (dx.norm() < 1e-9) { // reference parallel to the tangent — any perpendicular will do
+                Vec3 up = std::abs(t.z) < 0.9 ? Vec3{0, 0, 1} : Vec3{1, 0, 0};
+                dx = up - t * t.dot(up);
+            }
+            dx = dx.normalized();
+            sw->origin[i] = pts[i];
+            sw->dir_x[i] = dx;
+            sw->dir_y[i] = t.cross(dx);
+        }
+        return sw;
     }
     // A 3-point 3D circular arc (fit the plane through the points, circumcircle, sweep a->b via m).
     static std::vector<Vec3> arc_poly_3d(const Vec3 &a, const Vec3 &m, const Vec3 &b) {
