@@ -4,6 +4,7 @@
 #include "../geom/GroupReference.h"
 #include "../geom/Mesh.h"
 #include "../geom/MeshType.h"
+#include "../geom/mesh_spike.h"
 #include "../cadit/occt/static_param_guard.h"
 #include "../cadit/occt/step_writer.h"
 #include "../cadit/ifc/ngeom_taxonomy.h"
@@ -3796,9 +3797,43 @@ void cad_module(nb::module_ &m) {
                          return nb::ndarray<nb::numpy, const uint32_t, nb::ndim<1>>(
                              self.edges.data(), {self.edges.size()}, nb::find(self));
                      })
+        .def(
+            "spike_stats",
+            [](Mesh &self, double aspect_min, double outlier_k) {
+                // Crows-nest tessellation-spike scan (same detector as the viewer's client-side
+                // meshStats.ts) — usable from Python for audits/CI without the browser.
+                adacpp::geom::SpikeStats s =
+                    adacpp::geom::mesh_spike_stats(self.positions, self.indices, aspect_min, outlier_k);
+                nb::dict d;
+                d["max_spike"] = s.max_spike;
+                d["spike_tris"] = s.spike_tris;
+                d["triangles"] = s.triangles;
+                return d;
+            },
+            nb::arg("aspect_min") = 8.0, nb::arg("outlier_k") = 4.0,
+            "Crows-nest distortion stats {max_spike, spike_tris, triangles} for this tessellated mesh.")
         .def_ro("mesh_type", &Mesh::mesh_type)
         .def_ro("color", &Mesh::color)
         .def_ro("groups", &Mesh::group_reference);
+
+    // Free-function form: crows-nest distortion scan over raw (positions, indices) numpy arrays — for
+    // audits/CI that hold geometry from any source, not only a tessellate_stream Mesh. Same detector
+    // as Mesh.spike_stats and the viewer's client-side meshStats.ts.
+    m.def(
+        "mesh_spike_stats",
+        [](nb::ndarray<const float, nb::ndim<1>> positions, nb::ndarray<const uint32_t, nb::ndim<1>> indices,
+           double aspect_min, double outlier_k) {
+            std::vector<float> p(positions.data(), positions.data() + positions.size());
+            std::vector<uint32_t> ix(indices.data(), indices.data() + indices.size());
+            adacpp::geom::SpikeStats s = adacpp::geom::mesh_spike_stats(p, ix, aspect_min, outlier_k);
+            nb::dict d;
+            d["max_spike"] = s.max_spike;
+            d["spike_tris"] = s.spike_tris;
+            d["triangles"] = s.triangles;
+            return d;
+        },
+        nb::arg("positions"), nb::arg("indices"), nb::arg("aspect_min") = 8.0, nb::arg("outlier_k") = 4.0,
+        "Crows-nest distortion stats {max_spike, spike_tris, triangles} for a flat (positions, indices) mesh.");
 
     nb::class_<StepRootMeta>(m, "StepRootMeta")
         .def_ro("id", &StepRootMeta::id)

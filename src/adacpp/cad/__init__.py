@@ -39,6 +39,7 @@ IfcNgeomStream = _cad.IfcNgeomStream
 _step_index_parity = _cad._step_index_parity
 ifc_taxonomy_settings = _cad.ifc_taxonomy_settings
 meshopt_simplify_mesh = _cad.meshopt_simplify_mesh
+mesh_spike_stats = _cad.mesh_spike_stats
 meshopt_encode_vertex_buffer = _cad.meshopt_encode_vertex_buffer
 meshopt_encode_index_sequence = _cad.meshopt_encode_index_sequence
 meshopt_decode_vertex_buffer = _cad.meshopt_decode_vertex_buffer
