@@ -128,6 +128,40 @@ public:
         return 1.0;
     }
 
+    // Radians per model plane-angle unit. IfcSIUnit RADIAN => 1; an IfcConversionBasedUnit for
+    // PLANEANGLEUNIT (DEGREE/GRAD) carries the exact ratio in its ConversionFactor
+    // (IfcMeasureWithUnit.ValueComponent) -> use it so trimmed-circle parameters expressed in
+    // degrees (curve-parameters-in-degrees.ifc) sample the same arc as the radian model.
+    double plane_angle_scale() {
+        if (angle_scale_ > 0)
+            return angle_scale_;
+        angle_scale_ = 1.0; // default: radian
+        std::string scratch;
+        for (long id : idx_.ids) {
+            std::string_view t = type_of(id, scratch);
+            if (!iequals(t, "IFCCONVERSIONBASEDUNIT"))
+                continue;
+            const Instance *in = inst(id); // (Dimensions, UnitType, Name, ConversionFactor)
+            if (!in || in->args.size() < 4 ||
+                !(in->args[1].kind == adacpp::step::Kind::Enum && in->args[1].s == "PLANEANGLEUNIT"))
+                continue;
+            const Instance *mwu = inst(ref_arg(*in, 3)); // IfcMeasureWithUnit(ValueComponent, UnitComponent)
+            if (mwu)                                     // ValueComponent = IfcPlaneAngleMeasure(x): [Keyword, List[Real]]
+                for (const Value &a : mwu->args) {
+                    if (numeric(a)) {
+                        angle_scale_ = a.as_double();
+                        break;
+                    }
+                    if (a.is_list() && !a.items.empty() && numeric(a.items[0])) {
+                        angle_scale_ = a.items[0].as_double();
+                        break;
+                    }
+                }
+            break;
+        }
+        return angle_scale_;
+    }
+
     // Build the NgeomRoot for a product id (faces + name + per-instance transforms). Empty faces => the
     // product had no resolvable advanced-brep (skipped by the caller).
     NgeomRoot resolve_product(long pid) {
@@ -144,10 +178,42 @@ public:
         const Instance *pds = inst(rep);
         if (!pds || pds->args.size() < 3)
             return root;
+        // IfcShapeRepresentation: (ContextOfItems, RepresentationIdentifier, RepresentationType, Items).
+        // A product may carry several reps: "Body"/"Facetation"/"Tessellation" are the 3D shape;
+        // "Axis" is a reference curve (render only when there is NO body — an alignment segment IS
+        // its axis); "FootPrint"/"Annotation"/"Profile"/"Plan"/"Box" are 2D and never rendered in
+        // 3D. Pick the right class so a beam's Axis polyline doesn't collide with its Body extrusion,
+        // and an alignment takes its 3D gradient Axis rather than its 2D FootPrint.
+        auto rep_id = [](const Instance *sr) -> std::string_view {
+            if (sr->args.size() > 1 && sr->args[1].kind == adacpp::step::Kind::Str)
+                return sr->args[1].s;
+            return {};
+        };
+        auto is_2d_only = [](std::string_view id) {
+            return id == "FootPrint" || id == "Annotation" || id == "Profile" || id == "Plan" ||
+                   id == "Box";
+        };
+        auto is_axis = [](std::string_view id) { return id == "Axis"; };
+        bool has_body = false;
+        for (const Value &srref : pds->args[2].items) {
+            const Instance *sr = inst(srref.i);
+            if (sr && sr->args.size() >= 4) {
+                std::string_view id = rep_id(sr);
+                if (!is_2d_only(id) && !is_axis(id)) {
+                    has_body = true;
+                    break;
+                }
+            }
+        }
         for (const Value &srref : pds->args[2].items) {
             const Instance *sr = inst(srref.i);
             if (!sr || sr->args.size() < 4)
                 continue;
+            std::string_view id = rep_id(sr);
+            if (is_2d_only(id))
+                continue; // 2D reps are never rendered in 3D
+            if (has_body && is_axis(id))
+                continue; // a body exists -> the Axis is only a reference line, skip it
             for (const Value &item : sr->args[3].items) {
                 if (!item.is_ref())
                     continue;
@@ -206,8 +272,9 @@ private:
     std::unordered_map<long, std::pair<std::string, Instance>> cache_;
     std::unordered_map<long, std::shared_ptr<Surface>> surf_cache_;
     std::string pread_scratch_;
-    long solid_src_ = 0; // entity id of the one solid this product carries (mapped instances share it)
-    bool mixed_ = false; // product has >1 distinct solid / mixes brep+procedural -> skip (OCC)
+    long solid_src_ = 0;      // entity id of the one solid this product carries (mapped instances share it)
+    bool mixed_ = false;      // product has >1 distinct solid / mixes brep+procedural -> skip (OCC)
+    double angle_scale_ = 0.0; // radians per model plane-angle unit (0 => not yet computed)
 
     const Instance *inst(long id) {
         if (id <= 0)
@@ -800,10 +867,113 @@ private:
                 for (size_t i = 1; i < coords.size(); ++i)
                     push(coords[i]);
             }
+        } else if (iequals(in->type, "IFCCOMPOSITECURVE")) {
+            // (Segments=list of IfcCompositeCurveSegment, SelfIntersect). Each segment is
+            // (Transition, SameSense, ParentCurve); sample each parent (line/arc/polyline) and
+            // reverse it when SameSense=.F. so the outline stays continuous. This is how a curved
+            // profile outline (e.g. a semicircle of a trimmed arc + a closing trimmed line) is built.
+            if (!in->args.empty() && in->args[0].is_list())
+                for (const Value &sref : in->args[0].items) {
+                    if (!sref.is_ref())
+                        continue;
+                    const Instance *seg = inst(sref.i);
+                    if (!seg || seg->args.size() < 3 || !seg->args[2].is_ref())
+                        continue;
+                    bool same = !(seg->args[1].kind == adacpp::step::Kind::Enum && seg->args[1].s == "F");
+                    std::vector<Vec3> sp = curve_points2d(seg->args[2].i);
+                    if (!same)
+                        std::reverse(sp.begin(), sp.end());
+                    for (const Vec3 &q : sp)
+                        push(q);
+                }
+        } else if (iequals(in->type, "IFCTRIMMEDCURVE")) {
+            for (const Vec3 &q : trimmed_curve_points2d(*in))
+                push(q);
         }
         if (pts.size() > 1 && (pts.front() - pts.back()).norm() < 1e-9)
             pts.pop_back();
         return pts;
+    }
+    // Sample an IfcTrimmedCurve (BasisCurve, Trim1, Trim2, SenseAgreement, MasterRepresentation) as a
+    // 2D profile-outline polyline. Supports an IfcLine basis (straight span) and an IfcCircle basis
+    // (arc; PARAMETER trims are angles in the model plane-angle unit). CARTESIAN trims give the
+    // endpoints directly. SenseAgreement=.F. reverses the traversal direction.
+    std::vector<Vec3> trimmed_curve_points2d(const Instance &in) {
+        std::vector<Vec3> out;
+        const Instance *basis = inst(ref_arg(in, 0));
+        if (!basis)
+            return out;
+        bool sense = !(in.args.size() > 3 && in.args[3].kind == adacpp::step::Kind::Enum && in.args[3].s == "F");
+        // Trim1/Trim2 are SETs of IfcTrimmingSelect: an IfcParameterValue ([Keyword, List[Real]] or a
+        // bare number) and/or an IfcCartesianPoint ref.
+        auto read_trim = [&](const Value &set, double &param, bool &has_p, Vec3 &cart, bool &has_c) {
+            has_p = has_c = false;
+            if (!set.is_list())
+                return;
+            for (const Value &e : set.items) {
+                if (numeric(e)) {
+                    param = e.as_double();
+                    has_p = true;
+                } else if (e.is_list() && !e.items.empty() && numeric(e.items[0])) {
+                    param = e.items[0].as_double();
+                    has_p = true;
+                } else if (e.is_ref()) {
+                    const Instance *cp = inst(e.i);
+                    if (cp && iequals(cp->type, "IFCCARTESIANPOINT")) {
+                        cart = point(e.i);
+                        has_c = true;
+                    }
+                }
+            }
+        };
+        double t1 = 0, t2 = 0;
+        bool hp1 = false, hp2 = false, hc1 = false, hc2 = false;
+        Vec3 c1{}, c2{};
+        if (in.args.size() > 1)
+            read_trim(in.args[1], t1, hp1, c1, hc1);
+        if (in.args.size() > 2)
+            read_trim(in.args[2], t2, hp2, c2, hc2);
+        if (iequals(basis->type, "IFCLINE")) {
+            // IfcLine(Pnt, Dir=IfcVector(Orientation, Magnitude)); P(u) = Pnt + u*Magnitude*Orientation.
+            Vec3 p0 = point(ref_arg(*basis, 0));
+            const Instance *vec = inst(ref_arg(*basis, 1));
+            Vec3 od = vec ? dir(ref_arg(*vec, 0)) : Vec3{1, 0, 0};
+            double mag = (vec && vec->args.size() > 1 && numeric(vec->args[1])) ? vec->args[1].as_double() : 1.0;
+            auto at = [&](double u, bool hc, const Vec3 &cp) -> Vec3 {
+                return hc ? cp : Vec3{p0.x + u * mag * od.x, p0.y + u * mag * od.y, 0};
+            };
+            Vec3 a = at(t1, hc1, c1), b = at(t2, hc2, c2);
+            if (!sense)
+                std::swap(a, b);
+            out = {a, b};
+        } else if (iequals(basis->type, "IFCCIRCLE")) {
+            Vec3 center{0, 0, 0};
+            double phi0 = 0.0, r = ad(basis, 1);
+            const Instance *pos = inst(ref_arg(*basis, 0)); // IfcAxis2Placement2D(Location, RefDirection)
+            if (pos) {
+                if (pos->args.size() > 0 && pos->args[0].is_ref())
+                    center = point(pos->args[0].i);
+                if (pos->args.size() > 1 && pos->args[1].is_ref()) {
+                    Vec3 rd = dir(pos->args[1].i);
+                    phi0 = std::atan2(rd.y, rd.x);
+                }
+            }
+            double sc = plane_angle_scale();
+            double a1 = t1 * sc, a2 = t2 * sc; // angles measured from the placement's local X axis
+            if (sense) {                       // CCW from a1 to a2
+                while (a2 <= a1 + 1e-9)
+                    a2 += 2 * PI;
+            } else { // CW from a1 to a2
+                while (a2 >= a1 - 1e-9)
+                    a2 -= 2 * PI;
+            }
+            int n = std::max(2, (int) std::ceil(std::abs(a2 - a1) / (PI / 32)));
+            for (int i = 0; i <= n; ++i) {
+                double a = phi0 + a1 + (a2 - a1) * i / n;
+                out.push_back({center.x + r * std::cos(a), center.y + r * std::sin(a), 0});
+            }
+        }
+        return out;
     }
     // Translate/rotate a profile polygon by an IfcAxis2Placement2D (Location, RefDirection); $ = identity.
     void apply_placement2d(long pid, std::vector<Vec3> &poly) {
