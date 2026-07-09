@@ -305,13 +305,13 @@ public:
             return c != contained_of_.end() ? c->second : 0;
         };
         std::vector<std::pair<int, std::string>> path;
-        path.push_back({(int) pid, name_of(p)}); // deepest level = the product itself
+        path.push_back({(int) pid, name_or_guid(p)}); // deepest level = the product itself
         std::unordered_set<long> seen{pid};
         long up = next_up(pid);
         int guard = 0;
         while (up > 0 && seen.insert(up).second && guard++ < 64) {
             const Instance *s = inst(up);
-            path.push_back({(int) up, s ? name_of(*s) : std::string()});
+            path.push_back({(int) up, s ? name_or_guid(*s) : std::string()});
             up = next_up(up);
         }
         std::reverse(path.begin(), path.end()); // root-first
@@ -327,7 +327,7 @@ public:
         const Instance *p = inst(pid);
         if (!p)
             return root;
-        root.id = name_of(*p);
+        root.id = name_or_guid(*p);
         // IfcBuildingElementProxy.Representation (arg 6) -> IfcProductDefinitionShape.Representations
         // (arg 2) -> IfcShapeRepresentation.Items (arg 3).
         long rep = ref_arg(*p, 6);
@@ -523,6 +523,18 @@ private:
         // rooted entities: GlobalId, OwnerHistory, Name(arg2) ...
         if (in.args.size() > 2 && in.args[2].kind == adacpp::step::Kind::Str)
             return std::string(in.args[2].s);
+        return {};
+    }
+    // Display/picking id for a rooted entity: its Name (arg2) if set, else its GlobalId (arg0). Rebar
+    // and assemblies frequently carry only a GlobalId (empty Name) -> naming the tree/picking by Name
+    // alone yields blank nodes + empty selection; the Python from_ifc GLB keys on the guid instead, so
+    // this mirrors it. Empty only when the entity has neither.
+    static std::string name_or_guid(const Instance &in) {
+        std::string n = name_of(in);
+        if (!n.empty())
+            return n;
+        if (!in.args.empty() && in.args[0].kind == adacpp::step::Kind::Str)
+            return std::string(in.args[0].s);
         return {};
     }
 
