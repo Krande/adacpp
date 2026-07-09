@@ -10,6 +10,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "../cadit/step/step_part21.h"
@@ -49,10 +50,24 @@ public:
     // Root products: scan for IfcBuildingElementProxy (or any product carrying an AdvancedBrep). Each
     // yields one NgeomRoot (geometry + per-instance world transforms from IfcMappedItem).
     std::vector<long> proxy_roots() {
-        std::vector<long> roots;
+        // A geometric product is any IfcProduct whose Representation (arg 6 in every IfcProduct
+        // subtype) refs an IfcProductDefinitionShape. Resolving by representation — instead of the
+        // old cheap name allowlist, which missed subtypes like IfcSanitaryTerminal / MEP / furniture
+        // terminals — catches every product the ifcopenshell reader would, with no schema.
+        std::unordered_set<long> pds; // IfcProductDefinitionShape ids
         std::string scratch;
+        for (long id : idx_.ids)
+            if (iequals(type_of(id, scratch), "IFCPRODUCTDEFINITIONSHAPE"))
+                pds.insert(id);
+        std::vector<long> roots;
         for (long id : idx_.ids) {
-            if (is_product_type(type_of(id, scratch)))
+            std::string_view t = type_of(id, scratch);
+            if (is_product_type(t)) { // fast path for the common structural types (no full parse)
+                roots.push_back(id);
+                continue;
+            }
+            const Instance *in = inst(id);
+            if (in && in->args.size() > 6 && in->args[6].is_ref() && pds.count(in->args[6].i))
                 roots.push_back(id);
         }
         return roots;
@@ -518,6 +533,29 @@ private:
             if (hx <= 0 || hy <= 0)
                 return nullptr;
             poly = {{-hx, -hy, 0}, {hx, -hy, 0}, {hx, hy, 0}, {-hx, hy, 0}};
+            apply_placement2d(ref_arg(*in, 2), poly);
+        } else if (iequals(in->type, "IFCROUNDEDRECTANGLEPROFILEDEF")) {
+            // (ProfileType, Name, Position, XDim, YDim, RoundingRadius) — a rectangle whose four
+            // corners are quarter-circle arcs of RoundingRadius (matches the adapy Python reader).
+            double hx = ad(in, 3) / 2, hy = ad(in, 4) / 2, r = ad(in, 5);
+            if (hx <= 0 || hy <= 0)
+                return nullptr;
+            r = std::min(r, std::min(hx, hy));
+            if (r <= 1e-12) {
+                poly = {{-hx, -hy, 0}, {hx, -hy, 0}, {hx, hy, 0}, {-hx, hy, 0}};
+            } else {
+                auto corner = [&](double cx, double cy, double a0) { // quarter arc, centre (cx,cy), CCW
+                    int n = std::max(2, (int) std::ceil(0.25 * 64));
+                    for (int i = 0; i <= n; ++i) {
+                        double t = a0 + (PI / 2) * i / n;
+                        poly.push_back({cx + r * std::cos(t), cy + r * std::sin(t), 0});
+                    }
+                };
+                corner(hx - r, -(hy - r), -PI / 2); // bottom-right
+                corner(hx - r, hy - r, 0);          // top-right
+                corner(-(hx - r), hy - r, PI / 2);  // top-left
+                corner(-(hx - r), -(hy - r), PI);   // bottom-left
+            }
             apply_placement2d(ref_arg(*in, 2), poly);
         } else if (iequals(in->type, "IFCARBITRARYCLOSEDPROFILEDEF")) {
             poly = curve_points2d(ref_arg(*in, 2)); // (ProfileType, ProfileName, OuterCurve)
