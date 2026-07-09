@@ -33,6 +33,10 @@
 
 #include "../../cad/posix_compat.h"
 
+#ifdef ADACPP_HAVE_ZLIB
+#include <zlib.h>
+#endif
+
 #include "ngeom_bspline.h"  // BSplineCurve / BSplineSurface / expand_knots
 #include "ngeom_topology.h" // pulls ngeom_curves.h / ngeom_surfaces.h / ngeom_math.h
 #include "step_part21.h"
@@ -165,9 +169,16 @@ public:
     std::vector<size_t> offs; // statement-start offset, parallel to ids
     TypeLists lists;
 
-    // In-memory: the caller keeps `b` alive; statement_bytes returns views into it.
-    explicit StreamIndex(std::string_view b) : buf_(b) {
-        scan(b, nullptr);
+    // In-memory: the caller keeps `b` alive; statement_bytes returns views into it. gzip bytes are
+    // inflated into owned_ first (buf_ then views the inflated text).
+    explicit StreamIndex(std::string_view b) {
+        if (is_gzip(b.data(), b.size())) {
+            owned_ = gunzip(b.data(), b.size());
+            buf_ = owned_;
+        } else {
+            buf_ = b;
+        }
+        scan(buf_, nullptr);
     }
 
     // File-backed, pread-only (NO mmap): for environments where mmap can't lazily page a large file
@@ -185,6 +196,21 @@ public:
             return si;
         }
         si.fsize_ = (size_t) st.st_size;
+        char magic[2] = {0, 0};
+        if (::pread(si.fd_, magic, 2, 0) == 2 && is_gzip(magic, 2)) {
+            // gzip: read the whole compressed file, inflate, index in memory (no seekable fast path).
+            std::string comp;
+            comp.resize(si.fsize_);
+            ssize_t r = ::pread(si.fd_, comp.data(), si.fsize_, 0);
+            ::close(si.fd_);
+            si.fd_ = -1;
+            if (r == (ssize_t) si.fsize_) {
+                si.owned_ = gunzip(comp.data(), comp.size());
+                si.buf_ = si.owned_;
+                si.scan(si.buf_, nullptr);
+            }
+            return si;
+        }
         si.scan_pread();
         return si;
     }
@@ -208,6 +234,16 @@ public:
             si.fd_ = -1;
             return si;
         }
+        if (is_gzip((const char *) m, si.fsize_)) {
+            // gzip isn't seekable -> inflate fully, drop the fd/mmap, index the inflated text in memory.
+            si.owned_ = gunzip((const char *) m, si.fsize_);
+            ::munmap(m, si.fsize_);
+            ::close(si.fd_);
+            si.fd_ = -1;
+            si.buf_ = si.owned_;
+            si.scan(si.buf_, nullptr);
+            return si;
+        }
         ::madvise(m, si.fsize_, MADV_SEQUENTIAL);
         si.scan(std::string_view((const char *) m, si.fsize_), m); // free-behind during the scan
         ::munmap(m, si.fsize_);
@@ -228,7 +264,10 @@ public:
             ids = std::move(o.ids);
             offs = std::move(o.offs);
             lists = std::move(o.lists);
-            buf_ = o.buf_;
+            owned_ = std::move(o.owned_);
+            // If the source owned its bytes (inflated gzip), buf_ must view OUR moved buffer, not the
+            // source's now-empty one; otherwise carry the external view across verbatim.
+            buf_ = owned_.empty() ? o.buf_ : std::string_view(owned_);
             fd_ = o.fd_;
             fsize_ = o.fsize_;
             o.fd_ = -1;
@@ -569,9 +608,46 @@ private:
             lists.units.push_back(id);
     }
 
-    std::string_view buf_; // in-memory mode (empty in file mode)
+    std::string_view buf_; // in-memory mode (view; may point into owned_ for inflated gzip input)
+    std::string owned_;    // owns inflated bytes when the input was gzip (buf_ then views this)
     int fd_ = -1;          // file mode (>=0)
     size_t fsize_ = 0;
+
+    // gzip magic (RFC 1952): 0x1f 0x8b. A .ifc/.stp may be gzip-compressed on disk.
+    static bool is_gzip(const char *d, size_t n) {
+        return n >= 2 && (unsigned char) d[0] == 0x1f && (unsigned char) d[1] == 0x8b;
+    }
+    // Inflate a whole gzip buffer to text. Empty on failure or when zlib isn't linked (the caller then
+    // sees 0 statements -> products_skipped, never a crash). gzip is not seekable, so it must be fully
+    // inflated up front and indexed in-memory (no mmap/pread fast path).
+    static std::string gunzip(const char *data, size_t n) {
+#ifdef ADACPP_HAVE_ZLIB
+        z_stream zs{};
+        if (inflateInit2(&zs, 15 + 16) != Z_OK) // 15 window bits + 16 => gzip header
+            return {};
+        zs.next_in = (Bytef *) data;
+        zs.avail_in = (uInt) n;
+        std::string out;
+        char tmp[1u << 16];
+        int ret;
+        do {
+            zs.next_out = (Bytef *) tmp;
+            zs.avail_out = sizeof(tmp);
+            ret = inflate(&zs, Z_NO_FLUSH);
+            if (ret != Z_OK && ret != Z_STREAM_END) {
+                inflateEnd(&zs);
+                return {};
+            }
+            out.append(tmp, sizeof(tmp) - zs.avail_out);
+        } while (ret != Z_STREAM_END);
+        inflateEnd(&zs);
+        return out;
+#else
+        (void) data;
+        (void) n;
+        return {};
+#endif
+    }
 };
 
 class Resolver {

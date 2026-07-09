@@ -201,6 +201,21 @@ include(cmake/deps_manifold.cmake)
 list(APPEND ADA_CPP_LINK_LIBS manifold)
 add_compile_definitions(ADACPP_HAVE_MANIFOLD)
 
+# zlib for gzip-compressed IFC/STEP input (StreamIndex inflates before indexing). Native only — the
+# pixi test/prod envs carry zlib; the wasm build skips gzip (gunzip() is a no-op without the define,
+# returning 0 statements rather than crashing). The ADACPP_HAVE_ZLIB define is applied ONLY to the
+# Python ext target (build_python.cmake, guarded on ZLIB_FOUND) — NOT globally — so the minimal
+# STP2GLB CLI and the C++ test targets (which don't link zlib) compile gunzip() as the no-op stub.
+if (NOT BUILD_WASM)
+    find_package(ZLIB)
+    if (ZLIB_FOUND)
+        list(APPEND ADA_CPP_LINK_LIBS ZLIB::ZLIB)
+        message(STATUS "zlib found: gzip-compressed IFC/STEP input enabled (Python ext)")
+    else ()
+        message(STATUS "zlib NOT found: gzip-compressed input disabled")
+    endif ()
+endif ()
+
 if (BUILD_STP2GLB)
     message(STATUS "Building the STP2GLB executable")
     include(cmake/build_stp2glb.cmake)
