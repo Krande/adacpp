@@ -570,6 +570,37 @@ private:
                 corner(-(hx - r), -(hy - r), PI);   // bottom-left
             }
             apply_placement2d(ref_arg(*in, 2), poly);
+        } else if (iequals(in->type, "IFCDERIVEDPROFILEDEF")) {
+            // (ProfileType, Name, ParentProfile, Operator=IfcCartesianTransformationOperator2D, Label)
+            auto base = profile_face(ref_arg(*in, 2));
+            if (!base || base->bounds.empty())
+                return nullptr;
+            double c = 1, s = 0, ox = 0, oy = 0, sc = 1;
+            const Instance *op = inst(ref_arg(*in, 3));
+            if (op) {
+                if (!op->args.empty() && op->args[0].is_ref()) {
+                    Vec3 a = dir(op->args[0].i);
+                    double nn = std::hypot(a.x, a.y);
+                    if (nn > 1e-12) {
+                        c = a.x / nn;
+                        s = a.y / nn;
+                    }
+                }
+                if (op->args.size() > 2 && op->args[2].is_ref()) {
+                    Vec3 o = point(op->args[2].i);
+                    ox = o.x;
+                    oy = o.y;
+                }
+                if (op->args.size() > 3 && numeric(op->args[3]))
+                    sc = op->args[3].as_double();
+            }
+            for (auto &b : base->bounds)
+                if (b.loop && b.loop->is_poly)
+                    for (Vec3 &p : b.loop->polygon) {
+                        double x = p.x * sc, y = p.y * sc;
+                        p = {ox + c * x - s * y, oy + s * x + c * y, 0};
+                    }
+            return base;
         } else if (iequals(in->type, "IFCARBITRARYCLOSEDPROFILEDEF")) {
             poly = curve_points2d(ref_arg(*in, 2)); // (ProfileType, ProfileName, OuterCurve)
         } else if (iequals(in->type, "IFCISHAPEPROFILEDEF")) {
@@ -1021,6 +1052,216 @@ private:
         }
         return sw;
     }
+
+    // ---- IFC alignment curve sampling (port of adapy ngeom._alignment_sweep) ----------------------
+    // Normalised Fresnel S(t)=∫sin(πu²/2), C(t)=∫cos(πu²/2) via power series (clothoid transitions).
+    static void alignment_fresnel(double t, double &S, double &C) {
+        double hp = PI / 2.0, t4 = t * t * t * t;
+        C = 0.0;
+        double term = t;
+        for (int n = 0; n < 200; ++n) {
+            double c = term / (4 * n + 1);
+            C += c;
+            if (std::abs(c) < 1e-18 && n > 2)
+                break;
+            term *= -(hp * hp) * t4 / ((2 * n + 1) * (2 * n + 2));
+        }
+        S = 0.0;
+        term = hp * t * t * t;
+        for (int n = 0; n < 200; ++n) {
+            double s = term / (4 * n + 3);
+            S += s;
+            if (std::abs(s) < 1e-18 && n > 2)
+                break;
+            term *= -(hp * hp) * t4 / ((2 * n + 2) * (2 * n + 3));
+        }
+    }
+    static bool numeric(const Value &v) {
+        return v.kind == adacpp::step::Kind::Real || v.kind == adacpp::step::Kind::Int;
+    }
+    // Parent curve at arc length p (its own 2D frame) -> (point2d, unit tangent2d), as z=0 Vec3.
+    bool alignment_parent_eval(long cid, double p, double seg_len, Vec3 &P, Vec3 &T) {
+        const Instance *in = inst(cid);
+        if (!in)
+            return false;
+        std::string_view t = in->type;
+        if (iequals(t, "IFCLINE")) {
+            P = {p, 0, 0};
+            T = {1, 0, 0};
+            return true;
+        }
+        if (iequals(t, "IFCCIRCLE")) {
+            double r = ad(in, 1);
+            if (std::abs(r) < 1e-12)
+                return false;
+            double th = p / r;
+            P = {r * std::cos(th), r * std::sin(th), 0};
+            T = {-std::sin(th), std::cos(th), 0};
+            return true;
+        }
+        if (iequals(t, "IFCCLOTHOID")) {
+            double A = ad(in, 1), scale = std::abs(A) * std::sqrt(PI);
+            if (scale < 1e-12) {
+                P = {p, 0, 0};
+                T = {1, 0, 0};
+                return true;
+            }
+            double tt = p / scale, S, C;
+            alignment_fresnel(tt, S, C);
+            double sgn = A < 0 ? -1.0 : 1.0, ph = PI * tt * tt / 2.0;
+            P = {scale * C, sgn * scale * S, 0};
+            T = Vec3{std::cos(ph), sgn * std::sin(ph), 0}.normalized();
+            return true;
+        }
+        if (iequals(t, "IFCCOSINESPIRAL")) {
+            double A1 = ad(in, 1);
+            double A0 = (in->args.size() > 2 && numeric(in->args[2])) ? in->args[2].as_double() : 0.0;
+            double L = std::abs(seg_len);
+            auto theta = [&](double s) {
+                double th = (A0 != 0.0) ? s / A0 : 0.0;
+                if (L > 0.0 && A1 != 0.0)
+                    th += (L / (PI * A1)) * std::sin(PI * s / L);
+                return th;
+            };
+            int n = std::max(32, (int) (std::abs(p) / 0.1) + 1);
+            double px = 0, py = 0, dx = p / n;
+            for (int i = 1; i <= n; ++i) {
+                double th = theta(p * i / n), thm = theta(p * (i - 1) / n);
+                px += (std::cos(th) + std::cos(thm)) * 0.5 * dx;
+                py += (std::sin(th) + std::sin(thm)) * 0.5 * dx;
+            }
+            double thp = theta(p);
+            P = {px, py, 0};
+            T = {std::cos(thp), std::sin(thp), 0};
+            return true;
+        }
+        return false;
+    }
+    // Global (point2d, tangent2d) at local_len along an IfcCurveSegment (parent placed by its
+    // IfcAxis2Placement2D, arc length advancing in the sign of SegmentLength).
+    bool alignment_seg_eval(const Instance *seg, double local_len, Vec3 &gp, Vec3 &gt) {
+        long placement = -1, parent = -1;
+        std::vector<double> meas;
+        for (const Value &a : seg->args) {
+            if (a.is_ref()) {
+                if (placement < 0)
+                    placement = a.i;
+                else
+                    parent = a.i;
+            } else if (a.is_list() && !a.items.empty() && numeric(a.items[0]))
+                meas.push_back(a.items[0].as_double());
+        }
+        if (parent < 0 || meas.size() < 2)
+            return false;
+        double seg_start = meas[0], seg_length = meas[1], sgn = seg_length >= 0 ? 1.0 : -1.0;
+        Vec3 P, T, P0, T0;
+        if (!alignment_parent_eval(parent, seg_start + sgn * local_len, seg_length, P, T))
+            return false;
+        alignment_parent_eval(parent, seg_start, seg_length, P0, T0);
+        if (sgn < 0) {
+            T = T * -1.0;
+            T0 = T0 * -1.0;
+        }
+        // placement IfcAxis2Placement2D(Location, RefDirection)
+        Vec3 o{0, 0, 0}, rd{1, 0, 0};
+        const Instance *pl = inst(placement);
+        if (pl) {
+            if (!pl->args.empty() && pl->args[0].is_ref())
+                o = point(pl->args[0].i);
+            if (pl->args.size() > 1 && pl->args[1].is_ref())
+                rd = dir(pl->args[1].i);
+        }
+        double rn = std::hypot(rd.x, rd.y);
+        if (rn > 1e-12) {
+            rd.x /= rn;
+            rd.y /= rn;
+        }
+        double tn = std::hypot(T0.x, T0.y);
+        Vec3 t0 = tn > 1e-12 ? Vec3{T0.x / tn, T0.y / tn, 0} : Vec3{1, 0, 0};
+        // R = 2x2 rotation taking t0 -> rd
+        double c = t0.x * rd.x + t0.y * rd.y, s = t0.x * rd.y - t0.y * rd.x;
+        auto rot = [&](const Vec3 &v) { return Vec3{c * v.x - s * v.y, s * v.x + c * v.y, 0}; };
+        Vec3 dp = rot(P - P0);
+        gp = {o.x + dp.x, o.y + dp.y, 0};
+        gt = rot(T).normalized();
+        return true;
+    }
+    // Sample the IfcCurveSegments of a composite/base curve -> (cumulative arc length s, 2D point).
+    void alignment_sample(long curve_id, int n_per, std::vector<double> &s_out, std::vector<Vec3> &p_out) {
+        const Instance *in = inst(curve_id);
+        if (!in || in->args.empty() || !in->args[0].is_list())
+            return;
+        double s_acc = 0.0;
+        for (const Value &sref : in->args[0].items) {
+            if (!sref.is_ref())
+                continue;
+            const Instance *seg = inst(sref.i);
+            if (!seg || !iequals(seg->type, "IFCCURVESEGMENT"))
+                continue;
+            double L = 0.0;
+            std::vector<double> meas;
+            for (const Value &a : seg->args)
+                if (a.is_list() && !a.items.empty() && numeric(a.items[0]))
+                    meas.push_back(a.items[0].as_double());
+            if (meas.size() >= 2)
+                L = std::abs(meas[1]);
+            if (L < 1e-9)
+                continue;
+            for (int i = 0; i <= n_per; ++i) {
+                Vec3 gp, gt;
+                if (alignment_seg_eval(seg, L * i / n_per, gp, gt)) {
+                    s_out.push_back(s_acc + L * i / n_per);
+                    p_out.push_back(gp);
+                }
+            }
+            s_acc += L;
+        }
+    }
+    // A composite/segmented alignment curve of IfcCurveSegments -> planar 3D directrix (z=0).
+    std::vector<Vec3> alignment_planar_points(long cid) {
+        std::vector<double> s;
+        std::vector<Vec3> p;
+        alignment_sample(cid, 24, s, p);
+        return p;
+    }
+    // IfcGradientCurve(Segments=vertical gradient, SelfIntersect, BaseCurve=horizontal, EndPoint) ->
+    // 3D directrix: horizontal (x,y) from BaseCurve + z(s) interpolated from the vertical gradient.
+    std::vector<Vec3> alignment_gradient_points(long cid) {
+        const Instance *in = inst(cid);
+        if (!in)
+            return {};
+        long base = (in->args.size() > 2 && in->args[2].is_ref()) ? in->args[2].i : -1;
+        std::vector<double> hs;
+        std::vector<Vec3> hp;
+        if (base >= 0)
+            alignment_sample(base, 24, hs, hp); // horizontal (x,y) along s
+        else
+            alignment_sample(cid, 24, hs, hp);  // SegmentedReferenceCurve: sample its own segments
+        // vertical gradient z(s): the gradient's own segments give (distance, height) points
+        std::vector<double> vs;
+        std::vector<Vec3> vp;
+        if (iequals(in->type, "IFCGRADIENTCURVE"))
+            alignment_sample(cid, 24, vs, vp); // segments (arg 0) are the vertical profile
+        std::vector<Vec3> out;
+        out.reserve(hp.size());
+        for (size_t i = 0; i < hp.size(); ++i) {
+            double z = 0.0;
+            if (!vp.empty()) { // interpolate height over the vertical profile's (x=distance, y=height)
+                double q = hs[i];
+                z = vp.front().y;
+                for (size_t k = 0; k + 1 < vp.size(); ++k)
+                    if ((vp[k].x <= q && q <= vp[k + 1].x) || (vp[k + 1].x <= q && q <= vp[k].x)) {
+                        double dxk = vp[k + 1].x - vp[k].x;
+                        z = std::abs(dxk) < 1e-12 ? vp[k].y
+                                                  : vp[k].y + (vp[k + 1].y - vp[k].y) * (q - vp[k].x) / dxk;
+                        break;
+                    } else if (q > vp[k + 1].x)
+                        z = vp[k + 1].y;
+            }
+            out.push_back({hp[i].x, hp[i].y, z});
+        }
+        return out;
+    }
     // A 3-point 3D circular arc (fit the plane through the points, circumcircle, sweep a->b via m).
     static std::vector<Vec3> arc_poly_3d(const Vec3 &a, const Vec3 &m, const Vec3 &b) {
         Vec3 ab = b - a, am = m - a, nrm = ab.cross(am);
@@ -1089,6 +1330,20 @@ private:
                 for (size_t i = 1; i < coords.size(); ++i)
                     push(pts, coords[i]);
             return pts;
+        }
+        // Alignment directrixes: an IfcGradientCurve (horizontal composite + vertical gradient) or a
+        // composite/segmented curve of IfcCurveSegments (line/arc/clothoid/cosine-spiral transitions).
+        if (iequals(t, "IFCGRADIENTCURVE") || iequals(t, "IFCSEGMENTEDREFERENCECURVE"))
+            return alignment_gradient_points(cid);
+        if ((iequals(t, "IFCCOMPOSITECURVE")) && !in->args.empty() && in->args[0].is_list()) {
+            // alignment composite: its segments are IfcCurveSegment (not IfcCompositeCurveSegment)
+            for (const Value &sref : in->args[0].items)
+                if (sref.is_ref()) {
+                    const Instance *s0 = inst(sref.i);
+                    if (s0 && iequals(s0->type, "IFCCURVESEGMENT"))
+                        return alignment_planar_points(cid);
+                    break;
+                }
         }
         if (iequals(t, "IFCCOMPOSITECURVE") && !in->args.empty() && in->args[0].is_list()) {
             std::vector<Vec3> pts;
