@@ -38,6 +38,7 @@
 #endif
 
 #include "ngeom_bspline.h"  // BSplineCurve / BSplineSurface / expand_knots
+#include "ngeom_sweep.h"    // make_swept_disk (shared with the IFC reader)
 #include "ngeom_topology.h" // pulls ngeom_curves.h / ngeom_surfaces.h / ngeom_math.h
 #include "step_part21.h"
 
@@ -587,7 +588,8 @@ private:
             ++p;
         std::string_view t(t0, p - t0);
         if (t == "MANIFOLD_SOLID_BREP" || t == "SHELL_BASED_SURFACE_MODEL" || t == "BREP_WITH_VOIDS" ||
-            t == "EXTRUDED_AREA_SOLID" || t == "REVOLVED_AREA_SOLID" || t == "BOOLEAN_RESULT")
+            t == "EXTRUDED_AREA_SOLID" || t == "REVOLVED_AREA_SOLID" || t == "SWEPT_DISK_SOLID" ||
+            t == "BOOLEAN_RESULT")
             lists.roots.push_back(id);
         else if (t == "STYLED_ITEM")
             lists.styled.push_back(id);
@@ -722,6 +724,9 @@ public:
         } else if (in->type == "REVOLVED_AREA_SOLID") {
             root.revolve = build_revolve(in); // ('', #profile, #position, #axis1, angle)
             in = nullptr;
+        } else if (in->type == "SWEPT_DISK_SOLID") {
+            root.sweep = build_swept_disk(in); // ('', #directrix, radius, inner, start, end)
+            in = nullptr;
         } else if (in->type == "BOOLEAN_RESULT") {
             root.boolean = build_boolean(in); // ('', operator, #first, #second)
             in = nullptr;
@@ -840,7 +845,7 @@ private:
             }
             std::string_view t = in->type;
             if (t == "MANIFOLD_SOLID_BREP" || t == "SHELL_BASED_SURFACE_MODEL" || t == "EXTRUDED_AREA_SOLID" ||
-                t == "REVOLVED_AREA_SOLID")
+                t == "REVOLVED_AREA_SOLID" || t == "SWEPT_DISK_SOLID")
                 tl.roots.push_back(id);
             else if (t == "STYLED_ITEM")
                 tl.styled.push_back(id);
@@ -1032,6 +1037,24 @@ private:
         return ex;
     }
 
+    // SWEPT_DISK_SOLID('', #directrix, radius, inner_radius, start, end) -> ng::SweepN. Directrix is a
+    // POLYLINE of 3D points; radius/inner give the disk/annulus. The inverse of emit_swept_disk, so an
+    // IFC->STEP->IFC rebar recovers the same swept disk (shared make_swept_disk with the IFC reader).
+    std::shared_ptr<ng::SweepN> build_swept_disk(const Instance *in) {
+        if (!in || in->args.size() < 3 || !in->args[1].is_ref())
+            return nullptr;
+        const Instance *dc = inst(in->args[1].i);
+        if (!dc || dc->type != "POLYLINE" || dc->args.size() < 2 || dc->args[1].kind != Kind::List)
+            return nullptr;
+        std::vector<ng::Vec3> pts;
+        for (const Value &pr : dc->args[1].items)
+            if (pr.is_ref())
+                pts.push_back(point(pr.i)); // 3D directrix point
+        double radius = in->args[2].as_double();
+        double inner = in->args.size() > 3 ? in->args[3].as_double() : 0.0; // $ => as_double() 0
+        return ng::make_swept_disk(pts, radius, inner);
+    }
+
     // REVOLVED_AREA_SOLID('', #profile, #position, #axis1, angle) -> ng::RevolveN (null if no profile).
     std::shared_ptr<ng::RevolveN> build_revolve(const Instance *in) {
         if (!in || in->args.size() < 5)
@@ -1060,6 +1083,8 @@ private:
             it.extrusion = build_extrusion(in);
         else if (in->type == "REVOLVED_AREA_SOLID")
             it.revolve = build_revolve(in);
+        else if (in->type == "SWEPT_DISK_SOLID")
+            it.sweep = build_swept_disk(in);
         else if (in->type == "BOOLEAN_RESULT")
             it.boolean = build_boolean(in);
         else if (in->type == "MANIFOLD_SOLID_BREP" && in->args.size() > 1 && in->args[1].is_ref())
