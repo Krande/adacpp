@@ -2887,39 +2887,41 @@ static void emit_spatial_tree(std::string &out, const std::function<long()> &nex
                               const std::vector<IfcPath> &paths) {
     using adacpp::ifc_emit::ifc_guid;
     using adacpp::ifc_emit::ifc_str;
-    std::map<std::vector<int>, long> asm_id;    // rep-id prefix -> IfcElementAssembly id
-    std::map<long, std::vector<long>> children; // parent entity id -> child entity ids
-    const long STOREY = 14;
-    std::vector<long> storey_children;
-    uint64_t aguid = 0xE0000000ull; // assembly/rel GUID namespace (disjoint from header 0xF.. + proxies)
+    // Generic, domain-neutral spatial hierarchy: each assembly-path level is an IfcSpatialZone (not a
+    // building-specific IfcBuildingStorey / element-grouping IfcElementAssembly). Zones nest under the
+    // root zone (#12) via IfcRelAggregates; the leaf elements are contained in their deepest zone via
+    // IfcRelContainedInSpatialStructure (IfcSpatialZone is a valid IfcSpatialElement RelatingStructure).
+    const long ROOT = 12; // the header's root IfcSpatialZone (under IfcProject)
+    std::map<std::vector<int>, long> zone_id;        // rep-id prefix -> IfcSpatialZone id
+    std::map<long, std::vector<long>> agg_children;  // parent zone -> child zones (IfcRelAggregates)
+    std::map<long, std::vector<long>> contained;     // zone -> contained leaf elements (IfcRelContained…)
+    uint64_t aguid = 0xE0000000ull; // zone/rel GUID namespace (disjoint from header 0xF.. + proxies)
 
     for (size_t i = 0; i < proxies.size(); ++i) {
         const IfcPath &path = (i < paths.size()) ? paths[i] : IfcPath{};
-        // Intermediate assembly levels = path[0 .. n-2]; path.back() is the solid's own (leaf) product.
-        long parent = STOREY;
-        bool parent_is_storey = true;
+        // Intermediate spatial levels = path[0 .. n-2]; path.back() is the solid's own (leaf) product.
+        long parent_zone = ROOT;
         std::vector<int> prefix;
         for (size_t d = 0; d + 1 < path.size(); ++d) {
             prefix.push_back(path[d].first);
-            auto it = asm_id.find(prefix);
-            long aid;
-            if (it == asm_id.end()) {
-                aid = next_id();
-                asm_id[prefix] = aid;
-                std::string an =
-                    path[d].second.empty() ? ("asm_" + std::to_string(path[d].first)) : ifc_str(path[d].second);
-                out += "#" + std::to_string(aid) + "=IFCELEMENTASSEMBLY('" + ifc_guid(aguid++) + "',$,'" + an +
-                       "',$,$,#11,$,$,.NOTDEFINED.,.NOTDEFINED.);\n";
-                (parent_is_storey ? storey_children : children[parent]).push_back(aid);
+            auto it = zone_id.find(prefix);
+            long zid;
+            if (it == zone_id.end()) {
+                zid = next_id();
+                zone_id[prefix] = zid;
+                std::string zn =
+                    path[d].second.empty() ? ("zone_" + std::to_string(path[d].first)) : ifc_str(path[d].second);
+                out += "#" + std::to_string(zid) + "=IFCSPATIALZONE('" + ifc_guid(aguid++) + "',$,'" + zn +
+                       "',$,$,#11,$,$,.NOTDEFINED.);\n";
+                agg_children[parent_zone].push_back(zid);
             } else {
-                aid = it->second;
+                zid = it->second;
             }
-            parent = aid;
-            parent_is_storey = false;
+            parent_zone = zid;
         }
-        (parent_is_storey ? storey_children : children[parent]).push_back(proxies[i]);
+        contained[parent_zone].push_back(proxies[i]);
     }
-    for (const auto &[pid, kids] : children) {
+    for (const auto &[pid, kids] : agg_children) {
         std::string refs = "(";
         for (size_t j = 0; j < kids.size(); ++j)
             refs += (j ? ",#" : "#") + std::to_string(kids[j]);
@@ -2927,13 +2929,13 @@ static void emit_spatial_tree(std::string &out, const std::function<long()> &nex
         out += "#" + std::to_string(next_id()) + "=IFCRELAGGREGATES('" + ifc_guid(aguid++) + "',$,$,$,#" +
                std::to_string(pid) + "," + refs + ");\n";
     }
-    if (!storey_children.empty()) {
+    for (const auto &[zid, kids] : contained) {
         std::string refs = "(";
-        for (size_t j = 0; j < storey_children.size(); ++j)
-            refs += (j ? ",#" : "#") + std::to_string(storey_children[j]);
+        for (size_t j = 0; j < kids.size(); ++j)
+            refs += (j ? ",#" : "#") + std::to_string(kids[j]);
         refs += ")";
         out += "#" + std::to_string(next_id()) + "=IFCRELCONTAINEDINSPATIALSTRUCTURE('" + ifc_guid(aguid++) +
-               "',$,$,$," + refs + ",#" + std::to_string(STOREY) + ");\n";
+               "',$,$,$," + refs + ",#" + std::to_string(zid) + ");\n";
     }
 }
 
@@ -2965,21 +2967,18 @@ static std::string ifc_header_block(const std::string &schema, double unit_scale
     std::string b;
     b += "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION((''),'2;1');\n";
     b += "FILE_NAME('','',(''),(''),'adacpp','','');\nFILE_SCHEMA(('" + schema + "'));\nENDSEC;\nDATA;\n";
-    // adapy's default spatial hierarchy: IfcProject -> IfcSite -> IfcBuilding -> IfcBuildingStorey,
-    // chained by IfcRelAggregates. Elements/assemblies are contained in the storey (#14). Reserved
-    // header ids #1..#17 (K) — keep in sync with the parallel writer's K + renumber threshold.
+    // Generic, domain-neutral spatial hierarchy: IfcProject -> a root IfcSpatialZone (#12), aggregated
+    // by IfcRelAggregates (#13). Assembly-path levels become nested IfcSpatialZones under #12 and the
+    // leaf elements are contained in their deepest zone (emit_spatial_tree). No building semantics.
+    // Reserved header ids #1..#13 (K) — keep in sync with the parallel writer's K + renumber threshold.
     b += "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCDIRECTION((0.,0.,1.));\n#3=IFCDIRECTION((1.,0.,0.));\n"
          "#4=IFCAXIS2PLACEMENT3D(#1,#2,#3);\n#5=IFCDIRECTION((1.,0.));\n"
          "#6=IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-5,#4,#5);\n";
     b += ifc_length_unit_line(unit_scale);
-    b += "#9=IFCPROJECT('" + ifc_guid(0xF0000001ull) + "',$,'adacpp STEP->IFC',$,$,$,$,(#6),#8);\n";
+    b += "#9=IFCPROJECT('" + ifc_guid(0xF0000001ull) + "',$,'adacpp model',$,$,$,$,(#6),#8);\n";
     b += "#10=IFCAXIS2PLACEMENT3D(#1,$,$);\n#11=IFCLOCALPLACEMENT($,#10);\n";
-    b += "#12=IFCSITE('" + ifc_guid(0xF0000002ull) + "',$,'Site',$,$,#11,$,$,.ELEMENT.,$,$,$,$,$);\n";
-    b += "#13=IFCBUILDING('" + ifc_guid(0xF0000003ull) + "',$,'Building',$,$,#11,$,$,.ELEMENT.,$,$,$);\n";
-    b += "#14=IFCBUILDINGSTOREY('" + ifc_guid(0xF0000004ull) + "',$,'Storey',$,$,#11,$,$,.ELEMENT.,$);\n";
-    b += "#15=IFCRELAGGREGATES('" + ifc_guid(0xF0000005ull) + "',$,$,$,#9,(#12));\n";
-    b += "#16=IFCRELAGGREGATES('" + ifc_guid(0xF0000006ull) + "',$,$,$,#12,(#13));\n";
-    b += "#17=IFCRELAGGREGATES('" + ifc_guid(0xF0000007ull) + "',$,$,$,#13,(#14));\n";
+    b += "#12=IFCSPATIALZONE('" + ifc_guid(0xF0000002ull) + "',$,'Model',$,$,#11,$,$,.NOTDEFINED.);\n";
+    b += "#13=IFCRELAGGREGATES('" + ifc_guid(0xF0000005ull) + "',$,$,$,#9,(#12));\n";
     return b;
 }
 
@@ -3178,7 +3177,7 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
             roots[i] = cost[i].second;
     }
     prof.phase("lpt_order");
-    const long K = 17; // ids #1..#17 are the shared header block (Project/Site/Building/Storey + rels)
+    const long K = 13; // ids #1..#13 are the shared header block (Project + root IfcSpatialZone + rel)
     // Robust global id allocation: each solid is emitted with LOCAL ids (1..n), then a contiguous
     // block of n ids is reserved atomically and the solid's text is renumbered by the block base.
     // No STRIDE guessing, no overflow, compact ids — correct regardless of per-face entity counts.
