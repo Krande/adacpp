@@ -162,6 +162,105 @@ public:
         return angle_scale_;
     }
 
+    // Presentation colour. IfcStyledItem(Item, Styles, Name): Item=arg0 is the geometry rep item id
+    // (the same id resolve_item consumes), Styles=arg1. Build a one-time map rep-item-id -> rgba by
+    // resolving each styled item's style tree to its IfcColourRgb (+ transparency). Persistent across
+    // products (clear_cache() must not wipe it). Mirrors the STEP reader's colour_map_/find_colour.
+    void build_colour_map() {
+        if (colour_map_built_)
+            return;
+        colour_map_built_ = true;
+        std::string scratch;
+        for (long id : idx_.ids) {
+            if (!iequals(type_of(id, scratch), "IFCSTYLEDITEM"))
+                continue;
+            const Instance *si = inst(id);
+            if (!si || si->args.empty() || !si->args[0].is_ref())
+                continue;
+            std::array<float, 4> rgba{0.5f, 0.5f, 0.5f, 1.0f};
+            if (resolve_styles_color(si->args.size() > 1 ? si->args[1] : Value{}, rgba))
+                colour_map_[si->args[0].i] = rgba;
+        }
+    }
+    // BFS over a Styles ref-tree to the first IfcColourRgb (r/g/b = args[1..3]) + alpha from the
+    // IfcSurfaceStyleShading/Rendering transparency (arg1). Walks IfcSurfaceStyle (styles=arg2),
+    // IfcPresentationStyleAssignment (2x3 wrapper), etc. by collecting every ref arg — so it handles
+    // IFC2x3 and IFC4/4x3 without schema-specific level walking.
+    bool resolve_styles_color(const Value &styles, std::array<float, 4> &rgba) {
+        std::vector<long> stack;
+        auto push_refs = [&](const Value &v) {
+            if (v.is_ref())
+                stack.push_back(v.i);
+            else if (v.is_list())
+                for (const Value &e : v.items)
+                    if (e.is_ref())
+                        stack.push_back(e.i);
+        };
+        push_refs(styles);
+        std::unordered_set<long> seen;
+        bool found = false;
+        int guard = 0;
+        while (!stack.empty() && guard++ < 500) {
+            long id = stack.back();
+            stack.pop_back();
+            if (!seen.insert(id).second)
+                continue;
+            const Instance *in = inst(id);
+            if (!in)
+                continue;
+            std::string_view t = in->type;
+            if (iequals(t, "IFCCOLOURRGB")) {
+                rgba[0] = (float) ad(in, 1);
+                rgba[1] = (float) ad(in, 2);
+                rgba[2] = (float) ad(in, 3);
+                found = true;
+                continue;
+            }
+            if (iequals(t, "IFCSURFACESTYLESHADING") || iequals(t, "IFCSURFACESTYLERENDERING")) {
+                if (in->args.size() > 1 && numeric(in->args[1]))
+                    rgba[3] = 1.0f - (float) in->args[1].as_double(); // Transparency -> alpha
+                if (!in->args.empty() && in->args[0].is_ref())
+                    stack.push_back(in->args[0].i); // SurfaceColour
+                continue;
+            }
+            for (const Value &a : in->args)
+                push_refs(a); // IfcSurfaceStyle / PresentationStyleAssignment / StyledRepresentation ...
+        }
+        return found;
+    }
+    // Look up a rep item's colour, unwrapping an IfcMappedItem to its mapped representation's items
+    // (the style may sit on the shared inner geometry).
+    bool find_item_colour(long iid, std::array<float, 4> &rgba, int depth = 0) {
+        auto it = colour_map_.find(iid);
+        if (it != colour_map_.end()) {
+            rgba = it->second;
+            return true;
+        }
+        if (depth > 4)
+            return false;
+        const Instance *in = inst(iid);
+        if (!in)
+            return false;
+        if (iequals(in->type, "IFCMAPPEDITEM")) {
+            const Instance *rm = inst(ref_arg(*in, 0)); // IfcRepresentationMap
+            if (rm && rm->args.size() > 1) {
+                const Instance *sr = inst(ref_arg(*rm, 1)); // MappedRepresentation
+                if (sr && sr->args.size() > 3 && sr->args[3].is_list())
+                    for (const Value &m : sr->args[3].items)
+                        if (m.is_ref() && find_item_colour(m.i, rgba, depth + 1))
+                            return true;
+            }
+        } else if (iequals(in->type, "IFCBOOLEANCLIPPINGRESULT") || iequals(in->type, "IFCBOOLEANRESULT")) {
+            // (Operator, FirstOperand, SecondOperand) — the style usually rides the base operand.
+            for (int ai : {1, 2}) {
+                long op = ref_arg(*in, (size_t) ai);
+                if (op > 0 && find_item_colour(op, rgba, depth + 1))
+                    return true;
+            }
+        }
+        return false;
+    }
+
     // Build the NgeomRoot for a product id (faces + name + per-instance transforms). Empty faces => the
     // product had no resolvable advanced-brep (skipped by the caller).
     NgeomRoot resolve_product(long pid) {
@@ -210,6 +309,7 @@ public:
                 }
             }
         }
+        std::vector<long> item_ids; // the rep-item ids (IfcStyledItem keys colour on these)
         for (const Value &srref : pds->args[2].items) {
             const Instance *sr = inst(srref.i);
             if (!sr || sr->args.size() < 4)
@@ -222,8 +322,35 @@ public:
             for (const Value &item : sr->args[3].items) {
                 if (!item.is_ref())
                     continue;
+                item_ids.push_back(item.i);
                 resolve_item(item.i, root);
             }
+        }
+        // Presentation colour (IfcStyledItem -> IfcSurfaceStyle -> IfcColourRgb) — keyed on the rep
+        // item id, so it rides the same StepRootMeta.has_color/color rails the STEP path already uses.
+        build_colour_map();
+        if (!colour_map_.empty()) {
+            std::array<float, 4> rgba;
+            long keys[] = {solid_src_, 0};
+            for (long iid : item_ids)
+                if (find_item_colour(iid, rgba)) {
+                    root.has_color = true;
+                    root.cr = rgba[0];
+                    root.cg = rgba[1];
+                    root.cb = rgba[2];
+                    root.ca = rgba[3];
+                    break;
+                }
+            if (!root.has_color)
+                for (long k : keys)
+                    if (k > 0 && find_item_colour(k, rgba)) {
+                        root.has_color = true;
+                        root.cr = rgba[0];
+                        root.cg = rgba[1];
+                        root.cb = rgba[2];
+                        root.ca = rgba[3];
+                        break;
+                    }
         }
         // A product mixing >1 distinct solid (or brep+procedural) doesn't fit the single-solid root
         // model — leave it for OCC rather than emit partial geometry.
@@ -280,6 +407,8 @@ private:
     long solid_src_ = 0;      // entity id of the one solid this product carries (mapped instances share it)
     bool mixed_ = false;      // product has >1 distinct solid / mixes brep+procedural -> skip (OCC)
     double angle_scale_ = 0.0; // radians per model plane-angle unit (0 => not yet computed)
+    std::unordered_map<long, std::array<float, 4>> colour_map_; // rep-item id -> rgba (IfcStyledItem)
+    bool colour_map_built_ = false;
 
     const Instance *inst(long id) {
         if (id <= 0)
