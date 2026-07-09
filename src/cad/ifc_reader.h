@@ -985,7 +985,13 @@ private:
     static std::shared_ptr<FaceSurfaceN> make_poly_profile(std::vector<Vec3> poly) {
         return make_profile(std::move(poly));
     }
-    static std::vector<Vec3> circle_poly(double r, int n = 64) {
+    static std::vector<Vec3> circle_poly(double r, int n = 0) {
+        // Segment count from a ~17deg chord angle — consistent with the tessellator's angular default
+        // (max_angle ~0.30-0.35 rad), so a swept disk / round profile isn't discretized FINER than
+        // every other surface. A fixed 64-gon made rebar swept-disks ~3x denser than the OCC/Python
+        // output (13948 vs ~3900 tris/bar). Clamp [12,64]. Callers can still force an explicit n.
+        if (n <= 0)
+            n = std::max(12, std::min(64, (int) std::ceil(TWO_PI / 0.30)));
         std::vector<Vec3> p;
         p.reserve(n);
         for (int i = 0; i < n; ++i) {
