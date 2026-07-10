@@ -1974,6 +1974,17 @@ private:
                 auto git = geomrep_of_solid.find(sid);
                 if (git == geomrep_of_solid.end())
                     continue;
+                // Only recover hierarchy from NAUO when CDSR/world_matrices left this solid with a
+                // FLAT path (no assembly nesting) — the baked per-leaf case this fallback targets. A
+                // file with a real CDSR placement graph (e.g. the crane: 10795 CDSR) already has
+                // correct multi-level paths; overwriting them with the deep NAUO ancestor chain is
+                // redundant AND, on a deep/wide assembly, explodes the GLB scene-hierarchy build
+                // (build_scene_extras): ~5x slower + ~700 MB heavier on the crane STEP->GLB.
+                auto exist = path_map_.find(sid);
+                if (exist != path_map_.end() &&
+                    std::any_of(exist->second.begin(), exist->second.end(),
+                                [](const Path &p) { return p.size() > 1; }))
+                    continue; // already has a real CDSR hierarchy — keep it
                 auto rit = rep_pd.find(git->second);
                 if (rit == rep_pd.end())
                     continue;
