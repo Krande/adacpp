@@ -80,6 +80,28 @@ if (BUILD_IFC_GLB_WASM)
     return() # standalone target; skip the legacy WASM_UTILS stub below
 endif ()
 
+# The OCC-free native B-rep WRITER (STEP→IFC + IFC→STEP) as a STANDALONE embind wasm module — no
+# OCCT, no pyodide, no ifcopenshell, no nanobind, no Python. No tessellation (writers operate on the
+# analytic NgeomRoot), so unlike the →GLB modules it needs NO libtess2 / meshopt / manifold. Shares one
+# implementation with the nanobind module via brep_file_convert.h. Streams source from OPFS via WASMFS.
+if (BUILD_BREP_WRITER_WASM)
+    add_executable(adacpp_brep_writer
+            ${CMAKE_SOURCE_DIR}/src/cad/brep_writer_wasm.cpp)
+    set_target_properties(adacpp_brep_writer PROPERTIES OUTPUT_NAME "adacpp_brep_writer" SUFFIX ".js")
+    target_link_options(adacpp_brep_writer PRIVATE
+            "-lembind"
+            "-sWASMFS=1"              # WASMFS + OPFS backend (file-backed pread, not heap)
+            "-sFORCE_FILESYSTEM=1"
+            "-sEXPORTED_RUNTIME_METHODS=['FS']" # JS-side FS for OPFS mount + node smoke test
+            "-sALLOW_MEMORY_GROWTH=1"
+            "-sMODULARIZE=1"
+            "-sEXPORT_ES6=1"
+            "-sEXPORT_NAME=createAdacppBrepWriter"
+            "-sENVIRONMENT=web,worker,node"
+            "-sSTACK_SIZE=1048576")
+    return() # standalone target; skip the legacy WASM_UTILS stub below
+endif ()
+
 set(WASM_SOURCES src/wasm_utils.cpp)
 set(WASM_HEADERS src/wasm_utils.h)
 
