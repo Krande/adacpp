@@ -825,6 +825,87 @@ public:
         return n;
     }
 
+    // Complexity weight of one surface for the LPT cost proxy. A B-spline surface costs ~ its
+    // control-point grid (nu*nv): that (not face count) is what drives tessellation time — uv-inversion
+    // + grid evaluation scale with the control net. Analytic surfaces (plane/cyl/cone/sphere/torus) are
+    // cheap -> weight 1. One index deref, no geometry built.
+    size_t surface_cost(long surf_id) {
+        const Instance *s = inst(surf_id);
+        if (!s)
+            return 1;
+        const Value *grid = nullptr; // the control_points_list (nested u-rows), when this is a B-spline
+        if (s->complex) {
+            if (const std::vector<Value> *bs = sub(s, "B_SPLINE_SURFACE"))
+                if (bs->size() > 2 && (*bs)[2].kind == Kind::List)
+                    grid = &(*bs)[2];
+        } else if (s->type == "B_SPLINE_SURFACE_WITH_KNOTS" && s->args.size() > 3 &&
+                   s->args[3].kind == Kind::List) {
+            grid = &s->args[3];
+        }
+        if (!grid || grid->items.empty())
+            return 1; // analytic surface
+        size_t nu = grid->items.size();
+        size_t nv = grid->items[0].kind == Kind::List ? grid->items[0].items.size() : 1;
+        size_t cp = nu * nv;
+        return cp < 1 ? 1 : cp;
+    }
+
+    // Surface-aware LPT cost proxy: face count weighted by per-face surface complexity. Face count
+    // alone predicts tessellation time only weakly (Spearman ~0.49) because the real cost is B-spline
+    // uv-inversion, so a small-face solid whose faces are dense B-splines (few faces, very slow) gets
+    // dispatched late and pins a worker at the tail. Sample up to kSample faces' surfaces, average
+    // their weight, and scale by the full face count. Still ~free: a handful of derefs per solid, no
+    // geometry built. Call clear_geom_cache() after the batch.
+    size_t solid_cost_estimate(long sid) {
+        size_t faces = solid_face_count(sid);
+        if (faces == 0)
+            return 0;
+        constexpr size_t kSample = 8;
+        size_t sampled = 0, weight = 0;
+        std::function<void(long)> sample_shell = [&](long shell_id) {
+            if (sampled >= kSample)
+                return;
+            const Instance *sh = inst(shell_id);
+            if (!sh)
+                return;
+            if (sh->type == "ORIENTED_CLOSED_SHELL") {
+                if (sh->args.size() > 2 && sh->args[2].is_ref())
+                    sample_shell(sh->args[2].i);
+                return;
+            }
+            if (sh->args.size() > 1 && sh->args[1].kind == Kind::List) {
+                for (const Value &f : sh->args[1].items) {
+                    if (sampled >= kSample)
+                        break;
+                    ++sampled;
+                    const Instance *face = f.is_ref() ? inst(f.i) : nullptr;
+                    if (face && (face->type == "ADVANCED_FACE" || face->type == "FACE_SURFACE") &&
+                        face->args.size() > 2 && face->args[2].is_ref())
+                        weight += surface_cost(face->args[2].i);
+                    else
+                        weight += 1;
+                }
+            }
+        };
+        const Instance *in = inst(sid);
+        if (!in || in->args.size() < 2)
+            return faces;
+        if (in->type == "MANIFOLD_SOLID_BREP" || in->type == "BREP_WITH_VOIDS") {
+            if (in->args[1].is_ref())
+                sample_shell(in->args[1].i);
+        } else if (in->args[1].kind == Kind::List) {
+            for (const Value &sh : in->args[1].items) {
+                if (sampled >= kSample)
+                    break;
+                if (sh.is_ref())
+                    sample_shell(sh.i);
+            }
+        }
+        if (sampled == 0)
+            return faces;
+        return faces * weight / sampled; // extrapolate the sampled average weight to all faces
+    }
+
     double unit_scale() const {
         return unit_scale_;
     }

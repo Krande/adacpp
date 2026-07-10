@@ -75,6 +75,7 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
     // while the other threads idle after 20 s). Those roots — a prefix of the sorted order — are
     // processed FIRST, one at a time, with tessellate_doc's face-level pool using every thread.
     std::vector<long> roots(idx.lists.roots.begin(), idx.lists.roots.end());
+    std::vector<size_t> est_of_root; // LPT cost estimate per root (parallel to `roots`); empty if serial
     size_t n_huge = 0;
     if (nthreads > 1) {
         constexpr size_t HUGE_FACES = 2048;
@@ -82,14 +83,17 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
         cost.reserve(roots.size());
         size_t total_faces = 0;
         for (long sid : roots) {
-            size_t fc = master.solid_face_count(sid);
+            size_t fc = master.solid_cost_estimate(sid); // face count weighted by B-spline complexity
             total_faces += fc;
             cost.emplace_back(fc, sid);
         }
         master.clear_geom_cache();
         std::sort(cost.begin(), cost.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
-        for (size_t i = 0; i < cost.size(); ++i)
+        est_of_root.resize(roots.size());
+        for (size_t i = 0; i < cost.size(); ++i) {
             roots[i] = cost[i].second;
+            est_of_root[i] = cost[i].first;
+        }
         // Tail-dominance test, not absolute size: phase A serializes resolve between its
         // face-pool bursts, so routing merely-large solids through it SLOWS a well-balanced
         // file (crane: 7291 solids, many 2-4k faces, pool efficiency already 3.5x -> phase A
@@ -143,7 +147,7 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
                 TessMesh tm = tessellate_doc(one, tpp);
                 if (tprof && prof.timing())
                     prof.solid_timed(
-                        roots[i], fc,
+                        roots[i], i < est_of_root.size() ? est_of_root[i] : 0, fc, tm.indices.size() / 3,
                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tt0).count());
                 if (tm.indices.empty())
                     return;

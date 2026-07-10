@@ -151,14 +151,16 @@ public:
     bool timing() const {
         return timing_;
     }
-    // Record one solid's (id, face count = the LPT proxy, actual tessellation ms) so the destructor
-    // can report whether the face-count proxy actually predicts tessellation time. Env-gated
-    // separately (ADACPP_STEP_SOLID_TIMING) since it keeps a row per solid.
-    void solid_timed(long id, size_t faces, double ms) {
+    // Record one solid's (id, LPT cost estimate, resolved face count, output tris, actual tessellation
+    // ms) so the destructor / audit JSON can report whether the estimate predicts tessellation time
+    // (spearman_est_ms) AND memory (spearman_est_tris — tris is the per-solid tessellation-memory
+    // proxy). This is the continuous-tuning signal for the LPT cost model. Env-gated separately
+    // (ADACPP_STEP_SOLID_TIMING) since it keeps a row per solid.
+    void solid_timed(long id, size_t est, size_t faces, size_t tris, double ms) {
         if (!timing_)
             return;
         std::lock_guard<std::mutex> lk(mu_);
-        timed_.push_back({id, faces, ms});
+        timed_.push_back({id, est, faces, tris, ms});
     }
 
     ~StepProfiler() {
@@ -270,11 +272,22 @@ public:
                         break;
                     if (emitted++)
                         rows += ",";
-                    rows += "{\"id\":" + std::to_string(ts.id) + ",\"faces\":" + std::to_string(ts.faces) +
+                    rows += "{\"id\":" + std::to_string(ts.id) + ",\"est\":" + std::to_string(ts.est) +
+                            ",\"faces\":" + std::to_string(ts.faces) + ",\"tris\":" + std::to_string(ts.tris) +
                             ",\"ms\":" + fmt_num(ts.ms) + "}";
                 }
                 if (!rows.empty())
                     j += ",\"slowest_solids\":[" + rows + "]";
+                // LPT accuracy signals for continuous tuning: does the cost estimate rank-predict the
+                // actual tessellation time and the per-solid memory proxy (tris)?
+                j += ",\"spearman_est_ms\":" +
+                     fmt_num(spearman([](const SolidTime &s) { return (double) s.est; },
+                                      [](const SolidTime &s) { return s.ms; }),
+                             3);
+                j += ",\"spearman_est_tris\":" +
+                     fmt_num(spearman([](const SolidTime &s) { return (double) s.est; },
+                                      [](const SolidTime &s) { return (double) s.tris; }),
+                             3);
             }
             j += "}";
             std::fprintf(stderr, "[STEPPROF-JSON] %s\n", j.c_str());
@@ -301,9 +314,36 @@ private:
     };
     struct SolidTime {
         long id;
-        size_t faces;
-        double ms;
+        size_t est;   // LPT cost estimate (the value being validated)
+        size_t faces; // resolved face count
+        size_t tris;  // output triangles — per-solid tessellation-memory proxy
+        double ms;    // actual tessellation time
     };
+
+    // Spearman rank correlation between two per-solid signals over `timed_` (1.0 = perfect rank
+    // agreement). `pick` maps a SolidTime to the value on one axis. Used to score how well the LPT
+    // estimate predicts duration (ms) and memory (tris) so the audit can track the model over time.
+    template <class FA, class FB> double spearman(FA a, FB b) const {
+        size_t n = timed_.size();
+        if (n < 2)
+            return 1.0;
+        std::vector<size_t> oa(n), ob(n);
+        for (size_t i = 0; i < n; ++i)
+            oa[i] = ob[i] = i;
+        std::sort(oa.begin(), oa.end(), [&](size_t x, size_t y) { return a(timed_[x]) > a(timed_[y]); });
+        std::sort(ob.begin(), ob.end(), [&](size_t x, size_t y) { return b(timed_[x]) > b(timed_[y]); });
+        std::vector<size_t> ra(n), rb(n);
+        for (size_t r = 0; r < n; ++r) {
+            ra[oa[r]] = r;
+            rb[ob[r]] = r;
+        }
+        double d2 = 0;
+        for (size_t i = 0; i < n; ++i) {
+            double d = (double) ra[i] - (double) rb[i];
+            d2 += d * d;
+        }
+        return 1.0 - 6.0 * d2 / ((double) n * ((double) n * n - 1.0));
+    }
     struct Thr {
         int tid;
         double busy_ms;

@@ -2940,12 +2940,12 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
     std::vector<long> roots(idx.lists.roots.begin(), idx.lists.roots.end());
     if (max_solids > 0 && (long) roots.size() > max_solids)
         roots.resize(max_solids);
-    // LPT order (one solid_face_count pass) — load-balance the heavy solids first.
+    // LPT order (one cost-estimate pass) — load-balance the heavy solids first.
     {
         std::vector<std::pair<size_t, long>> cost;
         cost.reserve(roots.size());
         for (long sid : roots)
-            cost.emplace_back(master.solid_face_count(sid), sid);
+            cost.emplace_back(master.solid_cost_estimate(sid), sid);
         master.clear_geom_cache();
         std::sort(cost.begin(), cost.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
         for (size_t i = 0; i < cost.size(); ++i)
@@ -3132,7 +3132,7 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
         std::vector<std::pair<size_t, long>> cost;
         cost.reserve(roots.size());
         for (long sid : roots)
-            cost.emplace_back(master.solid_face_count(sid), sid);
+            cost.emplace_back(master.solid_cost_estimate(sid), sid);
         master.clear_geom_cache();
         std::sort(cost.begin(), cost.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
         for (size_t i = 0; i < cost.size(); ++i)
@@ -3342,7 +3342,7 @@ static void step_parity_impl(const std::string &in_path, double deflection, doub
         std::vector<std::pair<size_t, long>> cost;
         cost.reserve(roots.size());
         for (long sid : roots)
-            cost.emplace_back(master.solid_face_count(sid), sid);
+            cost.emplace_back(master.solid_cost_estimate(sid), sid);
         master.clear_geom_cache();
         std::sort(cost.begin(), cost.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
         for (size_t i = 0; i < cost.size(); ++i)

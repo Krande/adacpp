@@ -191,7 +191,7 @@ inline long stream_step_to_mesh(const std::string &in_path, const std::string &o
         cost.reserve(roots.size());
         size_t total_faces = 0;
         for (long sid : roots) {
-            size_t fc = master.solid_face_count(sid);
+            size_t fc = master.solid_cost_estimate(sid); // face count weighted by B-spline complexity
             total_faces += fc;
             cost.emplace_back(fc, sid);
         }
