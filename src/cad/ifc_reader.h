@@ -885,13 +885,30 @@ private:
             poly = curve_points2d(ref_arg(*in, 2)); // (ProfileType, ProfileName, OuterCurve)
         } else if (iequals(in->type, "IFCISHAPEPROFILEDEF")) {
             // (.., Position, OverallWidth, OverallDepth, WebThickness, FlangeThickness, FilletRadius, ...)
-            // Centred on the bounding box; fillets ignored (sharp corners). Outline CCW from bottom-right.
+            // Centred on the bounding box. Outline CCW from bottom-right; the four reentrant web/flange
+            // corners are rounded by FilletRadius (arg 7) when present, else left sharp.
             double bx = ad(in, 3) / 2, hy = ad(in, 4) / 2, wx = ad(in, 5) / 2, tf = ad(in, 6);
             if (bx <= 0 || hy <= 0 || wx <= 0 || tf <= 0)
                 return nullptr;
             double fy = hy - tf;
-            poly = {{bx, -hy, 0}, {bx, -fy, 0}, {wx, -fy, 0}, {wx, fy, 0},   {bx, fy, 0},   {bx, hy, 0},
-                    {-bx, hy, 0}, {-bx, fy, 0}, {-wx, fy, 0}, {-wx, -fy, 0}, {-bx, -fy, 0}, {-bx, -hy, 0}};
+            double rf = std::min(ad(in, 7), std::min(bx - wx, fy)); // clamp fillet to what fits
+            if (rf > 1e-9) {
+                int nf = std::max(3, (int) std::ceil((PI / 2) / 0.30)); // ~17deg chord, like circle_poly
+                poly = {{bx, -hy, 0}, {bx, -fy, 0}};
+                append_fillet_arc(poly, {wx + rf, -fy + rf, 0}, {wx + rf, -fy, 0}, {wx, -fy + rf, 0}, nf);
+                append_fillet_arc(poly, {wx + rf, fy - rf, 0}, {wx, fy - rf, 0}, {wx + rf, fy, 0}, nf);
+                poly.push_back({bx, fy, 0});
+                poly.push_back({bx, hy, 0});
+                poly.push_back({-bx, hy, 0});
+                poly.push_back({-bx, fy, 0});
+                append_fillet_arc(poly, {-wx - rf, fy - rf, 0}, {-wx - rf, fy, 0}, {-wx, fy - rf, 0}, nf);
+                append_fillet_arc(poly, {-wx - rf, -fy + rf, 0}, {-wx, -fy + rf, 0}, {-wx - rf, -fy, 0}, nf);
+                poly.push_back({-bx, -fy, 0});
+                poly.push_back({-bx, -hy, 0});
+            } else {
+                poly = {{bx, -hy, 0}, {bx, -fy, 0}, {wx, -fy, 0}, {wx, fy, 0},   {bx, fy, 0},   {bx, hy, 0},
+                        {-bx, hy, 0}, {-bx, fy, 0}, {-wx, fy, 0}, {-wx, -fy, 0}, {-bx, -fy, 0}, {-bx, -hy, 0}};
+            }
             apply_placement2d(ref_arg(*in, 2), poly);
         } else if (iequals(in->type, "IFCTSHAPEPROFILEDEF")) {
             // (.., Position, Depth, FlangeWidth, WebThickness, FlangeThickness, ...). Flange at +y (top),
@@ -999,6 +1016,23 @@ private:
             p.push_back({r * std::cos(a), r * std::sin(a), 0});
         }
         return p;
+    }
+    // Append a fillet arc (in z=0) sweeping the SHORT way from `from` to `to` about `center`, used to
+    // round the reentrant web/flange corners of I/T/U profiles (IfcIShapeProfileDef.FilletRadius etc.).
+    // Both endpoints are emitted; call sites lay out points so no consecutive duplicate is produced.
+    static void append_fillet_arc(std::vector<Vec3> &out, Vec3 center, Vec3 from, Vec3 to, int n) {
+        double r = std::hypot(from.x - center.x, from.y - center.y);
+        double a0 = std::atan2(from.y - center.y, from.x - center.x);
+        double a1 = std::atan2(to.y - center.y, to.x - center.x);
+        double d = a1 - a0;
+        while (d > PI)
+            d -= TWO_PI;
+        while (d < -PI)
+            d += TWO_PI;
+        for (int i = 0; i <= n; ++i) {
+            double a = a0 + d * i / n;
+            out.push_back({center.x + r * std::cos(a), center.y + r * std::sin(a), 0});
+        }
     }
     // A 3-point (start, mid, end) circular arc in the z=0 plane, discretized to a polyline (matches
     // the adapy Python reader's IfcArcIndex -> ArcLine, which the tessellator later rings). Falls
