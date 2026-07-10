@@ -1421,6 +1421,7 @@ private:
         } else if (iequals(t, "IFCBOOLEANRESULT") || iequals(t, "IFCBOOLEANCLIPPINGRESULT")) {
             out.boolean = mk_boolean(in);
         } else if (iequals(t, "IFCADVANCEDBREP") || iequals(t, "IFCFACETEDBREP")) {
+            out.smooth_faceset = out.smooth_faceset || iequals(t, "IFCFACETEDBREP"); // planar facets
             const Instance *shell = inst(ref_arg(*in, 0));
             if (shell && !shell->args.empty() && shell->args[0].is_list())
                 for (const Value &fref : shell->args[0].items)
@@ -1432,6 +1433,7 @@ private:
                 out.extrusion = ex;
         } else if (iequals(t, "IFCPOLYGONALFACESET")) {
             // (Coordinates=IfcCartesianPointList3D, Closed, Faces=IfcIndexedPolygonalFace[], PnIndex)
+            out.smooth_faceset = true; // planar facets approximating a (usually curved) surface
             std::vector<Vec3> pts = point_list_3d(ref_arg(*in, 0));
             if (in->args.size() > 2 && in->args[2].is_list())
                 for (const Value &fref : in->args[2].items)
@@ -1447,6 +1449,7 @@ private:
                     }
         } else if (iequals(t, "IFCTRIANGULATEDFACESET")) {
             // (Coordinates, Normals, Closed, CoordIndex=list of (i,j,k) triples, PnIndex)
+            out.smooth_faceset = true; // triangulated approximation of a (usually curved) surface
             std::vector<Vec3> pts = point_list_3d(ref_arg(*in, 0));
             if (in->args.size() > 3 && in->args[3].is_list())
                 for (const Value &tri : in->args[3].items)
@@ -2074,6 +2077,7 @@ private:
         SolidItemN it = resolve_solid_item(id);
         if (!solid_ok(it))
             return; // unsupported geometry -> product yields nothing here -> OCC fallback
+        root.smooth_faceset = root.smooth_faceset || it.smooth_faceset; // relaxed weld crease for facets
         if (!it.faces.empty() && !it.extrusion && !it.revolve && !it.boolean) {
             if (root.extrusion || root.revolve || root.boolean) { // brep mixed with a procedural solid
                 mixed_ = true;
