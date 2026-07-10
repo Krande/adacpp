@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "mem_trim.h"
+#include "mem_tune.h"
 #include "effective_concurrency.h"
 #include "posix_compat.h"
 
@@ -161,6 +162,7 @@ inline long stream_step_to_mesh(const std::string &in_path, const std::string &o
     using namespace adacpp::ngeom;
     static const std::array<float, 16> kIdentity = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     adacpp::prof::StepProfiler prof("stream_step_to_mesh");
+    adacpp::tune_malloc_for_streaming(); // bound streaming peak RSS (mmap/trim tuning) before the pool
 
     adacpp::step::StreamIndex idx = adacpp::step::StreamIndex::from_file(in_path);
     if (!idx.ok())

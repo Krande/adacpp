@@ -58,6 +58,7 @@
 
 #include "posix_compat.h"
 #include "mem_trim.h"
+#include "mem_tune.h"
 #include "effective_concurrency.h"
 
 #include <Bnd_Box.hxx>
@@ -2928,6 +2929,7 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
     using adacpp::ngeom::NgeomRoot;
     FileStats fs;
     adacpp::prof::StepProfiler prof("stream_step_to_ifc(par)");
+    adacpp::tune_malloc_for_streaming();
     auto idx = adacpp::step::StreamIndex::from_file(in_path);
     prof.phase("scan_index");
     adacpp::step::Resolver master(idx);
@@ -3116,6 +3118,7 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
     using adacpp::step_emit::StepBrepEmitter;
     adacpp::ifc_emit::FileStats fs;
     adacpp::prof::StepProfiler prof("stream_step_to_step");
+    adacpp::tune_malloc_for_streaming();
     auto idx = adacpp::step::StreamIndex::from_file(in_path);
     prof.phase("scan_index");
     adacpp::step::Resolver master(idx);

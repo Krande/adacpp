@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "mem_trim.h"
+#include "mem_tune.h"
 #include "effective_concurrency.h"
 #include "posix_compat.h"
 
@@ -44,6 +45,7 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
                                double model_scale = 0.0) {
     using namespace adacpp::ngeom;
     adacpp::prof::StepProfiler prof("stream_step_to_glb");
+    adacpp::tune_malloc_for_streaming(); // bound streaming peak RSS (mmap/trim tuning) before the pool
 
     // File-backed offset index: mmap to scan (freed-behind), then pread each statement on demand so
     // the file lives in the OS page cache, not process RSS.

@@ -26,6 +26,7 @@
 #include "../cadit/step/step_reader.h"
 #include "../geom/neutral/ngeom_decode.h"
 #include "../geom/neutral/ngeom_profile.h"
+#include "mem_tune.h"
 #include "ifc_emit.h"
 #include "ifc_reader.h"
 #include "step_emit.h"
@@ -397,6 +398,7 @@ inline adacpp::ifc_emit::FileStats write_ifc_to_step_impl(const std::string &in_
     using adacpp::step_emit::StepBrepEmitter;
     adacpp::ifc_emit::FileStats fs;
     adacpp::prof::StepProfiler prof("stream_ifc_to_step");
+    adacpp::tune_malloc_for_streaming();
     auto idx = adacpp::step::StreamIndex::from_file(in_path);
     prof.phase("scan_index");
     if (!idx.ok())
