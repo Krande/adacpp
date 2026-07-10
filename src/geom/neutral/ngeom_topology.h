@@ -357,7 +357,6 @@ struct SolidItemN {
     std::shared_ptr<SweepN> sweep;
     std::shared_ptr<BooleanN> boolean;
     std::vector<std::shared_ptr<FaceSurfaceN>> faces; // shell operand
-    bool smooth_faceset = false;                      // explicit faceted rep -> relaxed weld crease
 };
 
 // A CSG boolean: op(a, b). op 0=difference (cut), 1=union (fuse), 2=intersection (common).
@@ -388,13 +387,6 @@ struct NgeomRoot {
     // reference kernel also refuses). Distinguishes "intentionally empty" from "unsupported": the
     // stream must NOT count these as products_skipped (they'd else drive a pointless OCC fallback).
     bool recognized_empty = false;
-    // This root is an EXPLICIT faceted representation (IfcFacetedBrep / Polygonal- or
-    // TriangulatedFaceSet): a curved surface approximated by many small planar facets. The GLB carries
-    // no normals, so the viewer shades from the welded geometry — but the default 40° weld crease
-    // splits coarse curved facets into hard edges, so a bowl looks faceted next to the smooth
-    // AdvancedBrep. Weld these roots with a relaxed crease so gentle facets shade smoothly while
-    // genuine ~90° edges (box corners, a basin rim) stay sharp. Set by the IFC reader.
-    bool smooth_faceset = false;
     // Presentation colour (STYLED_ITEM -> COLOUR_RGB), populated by the native STEP reader; the
     // NGEOM byte decoder leaves has_color=false (colour travels out-of-band on that path).
     bool has_color = false;
