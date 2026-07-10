@@ -743,12 +743,13 @@ int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_p
                                             /*spill_dir=*/"", model_scale);
 }
 
-// Native OCC-free IFC -> GLB (IfcResolver: geometry + colour + spatial tree, baked to metres). v1
-// single-threaded. Returns the number of products written, or -1 on error.
+// Native OCC-free IFC -> GLB (IfcResolver: geometry + colour + spatial tree, baked to metres).
+// Parallel: LPT-ordered products across `num_threads` workers (0 = cgroup-aware auto). Returns the
+// number of products written, or -1 on error.
 int stream_ifc_to_glb_impl(const std::string &in_path, const std::string &out_path, double deflection,
-                           double angular_deg, bool meshopt, double model_scale) {
+                           double angular_deg, bool meshopt, double model_scale, int num_threads) {
     return (int) adacpp::stream_ifc_to_glb(in_path, out_path, deflection, angular_deg, meshopt,
-                                           /*spill_dir=*/"", model_scale);
+                                           /*spill_dir=*/"", model_scale, num_threads);
 }
 
 // Threaded OCC-free STEP -> STL / OBJ (same reader + parallel tessellation as the GLB core, but bakes
@@ -3801,11 +3802,12 @@ void cad_module(nb::module_ &m) {
           "solids written (-1 on I/O error). angular_deg in degrees.");
 
     m.def("stream_ifc_to_glb", &stream_ifc_to_glb_impl, "in_path"_a, "out_path"_a, "deflection"_a = 0.0,
-          "angular_deg"_a = 20.0, "meshopt"_a = true, "model_scale"_a = 0.0,
+          "angular_deg"_a = 20.0, "meshopt"_a = true, "model_scale"_a = 0.0, "num_threads"_a = 0,
           "Native IFC -> GLB file (no ifcopenshell, no OCC): IfcResolver resolves each product's "
           "geometry + presentation colour + spatial-structure path, libtess2 tessellates, baked to "
-          "metres into a merge-by-colour GLB matching the viewer. Single-threaded v1; curve-only "
-          "bodies (alignment axes) skipped. Returns products written (-1 on error).");
+          "metres into a merge-by-colour GLB matching the viewer. LPT-ordered across num_threads "
+          "workers (0=cgroup-aware auto); curve-only bodies (alignment axes) skipped. Returns products "
+          "written (-1 on error).");
 
     m.def("stream_step_to_mesh", &stream_step_to_mesh_impl, "in_path"_a, "out_path"_a, "fmt"_a, "deflection"_a = 2.0,
           "angular_deg"_a = 20.0, "num_threads"_a = 0, "model_scale"_a = 0.0,

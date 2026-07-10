@@ -463,7 +463,73 @@ public:
         surf_cache_.clear();
     }
 
+    // Build the expensive, read-only, cross-product metadata (colour + spatial-hierarchy maps) ONCE on
+    // a master resolver so parallel workers can share it via copy_metadata_from instead of each
+    // rebuilding it (both scan every entity in the file). clear_cache() must not wipe these.
+    void build_metadata() {
+        build_colour_map();
+        build_rel_maps();
+    }
+    // Share the master's read-only metadata into this (worker) resolver. The per-product transient
+    // state (statement/surface caches, pread scratch, solid_src_/mixed_) stays per-thread; only idx_
+    // (const, pread-safe) and these maps are shared, so each worker resolves independently.
+    void copy_metadata_from(const IfcResolver &m) {
+        colour_map_ = m.colour_map_;
+        colour_map_built_ = m.colour_map_built_;
+        contained_of_ = m.contained_of_;
+        parent_of_ = m.parent_of_;
+        rel_maps_built_ = m.rel_maps_built_;
+        angle_scale_ = m.angle_scale_;
+    }
+
+    // Cheap LPT cost proxy for a product: the face count of its body representation's brep items
+    // (a few index derefs down product -> IfcProductDefinitionShape -> IfcShapeRepresentation ->
+    // Items -> brep -> shell, no geometry built). Procedural items (swept/CSG/mapped) get a small
+    // constant — they rarely dominate an IFC tessellation the way a dense brep does. Call
+    // clear_cache() after the batch.
+    size_t product_cost(long pid) {
+        const Instance *p = inst(pid);
+        if (!p)
+            return 1;
+        const Instance *pds = inst(ref_arg(*p, 6));
+        if (!pds || pds->args.size() < 3 || !pds->args[2].is_list())
+            return 1;
+        size_t cost = 0;
+        for (const Value &srref : pds->args[2].items) {
+            const Instance *sr = inst(srref.i);
+            if (!sr || sr->args.size() < 4 || !sr->args[3].is_list())
+                continue;
+            std::string_view id =
+                (sr->args.size() > 1 && sr->args[1].kind == adacpp::step::Kind::Str) ? sr->args[1].s : std::string_view{};
+            if (id == "FootPrint" || id == "Annotation" || id == "Profile" || id == "Plan" || id == "Box" || id == "Axis")
+                continue; // 2D / reference reps are not tessellated
+            for (const Value &itref : sr->args[3].items)
+                if (const Instance *it = inst(itref.i))
+                    cost += item_face_count(it);
+        }
+        return cost ? cost : 1;
+    }
+
 private:
+    // Face count of one representation item (brep -> shell face list; procedural -> small constant).
+    size_t item_face_count(const Instance *it) {
+        std::string_view t = it->type;
+        if (iequals(t, "IFCADVANCEDBREP") || iequals(t, "IFCFACETEDBREP")) {
+            const Instance *sh = inst(ref_arg(*it, 0));
+            return (sh && !sh->args.empty() && sh->args[0].is_list()) ? sh->args[0].items.size() : 1;
+        }
+        if (iequals(t, "IFCSHELLBASEDSURFACEMODEL") || iequals(t, "IFCFACEBASEDSURFACEMODEL")) {
+            size_t n = 0;
+            if (!it->args.empty() && it->args[0].is_list())
+                for (const Value &sh : it->args[0].items)
+                    if (const Instance *s = inst(sh.i))
+                        if (!s->args.empty() && s->args[0].is_list())
+                            n += s->args[0].items.size();
+            return n ? n : 1;
+        }
+        return 4; // procedural (extrusion / revolve / sweep / CSG / mapped) — cheap-ish default
+    }
+
     const StreamIndex &idx_;
     std::unordered_map<long, std::pair<std::string, Instance>> cache_;
     std::unordered_map<long, std::shared_ptr<Surface>> surf_cache_;
