@@ -856,6 +856,7 @@ private:
         } else {
             fc->surface = std::make_shared<PlaneSurface>(Frame{});
             fc->same_sense = true;
+            fc->fit_plane_from_loop = true; // plain IfcFace: fit the real 3D plane from the boundary
         }
         if (in->args.empty() || !in->args[0].is_list())
             return nullptr;
@@ -1444,8 +1445,10 @@ private:
                         std::vector<Vec3> poly;
                         for (const Value &iv : pf->args[0].items)
                             push_pt(poly, pts, iv);
-                        if (auto f = make_profile(poly))
+                        if (auto f = make_profile(poly)) {
+                            f->fit_plane_from_loop = true; // 3D face: fit its real plane, not z=0
                             out.faces.push_back(f);
+                        }
                     }
         } else if (iequals(t, "IFCTRIANGULATEDFACESET")) {
             // (Coordinates, Normals, Closed, CoordIndex=list of (i,j,k) triples, PnIndex)
@@ -1458,8 +1461,10 @@ private:
                         for (const Value &iv : tri.items)
                             push_pt(poly, pts, iv);
                         if (poly.size() >= 3)
-                            if (auto f = make_profile(poly))
+                            if (auto f = make_profile(poly)) {
+                                f->fit_plane_from_loop = true; // 3D triangle: fit its real plane
                                 out.faces.push_back(f);
+                            }
                     }
         } else if (iequals(t, "IFCSHELLBASEDSURFACEMODEL")) { // (SbsmBoundary = shells)
             if (!in->args.empty() && in->args[0].is_list())

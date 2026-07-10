@@ -1433,8 +1433,20 @@ bool tessellate_face_impl(const FaceSurfaceN &face, const TessParams &tp, TessMe
         return false;
     }
 
+    // Placeholder-plane face (plain IfcFace / explicit face-set polygon): the declared surface is the
+    // z=0 identity plane, so fit the REAL plane from the 3D loop up front. Without this the 3D poly
+    // projects validly onto z=0 (face_to_mesh succeeds, so the on-failure re-fit below never runs) and
+    // the whole face-set collapses flat.
+    std::shared_ptr<PlaneSurface> refit;
+    if (face.fit_plane_from_loop) {
+        refit = fit_plane(loops3d);
+        if (refit)
+            same_sense = true; // fitted normal follows the loop winding
+    }
+    const Surface &use_surf = refit ? *refit : surf;
+
     auto cp = mesh.checkpoint();
-    const char *reason = face_to_mesh(surf, loops3d, tp, same_sense, mesh);
+    const char *reason = face_to_mesh(use_surf, loops3d, tp, same_sense, mesh);
     if (!reason)
         return true;
 
@@ -1452,7 +1464,7 @@ bool tessellate_face_impl(const FaceSurfaceN &face, const TessParams &tp, TessMe
             if (fl.size() != loops3d.size())
                 continue;
             auto cp2 = mesh.checkpoint();
-            if (!face_to_mesh(surf, fl, fine, same_sense, mesh))
+            if (!face_to_mesh(use_surf, fl, fine, same_sense, mesh))
                 return true;
             mesh.rollback(cp2);
         }
