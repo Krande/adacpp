@@ -266,6 +266,12 @@ inline long stream_step_to_mesh(const std::string &in_path, const std::string &o
         tph.threads = nthreads;
         adacpp::step::Resolver r0(idx);
         r0.copy_metadata_from(master);
+        // Phase A resolves each huge solid single-threaded (only tessellate_doc's face pool is
+        // parallel), so bound parse_cache_ here — without it a 61k-face monster's parsed STEP
+        // statements pile up to ~2GB during its one resolve (469826's obj/stl OOM), same as the
+        // STEP->GLB path. Drops that shell to ~432MB by clearing parse_cache_ every 1024 faces
+        // (built ng:: geometry is retained). Phase B (concurrent pool) stays unbounded.
+        r0.enable_parse_cache_bounding();
         for (size_t i = 0; i < n_huge; ++i) {
             process_root(r0, lanes[0], i, tph);
             r0.clear_geom_cache();
