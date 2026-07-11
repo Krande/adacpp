@@ -192,6 +192,14 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
                 tph.threads = nthreads;
                 adacpp::step::Resolver r0(idx);
                 r0.copy_metadata_from(master);
+                // Phase A resolves each huge solid SINGLE-THREADED (only tessellate_doc's face pool
+                // below is parallel), so parse-cache bounding is safe here — the constraint the flag
+                // documents. Without it, a 61k-face monster's parsed STEP statements pile up to ~2GB
+                // during its one resolve (469826's memory floor); bounding drops that shell to ~432MB
+                // by dropping parse_cache_ every 1024 faces (built ng:: geometry is retained). Phase B
+                // (the concurrent pool) stays unbounded — its solids are all below the huge threshold.
+                // Measured on 469826: peak RSS 2840 -> 1257 MB (-56%), conversion time unchanged.
+                r0.enable_parse_cache_bounding();
                 double busy_ms = 0;
                 std::chrono::steady_clock::time_point b0;
                 if (tprof)
