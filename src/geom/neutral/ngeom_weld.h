@@ -57,7 +57,13 @@ inline void weld_mesh(std::vector<float> &positions, std::vector<uint32_t> &indi
         fnorm[t] = len > 1e-30 ? Vec3{n.x / len, n.y / len, n.z / len} : Vec3{0, 0, 1};
     }
 
-    // Group soup corners by quantized position.
+    // Group soup corners by quantized position. A dense group id per unique key + a CSR
+    // (gstart offsets / corners) layout — one flat uint32 corner array instead of a
+    // std::vector-per-key. The old map-of-vectors did one heap allocation PER soup vertex, so a
+    // 61k-face solid's 16.9M-vertex soup churned ~2GB of tiny nodes/vectors; CSR holds the same
+    // data in ~0.5GB and never allocates per vertex. Bonus: numbering output verts in
+    // first-appearance (spatially coherent) order rather than hash order lets meshopt compress the
+    // merged GLB markedly better (469826: 130MB -> 83MB). Geometrically identical to the old weld.
     struct KeyHash {
         size_t operator()(const std::array<int64_t, 3> &k) const {
             uint64_t h = 1469598103934665603ull;
@@ -65,25 +71,50 @@ inline void weld_mesh(std::vector<float> &positions, std::vector<uint32_t> &indi
             return (size_t) h;
         }
     };
-    std::unordered_map<std::array<int64_t, 3>, std::vector<uint32_t>, KeyHash> groups;
-    groups.reserve(nv);
+    // First-appearance dense group id per unique quantized position. gid_of[v] indexes the group of
+    // soup vertex v; groups are numbered in v order, so the CSR below lists each group's corners in
+    // ascending v — the same order the old per-key push_back produced, keeping the greedy crease
+    // clustering (and thus the welded normals/topology) identical. Output vertices are numbered in
+    // group order rather than the old hash order: geometrically identical, deterministically renumbered.
+    std::unordered_map<std::array<int64_t, 3>, uint32_t, KeyHash> gid;
+    std::vector<uint32_t> gid_of(nv);
+    for (size_t v = 0; v < nv; ++v) {
+        std::array<int64_t, 3> key{qcoord(positions[3 * v]), qcoord(positions[3 * v + 1]),
+                                   qcoord(positions[3 * v + 2])};
+        gid_of[v] = gid.emplace(key, (uint32_t) gid.size()).first->second;
+    }
+    const size_t ng = gid.size();
+    // Counting sort corners into group order: gstart[g] is the start of group g's corner run.
+    std::vector<uint32_t> gstart(ng + 1, 0);
     for (size_t v = 0; v < nv; ++v)
-        groups[{qcoord(positions[3 * v]), qcoord(positions[3 * v + 1]), qcoord(positions[3 * v + 2])}].push_back(
-            (uint32_t) v);
+        ++gstart[gid_of[v] + 1];
+    for (size_t g = 0; g < ng; ++g)
+        gstart[g + 1] += gstart[g];
+    std::vector<uint32_t> corners(nv);
+    {
+        std::vector<uint32_t> cur(gstart.begin(), gstart.end() - 1); // per-group write cursor
+        for (size_t v = 0; v < nv; ++v)
+            corners[cur[gid_of[v]]++] = (uint32_t) v;
+    }
 
     const double crease_cos = std::cos(crease_deg * PI / 180.0);
     std::vector<float> npos, nnrm;
     std::vector<uint32_t> remap(nv);
     npos.reserve(positions.size() / 4);
     nnrm.reserve(positions.size() / 4);
-    for (auto &[key, corners] : groups) {
+    std::vector<Vec3> cluster_dir; // representative (first face's normal), reused across groups
+    std::vector<Vec3> cluster_acc; // area-weighted accumulated normal
+    std::vector<int> which;
+    std::vector<uint32_t> cluster_vid;
+    for (size_t g = 0; g < ng; ++g) {
+        const uint32_t cs = gstart[g], nc = gstart[g + 1] - cs;
         // Cluster this position's incident-face normals by crease angle (greedy — a vertex's incident
         // faces are locally coherent, so smooth surfaces make one cluster, a 90-degree edge makes two).
-        std::vector<Vec3> cluster_dir; // representative (first face's normal)
-        std::vector<Vec3> cluster_acc; // area-weighted accumulated normal
-        std::vector<int> which(corners.size());
-        for (size_t ci = 0; ci < corners.size(); ++ci) {
-            size_t t = corners[ci] / 3; // soup: old vertex belongs to exactly one triangle
+        cluster_dir.clear();
+        cluster_acc.clear();
+        which.assign(nc, 0);
+        for (uint32_t ci = 0; ci < nc; ++ci) {
+            size_t t = corners[cs + ci] / 3; // soup: old vertex belongs to exactly one triangle
             const Vec3 &fn = fnorm[t];
             int found = -1;
             for (size_t cl = 0; cl < cluster_dir.size(); ++cl)
@@ -96,8 +127,8 @@ inline void weld_mesh(std::vector<float> &positions, std::vector<uint32_t> &indi
             cluster_acc[found] = cluster_acc[found] + fn * farea[t];
             which[ci] = found;
         }
-        uint32_t p0 = corners[0];
-        std::vector<uint32_t> cluster_vid(cluster_dir.size());
+        uint32_t p0 = corners[cs];
+        cluster_vid.assign(cluster_dir.size(), 0);
         for (size_t cl = 0; cl < cluster_dir.size(); ++cl) {
             cluster_vid[cl] = (uint32_t) (npos.size() / 3);
             npos.push_back(positions[3 * p0]);
@@ -112,8 +143,8 @@ inline void weld_mesh(std::vector<float> &positions, std::vector<uint32_t> &indi
                 nnrm.push_back((float) un.z);
             }
         }
-        for (size_t ci = 0; ci < corners.size(); ++ci)
-            remap[corners[ci]] = cluster_vid[which[ci]];
+        for (uint32_t ci = 0; ci < nc; ++ci)
+            remap[corners[cs + ci]] = cluster_vid[which[ci]];
     }
 
     for (uint32_t &i : indices)

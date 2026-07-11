@@ -21,7 +21,7 @@ g++ -std=c++20 -O2 -c -I third_party/meshoptimizer/src third_party/meshoptimizer
 mv ./*.o "$obj/mo"/
 
 # header-only suites
-for t in test_analytic test_bspline test_decode; do
+for t in test_analytic test_bspline test_decode test_weld; do
     g++ -std=c++20 -O2 -Wall $INC "tests/ngeom/$t.cpp" -o "$obj/$t"
     "$obj/$t"
 done
