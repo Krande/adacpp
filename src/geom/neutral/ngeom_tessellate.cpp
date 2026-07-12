@@ -38,6 +38,23 @@ const bool FDBG = std::getenv("NGEOM_FDBG") != nullptr;
 // triangle counts, all tess params) — for head-to-head comparison with the reference tessellator's face-debug dump.
 const bool TESSDBG = std::getenv("NGEOM_TESSDBG") != nullptr;
 
+// Face-merge batch size for the huge single-root face-parallel path (tessellate_one_root). The
+// per-face local meshes are held resident until merged; on a 61k-face monster solid the full
+// locals[] is a SECOND complete copy of the solid's soup (~0.5 GB with normals), inflating that
+// root's transient peak. Processing faces in BATCHES caps the resident local meshes to one batch,
+// keeping the merge byte-identical (same face-order append). Defensive memory hygiene — measurably
+// trims the face-parallel merge transient, though it is not the dominant term in the 469826 case.
+// ADA_TESS_FACE_MERGE_BATCH: batch size (default 4096); 0 disables batching (old all-at-once path).
+inline size_t tess_face_merge_batch() {
+    if (const char *e = std::getenv("ADA_TESS_FACE_MERGE_BATCH")) {
+        char *end = nullptr;
+        long v = std::strtol(e, &end, 10);
+        if (end != e && v >= 0)
+            return (size_t) v;
+    }
+    return 4096;
+}
+
 // ---- diagnostics (env-gated) ----------------------------------------------------------------
 [[maybe_unused]] const char *surf_kind(const Surface &s) {
     if (dynamic_cast<const PlaneSurface *>(&s))
@@ -1899,25 +1916,44 @@ static void tessellate_one_root(const NgeomRoot &root, const TessParams &tp, Tes
         // the serial loop. The 64-face floor keeps small solids on the cheap path.
         if (tp.threads > 1 && root.faces.size() >= 64) {
             const size_t n = root.faces.size();
-            std::vector<TessMesh> locals(n);
-            std::atomic<size_t> next{0};
             TessParams tpl = tp;
             tpl.threads = 1; // no nested pools inside a face
-            unsigned nt = std::min<unsigned>((unsigned) tp.threads, (unsigned) n);
-            std::vector<std::thread> pool;
-            pool.reserve(nt - 1);
-            auto face_worker = [&]() {
-                for (size_t i = next.fetch_add(1); i < n; i = next.fetch_add(1))
-                    if (root.faces[i])
-                        tessellate_face(*root.faces[i], tpl, locals[i]);
-            };
-            for (unsigned t = 1; t < nt; ++t)
-                pool.emplace_back(face_worker);
-            face_worker();
-            for (std::thread &th : pool)
-                th.join();
-            for (const TessMesh &lm : locals)
-                append_mesh(out, lm);
+            // Batch the parallel face tessellation + in-order merge so the resident per-face local
+            // meshes never exceed one batch (a 61k-face locals[] is otherwise a full second copy of
+            // the solid soup ~0.5 GB — the 469826 obj/stl OOM). Faces within a batch run in parallel;
+            // batches (and faces within them) merge in face order, so the output is byte-identical to
+            // the old all-at-once path. batch==0 or >=n => single batch (the original behaviour).
+            size_t batch = tess_face_merge_batch();
+            if (batch == 0 || batch > n)
+                batch = n;
+            for (size_t b0 = 0; b0 < n; b0 += batch) {
+                const size_t b1 = std::min(n, b0 + batch);
+                std::vector<TessMesh> locals(b1 - b0);
+                std::atomic<size_t> next{b0};
+                unsigned nt = std::min<unsigned>((unsigned) tp.threads, (unsigned) (b1 - b0));
+                auto face_worker = [&]() {
+                    // tls_model_scale is thread_local, set (line above) ONLY on the thread that runs
+                    // tessellate_one_root. The SPAWNED face workers start at 0.0 => adaptive density
+                    // OFF => full fine tessellation for whatever share of the faces they grab. So a
+                    // huge solid's triangle count SCALED WITH THREAD COUNT and varied run-to-run with
+                    // scheduling (measured 469826: 12.44M serial -> 14.6M at 4 threads -> 15.85M at 8;
+                    // ~+17% at the 3-thread prod pod). Publishing the model scale on THIS worker makes
+                    // every face use the adaptive density => tri count is thread-invariant + deterministic.
+                    tls_model_scale() = tp.model_scale;
+                    for (size_t i = next.fetch_add(1); i < b1; i = next.fetch_add(1))
+                        if (root.faces[i])
+                            tessellate_face(*root.faces[i], tpl, locals[i - b0]);
+                };
+                std::vector<std::thread> pool;
+                pool.reserve(nt - 1);
+                for (unsigned t = 1; t < nt; ++t)
+                    pool.emplace_back(face_worker);
+                face_worker();
+                for (std::thread &th : pool)
+                    th.join();
+                for (const TessMesh &lm : locals)
+                    append_mesh(out, lm);
+            } // locals freed here -> next batch's peak is one batch, not all n faces
             return;
         }
         for (const auto &face : root.faces)
