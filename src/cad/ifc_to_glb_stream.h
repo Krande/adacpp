@@ -149,6 +149,10 @@ inline long stream_ifc_to_glb(const std::string &in_path, const std::string &out
             tph.threads = nthreads;
             adacpp::ifc_read::IfcResolver r0(idx);
             r0.copy_metadata_from(master);
+            // Phase A resolves each huge product single-threaded (only tessellate_doc's face pool is
+            // parallel), so bound cache_ mid-shell — without it a single 61k-face IFC product piles
+            // parsed statements to ~GB during its one resolve, same failure the STEP glb/mesh paths hit.
+            r0.enable_cache_bounding();
             for (size_t i = 0; i < n_huge; ++i)
                 process(r0, lanes[0], i, tph);
             adacpp::mem_trim();

@@ -463,6 +463,15 @@ public:
         surf_cache_.clear();
     }
 
+    // Bound cache_ MID-product for a huge single-product shell: drop the parsed Part-21 statements
+    // (NOT the built-geometry surf_cache_) every 1024 faces so a 61k-face brep doesn't pile up
+    // hundreds of MB of parsed face/bound/loop/edge/vertex entities during its one resolve — the IFC
+    // analogue of the STEP reader's enable_parse_cache_bounding (see step_reader.h). Faces re-parse
+    // their sub-entities on demand via the pread offset index. Enable ONLY on a single-threaded
+    // (phase-A) resolver; the concurrent phase-B pool leaves it off and bounds via clear_cache() per
+    // product. A no-op for products under 1024 faces (the mid-shell clear never fires).
+    void enable_cache_bounding() { bound_cache_ = true; }
+
     // Build the expensive, read-only, cross-product metadata (colour + spatial-hierarchy maps) ONCE on
     // a master resolver so parallel workers can share it via copy_metadata_from instead of each
     // rebuilding it (both scan every entity in the file). clear_cache() must not wipe these.
@@ -533,6 +542,7 @@ private:
     const StreamIndex &idx_;
     std::unordered_map<long, std::pair<std::string, Instance>> cache_;
     std::unordered_map<long, std::shared_ptr<Surface>> surf_cache_;
+    bool bound_cache_ = false; // enable_cache_bounding(): drop cache_ mid-shell on huge products
     std::string pread_scratch_;
     long solid_src_ = 0;      // entity id of the one solid this product carries (mapped instances share it)
     bool mixed_ = false;      // product has >1 distinct solid / mixes brep+procedural -> skip (OCC)
@@ -1422,32 +1432,30 @@ private:
         } else if (iequals(t, "IFCBOOLEANRESULT") || iequals(t, "IFCBOOLEANCLIPPINGRESULT")) {
             out.boolean = mk_boolean(in);
         } else if (iequals(t, "IFCADVANCEDBREP") || iequals(t, "IFCFACETEDBREP")) {
-            const Instance *shell = inst(ref_arg(*in, 0));
-            if (shell && !shell->args.empty() && shell->args[0].is_list())
-                for (const Value &fref : shell->args[0].items)
-                    if (fref.is_ref())
-                        if (auto f = face(fref.i))
-                            out.faces.push_back(f);
+            add_shell_faces(ref_arg(*in, 0), out); // shell (arg 0) — bounded face loop, same as shells below
         } else if (iequals(t, "IFCHALFSPACESOLID")) {
             if (auto ex = mk_halfspace(in, refmin, refmax))
                 out.extrusion = ex;
         } else if (iequals(t, "IFCPOLYGONALFACESET")) {
             // (Coordinates=IfcCartesianPointList3D, Closed, Faces=IfcIndexedPolygonalFace[], PnIndex)
-            std::vector<Vec3> pts = point_list_3d(ref_arg(*in, 0));
+            std::vector<Vec3> pts = point_list_3d(ref_arg(*in, 0)); // own copy — survives a cache_ clear
+            std::vector<long> face_ids;
             if (in->args.size() > 2 && in->args[2].is_list())
-                for (const Value &fref : in->args[2].items)
-                    if (fref.is_ref()) {
-                        const Instance *pf = inst(fref.i); // IfcIndexedPolygonalFace(CoordIndex[, Inner])
-                        if (!pf || pf->args.empty() || !pf->args[0].is_list())
-                            continue;
-                        std::vector<Vec3> poly;
-                        for (const Value &iv : pf->args[0].items)
-                            push_pt(poly, pts, iv);
-                        if (auto f = make_profile(poly)) {
-                            f->fit_plane_from_loop = true; // 3D face: fit its real plane, not z=0
-                            out.faces.push_back(f);
-                        }
-                    }
+                for (const Value &fref : in->args[2].items) // copy first — the loop below may clear cache_
+                    if (fref.is_ref())
+                        face_ids.push_back(fref.i);
+            iter_faces_bounded(face_ids, [&](long fid) {
+                const Instance *pf = inst(fid); // IfcIndexedPolygonalFace(CoordIndex[, Inner])
+                if (!pf || pf->args.empty() || !pf->args[0].is_list())
+                    return;
+                std::vector<Vec3> poly;
+                for (const Value &iv : pf->args[0].items)
+                    push_pt(poly, pts, iv);
+                if (auto f = make_profile(poly)) {
+                    f->fit_plane_from_loop = true; // 3D face: fit its real plane, not z=0
+                    out.faces.push_back(f);
+                }
+            });
         } else if (iequals(t, "IFCTRIANGULATEDFACESET")) {
             // (Coordinates, Normals, Closed, CoordIndex=list of (i,j,k) triples, PnIndex)
             std::vector<Vec3> pts = point_list_3d(ref_arg(*in, 0));
@@ -1929,14 +1937,33 @@ private:
         if (ix >= 1 && (size_t) ix < pts.size())
             poly.push_back(pts[ix]);
     }
+    // Iterate a COPIED list of face ref-ids, invoking emit(id) per face, dropping cache_ (parsed
+    // statements) every 1024 faces when bounding is on. Callers MUST copy the ids out first: the clear
+    // frees the parent shell/faceset Instance, so iterating its arg list in place would use-after-free
+    // (same hazard the STEP reader guards). Built geometry (surf_cache_) + persistent maps are kept.
+    template <class Emit>
+    void iter_faces_bounded(const std::vector<long> &face_ids, Emit emit) {
+        for (size_t i = 0; i < face_ids.size(); ++i) {
+            emit(face_ids[i]);
+            if (bound_cache_ && (i & 1023u) == 1023u)
+                cache_.clear();
+        }
+    }
+
     // A shell (IfcClosedShell/IfcOpenShell/IfcConnectedFaceSet): CfsFaces (arg 0) is a list of IfcFace.
     void add_shell_faces(long shell_id, SolidItemN &out) {
         const Instance *sh = inst(shell_id);
-        if (sh && !sh->args.empty() && sh->args[0].is_list())
-            for (const Value &fref : sh->args[0].items)
-                if (fref.is_ref())
-                    if (auto f = face(fref.i))
-                        out.faces.push_back(f);
+        if (!sh || sh->args.empty() || !sh->args[0].is_list())
+            return;
+        std::vector<long> face_ids;
+        face_ids.reserve(sh->args[0].items.size());
+        for (const Value &fref : sh->args[0].items) // copy first — iter_faces_bounded may clear cache_
+            if (fref.is_ref())
+                face_ids.push_back(fref.i);
+        iter_faces_bounded(face_ids, [&](long fid) {
+            if (auto f = face(fid))
+                out.faces.push_back(f);
+        });
     }
     // IfcBooleanResult(Operator, FirstOperand, SecondOperand) -> ng::BooleanN (null if an operand can't
     // be resolved). op: 0 difference / 1 union / 2 intersection. The 1st operand bounds a half-space 2nd.
