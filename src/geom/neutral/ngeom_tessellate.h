@@ -32,6 +32,10 @@ struct TessParams {
                               // relative to model_scale (imperceptible facets), so dense assemblies
                               // of tiny curved features (bolts/pins) don't blow the triangle budget
                               // while large visible surfaces keep the fine max_angle.
+    bool capture_face_ranges = false; // record per-face triangle ranges (TessMesh::face_ranges) so the
+                                       // GLB writer can emit clickable per-face regions. Opt-in (bloats
+                                       // the output) and forces serial face tessellation for stable
+                                       // face-order ranges. Off => no per-face bookkeeping.
 };
 
 struct TessMesh {
@@ -47,6 +51,16 @@ struct TessMesh {
         uint32_t vertex_count = 0;
     };
     std::vector<Group> groups;
+    // Per-face triangle range within `indices` — populated only when TessParams.capture_face_ranges
+    // is set (clickable per-face regions). `first_index` is relative to this mesh; the GLB writer
+    // re-bases it against the owning solid's draw range.
+    struct FaceRange {
+        uint32_t first_index = 0; // flat index into `indices`
+        uint32_t index_count = 0; // number of indices (3 * triangles)
+        int64_t face_id = 0;      // source entity id (STEP/IFC #id), 0 if unknown
+        uint32_t face_seq = 0;    // 0-based face position within the solid
+    };
+    std::vector<FaceRange> face_ranges;
     // Primitive topology of `indices`: TRIANGLES for solids/faces, LINES for curve-only bodies
     // (index pairs). A single stream blob is one root, so it is homogeneous.
     MeshType mesh_type = MeshType::TRIANGLES;

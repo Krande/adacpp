@@ -305,6 +305,10 @@ struct FaceSurfaceN {
     std::shared_ptr<Surface> surface;
     bool same_sense = true;         // false => face normal is the surface normal flipped
     std::vector<FaceBoundN> bounds; // bounds[0] outer, rest holes
+    // Source entity id (STEP ADVANCED_FACE / IFC IfcFace #id), 0 when unknown. Only used when the
+    // caller requests per-face clickable regions (TessParams.capture_face_ranges) — lets the viewer
+    // report the exact source id of a clicked face. Costs nothing otherwise.
+    int64_t src_id = 0;
     // The `surface` is a PLACEHOLDER identity plane (a plain IfcFace / explicit face-set polygon whose
     // real 3D plane is only implied by its boundary points). The tessellator must fit the plane from
     // the 3D loop up front — otherwise the poly projects flat onto the z=0 placeholder plane.

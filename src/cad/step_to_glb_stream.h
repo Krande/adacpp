@@ -44,7 +44,7 @@ namespace adacpp {
 //               still cleaned up by GlbSpillWriter's destructor; only the user-supplied dir survives.
 inline long stream_step_to_glb(const std::string &in_path, const std::string &out_path, double deflection,
                                double angular_deg, int num_threads, bool meshopt, const std::string &spill_dir = "",
-                               double model_scale = 0.0) {
+                               double model_scale = 0.0, bool face_regions = false) {
     using namespace adacpp::ngeom;
     adacpp::prof::StepProfiler prof("stream_step_to_glb");
     adacpp::tune_malloc_for_streaming(); // bound streaming peak RSS (mmap/trim tuning) before the pool
@@ -61,6 +61,7 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
     tp.deflection = deflection;
     tp.max_angle = angular_deg * 3.14159265358979323846 / 180.0;
     tp.model_scale = model_scale; // >0 => adaptive per-surface density; the per-solid tpp copies inherit it
+    tp.capture_face_ranges = face_regions; // opt-in per-face clickable regions -> scenes[0].extras
 
     // Metadata (colour/transform/path maps) once; workers copy these read-only maps.
     adacpp::step::Resolver master(idx);
@@ -159,6 +160,10 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
                 adacpp::glb::GlbSolid gs;
                 gs.positions = std::move(tm.positions);
                 gs.indices = std::move(tm.indices);
+                // Carry per-face clickable regions (relative to this solid's index buffer) when captured.
+                gs.face_ranges.reserve(tm.face_ranges.size());
+                for (const auto &fr : tm.face_ranges)
+                    gs.face_ranges.push_back({fr.first_index, fr.index_count, fr.face_id, fr.face_seq});
                 gs.color = {rr.cr, rr.cg, rr.cb, rr.ca}; // grey default when !has_color
                 gs.transforms = rr.transforms;
                 gs.id = rr.id; // fallback leaf name

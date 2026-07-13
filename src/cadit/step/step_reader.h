@@ -1503,6 +1503,7 @@ private:
         if (c != face_cache_.end())
             return c->second;
         auto f = std::make_shared<ng::FaceSurfaceN>();
+        f->src_id = id; // STEP ADVANCED_FACE / FACE_SURFACE entity id -> per-face clickable region label
         const Instance *in = inst(id);
         if (in && (in->type == "ADVANCED_FACE" || in->type == "FACE_SURFACE") && in->args.size() >= 4) {
             if (in->args[1].kind == Kind::List)

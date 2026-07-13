@@ -1935,7 +1935,7 @@ static void tessellate_one_root(const NgeomRoot &root, const TessParams &tp, Tes
         // are independent (each tessellate_face builds its own libtess2 tessellator);
         // per-face local meshes merged in face order keep the output identical to
         // the serial loop. The 64-face floor keeps small solids on the cheap path.
-        if (tp.threads > 1 && root.faces.size() >= 64) {
+        if (tp.threads > 1 && root.faces.size() >= 64 && !tp.capture_face_ranges) {
             const size_t n = root.faces.size();
             TessParams tpl = tp;
             tpl.threads = 1; // no nested pools inside a face
@@ -1977,9 +1977,20 @@ static void tessellate_one_root(const NgeomRoot &root, const TessParams &tp, Tes
             } // locals freed here -> next batch's peak is one batch, not all n faces
             return;
         }
-        for (const auto &face : root.faces)
-            if (face)
+        for (size_t fi = 0; fi < root.faces.size(); ++fi) {
+            const auto &face = root.faces[fi];
+            if (!face)
+                continue;
+            if (tp.capture_face_ranges) {
+                const uint32_t s = (uint32_t) out.indices.size();
                 tessellate_face(*face, tp, out);
+                const uint32_t c = (uint32_t) out.indices.size() - s;
+                if (c > 0)
+                    out.face_ranges.push_back({s, c, face->src_id, (uint32_t) fi});
+            } else {
+                tessellate_face(*face, tp, out);
+            }
+        }
     }
 }
 
@@ -2009,6 +2020,10 @@ TessMesh tessellate_doc(const NgeomDoc &doc, const TessParams &tp) {
             uint32_t vfirst = (uint32_t) (mesh.positions.size() / 3);
             mesh.mesh_type = rm.mesh_type; // single-root streaming: propagate LINES/TRIANGLES
             append_mesh(mesh, rm);
+            for (auto fr : rm.face_ranges) { // re-base per-face ranges onto the merged index buffer
+                fr.first_index += first;
+                mesh.face_ranges.push_back(fr);
+            }
             mesh.groups.push_back({root.id, first, (uint32_t) mesh.indices.size() - first, vfirst,
                                    (uint32_t) (mesh.positions.size() / 3) - vfirst});
         }
@@ -2034,6 +2049,10 @@ TessMesh tessellate_doc(const NgeomDoc &doc, const TessParams &tp) {
         uint32_t first = (uint32_t) mesh.indices.size();
         uint32_t vfirst = (uint32_t) (mesh.positions.size() / 3);
         append_mesh(mesh, locals[i]);
+        for (auto fr : locals[i].face_ranges) { // re-base per-face ranges onto the merged index buffer
+            fr.first_index += first;
+            mesh.face_ranges.push_back(fr);
+        }
         mesh.groups.push_back({roots[i].id, first, (uint32_t) mesh.indices.size() - first, vfirst,
                                (uint32_t) (mesh.positions.size() / 3) - vfirst});
     }

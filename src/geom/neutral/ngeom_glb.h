@@ -29,11 +29,22 @@ namespace adacpp::glb {
 
 // One tessellated solid to place in the GLB: local-space mesh + colour + per-instance world
 // transforms (column-major / glTF order; empty => a single identity instance).
+// One clickable face region within a solid — the triangle range RELATIVE to the solid's own index
+// buffer (the viewer adds it to the solid's draw-range start), plus the source face id + sequence.
+// Emitted into scenes[0].extras as face_ranges_node<m> only when face-region capture is requested.
+struct FaceSub {
+    uint32_t start = 0;  // first index, relative to the solid's draw range
+    uint32_t length = 0; // index count (3 * triangles)
+    int64_t face_id = 0; // source entity id (STEP/IFC #id), 0 if unknown
+    uint32_t seq = 0;    // 0-based face position within the solid
+};
+
 struct GlbSolid {
     std::vector<float> positions; // flat xyz (local)
     std::vector<uint32_t> indices;
     std::array<float, 4> color{0.5f, 0.5f, 0.5f, 1.0f};
     std::vector<std::array<float, 16>> transforms;
+    std::vector<FaceSub> face_ranges; // per-face regions (relative to this solid); empty unless captured
     std::string id;           // solid's own name (fallback leaf name)
     std::string product_name; // the solid's product name (the picking leaf name `gid`); "" => use id
     // Per-instance assembly path (root-first (rep_id, product_name) levels, last level = the solid's
@@ -126,6 +137,7 @@ struct PartRange {
     std::string id;
     uint32_t start, length;
     std::vector<std::pair<int, std::string>> path;
+    std::vector<FaceSub> faces; // per-face regions relative to [start,length); empty unless captured
 };
 
 // Build the scenes[0].extras content: id_hierarchy {nid:[name,parent]} (the full STEP product tree —
@@ -190,8 +202,42 @@ inline std::string build_scene_extras(const std::vector<std::vector<PartRange>> 
         }
         ranges << "}";
     }
+    // Per-face clickable regions (opt-in): face_ranges_node<m> {solid_nid:[[start,len,face_id,seq],...]}
+    // where start/len are RELATIVE to that solid's draw range (the viewer adds the draw-range start).
+    // Emitted only when some part carries face regions, so normal GLBs are unchanged.
+    std::ostringstream franges;
+    bool any_faces = false;
+    for (const auto &pm : per_mat)
+        for (const PartRange &r : pm)
+            if (!r.faces.empty()) {
+                any_faces = true;
+                break;
+            }
+    if (any_faces) {
+        for (size_t m = 0; m < per_mat.size(); ++m) {
+            franges << ",\"face_ranges_node" << m << "\":{";
+            bool firstk = true;
+            for (size_t k = 0; k < per_mat[m].size(); ++k) {
+                const PartRange &r = per_mat[m][k];
+                if (r.faces.empty())
+                    continue;
+                if (!firstk)
+                    franges << ",";
+                firstk = false;
+                franges << "\"" << solid_nid[m][k] << "\":[";
+                for (size_t j = 0; j < r.faces.size(); ++j) {
+                    const FaceSub &fs = r.faces[j];
+                    if (j)
+                        franges << ",";
+                    franges << "[" << fs.start << "," << fs.length << "," << fs.face_id << "," << fs.seq << "]";
+                }
+                franges << "]";
+            }
+            franges << "}";
+        }
+    }
     std::ostringstream e;
-    e << "\"id_hierarchy\":{" << hier.str() << "}" << ranges.str();
+    e << "\"id_hierarchy\":{" << hier.str() << "}" << ranges.str() << franges.str();
     return e.str();
 }
 
@@ -476,9 +522,11 @@ inline bool write_glb(const std::string &path, const std::vector<GlbSolid> &soli
                 m.idx.push_back(v);
                 m.idx_max = std::max(m.idx_max, v);
             }
-            // One pickable leaf per placement (1:1 with the Python scene builder).
+            // One pickable leaf per placement (1:1 with the Python scene builder). Face regions are
+            // relative to the solid's index buffer, identical for every placement, so each leaf carries
+            // the same list (the viewer re-bases each against that leaf's own draw-range start).
             m.parts.push_back({instance_leaf_name(s, t), part_start, (uint32_t) m.idx.size() - part_start,
-                               instance_parent_path(s, t)});
+                               instance_parent_path(s, t), s.face_ranges});
         }
     }
     std::vector<MatHeader> hdrs;
@@ -549,6 +597,7 @@ public:
             std::string id;
             uint32_t index_count;
             std::vector<std::pair<int, std::string>> path;
+            std::vector<FaceSub> faces; // per-face regions relative to this part; empty unless captured
         };
         std::vector<Part> parts; // per-solid (id, index_count, assembly path) in add order
 
@@ -621,8 +670,10 @@ public:
                 m.idx_max = std::max(m.idx_max, v);
                 ++m.index_count;
             }
-            // One pickable leaf per placement (1:1 with the Python scene builder).
-            m.parts.push_back({instance_leaf_name(s, t), m.index_count - inst_before, instance_parent_path(s, t)});
+            // One pickable leaf per placement (1:1 with the Python scene builder). Face regions are
+            // relative to the solid's index buffer (same for every placement); each leaf keeps its own copy.
+            m.parts.push_back(
+                {instance_leaf_name(s, t), m.index_count - inst_before, instance_parent_path(s, t), s.face_ranges});
         }
     }
     void flush() {
@@ -739,7 +790,7 @@ inline bool write_glb_merged(const std::string &path, const std::vector<GlbSpill
             if (it == l->mats().end())
                 continue;
             for (const auto &part : it->second.parts) {
-                parts.push_back({part.id, off, part.index_count, part.path});
+                parts.push_back({part.id, off, part.index_count, part.path, part.faces});
                 off += part.index_count;
             }
         }
