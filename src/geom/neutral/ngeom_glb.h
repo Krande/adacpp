@@ -516,15 +516,33 @@ inline bool write_glb(const std::string &path, const std::vector<GlbSolid> &soli
     });
 }
 
+// Per-material buffer/spill threshold (bytes, pos+idx combined). Below it a material stays entirely in
+// RAM and never touches the disk — most conversions (small/medium models) then do ZERO spill writes,
+// which is the dominant (~70%) source of the audit's nvme write pressure. A material that grows past it
+// (a huge solid / dense model) spills to disk and streams from there, keeping peak RAM bounded. Env
+// ADA_GLB_SPILL_THRESHOLD_MB (default 96); 0 forces the always-spill behaviour.
+inline size_t glb_spill_threshold_bytes() {
+    if (const char *e = std::getenv("ADA_GLB_SPILL_THRESHOLD_MB")) {
+        char *end = nullptr;
+        long v = std::strtol(e, &end, 10);
+        if (end != e && v >= 0)
+            return (size_t) v * 1024 * 1024;
+    }
+    return (size_t) 96 * 1024 * 1024;
+}
+
 // Disk-spilling writer: one "lane" (one producer / worker). add() bakes + appends each material's
-// verts/indices to per-material temp files; the merge (write_glb_merged) streams them into the GLB.
-// Keeps only per-material metadata in RAM, never the merged buffers.
+// verts/indices; small materials stay in an in-RAM buffer, large ones spill to per-material temp files.
+// The merge (write_glb_merged) reads each material from its buffer or file. Keeps only per-material
+// metadata + (for small models) the raw bytes in RAM, never the merged buffers.
 class GlbSpillWriter {
 public:
     struct MatLane {
         std::array<float, 4> color{0.5f, 0.5f, 0.5f, 1.0f};
-        std::string pos_path, idx_path;
+        std::string pos_path, idx_path;   // set only once this material has spilled to disk
         std::ofstream pos, idx;
+        std::string pos_buf, idx_buf;     // in-RAM bytes while !spilled (then flushed to file + cleared)
+        bool spilled = false;
         uint32_t vert_count = 0, index_count = 0, idx_max = 0;
         float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
         struct Part {
@@ -533,9 +551,44 @@ public:
             std::vector<std::pair<int, std::string>> path;
         };
         std::vector<Part> parts; // per-solid (id, index_count, assembly path) in add order
+
+        // Yield this material's index bytes as uint32 chunks — from the RAM buffer or streamed from the
+        // spill file — so the merge readers don't care which. f(const uint32_t*, count).
+        template <class F> void for_idx(F f) const {
+            if (!spilled) {
+                if (!idx_buf.empty())
+                    f(reinterpret_cast<const uint32_t *>(idx_buf.data()), idx_buf.size() / 4);
+                return;
+            }
+            std::ifstream xf(idx_path, std::ios::binary);
+            std::vector<uint32_t> rb(1u << 16);
+            while (xf) {
+                xf.read(reinterpret_cast<char *>(rb.data()), (std::streamsize) (rb.size() * 4));
+                size_t got = (size_t) (xf.gcount() / 4);
+                if (got)
+                    f(rb.data(), got);
+            }
+        }
+        // Yield this material's position bytes as raw chunks. f(const char*, nbytes).
+        template <class F> void for_pos(F f) const {
+            if (!spilled) {
+                if (!pos_buf.empty())
+                    f(pos_buf.data(), pos_buf.size());
+                return;
+            }
+            std::ifstream pf(pos_path, std::ios::binary);
+            std::vector<char> b(1u << 16);
+            while (pf) {
+                pf.read(b.data(), (std::streamsize) b.size());
+                std::streamsize got = pf.gcount();
+                if (got > 0)
+                    f(b.data(), (size_t) got);
+            }
+        }
     };
 
-    GlbSpillWriter(std::string dir, int lane) : dir_(std::move(dir)), lane_(lane) {}
+    GlbSpillWriter(std::string dir, int lane)
+        : dir_(std::move(dir)), lane_(lane), threshold_(glb_spill_threshold_bytes()) {}
     ~GlbSpillWriter() {
         remove_files();
     }
@@ -546,8 +599,6 @@ public:
             return;
         std::array<int, 4> key = colour_key(s.color);
         MatLane &m = mats_[key];
-        if (m.pos_path.empty())
-            open(m, key);
         m.color = s.color;
         size_t ninst = s.transforms.empty() ? 1 : s.transforms.size();
         for (size_t t = 0; t < ninst; ++t) {
@@ -557,7 +608,7 @@ public:
             for (size_t i = 0; i + 2 < s.positions.size(); i += 3) {
                 float o[3];
                 xform(M, s.positions[i], s.positions[i + 1], s.positions[i + 2], o[0], o[1], o[2]);
-                m.pos.write(reinterpret_cast<const char *>(o), 12);
+                append(m, key, /*is_pos=*/true, reinterpret_cast<const char *>(o), 12);
                 for (int k = 0; k < 3; ++k) {
                     m.lo[k] = std::min(m.lo[k], o[k]);
                     m.hi[k] = std::max(m.hi[k], o[k]);
@@ -566,7 +617,7 @@ public:
             }
             for (uint32_t ix : s.indices) {
                 uint32_t v = base + ix;
-                m.idx.write(reinterpret_cast<const char *>(&v), 4);
+                append(m, key, /*is_pos=*/false, reinterpret_cast<const char *>(&v), 4);
                 m.idx_max = std::max(m.idx_max, v);
                 ++m.index_count;
             }
@@ -575,26 +626,57 @@ public:
         }
     }
     void flush() {
-        for (auto &[k, m] : mats_) {
-            m.pos.flush();
-            m.idx.flush();
-        }
+        for (auto &[k, m] : mats_)
+            if (m.spilled) {
+                m.pos.flush();
+                m.idx.flush();
+            }
     }
     const std::map<std::array<int, 4>, MatLane> &mats() const {
         return mats_;
     }
 
 private:
-    void open(MatLane &m, const std::array<int, 4> &key) {
+    // Append bytes to a material's pos/idx — into the RAM buffer, or the spill file once spilled. The
+    // threshold bounds the LANE's total in-RAM bytes (across all its materials), not one material's, so
+    // a many-material model can't pile up N thresholds of RAM on the memory-capped worker: crossing it
+    // spills the material currently being appended (freeing its buffer) and, if still over, the rest.
+    void append(MatLane &m, const std::array<int, 4> &key, bool is_pos, const char *p, size_t n) {
+        if (m.spilled) {
+            (is_pos ? m.pos : m.idx).write(p, (std::streamsize) n);
+            return;
+        }
+        (is_pos ? m.pos_buf : m.idx_buf).append(p, n);
+        buffered_ += n;
+        if (threshold_ && buffered_ > threshold_) {
+            spill(m, key); // the hot material first
+            for (auto &[k2, m2] : mats_) {
+                if (buffered_ <= threshold_)
+                    break;
+                if (!m2.spilled && !(m2.pos_buf.empty() && m2.idx_buf.empty()))
+                    spill(m2, k2);
+            }
+        }
+    }
+    // Move a material from RAM to disk: open its files, write the accumulated buffers, free the RAM.
+    void spill(MatLane &m, const std::array<int, 4> &key) {
         char tag[64];
         std::snprintf(tag, sizeof tag, "/glb_l%d_%d_%d_%d_%d", lane_, key[0], key[1], key[2], key[3]);
         m.pos_path = dir_ + tag + ".pos";
         m.idx_path = dir_ + tag + ".idx";
         m.pos.open(m.pos_path, std::ios::binary);
         m.idx.open(m.idx_path, std::ios::binary);
+        m.pos.write(m.pos_buf.data(), (std::streamsize) m.pos_buf.size());
+        m.idx.write(m.idx_buf.data(), (std::streamsize) m.idx_buf.size());
+        buffered_ -= (m.pos_buf.size() + m.idx_buf.size());
+        std::string().swap(m.pos_buf);
+        std::string().swap(m.idx_buf);
+        m.spilled = true;
     }
     void remove_files() {
         for (auto &[k, m] : mats_) {
+            if (!m.spilled)
+                continue;
             m.pos.close();
             m.idx.close();
             if (!m.pos_path.empty())
@@ -605,6 +687,8 @@ private:
     }
     std::string dir_;
     int lane_;
+    size_t threshold_;
+    size_t buffered_ = 0; // total in-RAM buffer bytes across all not-yet-spilled materials in this lane
     std::map<std::array<int, 4>, MatLane> mats_;
 };
 
@@ -677,14 +761,10 @@ inline bool write_glb_merged(const std::string &path, const std::vector<GlbSpill
             if (it == l->mats().end())
                 continue;
             const auto &m = it->second;
-            std::ifstream xf(m.idx_path, std::ios::binary);
-            std::vector<uint32_t> rb(1u << 16);
-            while (xf) {
-                xf.read(reinterpret_cast<char *>(rb.data()), (std::streamsize) (rb.size() * 4));
-                size_t got = (size_t) (xf.gcount() / 4);
+            m.for_idx([&](const uint32_t *rb, size_t got) {
                 for (size_t k = 0; k < got; ++k)
                     idx.push_back(rb[k] + vbase);
-            }
+            });
             vbase += m.vert_count;
         }
     };
@@ -695,10 +775,13 @@ inline bool write_glb_merged(const std::string &path, const std::vector<GlbSpill
             if (it == l->mats().end())
                 continue;
             const auto &m = it->second;
-            size_t nf = (size_t) m.vert_count * 3, old = pos.size();
-            pos.resize(old + nf);
-            std::ifstream pf(m.pos_path, std::ios::binary);
-            pf.read(reinterpret_cast<char *>(pos.data() + old), (std::streamsize) (nf * 4));
+            size_t old = pos.size();
+            pos.resize(old + (size_t) m.vert_count * 3);
+            char *dst = reinterpret_cast<char *>(pos.data() + old);
+            m.for_pos([&](const char *b, size_t n) {
+                std::memcpy(dst, b, n);
+                dst += n;
+            });
         }
     };
     if (meshopt && glb_write_framed_meshopt(path, hdrs, provide_idx, provide_pos, extras, ada_ext))
@@ -713,19 +796,16 @@ inline bool write_glb_merged(const std::string &path, const std::vector<GlbSpill
                 if (it == l->mats().end())
                     continue;
                 const auto &m = it->second;
-                std::ifstream f(m.idx_path, std::ios::binary);
-                // Re-offset in bulk (a buffer at a time) instead of per-uint32 read/add/write —
-                // there are tens of millions of indices, so the syscall + stream overhead dominates.
-                std::vector<uint32_t> ibuf(1u << 16);
-                while (f) {
-                    f.read(reinterpret_cast<char *>(ibuf.data()), (std::streamsize) (ibuf.size() * 4));
-                    size_t got = (size_t) (f.gcount() / 4);
-                    if (!got)
-                        break;
+                // Re-offset in bulk (a chunk at a time) instead of per-uint32 read/add/write — there are
+                // tens of millions of indices, so per-element overhead dominates. Chunks come from the
+                // material's RAM buffer or its spill file (for_idx hides which).
+                std::vector<uint32_t> ibuf;
+                m.for_idx([&](const uint32_t *rb, size_t got) {
+                    ibuf.assign(rb, rb + got);
                     for (size_t i = 0; i < got; ++i)
                         ibuf[i] += base;
                     out.write(reinterpret_cast<const char *>(ibuf.data()), (std::streamsize) (got * 4));
-                }
+                });
                 base += m.vert_count;
                 idx_bytes += m.index_count * 4;
             }
@@ -737,8 +817,7 @@ inline bool write_glb_merged(const std::string &path, const std::vector<GlbSpill
                 if (it == l->mats().end())
                     continue;
                 const auto &m = it->second;
-                std::ifstream f(m.pos_path, std::ios::binary);
-                out << f.rdbuf();
+                m.for_pos([&](const char *b, size_t n) { out.write(b, (std::streamsize) n); });
                 pos_bytes += m.vert_count * 12;
             }
             out.write(z, pad4(pos_bytes));
