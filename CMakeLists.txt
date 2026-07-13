@@ -12,6 +12,8 @@ endif()
 OPTION(BUILD_WASM "Build the project for WebAssembly" OFF)
 OPTION(BUILD_STEP_GLB_WASM "Build ONLY the OCC-free STEP->GLB wasm module (embind, no OCCT/pyodide/Python)" OFF)
 OPTION(BUILD_GLB_DIFF_WASM "Build ONLY the OCC-free GLB-diff wasm module (embind, no OCCT/pyodide/Python)" OFF)
+OPTION(BUILD_IFC_GLB_WASM "Build ONLY the OCC-free IFC->GLB wasm module (embind, no OCCT/pyodide/Python)" OFF)
+OPTION(BUILD_BREP_WRITER_WASM "Build ONLY the OCC-free B-rep writer wasm module (STEP<->IFC, embind, no OCCT/pyodide/Python)" OFF)
 OPTION(BUILD_STP2GLB_STANDALONE "Build ONLY the OCC-free STP2GLB CLI — skip OCCT/CGAL/gmsh/IFC/Python" OFF)
 OPTION(BUILD_PYTHON "Build the project for Python" ON)
 OPTION(BUILD_STP2GLB "Build the STP2GLB executable" ON)
@@ -149,8 +151,9 @@ if (BUILD_WASM)
     # Cross-compile a minimal OCCT to wasm via FetchContent. Sets WASM_OCCT_TARGETS
     # for the nanobind module / executables to link against. First spike is
     # FoundationClasses only; module set widens as features land.
-    # Skipped for the OCC-free STEP->GLB / GLB-diff modules — they need no OCCT, so we avoid the heavy cross-build.
-    if (NOT BUILD_STEP_GLB_WASM AND NOT BUILD_GLB_DIFF_WASM)
+    # Skipped for the OCC-free standalone embind modules (STEP->GLB / IFC->GLB / GLB-diff / B-rep
+    # writer) — they need no OCCT, so we avoid the heavy cross-build.
+    if (NOT BUILD_STEP_GLB_WASM AND NOT BUILD_GLB_DIFF_WASM AND NOT BUILD_IFC_GLB_WASM AND NOT BUILD_BREP_WRITER_WASM)
         include(cmake/wasm_occt.cmake)
     endif ()
 endif ()
@@ -200,6 +203,21 @@ endif ()
 include(cmake/deps_manifold.cmake)
 list(APPEND ADA_CPP_LINK_LIBS manifold)
 add_compile_definitions(ADACPP_HAVE_MANIFOLD)
+
+# zlib for gzip-compressed IFC/STEP input (StreamIndex inflates before indexing). Native only — the
+# pixi test/prod envs carry zlib; the wasm build skips gzip (gunzip() is a no-op without the define,
+# returning 0 statements rather than crashing). The ADACPP_HAVE_ZLIB define is applied ONLY to the
+# Python ext target (build_python.cmake, guarded on ZLIB_FOUND) — NOT globally — so the minimal
+# STP2GLB CLI and the C++ test targets (which don't link zlib) compile gunzip() as the no-op stub.
+if (NOT BUILD_WASM)
+    find_package(ZLIB)
+    if (ZLIB_FOUND)
+        list(APPEND ADA_CPP_LINK_LIBS ZLIB::ZLIB)
+        message(STATUS "zlib found: gzip-compressed IFC/STEP input enabled (Python ext)")
+    else ()
+        message(STATUS "zlib NOT found: gzip-compressed input disabled")
+    endif ()
+endif ()
 
 if (BUILD_STP2GLB)
     message(STATUS "Building the STP2GLB executable")

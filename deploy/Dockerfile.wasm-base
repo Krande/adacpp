@@ -13,8 +13,10 @@
 #   ada_cpp-<ver>-cp313-cp313-pyodide_2025_0_wasm32.whl
 #   manifest.json   {"adacpp": "<wheel filename>"}
 #   adacpp.sha      the resolved adacpp commit
-#   wasm/adacpp_step_glb.{js,wasm}   no-pyodide STEP->GLB embind module (viewer in-browser convert)
-#   wasm/adacpp_glb_diff.{js,wasm}   no-pyodide GLB-diff embind module (viewer in-browser diff utility)
+#   wasm/adacpp_step_glb.{js,wasm}     no-pyodide STEP->GLB embind module (viewer in-browser convert)
+#   wasm/adacpp_glb_diff.{js,wasm}     no-pyodide GLB-diff embind module (viewer in-browser diff utility)
+#   wasm/adacpp_ifc_glb.{js,wasm}      no-pyodide IFC->GLB embind module (viewer in-browser convert)
+#   wasm/adacpp_brep_writer.{js,wasm}  no-pyodide STEP<->IFC B-rep writer embind module
 #
 # busybox (not scratch) so `docker create` + `docker cp` work for consumers
 # that extract /out/ without a running command.

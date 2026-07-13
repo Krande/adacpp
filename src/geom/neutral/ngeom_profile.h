@@ -98,7 +98,14 @@ public:
     using clock = std::chrono::steady_clock;
     explicit StepProfiler(const char *label)
         : on_(std::getenv("ADACPP_STEP_PROFILE") != nullptr),
-          timing_(std::getenv("ADACPP_STEP_SOLID_TIMING") != nullptr), label_(label) {
+          // Per-solid timing rides along whenever profiling is on: the cost is two
+          // steady_clock reads + one 24-byte row per solid behind the mutex prof.solid()
+          // already takes — negligible against a solid's resolve+tessellate. It is what
+          // identifies the monster solid of a slow conversion without a local re-run;
+          // ADACPP_STEP_SOLID_TIMING still enables it standalone.
+          timing_(std::getenv("ADACPP_STEP_PROFILE") != nullptr ||
+                  std::getenv("ADACPP_STEP_SOLID_TIMING") != nullptr),
+          label_(label) {
         on_ = on_ || timing_;
         if (on_) {
             t0_ = last_ = clock::now();
@@ -144,14 +151,16 @@ public:
     bool timing() const {
         return timing_;
     }
-    // Record one solid's (id, face count = the LPT proxy, actual tessellation ms) so the destructor
-    // can report whether the face-count proxy actually predicts tessellation time. Env-gated
-    // separately (ADACPP_STEP_SOLID_TIMING) since it keeps a row per solid.
-    void solid_timed(long id, size_t faces, double ms) {
+    // Record one solid's (id, LPT cost estimate, resolved face count, output tris, actual tessellation
+    // ms) so the destructor / audit JSON can report whether the estimate predicts tessellation time
+    // (spearman_est_ms) AND memory (spearman_est_tris — tris is the per-solid tessellation-memory
+    // proxy). This is the continuous-tuning signal for the LPT cost model. Env-gated separately
+    // (ADACPP_STEP_SOLID_TIMING) since it keeps a row per solid.
+    void solid_timed(long id, size_t est, size_t faces, size_t tris, double ms) {
         if (!timing_)
             return;
         std::lock_guard<std::mutex> lk(mu_);
-        timed_.push_back({id, faces, ms});
+        timed_.push_back({id, est, faces, tris, ms});
     }
 
     ~StepProfiler() {
@@ -198,11 +207,105 @@ public:
         }
         if (timing_ && !timed_.empty())
             dump_solid_timing();
+
+        // Machine-readable sibling of the pretty lines above: ONE compact JSON line a
+        // log-capturing consumer (the adapy audit worker) can parse into structured
+        // metrics without scraping the human format. Keys mirror the printed fields.
+        {
+            std::string j = "{\"label\":\"";
+            j += label_;
+            j += "\",\"wall_ms\":" + fmt_num(wall);
+            j += ",\"peak_rss_mb\":" + fmt_num(hwm);
+            j += ",\"cpu_s\":" + fmt_num(cpu, 2);
+            j += ",\"parallelism\":" + fmt_num(wall_s > 0 ? cpu / wall_s : 0.0, 2);
+            j += ",\"vctx\":" + std::to_string(e.vctx - snap0_.vctx);
+            j += ",\"nvctx\":" + std::to_string(e.nvctx - snap0_.nvctx);
+            j += ",\"disk_read_mb\":" + fmt_num((e.read_bytes - snap0_.read_bytes) / 1e6);
+            j += ",\"majflt\":" + std::to_string(e.majflt - snap0_.majflt);
+            j += ",\"solids\":" + std::to_string(n_solids_);
+            j += ",\"tris\":" + std::to_string(total_tris_);
+            j += ",\"max_tris_solid\":" + std::to_string(max_tris_);
+            j += ",\"phases\":[";
+            for (size_t i = 0; i < phases_.size(); ++i) {
+                if (i)
+                    j += ",";
+                j += "{\"name\":\"";
+                j += phases_[i].name;
+                j += "\",\"ms\":" + fmt_num(phases_[i].ms) + ",\"rss_mb\":" + fmt_num(phases_[i].rss_mb) + "}";
+            }
+            j += "]";
+            if (!notes_.empty()) {
+                j += ",\"notes\":{";
+                for (size_t i = 0; i < notes_.size(); ++i) {
+                    if (i)
+                        j += ",";
+                    j += "\"";
+                    j += notes_[i].first;
+                    j += "\":" + fmt_num(notes_[i].second);
+                }
+                j += "}";
+            }
+            if (!threads_.empty()) {
+                j += ",\"threads\":[";
+                for (size_t i = 0; i < threads_.size(); ++i) {
+                    if (i)
+                        j += ",";
+                    j += "{\"tid\":" + std::to_string(threads_[i].tid) +
+                         ",\"solids\":" + std::to_string(threads_[i].solids) +
+                         ",\"busy_ms\":" + fmt_num(threads_[i].busy_ms) + "}";
+                }
+                j += "]";
+            }
+            if (!timed_.empty()) {
+                // The 10 slowest solids (>= 100 ms — sub-100ms rows are never the story), so the
+                // audit's convert_meta names the monster solid without a local re-run.
+                std::vector<size_t> order(timed_.size());
+                for (size_t i = 0; i < order.size(); ++i)
+                    order[i] = i;
+                std::sort(order.begin(), order.end(),
+                          [&](size_t a, size_t b) { return timed_[a].ms > timed_[b].ms; });
+                std::string rows;
+                size_t emitted = 0;
+                for (size_t r = 0; r < order.size() && emitted < 10; ++r) {
+                    const SolidTime &ts = timed_[order[r]];
+                    if (ts.ms < 100.0)
+                        break;
+                    if (emitted++)
+                        rows += ",";
+                    rows += "{\"id\":" + std::to_string(ts.id) + ",\"est\":" + std::to_string(ts.est) +
+                            ",\"faces\":" + std::to_string(ts.faces) + ",\"tris\":" + std::to_string(ts.tris) +
+                            ",\"ms\":" + fmt_num(ts.ms) + "}";
+                }
+                if (!rows.empty())
+                    j += ",\"slowest_solids\":[" + rows + "]";
+                // LPT accuracy signals for continuous tuning: does the cost estimate rank-predict the
+                // actual tessellation time and the per-solid memory proxy (tris)?
+                j += ",\"spearman_est_ms\":" +
+                     fmt_num(spearman([](const SolidTime &s) { return (double) s.est; },
+                                      [](const SolidTime &s) { return s.ms; }),
+                             3);
+                j += ",\"spearman_est_tris\":" +
+                     fmt_num(spearman([](const SolidTime &s) { return (double) s.est; },
+                                      [](const SolidTime &s) { return (double) s.tris; }),
+                             3);
+            }
+            j += "}";
+            std::fprintf(stderr, "[STEPPROF-JSON] %s\n", j.c_str());
+        }
     }
 
 private:
     static double ms(clock::time_point a, clock::time_point b) {
         return std::chrono::duration<double, std::milli>(b - a).count();
+    }
+    // %.<prec>f without locale surprises — JSON must always use '.' decimals.
+    static std::string fmt_num(double v, int prec = 0) {
+        char b[64];
+        std::snprintf(b, sizeof(b), "%.*f", prec, v);
+        for (char *p = b; *p; ++p)
+            if (*p == ',')
+                *p = '.';
+        return std::string(b);
     }
     struct Phase {
         const char *name;
@@ -211,9 +314,36 @@ private:
     };
     struct SolidTime {
         long id;
-        size_t faces;
-        double ms;
+        size_t est;   // LPT cost estimate (the value being validated)
+        size_t faces; // resolved face count
+        size_t tris;  // output triangles — per-solid tessellation-memory proxy
+        double ms;    // actual tessellation time
     };
+
+    // Spearman rank correlation between two per-solid signals over `timed_` (1.0 = perfect rank
+    // agreement). `pick` maps a SolidTime to the value on one axis. Used to score how well the LPT
+    // estimate predicts duration (ms) and memory (tris) so the audit can track the model over time.
+    template <class FA, class FB> double spearman(FA a, FB b) const {
+        size_t n = timed_.size();
+        if (n < 2)
+            return 1.0;
+        std::vector<size_t> oa(n), ob(n);
+        for (size_t i = 0; i < n; ++i)
+            oa[i] = ob[i] = i;
+        std::sort(oa.begin(), oa.end(), [&](size_t x, size_t y) { return a(timed_[x]) > a(timed_[y]); });
+        std::sort(ob.begin(), ob.end(), [&](size_t x, size_t y) { return b(timed_[x]) > b(timed_[y]); });
+        std::vector<size_t> ra(n), rb(n);
+        for (size_t r = 0; r < n; ++r) {
+            ra[oa[r]] = r;
+            rb[ob[r]] = r;
+        }
+        double d2 = 0;
+        for (size_t i = 0; i < n; ++i) {
+            double d = (double) ra[i] - (double) rb[i];
+            d2 += d * d;
+        }
+        return 1.0 - 6.0 * d2 / ((double) n * ((double) n * n - 1.0));
+    }
     struct Thr {
         int tid;
         double busy_ms;

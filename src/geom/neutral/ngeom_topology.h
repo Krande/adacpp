@@ -104,7 +104,17 @@ inline std::vector<Vec3> align_polyline_to_vertices(const std::vector<Vec3> &pts
     const size_t ia = nearest(a, pts), ib = nearest(b, pts);
     if (ia < ib)
         return std::vector<Vec3>(pts.begin() + ia, pts.begin() + ib + 1);
-    return pts; // vertices against the parameter direction: leave as-is
+    if (ia > ib) {
+        // Edge runs against the basis curve's sample direction: take the interior stretch
+        // [ib, ia] and reverse it so the result still goes a -> b. Returning the FULL polyline
+        // here made a trimmed straight B-spline edge (e.g. an ACIS intcurve boundary of a flat
+        // plate) zig-zag back across its own domain -> a self-intersecting face boundary that
+        // tess2 collapsed to a single triangle.
+        std::vector<Vec3> sub(pts.begin() + ib, pts.begin() + ia + 1);
+        std::reverse(sub.begin(), sub.end());
+        return sub;
+    }
+    return std::vector<Vec3>{a, b}; // ia == ib: sub-range within one sample interval
 }
 
 // One oriented edge of a loop. `start`/`end` are the EDGE_CURVE endpoints with the ORIENTED_EDGE
@@ -172,10 +182,19 @@ struct OrientedEdgeN {
             for (int i = 0; i <= useg; ++i)
                 full.push_back(g->point(lo + (hi - lo) * i / useg));
             pts = align_polyline_to_vertices(full, a, b);
-            if (pts.size() >= 2) {
-                pts.front() = a;
-                pts.back() = b;
-            }
+            // Loop assembly needs each edge to run start->end (the oriented topological
+            // endpoints). The a/b alignment + the common same_sense/orientation reversals below
+            // mis-ordered a trimmed intcurve boundary edge (an ACIS flat plate's B-spline side ran
+            // end->start), scrambling the face boundary into a self-intersecting loop that tess2
+            // collapsed to one triangle. Emit start->end directly and return, bypassing those
+            // reversals (the align clip above already dropped the out-of-trim interior samples).
+            if (pts.size() < 2)
+                return {start, end};
+            if ((pts.front() - start).norm() > (pts.back() - start).norm())
+                std::reverse(pts.begin(), pts.end());
+            pts.front() = start;
+            pts.back() = end;
+            return pts;
         } else {
             handled = false;
         }
@@ -213,12 +232,61 @@ struct LoopN {
     std::vector<Vec3> discretize(double deflection, double max_angle) const {
         if (is_poly)
             return polygon;
-        std::vector<Vec3> out;
+        // Discretize each edge, then re-chain them end-to-end by nearest endpoint (flipping an edge
+        // when its tail, not its head, meets the running chain). Concatenating in stored order
+        // assumes every edge already runs head-to-tail, but ACIS loops of mixed Line / trimmed-
+        // intcurve edges can arrive with inconsistent per-edge direction (and order) — blind
+        // concatenation then self-intersects and tess2 collapses the face to a single triangle.
+        // For an already-consistent loop each next edge's head is the chain tail, so this reproduces
+        // the old plain concatenation (no reorder, no flip).
+        std::vector<std::vector<Vec3>> segs;
+        segs.reserve(edges.size());
         for (const auto &e : edges) {
             std::vector<Vec3> ep = e.discretize(deflection, max_angle);
-            for (const Vec3 &p : ep) {
+            if (ep.size() >= 2)
+                segs.push_back(std::move(ep));
+        }
+        if (segs.empty())
+            return {};
+
+        auto append = [](std::vector<Vec3> &out, const std::vector<Vec3> &s) {
+            for (const Vec3 &p : s)
                 if (out.empty() || (p - out.back()).norm() > 1e-9)
                     out.push_back(p);
+        };
+
+        std::vector<char> used(segs.size(), 0);
+        std::vector<Vec3> out = segs[0];
+        used[0] = 1;
+        for (size_t placed = 1; placed < segs.size(); ++placed) {
+            const Vec3 tail = out.back();
+            size_t best = segs.size();
+            bool flip = false;
+            double bd = std::numeric_limits<double>::max();
+            for (size_t i = 0; i < segs.size(); ++i) {
+                if (used[i])
+                    continue;
+                double df = (segs[i].front() - tail).norm();
+                double db = (segs[i].back() - tail).norm();
+                if (df < bd) {
+                    bd = df;
+                    best = i;
+                    flip = false;
+                }
+                if (db < bd) {
+                    bd = db;
+                    best = i;
+                    flip = true;
+                }
+            }
+            if (best == segs.size())
+                break;
+            used[best] = 1;
+            if (flip) {
+                std::vector<Vec3> rev(segs[best].rbegin(), segs[best].rend());
+                append(out, rev);
+            } else {
+                append(out, segs[best]);
             }
         }
         // drop a closing duplicate of the first vertex
@@ -237,6 +305,14 @@ struct FaceSurfaceN {
     std::shared_ptr<Surface> surface;
     bool same_sense = true;         // false => face normal is the surface normal flipped
     std::vector<FaceBoundN> bounds; // bounds[0] outer, rest holes
+    // Source entity id (STEP ADVANCED_FACE / IFC IfcFace #id), 0 when unknown. Only used when the
+    // caller requests per-face clickable regions (TessParams.capture_face_ranges) — lets the viewer
+    // report the exact source id of a clicked face. Costs nothing otherwise.
+    int64_t src_id = 0;
+    // The `surface` is a PLACEHOLDER identity plane (a plain IfcFace / explicit face-set polygon whose
+    // real 3D plane is only implied by its boundary points). The tessellator must fit the plane from
+    // the 3D loop up front — otherwise the poly projects flat onto the z=0 placeholder plane.
+    bool fit_plane_from_loop = false;
 };
 
 struct ConnectedFaceSetN {
@@ -309,6 +385,12 @@ struct NgeomRoot {
     std::shared_ptr<SweepN> sweep;                    // set if this root is a fixed-ref swept solid
     std::shared_ptr<BooleanN> boolean;                // set if this root is a boolean result
     std::shared_ptr<SphereN> sphere;                  // set if this root is a sphere primitive
+    std::vector<std::vector<Vec3>> polylines;         // set if this root is a curve-only body (GL_LINES)
+    // The product's representation WAS recognized but resolved to no drawable geometry because it is
+    // degenerate (e.g. a zero-length DISCONTINUOUS IfcCurveSegment — a topological end-marker the
+    // reference kernel also refuses). Distinguishes "intentionally empty" from "unsupported": the
+    // stream must NOT count these as products_skipped (they'd else drive a pointless OCC fallback).
+    bool recognized_empty = false;
     // Presentation colour (STYLED_ITEM -> COLOUR_RGB), populated by the native STEP reader; the
     // NGEOM byte decoder leaves has_color=false (colour travels out-of-band on that path).
     bool has_color = false;

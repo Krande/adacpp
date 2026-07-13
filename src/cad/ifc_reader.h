@@ -10,6 +10,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "../cadit/step/step_part21.h"
@@ -49,10 +50,27 @@ public:
     // Root products: scan for IfcBuildingElementProxy (or any product carrying an AdvancedBrep). Each
     // yields one NgeomRoot (geometry + per-instance world transforms from IfcMappedItem).
     std::vector<long> proxy_roots() {
-        std::vector<long> roots;
+        // A geometric product is any IfcProduct whose Representation (arg 6 in every IfcProduct
+        // subtype) refs an IfcProductDefinitionShape. Resolving by representation — instead of the
+        // old cheap name allowlist, which missed subtypes like IfcSanitaryTerminal / MEP / furniture
+        // terminals — catches every product the ifcopenshell reader would, with no schema.
+        build_rel_maps(); // populate openings_ so opening elements are excluded (they cut their host)
+        std::unordered_set<long> pds; // IfcProductDefinitionShape ids
         std::string scratch;
+        for (long id : idx_.ids)
+            if (iequals(type_of(id, scratch), "IFCPRODUCTDEFINITIONSHAPE"))
+                pds.insert(id);
+        std::vector<long> roots;
         for (long id : idx_.ids) {
-            if (is_product_type(type_of(id, scratch)))
+            if (openings_.count(id))
+                continue; // an IfcOpeningElement — subtracted from its host, not a standalone product
+            std::string_view t = type_of(id, scratch);
+            if (is_product_type(t)) { // fast path for the common structural types (no full parse)
+                roots.push_back(id);
+                continue;
+            }
+            const Instance *in = inst(id);
+            if (in && in->args.size() > 6 && in->args[6].is_ref() && pds.count(in->args[6].i))
                 roots.push_back(id);
         }
         return roots;
@@ -113,6 +131,207 @@ public:
         return 1.0;
     }
 
+    // Radians per model plane-angle unit. IfcSIUnit RADIAN => 1; an IfcConversionBasedUnit for
+    // PLANEANGLEUNIT (DEGREE/GRAD) carries the exact ratio in its ConversionFactor
+    // (IfcMeasureWithUnit.ValueComponent) -> use it so trimmed-circle parameters expressed in
+    // degrees (curve-parameters-in-degrees.ifc) sample the same arc as the radian model.
+    double plane_angle_scale() {
+        if (angle_scale_ > 0)
+            return angle_scale_;
+        angle_scale_ = 1.0; // default: radian
+        std::string scratch;
+        for (long id : idx_.ids) {
+            std::string_view t = type_of(id, scratch);
+            if (!iequals(t, "IFCCONVERSIONBASEDUNIT"))
+                continue;
+            const Instance *in = inst(id); // (Dimensions, UnitType, Name, ConversionFactor)
+            if (!in || in->args.size() < 4 ||
+                !(in->args[1].kind == adacpp::step::Kind::Enum && in->args[1].s == "PLANEANGLEUNIT"))
+                continue;
+            const Instance *mwu = inst(ref_arg(*in, 3)); // IfcMeasureWithUnit(ValueComponent, UnitComponent)
+            if (mwu)                                     // ValueComponent = IfcPlaneAngleMeasure(x): [Keyword, List[Real]]
+                for (const Value &a : mwu->args) {
+                    if (numeric(a)) {
+                        angle_scale_ = a.as_double();
+                        break;
+                    }
+                    if (a.is_list() && !a.items.empty() && numeric(a.items[0])) {
+                        angle_scale_ = a.items[0].as_double();
+                        break;
+                    }
+                }
+            break;
+        }
+        return angle_scale_;
+    }
+
+    // Presentation colour. IfcStyledItem(Item, Styles, Name): Item=arg0 is the geometry rep item id
+    // (the same id resolve_item consumes), Styles=arg1. Build a one-time map rep-item-id -> rgba by
+    // resolving each styled item's style tree to its IfcColourRgb (+ transparency). Persistent across
+    // products (clear_cache() must not wipe it). Mirrors the STEP reader's colour_map_/find_colour.
+    void build_colour_map() {
+        if (colour_map_built_)
+            return;
+        colour_map_built_ = true;
+        std::string scratch;
+        for (long id : idx_.ids) {
+            if (!iequals(type_of(id, scratch), "IFCSTYLEDITEM"))
+                continue;
+            const Instance *si = inst(id);
+            if (!si || si->args.empty() || !si->args[0].is_ref())
+                continue;
+            std::array<float, 4> rgba{0.5f, 0.5f, 0.5f, 1.0f};
+            if (resolve_styles_color(si->args.size() > 1 ? si->args[1] : Value{}, rgba))
+                colour_map_[si->args[0].i] = rgba;
+        }
+    }
+    // BFS over a Styles ref-tree to the first IfcColourRgb (r/g/b = args[1..3]) + alpha from the
+    // IfcSurfaceStyleShading/Rendering transparency (arg1). Walks IfcSurfaceStyle (styles=arg2),
+    // IfcPresentationStyleAssignment (2x3 wrapper), etc. by collecting every ref arg — so it handles
+    // IFC2x3 and IFC4/4x3 without schema-specific level walking.
+    bool resolve_styles_color(const Value &styles, std::array<float, 4> &rgba) {
+        std::vector<long> stack;
+        auto push_refs = [&](const Value &v) {
+            if (v.is_ref())
+                stack.push_back(v.i);
+            else if (v.is_list())
+                for (const Value &e : v.items)
+                    if (e.is_ref())
+                        stack.push_back(e.i);
+        };
+        push_refs(styles);
+        std::unordered_set<long> seen;
+        bool found = false;
+        int guard = 0;
+        while (!stack.empty() && guard++ < 500) {
+            long id = stack.back();
+            stack.pop_back();
+            if (!seen.insert(id).second)
+                continue;
+            const Instance *in = inst(id);
+            if (!in)
+                continue;
+            std::string_view t = in->type;
+            if (iequals(t, "IFCCOLOURRGB")) {
+                rgba[0] = (float) ad(in, 1);
+                rgba[1] = (float) ad(in, 2);
+                rgba[2] = (float) ad(in, 3);
+                found = true;
+                continue;
+            }
+            if (iequals(t, "IFCSURFACESTYLESHADING") || iequals(t, "IFCSURFACESTYLERENDERING")) {
+                if (in->args.size() > 1 && numeric(in->args[1]))
+                    rgba[3] = 1.0f - (float) in->args[1].as_double(); // Transparency -> alpha
+                if (!in->args.empty() && in->args[0].is_ref())
+                    stack.push_back(in->args[0].i); // SurfaceColour
+                continue;
+            }
+            for (const Value &a : in->args)
+                push_refs(a); // IfcSurfaceStyle / PresentationStyleAssignment / StyledRepresentation ...
+        }
+        return found;
+    }
+    // Look up a rep item's colour, unwrapping an IfcMappedItem to its mapped representation's items
+    // (the style may sit on the shared inner geometry).
+    bool find_item_colour(long iid, std::array<float, 4> &rgba, int depth = 0) {
+        auto it = colour_map_.find(iid);
+        if (it != colour_map_.end()) {
+            rgba = it->second;
+            return true;
+        }
+        if (depth > 4)
+            return false;
+        const Instance *in = inst(iid);
+        if (!in)
+            return false;
+        if (iequals(in->type, "IFCMAPPEDITEM")) {
+            const Instance *rm = inst(ref_arg(*in, 0)); // IfcRepresentationMap
+            if (rm && rm->args.size() > 1) {
+                const Instance *sr = inst(ref_arg(*rm, 1)); // MappedRepresentation
+                if (sr && sr->args.size() > 3 && sr->args[3].is_list())
+                    for (const Value &m : sr->args[3].items)
+                        if (m.is_ref() && find_item_colour(m.i, rgba, depth + 1))
+                            return true;
+            }
+        } else if (iequals(in->type, "IFCBOOLEANCLIPPINGRESULT") || iequals(in->type, "IFCBOOLEANRESULT")) {
+            // (Operator, FirstOperand, SecondOperand) — the style usually rides the base operand.
+            for (int ai : {1, 2}) {
+                long op = ref_arg(*in, (size_t) ai);
+                if (op > 0 && find_item_colour(op, rgba, depth + 1))
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    // Spatial hierarchy. IfcRelContainedInSpatialStructure(.., RelatedElements=arg4 list,
+    // RelatingStructure=arg5) puts products in a storey/space; IfcRelAggregates(.., RelatingObject=arg4,
+    // RelatedObjects=arg5 list) nests storey->building->site->project (and sub-assemblies). Build both
+    // reverse maps once (persistent; clear_cache must not wipe them) so a product can walk up to root.
+    void build_rel_maps() {
+        if (rel_maps_built_)
+            return;
+        rel_maps_built_ = true;
+        std::string scratch;
+        for (long id : idx_.ids) {
+            std::string_view t = type_of(id, scratch);
+            if (iequals(t, "IFCRELCONTAINEDINSPATIALSTRUCTURE")) {
+                const Instance *in = inst(id);
+                if (!in || in->args.size() < 6)
+                    continue;
+                long structure = ref_arg(*in, 5);
+                if (in->args[4].is_list())
+                    for (const Value &e : in->args[4].items)
+                        if (e.is_ref())
+                            contained_of_[e.i] = structure;
+            } else if (iequals(t, "IFCRELAGGREGATES")) {
+                const Instance *in = inst(id);
+                if (!in || in->args.size() < 6)
+                    continue;
+                long parent = ref_arg(*in, 4);
+                if (in->args[5].is_list())
+                    for (const Value &e : in->args[5].items)
+                        if (e.is_ref())
+                            parent_of_[e.i] = parent;
+            } else if (iequals(t, "IFCRELVOIDSELEMENT")) {
+                // (…, RelatingBuildingElement=arg 4, RelatedOpeningElement=arg 5): the opening is
+                // subtracted from the host element's solid (a hole/recess) and never rendered on its own.
+                const Instance *in = inst(id);
+                if (!in || in->args.size() < 6)
+                    continue;
+                long host = ref_arg(*in, 4), opening = ref_arg(*in, 5);
+                if (host > 0 && opening > 0) {
+                    voids_[host].push_back(opening);
+                    openings_.insert(opening);
+                }
+            }
+        }
+    }
+    // Root-first (id, name) levels from IfcProject down to the product — the assembly path the adapy
+    // consumer turns into the scene tree. One path (IFC products are single-instance here).
+    std::vector<std::pair<int, std::string>> product_path(long pid, const Instance &p) {
+        build_rel_maps();
+        auto next_up = [&](long id) -> long {
+            auto a = parent_of_.find(id);
+            if (a != parent_of_.end())
+                return a->second;
+            auto c = contained_of_.find(id);
+            return c != contained_of_.end() ? c->second : 0;
+        };
+        std::vector<std::pair<int, std::string>> path;
+        path.push_back({(int) pid, name_or_guid(p)}); // deepest level = the product itself
+        std::unordered_set<long> seen{pid};
+        long up = next_up(pid);
+        int guard = 0;
+        while (up > 0 && seen.insert(up).second && guard++ < 64) {
+            const Instance *s = inst(up);
+            path.push_back({(int) up, s ? name_or_guid(*s) : std::string()});
+            up = next_up(up);
+        }
+        std::reverse(path.begin(), path.end()); // root-first
+        return path;
+    }
+
     // Build the NgeomRoot for a product id (faces + name + per-instance transforms). Empty faces => the
     // product had no resolvable advanced-brep (skipped by the caller).
     NgeomRoot resolve_product(long pid) {
@@ -122,22 +341,94 @@ public:
         const Instance *p = inst(pid);
         if (!p)
             return root;
-        root.id = name_of(*p);
+        root.id = name_or_guid(*p);
         // IfcBuildingElementProxy.Representation (arg 6) -> IfcProductDefinitionShape.Representations
         // (arg 2) -> IfcShapeRepresentation.Items (arg 3).
         long rep = ref_arg(*p, 6);
         const Instance *pds = inst(rep);
-        if (!pds || pds->args.size() < 3)
+        if (!pds || pds->args.size() < 3) {
+            // No (resolvable) Representation -> an intentionally geometry-less container/spatial product
+            // (e.g. an IfcElementAssembly aggregating rebars, reached via the is_product_type fast path).
+            // Recognized, not an unsupported skip -> the stream won't waste an OCC fallback on it.
+            root.recognized_empty = true;
             return root;
+        }
+        // IfcShapeRepresentation: (ContextOfItems, RepresentationIdentifier, RepresentationType, Items).
+        // A product may carry several reps: "Body"/"Facetation"/"Tessellation" are the 3D shape;
+        // "Axis" is a reference curve (render only when there is NO body — an alignment segment IS
+        // its axis); "FootPrint"/"Annotation"/"Profile"/"Plan"/"Box" are 2D and never rendered in
+        // 3D. Pick the right class so a beam's Axis polyline doesn't collide with its Body extrusion,
+        // and an alignment takes its 3D gradient Axis rather than its 2D FootPrint.
+        auto rep_id = [](const Instance *sr) -> std::string_view {
+            if (sr->args.size() > 1 && sr->args[1].kind == adacpp::step::Kind::Str)
+                return sr->args[1].s;
+            return {};
+        };
+        auto is_2d_only = [](std::string_view id) {
+            return id == "FootPrint" || id == "Annotation" || id == "Profile" || id == "Plan" ||
+                   id == "Box";
+        };
+        auto is_axis = [](std::string_view id) { return id == "Axis"; };
+        bool has_body = false;
+        for (const Value &srref : pds->args[2].items) {
+            const Instance *sr = inst(srref.i);
+            if (sr && sr->args.size() >= 4) {
+                std::string_view id = rep_id(sr);
+                if (!is_2d_only(id) && !is_axis(id)) {
+                    has_body = true;
+                    break;
+                }
+            }
+        }
+        std::vector<long> item_ids; // the rep-item ids (IfcStyledItem keys colour on these)
         for (const Value &srref : pds->args[2].items) {
             const Instance *sr = inst(srref.i);
             if (!sr || sr->args.size() < 4)
                 continue;
+            std::string_view id = rep_id(sr);
+            if (is_2d_only(id))
+                continue; // 2D reps are never rendered in 3D
+            if (has_body && is_axis(id))
+                continue; // a body exists -> the Axis is only a reference line, skip it
             for (const Value &item : sr->args[3].items) {
                 if (!item.is_ref())
                     continue;
+                item_ids.push_back(item.i);
                 resolve_item(item.i, root);
             }
+        }
+        // Presentation colour (IfcStyledItem -> IfcSurfaceStyle -> IfcColourRgb) — keyed on the rep
+        // item id, so it rides the same StepRootMeta.has_color/color rails the STEP path already uses.
+        build_colour_map();
+        if (!colour_map_.empty()) {
+            std::array<float, 4> rgba;
+            long keys[] = {solid_src_, 0};
+            for (long iid : item_ids)
+                if (find_item_colour(iid, rgba)) {
+                    root.has_color = true;
+                    root.cr = rgba[0];
+                    root.cg = rgba[1];
+                    root.cb = rgba[2];
+                    root.ca = rgba[3];
+                    break;
+                }
+            if (!root.has_color)
+                for (long k : keys)
+                    if (k > 0 && find_item_colour(k, rgba)) {
+                        root.has_color = true;
+                        root.cr = rgba[0];
+                        root.cg = rgba[1];
+                        root.cb = rgba[2];
+                        root.ca = rgba[3];
+                        break;
+                    }
+        }
+        // Spatial-structure path (Project -> Site -> Storey -> product), for the scene tree. Only emit
+        // when there's a real ancestor chain (size>1); a bare product level carries no hierarchy.
+        {
+            auto path = product_path(pid, *p);
+            if (path.size() > 1)
+                root.instance_paths.push_back(std::move(path));
         }
         // A product mixing >1 distinct solid (or brep+procedural) doesn't fit the single-solid root
         // model — leave it for OCC rather than emit partial geometry.
@@ -146,6 +437,44 @@ public:
             root.extrusion = nullptr;
             root.revolve = nullptr;
             root.boolean = nullptr;
+        }
+        // IfcRelVoidsElement: subtract each opening element's solid (a hole/recess) from this host. The
+        // opening geometry is in the OPENING element's local frame; move it into THIS host's local frame
+        // (inverse(host placement) * opening placement) before the difference — the host's placement is
+        // applied to the whole result below. Face-set openings (no single frame to move) are skipped.
+        if (auto vit = voids_.find(pid); vit != voids_.end()) {
+            SolidItemN base = root_to_solid(root);
+            if (solid_ok(base)) {
+                std::array<float, 16> host_inv = rigid_inverse(object_placement(ref_arg(*p, 5)));
+                SolidItemN acc = base;
+                int cuts = 0;
+                for (long opid : vit->second) {
+                    const Instance *op = inst(opid);
+                    long bid = op ? first_body_item(opid) : 0;
+                    if (!bid)
+                        continue;
+                    SolidItemN cut = resolve_solid_item(bid);
+                    if (!solid_ok(cut))
+                        continue;
+                    std::array<float, 16> rel = mat_mul(host_inv, object_placement(ref_arg(*op, 5)));
+                    if (!xform_solid_item(cut, rel))
+                        continue;
+                    auto bn = std::make_shared<BooleanN>();
+                    bn->op = 0; // difference
+                    bn->a = acc;
+                    bn->b = cut;
+                    acc = SolidItemN{};
+                    acc.boolean = bn;
+                    ++cuts;
+                }
+                if (cuts > 0) {
+                    root.faces.clear();
+                    root.extrusion = nullptr;
+                    root.revolve = nullptr;
+                    root.sweep = nullptr;
+                    root.boolean = acc.boolean;
+                }
+            }
         }
         // Compose the product's world placement (IfcLocalPlacement chain) onto every instance — the
         // geometry rep is in the element's local frame; ObjectPlacement positions it in the world.
@@ -171,13 +500,114 @@ public:
         return root;
     }
 
+    // The product's IFC GlobalId (arg 0 of any rooted entity). Empty when unparsable.
+    std::string product_guid(long pid) {
+        const Instance *p = inst(pid);
+        if (p && !p->args.empty() && p->args[0].kind == adacpp::step::Kind::Str)
+            return std::string(p->args[0].s);
+        return {};
+    }
+
+    // Drop the statement/surface caches — called between products by the streaming
+    // per-product consumer (IfcNgeomStream) so memory stays bounded on large files.
+    void clear_cache() {
+        cache_.clear();
+        surf_cache_.clear();
+    }
+
+    // Bound cache_ MID-product for a huge single-product shell: drop the parsed Part-21 statements
+    // (NOT the built-geometry surf_cache_) every 1024 faces so a 61k-face brep doesn't pile up
+    // hundreds of MB of parsed face/bound/loop/edge/vertex entities during its one resolve — the IFC
+    // analogue of the STEP reader's enable_parse_cache_bounding (see step_reader.h). Faces re-parse
+    // their sub-entities on demand via the pread offset index. Enable ONLY on a single-threaded
+    // (phase-A) resolver; the concurrent phase-B pool leaves it off and bounds via clear_cache() per
+    // product. A no-op for products under 1024 faces (the mid-shell clear never fires).
+    void enable_cache_bounding() { bound_cache_ = true; }
+
+    // Build the expensive, read-only, cross-product metadata (colour + spatial-hierarchy maps) ONCE on
+    // a master resolver so parallel workers can share it via copy_metadata_from instead of each
+    // rebuilding it (both scan every entity in the file). clear_cache() must not wipe these.
+    void build_metadata() {
+        build_colour_map();
+        build_rel_maps();
+    }
+    // Share the master's read-only metadata into this (worker) resolver. The per-product transient
+    // state (statement/surface caches, pread scratch, solid_src_/mixed_) stays per-thread; only idx_
+    // (const, pread-safe) and these maps are shared, so each worker resolves independently.
+    void copy_metadata_from(const IfcResolver &m) {
+        colour_map_ = m.colour_map_;
+        colour_map_built_ = m.colour_map_built_;
+        contained_of_ = m.contained_of_;
+        parent_of_ = m.parent_of_;
+        voids_ = m.voids_;
+        openings_ = m.openings_;
+        rel_maps_built_ = m.rel_maps_built_;
+        angle_scale_ = m.angle_scale_;
+    }
+
+    // Cheap LPT cost proxy for a product: the face count of its body representation's brep items
+    // (a few index derefs down product -> IfcProductDefinitionShape -> IfcShapeRepresentation ->
+    // Items -> brep -> shell, no geometry built). Procedural items (swept/CSG/mapped) get a small
+    // constant — they rarely dominate an IFC tessellation the way a dense brep does. Call
+    // clear_cache() after the batch.
+    size_t product_cost(long pid) {
+        const Instance *p = inst(pid);
+        if (!p)
+            return 1;
+        const Instance *pds = inst(ref_arg(*p, 6));
+        if (!pds || pds->args.size() < 3 || !pds->args[2].is_list())
+            return 1;
+        size_t cost = 0;
+        for (const Value &srref : pds->args[2].items) {
+            const Instance *sr = inst(srref.i);
+            if (!sr || sr->args.size() < 4 || !sr->args[3].is_list())
+                continue;
+            std::string_view id =
+                (sr->args.size() > 1 && sr->args[1].kind == adacpp::step::Kind::Str) ? sr->args[1].s : std::string_view{};
+            if (id == "FootPrint" || id == "Annotation" || id == "Profile" || id == "Plan" || id == "Box" || id == "Axis")
+                continue; // 2D / reference reps are not tessellated
+            for (const Value &itref : sr->args[3].items)
+                if (const Instance *it = inst(itref.i))
+                    cost += item_face_count(it);
+        }
+        return cost ? cost : 1;
+    }
+
 private:
+    // Face count of one representation item (brep -> shell face list; procedural -> small constant).
+    size_t item_face_count(const Instance *it) {
+        std::string_view t = it->type;
+        if (iequals(t, "IFCADVANCEDBREP") || iequals(t, "IFCFACETEDBREP")) {
+            const Instance *sh = inst(ref_arg(*it, 0));
+            return (sh && !sh->args.empty() && sh->args[0].is_list()) ? sh->args[0].items.size() : 1;
+        }
+        if (iequals(t, "IFCSHELLBASEDSURFACEMODEL") || iequals(t, "IFCFACEBASEDSURFACEMODEL")) {
+            size_t n = 0;
+            if (!it->args.empty() && it->args[0].is_list())
+                for (const Value &sh : it->args[0].items)
+                    if (const Instance *s = inst(sh.i))
+                        if (!s->args.empty() && s->args[0].is_list())
+                            n += s->args[0].items.size();
+            return n ? n : 1;
+        }
+        return 4; // procedural (extrusion / revolve / sweep / CSG / mapped) — cheap-ish default
+    }
+
     const StreamIndex &idx_;
     std::unordered_map<long, std::pair<std::string, Instance>> cache_;
     std::unordered_map<long, std::shared_ptr<Surface>> surf_cache_;
+    bool bound_cache_ = false; // enable_cache_bounding(): drop cache_ mid-shell on huge products
     std::string pread_scratch_;
-    long solid_src_ = 0; // entity id of the one solid this product carries (mapped instances share it)
-    bool mixed_ = false; // product has >1 distinct solid / mixes brep+procedural -> skip (OCC)
+    long solid_src_ = 0;      // entity id of the one solid this product carries (mapped instances share it)
+    bool mixed_ = false;      // product has >1 distinct solid / mixes brep+procedural -> skip (OCC)
+    double angle_scale_ = 0.0; // radians per model plane-angle unit (0 => not yet computed)
+    std::unordered_map<long, std::array<float, 4>> colour_map_; // rep-item id -> rgba (IfcStyledItem)
+    bool colour_map_built_ = false;
+    std::unordered_map<long, long> contained_of_; // product -> containing spatial element (IfcRelContained…)
+    std::unordered_map<long, long> parent_of_;    // child -> aggregating parent (IfcRelAggregates)
+    std::unordered_map<long, std::vector<long>> voids_; // host element -> opening elements (IfcRelVoidsElement)
+    std::unordered_set<long> openings_;                 // opening element ids (cut from host, not rendered standalone)
+    bool rel_maps_built_ = false;
 
     const Instance *inst(long id) {
         if (id <= 0)
@@ -225,6 +655,18 @@ private:
         // rooted entities: GlobalId, OwnerHistory, Name(arg2) ...
         if (in.args.size() > 2 && in.args[2].kind == adacpp::step::Kind::Str)
             return std::string(in.args[2].s);
+        return {};
+    }
+    // Display/picking id for a rooted entity: its Name (arg2) if set, else its GlobalId (arg0). Rebar
+    // and assemblies frequently carry only a GlobalId (empty Name) -> naming the tree/picking by Name
+    // alone yields blank nodes + empty selection; the Python from_ifc GLB keys on the guid instead, so
+    // this mirrors it. Empty only when the entity has neither.
+    static std::string name_or_guid(const Instance &in) {
+        std::string n = name_of(in);
+        if (!n.empty())
+            return n;
+        if (!in.args.empty() && in.args[0].kind == adacpp::step::Kind::Str)
+            return std::string(in.args[0].s);
         return {};
     }
 
@@ -460,14 +902,28 @@ private:
         return nullptr;
     }
     std::shared_ptr<FaceSurfaceN> face(long id) {
-        const Instance *in = inst(id); // IfcAdvancedFace(Bounds, FaceSurface, SameSense)
-        if (!in || !iequals(in->type, "IFCADVANCEDFACE"))
+        const Instance *in = inst(id);
+        if (!in)
+            return nullptr;
+        // IfcAdvancedFace / IfcFaceSurface (Bounds, FaceSurface, SameSense) carry an analytic surface;
+        // a plain IfcFace (Bounds) is a bare polygon — placeholder plane, the tessellator fits the
+        // real plane from the poly loop (face-based surface models, shells).
+        bool analytic = iequals(in->type, "IFCADVANCEDFACE") || iequals(in->type, "IFCFACESURFACE");
+        bool plain = iequals(in->type, "IFCFACE");
+        if (!analytic && !plain)
             return nullptr;
         auto fc = std::make_shared<FaceSurfaceN>();
-        fc->surface = surface(ref_arg(*in, 1));
-        if (!fc->surface)
-            return nullptr;
-        fc->same_sense = !(in->args.size() > 2 && in->args[2].kind == adacpp::step::Kind::Enum && in->args[2].s == "F");
+        if (analytic) {
+            fc->surface = surface(ref_arg(*in, 1));
+            if (!fc->surface)
+                return nullptr;
+            fc->same_sense =
+                !(in->args.size() > 2 && in->args[2].kind == adacpp::step::Kind::Enum && in->args[2].s == "F");
+        } else {
+            fc->surface = std::make_shared<PlaneSurface>(Frame{});
+            fc->same_sense = true;
+            fc->fit_plane_from_loop = true; // plain IfcFace: fit the real 3D plane from the boundary
+        }
         if (in->args.empty() || !in->args[0].is_list())
             return nullptr;
         for (const Value &bref : in->args[0].items) {
@@ -504,17 +960,88 @@ private:
                 return nullptr;
             poly = {{-hx, -hy, 0}, {hx, -hy, 0}, {hx, hy, 0}, {-hx, hy, 0}};
             apply_placement2d(ref_arg(*in, 2), poly);
+        } else if (iequals(in->type, "IFCROUNDEDRECTANGLEPROFILEDEF")) {
+            // (ProfileType, Name, Position, XDim, YDim, RoundingRadius) — a rectangle whose four
+            // corners are quarter-circle arcs of RoundingRadius (matches the adapy Python reader).
+            double hx = ad(in, 3) / 2, hy = ad(in, 4) / 2, r = ad(in, 5);
+            if (hx <= 0 || hy <= 0)
+                return nullptr;
+            r = std::min(r, std::min(hx, hy));
+            if (r <= 1e-12) {
+                poly = {{-hx, -hy, 0}, {hx, -hy, 0}, {hx, hy, 0}, {-hx, hy, 0}};
+            } else {
+                auto corner = [&](double cx, double cy, double a0) { // quarter arc, centre (cx,cy), CCW
+                    int n = std::max(2, (int) std::ceil(0.25 * 64));
+                    for (int i = 0; i <= n; ++i) {
+                        double t = a0 + (PI / 2) * i / n;
+                        poly.push_back({cx + r * std::cos(t), cy + r * std::sin(t), 0});
+                    }
+                };
+                corner(hx - r, -(hy - r), -PI / 2); // bottom-right
+                corner(hx - r, hy - r, 0);          // top-right
+                corner(-(hx - r), hy - r, PI / 2);  // top-left
+                corner(-(hx - r), -(hy - r), PI);   // bottom-left
+            }
+            apply_placement2d(ref_arg(*in, 2), poly);
+        } else if (iequals(in->type, "IFCDERIVEDPROFILEDEF")) {
+            // (ProfileType, Name, ParentProfile, Operator=IfcCartesianTransformationOperator2D, Label)
+            auto base = profile_face(ref_arg(*in, 2));
+            if (!base || base->bounds.empty())
+                return nullptr;
+            double c = 1, s = 0, ox = 0, oy = 0, sc = 1;
+            const Instance *op = inst(ref_arg(*in, 3));
+            if (op) {
+                if (!op->args.empty() && op->args[0].is_ref()) {
+                    Vec3 a = dir(op->args[0].i);
+                    double nn = std::hypot(a.x, a.y);
+                    if (nn > 1e-12) {
+                        c = a.x / nn;
+                        s = a.y / nn;
+                    }
+                }
+                if (op->args.size() > 2 && op->args[2].is_ref()) {
+                    Vec3 o = point(op->args[2].i);
+                    ox = o.x;
+                    oy = o.y;
+                }
+                if (op->args.size() > 3 && numeric(op->args[3]))
+                    sc = op->args[3].as_double();
+            }
+            for (auto &b : base->bounds)
+                if (b.loop && b.loop->is_poly)
+                    for (Vec3 &p : b.loop->polygon) {
+                        double x = p.x * sc, y = p.y * sc;
+                        p = {ox + c * x - s * y, oy + s * x + c * y, 0};
+                    }
+            return base;
         } else if (iequals(in->type, "IFCARBITRARYCLOSEDPROFILEDEF")) {
             poly = curve_points2d(ref_arg(*in, 2)); // (ProfileType, ProfileName, OuterCurve)
         } else if (iequals(in->type, "IFCISHAPEPROFILEDEF")) {
             // (.., Position, OverallWidth, OverallDepth, WebThickness, FlangeThickness, FilletRadius, ...)
-            // Centred on the bounding box; fillets ignored (sharp corners). Outline CCW from bottom-right.
+            // Centred on the bounding box. Outline CCW from bottom-right; the four reentrant web/flange
+            // corners are rounded by FilletRadius (arg 7) when present, else left sharp.
             double bx = ad(in, 3) / 2, hy = ad(in, 4) / 2, wx = ad(in, 5) / 2, tf = ad(in, 6);
             if (bx <= 0 || hy <= 0 || wx <= 0 || tf <= 0)
                 return nullptr;
             double fy = hy - tf;
-            poly = {{bx, -hy, 0}, {bx, -fy, 0}, {wx, -fy, 0}, {wx, fy, 0},   {bx, fy, 0},   {bx, hy, 0},
-                    {-bx, hy, 0}, {-bx, fy, 0}, {-wx, fy, 0}, {-wx, -fy, 0}, {-bx, -fy, 0}, {-bx, -hy, 0}};
+            double rf = std::min(ad(in, 7), std::min(bx - wx, fy)); // clamp fillet to what fits
+            if (rf > 1e-9) {
+                int nf = std::max(3, (int) std::ceil((PI / 2) / 0.30)); // ~17deg chord, like circle_poly
+                poly = {{bx, -hy, 0}, {bx, -fy, 0}};
+                append_fillet_arc(poly, {wx + rf, -fy + rf, 0}, {wx + rf, -fy, 0}, {wx, -fy + rf, 0}, nf);
+                append_fillet_arc(poly, {wx + rf, fy - rf, 0}, {wx, fy - rf, 0}, {wx + rf, fy, 0}, nf);
+                poly.push_back({bx, fy, 0});
+                poly.push_back({bx, hy, 0});
+                poly.push_back({-bx, hy, 0});
+                poly.push_back({-bx, fy, 0});
+                append_fillet_arc(poly, {-wx - rf, fy - rf, 0}, {-wx - rf, fy, 0}, {-wx, fy - rf, 0}, nf);
+                append_fillet_arc(poly, {-wx - rf, -fy + rf, 0}, {-wx, -fy + rf, 0}, {-wx - rf, -fy, 0}, nf);
+                poly.push_back({-bx, -fy, 0});
+                poly.push_back({-bx, -hy, 0});
+            } else {
+                poly = {{bx, -hy, 0}, {bx, -fy, 0}, {wx, -fy, 0}, {wx, fy, 0},   {bx, fy, 0},   {bx, hy, 0},
+                        {-bx, hy, 0}, {-bx, fy, 0}, {-wx, fy, 0}, {-wx, -fy, 0}, {-bx, -fy, 0}, {-bx, -hy, 0}};
+            }
             apply_placement2d(ref_arg(*in, 2), poly);
         } else if (iequals(in->type, "IFCTSHAPEPROFILEDEF")) {
             // (.., Position, Depth, FlangeWidth, WebThickness, FlangeThickness, ...). Flange at +y (top),
@@ -608,7 +1135,13 @@ private:
     static std::shared_ptr<FaceSurfaceN> make_poly_profile(std::vector<Vec3> poly) {
         return make_profile(std::move(poly));
     }
-    static std::vector<Vec3> circle_poly(double r, int n = 64) {
+    static std::vector<Vec3> circle_poly(double r, int n = 0) {
+        // Segment count from a ~17deg chord angle — consistent with the tessellator's angular default
+        // (max_angle ~0.30-0.35 rad), so a swept disk / round profile isn't discretized FINER than
+        // every other surface. A fixed 64-gon made rebar swept-disks ~3x denser than the OCC/Python
+        // output (13948 vs ~3900 tris/bar). Clamp [12,64]. Callers can still force an explicit n.
+        if (n <= 0)
+            n = std::max(12, std::min(64, (int) std::ceil(TWO_PI / 0.30)));
         std::vector<Vec3> p;
         p.reserve(n);
         for (int i = 0; i < n; ++i) {
@@ -617,6 +1150,56 @@ private:
         }
         return p;
     }
+    // Append a fillet arc (in z=0) sweeping the SHORT way from `from` to `to` about `center`, used to
+    // round the reentrant web/flange corners of I/T/U profiles (IfcIShapeProfileDef.FilletRadius etc.).
+    // Both endpoints are emitted; call sites lay out points so no consecutive duplicate is produced.
+    static void append_fillet_arc(std::vector<Vec3> &out, Vec3 center, Vec3 from, Vec3 to, int n) {
+        double r = std::hypot(from.x - center.x, from.y - center.y);
+        double a0 = std::atan2(from.y - center.y, from.x - center.x);
+        double a1 = std::atan2(to.y - center.y, to.x - center.x);
+        double d = a1 - a0;
+        while (d > PI)
+            d -= TWO_PI;
+        while (d < -PI)
+            d += TWO_PI;
+        for (int i = 0; i <= n; ++i) {
+            double a = a0 + d * i / n;
+            out.push_back({center.x + r * std::cos(a), center.y + r * std::sin(a), 0});
+        }
+    }
+    // A 3-point (start, mid, end) circular arc in the z=0 plane, discretized to a polyline (matches
+    // the adapy Python reader's IfcArcIndex -> ArcLine, which the tessellator later rings). Falls
+    // back to the chord [a, m, b] when the three points are collinear (degenerate circumcircle).
+    static std::vector<Vec3> arc_poly_2d(const Vec3 &a, const Vec3 &m, const Vec3 &b) {
+        double ax = a.x, ay = a.y, mx = m.x, my = m.y, bx = b.x, by = b.y;
+        double d = 2.0 * (ax * (my - by) + mx * (by - ay) + bx * (ay - my));
+        if (std::abs(d) < 1e-12)
+            return {a, m, b};
+        double a2 = ax * ax + ay * ay, m2 = mx * mx + my * my, b2 = bx * bx + by * by;
+        double ux = (a2 * (my - by) + m2 * (by - ay) + b2 * (ay - my)) / d;
+        double uy = (a2 * (bx - mx) + m2 * (ax - bx) + b2 * (mx - ax)) / d;
+        double r = std::hypot(ax - ux, ay - uy);
+        double ta = std::atan2(ay - uy, ax - ux);
+        double tm = std::atan2(my - uy, mx - ux);
+        double tb = std::atan2(by - uy, bx - ux);
+        auto wrap = [](double x) {
+            while (x < 0)
+                x += 2.0 * PI;
+            while (x >= 2.0 * PI)
+                x -= 2.0 * PI;
+            return x;
+        };
+        double dab = wrap(tb - ta), dam = wrap(tm - ta);
+        double sweep = (dam <= dab) ? dab : dab - 2.0 * PI; // the direction a->b passing through m
+        int n = std::max(2, (int) std::ceil(std::abs(sweep) / (2.0 * PI) * 64.0));
+        std::vector<Vec3> out;
+        out.reserve(n + 1);
+        for (int i = 0; i <= n; ++i) {
+            double t = ta + sweep * i / n;
+            out.push_back({ux + r * std::cos(t), uy + r * std::sin(t), 0});
+        }
+        return out;
+    }
     // OuterCurve (IfcPolyline of IfcCartesianPoint, or IfcIndexedPolyCurve over an IfcCartesianPointList2D)
     // -> the profile's 2D polygon (z=0), drop the closing duplicate point.
     std::vector<Vec3> curve_points2d(long cid) {
@@ -624,23 +1207,159 @@ private:
         const Instance *in = inst(cid);
         if (!in)
             return pts;
+        auto push = [&](const Vec3 &p) {
+            if (pts.empty() || (pts.back() - p).norm() > 1e-9)
+                pts.push_back(p);
+        };
         if (iequals(in->type, "IFCPOLYLINE")) {
             if (!in->args.empty() && in->args[0].is_list())
                 for (const Value &pr : in->args[0].items)
                     if (pr.is_ref()) {
                         Vec3 p = point(pr.i);
-                        pts.push_back({p.x, p.y, 0});
+                        push({p.x, p.y, 0});
                     }
         } else if (iequals(in->type, "IFCINDEXEDPOLYCURVE")) {
             const Instance *pl = inst(ref_arg(*in, 0)); // IfcCartesianPointList2D(CoordList)
+            std::vector<Vec3> coords{{0, 0, 0}};        // 1-based: coords[0] is a placeholder
             if (pl && !pl->args.empty() && pl->args[0].is_list())
                 for (const Value &row : pl->args[0].items)
                     if (row.is_list() && row.items.size() >= 2)
-                        pts.push_back({row.items[0].as_double(), row.items[1].as_double(), 0});
+                        coords.push_back({row.items[0].as_double(), row.items[1].as_double(), 0});
+            auto at = [&](long i1) -> Vec3 {
+                return (i1 >= 1 && (size_t) i1 < coords.size()) ? coords[i1] : Vec3{0, 0, 0};
+            };
+            // Segments (arg 1): a list of typed [Keyword, ((indices))] pairs. IfcLineIndex is a
+            // polyline through ALL its points; IfcArcIndex is a 3-point circular arc (discretized).
+            // Ignoring them (the old behaviour) collapsed every arc to the chord between listed
+            // points — sharp corners on filleted profiles. Absent Segments -> the raw coord polygon.
+            const Value *segs = (in->args.size() > 1 && in->args[1].is_list()) ? &in->args[1] : nullptr;
+            if (segs && !segs->items.empty()) {
+                for (size_t k = 0; k + 1 < segs->items.size(); k += 2) {
+                    const Value &kw = segs->items[k];
+                    const Value &al = segs->items[k + 1];
+                    if (kw.kind != adacpp::step::Kind::Keyword || !al.is_list() || al.items.empty() ||
+                        !al.items[0].is_list())
+                        continue;
+                    const std::vector<Value> &ix = al.items[0].items;
+                    if (iequals(kw.s, "IFCARCINDEX") && ix.size() == 3) {
+                        for (const Vec3 &q : arc_poly_2d(at(ix[0].i), at(ix[1].i), at(ix[2].i)))
+                            push(q);
+                    } else {
+                        for (const Value &iv : ix)
+                            push(at(iv.kind == adacpp::step::Kind::Int ? iv.i : (long) iv.as_double()));
+                    }
+                }
+            } else {
+                for (size_t i = 1; i < coords.size(); ++i)
+                    push(coords[i]);
+            }
+        } else if (iequals(in->type, "IFCCOMPOSITECURVE")) {
+            // (Segments=list of IfcCompositeCurveSegment, SelfIntersect). Each segment is
+            // (Transition, SameSense, ParentCurve); sample each parent (line/arc/polyline) and
+            // reverse it when SameSense=.F. so the outline stays continuous. This is how a curved
+            // profile outline (e.g. a semicircle of a trimmed arc + a closing trimmed line) is built.
+            if (!in->args.empty() && in->args[0].is_list())
+                for (const Value &sref : in->args[0].items) {
+                    if (!sref.is_ref())
+                        continue;
+                    const Instance *seg = inst(sref.i);
+                    if (!seg || seg->args.size() < 3 || !seg->args[2].is_ref())
+                        continue;
+                    bool same = !(seg->args[1].kind == adacpp::step::Kind::Enum && seg->args[1].s == "F");
+                    std::vector<Vec3> sp = curve_points2d(seg->args[2].i);
+                    if (!same)
+                        std::reverse(sp.begin(), sp.end());
+                    for (const Vec3 &q : sp)
+                        push(q);
+                }
+        } else if (iequals(in->type, "IFCTRIMMEDCURVE")) {
+            for (const Vec3 &q : trimmed_curve_points2d(*in))
+                push(q);
         }
         if (pts.size() > 1 && (pts.front() - pts.back()).norm() < 1e-9)
             pts.pop_back();
         return pts;
+    }
+    // Sample an IfcTrimmedCurve (BasisCurve, Trim1, Trim2, SenseAgreement, MasterRepresentation) as a
+    // 2D profile-outline polyline. Supports an IfcLine basis (straight span) and an IfcCircle basis
+    // (arc; PARAMETER trims are angles in the model plane-angle unit). CARTESIAN trims give the
+    // endpoints directly. SenseAgreement=.F. reverses the traversal direction.
+    std::vector<Vec3> trimmed_curve_points2d(const Instance &in) {
+        std::vector<Vec3> out;
+        const Instance *basis = inst(ref_arg(in, 0));
+        if (!basis)
+            return out;
+        bool sense = !(in.args.size() > 3 && in.args[3].kind == adacpp::step::Kind::Enum && in.args[3].s == "F");
+        // Trim1/Trim2 are SETs of IfcTrimmingSelect: an IfcParameterValue ([Keyword, List[Real]] or a
+        // bare number) and/or an IfcCartesianPoint ref.
+        auto read_trim = [&](const Value &set, double &param, bool &has_p, Vec3 &cart, bool &has_c) {
+            has_p = has_c = false;
+            if (!set.is_list())
+                return;
+            for (const Value &e : set.items) {
+                if (numeric(e)) {
+                    param = e.as_double();
+                    has_p = true;
+                } else if (e.is_list() && !e.items.empty() && numeric(e.items[0])) {
+                    param = e.items[0].as_double();
+                    has_p = true;
+                } else if (e.is_ref()) {
+                    const Instance *cp = inst(e.i);
+                    if (cp && iequals(cp->type, "IFCCARTESIANPOINT")) {
+                        cart = point(e.i);
+                        has_c = true;
+                    }
+                }
+            }
+        };
+        double t1 = 0, t2 = 0;
+        bool hp1 = false, hp2 = false, hc1 = false, hc2 = false;
+        Vec3 c1{}, c2{};
+        if (in.args.size() > 1)
+            read_trim(in.args[1], t1, hp1, c1, hc1);
+        if (in.args.size() > 2)
+            read_trim(in.args[2], t2, hp2, c2, hc2);
+        if (iequals(basis->type, "IFCLINE")) {
+            // IfcLine(Pnt, Dir=IfcVector(Orientation, Magnitude)); P(u) = Pnt + u*Magnitude*Orientation.
+            Vec3 p0 = point(ref_arg(*basis, 0));
+            const Instance *vec = inst(ref_arg(*basis, 1));
+            Vec3 od = vec ? dir(ref_arg(*vec, 0)) : Vec3{1, 0, 0};
+            double mag = (vec && vec->args.size() > 1 && numeric(vec->args[1])) ? vec->args[1].as_double() : 1.0;
+            auto at = [&](double u, bool hc, const Vec3 &cp) -> Vec3 {
+                return hc ? cp : Vec3{p0.x + u * mag * od.x, p0.y + u * mag * od.y, 0};
+            };
+            Vec3 a = at(t1, hc1, c1), b = at(t2, hc2, c2);
+            if (!sense)
+                std::swap(a, b);
+            out = {a, b};
+        } else if (iequals(basis->type, "IFCCIRCLE")) {
+            Vec3 center{0, 0, 0};
+            double phi0 = 0.0, r = ad(basis, 1);
+            const Instance *pos = inst(ref_arg(*basis, 0)); // IfcAxis2Placement2D(Location, RefDirection)
+            if (pos) {
+                if (pos->args.size() > 0 && pos->args[0].is_ref())
+                    center = point(pos->args[0].i);
+                if (pos->args.size() > 1 && pos->args[1].is_ref()) {
+                    Vec3 rd = dir(pos->args[1].i);
+                    phi0 = std::atan2(rd.y, rd.x);
+                }
+            }
+            double sc = plane_angle_scale();
+            double a1 = t1 * sc, a2 = t2 * sc; // angles measured from the placement's local X axis
+            if (sense) {                       // CCW from a1 to a2
+                while (a2 <= a1 + 1e-9)
+                    a2 += 2 * PI;
+            } else { // CW from a1 to a2
+                while (a2 >= a1 - 1e-9)
+                    a2 -= 2 * PI;
+            }
+            int n = std::max(2, (int) std::ceil(std::abs(a2 - a1) / (PI / 32)));
+            for (int i = 0; i <= n; ++i) {
+                double a = phi0 + a1 + (a2 - a1) * i / n;
+                out.push_back({center.x + r * std::cos(a), center.y + r * std::sin(a), 0});
+            }
+        }
+        return out;
     }
     // Translate/rotate a profile polygon by an IfcAxis2Placement2D (Location, RefDirection); $ = identity.
     void apply_placement2d(long pid, std::vector<Vec3> &poly) {
@@ -669,7 +1388,7 @@ private:
             mixed_ = true;
             return false;
         }
-        if ((root.extrusion || root.revolve || root.boolean) && solid_src_ != id) {
+        if ((root.extrusion || root.revolve || root.boolean || root.sweep) && solid_src_ != id) {
             mixed_ = true;
             return false;
         }
@@ -677,7 +1396,7 @@ private:
         return true;
     }
     static bool solid_ok(const SolidItemN &it) {
-        return it.extrusion || it.revolve || it.boolean || !it.faces.empty();
+        return it.extrusion || it.revolve || it.boolean || it.sweep || !it.faces.empty();
     }
     // Resolve an IfcSolidModel / IfcCsgPrimitive3D / IfcBooleanResult / IfcHalfSpaceSolid into a
     // SolidItemN (the boolean-operand form). `ref*` = a sibling-operand bbox to bound a half-space.
@@ -769,17 +1488,538 @@ private:
         } else if (iequals(t, "IFCBOOLEANRESULT") || iequals(t, "IFCBOOLEANCLIPPINGRESULT")) {
             out.boolean = mk_boolean(in);
         } else if (iequals(t, "IFCADVANCEDBREP") || iequals(t, "IFCFACETEDBREP")) {
-            const Instance *shell = inst(ref_arg(*in, 0));
-            if (shell && !shell->args.empty() && shell->args[0].is_list())
-                for (const Value &fref : shell->args[0].items)
-                    if (fref.is_ref())
-                        if (auto f = face(fref.i))
-                            out.faces.push_back(f);
+            add_shell_faces(ref_arg(*in, 0), out); // shell (arg 0) — bounded face loop, same as shells below
         } else if (iequals(t, "IFCHALFSPACESOLID")) {
             if (auto ex = mk_halfspace(in, refmin, refmax))
                 out.extrusion = ex;
+        } else if (iequals(t, "IFCPOLYGONALFACESET")) {
+            // (Coordinates=IfcCartesianPointList3D, Closed, Faces=IfcIndexedPolygonalFace[], PnIndex)
+            std::vector<Vec3> pts = point_list_3d(ref_arg(*in, 0)); // own copy — survives a cache_ clear
+            std::vector<long> face_ids;
+            if (in->args.size() > 2 && in->args[2].is_list())
+                for (const Value &fref : in->args[2].items) // copy first — the loop below may clear cache_
+                    if (fref.is_ref())
+                        face_ids.push_back(fref.i);
+            iter_faces_bounded(face_ids, [&](long fid) {
+                const Instance *pf = inst(fid); // IfcIndexedPolygonalFace(CoordIndex[, Inner])
+                if (!pf || pf->args.empty() || !pf->args[0].is_list())
+                    return;
+                std::vector<Vec3> poly;
+                for (const Value &iv : pf->args[0].items)
+                    push_pt(poly, pts, iv);
+                if (auto f = make_profile(poly)) {
+                    f->fit_plane_from_loop = true; // 3D face: fit its real plane, not z=0
+                    out.faces.push_back(f);
+                }
+            });
+        } else if (iequals(t, "IFCTRIANGULATEDFACESET")) {
+            // (Coordinates, Normals, Closed, CoordIndex=list of (i,j,k) triples, PnIndex)
+            std::vector<Vec3> pts = point_list_3d(ref_arg(*in, 0));
+            if (in->args.size() > 3 && in->args[3].is_list())
+                for (const Value &tri : in->args[3].items)
+                    if (tri.is_list() && tri.items.size() >= 3) {
+                        std::vector<Vec3> poly;
+                        for (const Value &iv : tri.items)
+                            push_pt(poly, pts, iv);
+                        if (poly.size() >= 3)
+                            if (auto f = make_profile(poly)) {
+                                f->fit_plane_from_loop = true; // 3D triangle: fit its real plane
+                                out.faces.push_back(f);
+                            }
+                    }
+        } else if (iequals(t, "IFCSHELLBASEDSURFACEMODEL")) { // (SbsmBoundary = shells)
+            if (!in->args.empty() && in->args[0].is_list())
+                for (const Value &sh : in->args[0].items)
+                    if (sh.is_ref())
+                        add_shell_faces(sh.i, out);
+        } else if (iequals(t, "IFCFACEBASEDSURFACEMODEL")) { // (FbsmFaces = IfcConnectedFaceSet[])
+            if (!in->args.empty() && in->args[0].is_list())
+                for (const Value &cfs : in->args[0].items)
+                    if (cfs.is_ref())
+                        add_shell_faces(cfs.i, out);
+        } else if (iequals(t, "IFCCONNECTEDFACESET") || iequals(t, "IFCOPENSHELL") ||
+                   iequals(t, "IFCCLOSEDSHELL")) {
+            add_shell_faces(id, out);
+        } else if (iequals(t, "IFCADVANCEDFACE") || iequals(t, "IFCFACESURFACE") || iequals(t, "IFCFACE")) {
+            if (auto f = face(id)) // a bare face as the representation item
+                out.faces.push_back(f);
+        } else if (iequals(t, "IFCSWEPTDISKSOLID")) {
+            // (Directrix, Radius, InnerRadius, StartParam, EndParam) — a disk/annulus swept along the
+            // 3D directrix (rebar, pipes). Trim params ignored (full directrix).
+            std::vector<Vec3> dp = directrix_points(ref_arg(*in, 0));
+            double radius = ad(in, 1);
+            double inner = (in->args.size() > 2 && (in->args[2].kind == adacpp::step::Kind::Real ||
+                                                    in->args[2].kind == adacpp::step::Kind::Int))
+                               ? in->args[2].as_double()
+                               : 0.0;
+            out.sweep = mk_swept_disk(dp, radius, inner);
+        } else if (iequals(t, "IFCFIXEDREFERENCESWEPTAREASOLID")) {
+            // (SweptArea, Position, Directrix, StartParam, EndParam, FixedReference)
+            auto prof = profile_face(ref_arg(*in, 0));
+            Frame pos = axis2(ref_arg(*in, 1));
+            std::vector<Vec3> dp = directrix_points(ref_arg(*in, 2));
+            Vec3 fref = (in->args.size() > 5 && in->args[5].is_ref()) ? dir(in->args[5].i) : Vec3{0, 0, 1};
+            out.sweep = mk_fixed_ref_swept(prof, dp, pos, fref);
+        } else if (iequals(t, "IFCSECTIONEDSOLIDHORIZONTAL")) {
+            // (Directrix, CrossSections, CrossSectionPositions, FixedAxisVertical). Uniform sections
+            // (all CrossSections identical) sweep like a fixed-vertical-reference solid; varying
+            // sections aren't a single SweepN -> skipped.
+            std::vector<Vec3> dp = directrix_points(ref_arg(*in, 0));
+            long sec0 = -1;
+            bool uniform = true;
+            if (in->args.size() > 1 && in->args[1].is_list())
+                for (const Value &s : in->args[1].items)
+                    if (s.is_ref()) {
+                        if (sec0 < 0)
+                            sec0 = s.i;
+                        else if (s.i != sec0)
+                            uniform = false;
+                    }
+            if (uniform && sec0 >= 0)
+                out.sweep = mk_fixed_ref_swept(profile_face(sec0), dp, Frame{}, Vec3{0, 0, 1});
         }
         return out;
+    }
+    // Fixed-reference sweep: the profile's local-x tracks a FIXED reference direction (projected
+    // perpendicular to the tangent), not a rotation-minimising frame. Used by
+    // IfcFixedReferenceSweptAreaSolid + (with a vertical reference) IfcSectionedSolidHorizontal.
+    std::shared_ptr<SweepN> mk_fixed_ref_swept(std::shared_ptr<FaceSurfaceN> profile, const std::vector<Vec3> &pts,
+                                               const Frame &pos, Vec3 fref) {
+        if (!profile || pts.size() < 2)
+            return nullptr;
+        int n = (int) pts.size();
+        Vec3 fr = fref.norm() > 1e-9 ? fref.normalized() : Vec3{0, 0, 1};
+        auto sw = std::make_shared<SweepN>();
+        sw->frame = pos;
+        sw->profile = profile;
+        sw->origin.resize(n);
+        sw->dir_x.resize(n);
+        sw->dir_y.resize(n);
+        for (int i = 0; i < n; ++i) {
+            Vec3 tv = (i == 0) ? pts[1] - pts[0] : (i == n - 1) ? pts[n - 1] - pts[n - 2] : pts[i + 1] - pts[i - 1];
+            Vec3 t = tv.norm() > 1e-12 ? tv.normalized() : Vec3{1, 0, 0};
+            Vec3 dx = fr - t * t.dot(fr);
+            if (dx.norm() < 1e-9) { // reference parallel to the tangent — any perpendicular will do
+                Vec3 up = std::abs(t.z) < 0.9 ? Vec3{0, 0, 1} : Vec3{1, 0, 0};
+                dx = up - t * t.dot(up);
+            }
+            dx = dx.normalized();
+            sw->origin[i] = pts[i];
+            sw->dir_x[i] = dx;
+            sw->dir_y[i] = t.cross(dx);
+        }
+        return sw;
+    }
+
+    // ---- IFC alignment curve sampling (port of adapy ngeom._alignment_sweep) ----------------------
+    // Normalised Fresnel S(t)=∫sin(πu²/2), C(t)=∫cos(πu²/2) via power series (clothoid transitions).
+    static void alignment_fresnel(double t, double &S, double &C) {
+        double hp = PI / 2.0, t4 = t * t * t * t;
+        C = 0.0;
+        double term = t;
+        for (int n = 0; n < 200; ++n) {
+            double c = term / (4 * n + 1);
+            C += c;
+            if (std::abs(c) < 1e-18 && n > 2)
+                break;
+            term *= -(hp * hp) * t4 / ((2 * n + 1) * (2 * n + 2));
+        }
+        S = 0.0;
+        term = hp * t * t * t;
+        for (int n = 0; n < 200; ++n) {
+            double s = term / (4 * n + 3);
+            S += s;
+            if (std::abs(s) < 1e-18 && n > 2)
+                break;
+            term *= -(hp * hp) * t4 / ((2 * n + 2) * (2 * n + 3));
+        }
+    }
+    static bool numeric(const Value &v) {
+        return v.kind == adacpp::step::Kind::Real || v.kind == adacpp::step::Kind::Int;
+    }
+    // Parent curve at arc length p (its own 2D frame) -> (point2d, unit tangent2d), as z=0 Vec3.
+    bool alignment_parent_eval(long cid, double p, double seg_len, Vec3 &P, Vec3 &T) {
+        const Instance *in = inst(cid);
+        if (!in)
+            return false;
+        std::string_view t = in->type;
+        if (iequals(t, "IFCLINE")) {
+            P = {p, 0, 0};
+            T = {1, 0, 0};
+            return true;
+        }
+        if (iequals(t, "IFCCIRCLE")) {
+            double r = ad(in, 1);
+            if (std::abs(r) < 1e-12)
+                return false;
+            double th = p / r;
+            P = {r * std::cos(th), r * std::sin(th), 0};
+            T = {-std::sin(th), std::cos(th), 0};
+            return true;
+        }
+        if (iequals(t, "IFCCLOTHOID")) {
+            double A = ad(in, 1), scale = std::abs(A) * std::sqrt(PI);
+            if (scale < 1e-12) {
+                P = {p, 0, 0};
+                T = {1, 0, 0};
+                return true;
+            }
+            double tt = p / scale, S, C;
+            alignment_fresnel(tt, S, C);
+            double sgn = A < 0 ? -1.0 : 1.0, ph = PI * tt * tt / 2.0;
+            P = {scale * C, sgn * scale * S, 0};
+            T = Vec3{std::cos(ph), sgn * std::sin(ph), 0}.normalized();
+            return true;
+        }
+        if (iequals(t, "IFCCOSINESPIRAL")) {
+            double A1 = ad(in, 1);
+            double A0 = (in->args.size() > 2 && numeric(in->args[2])) ? in->args[2].as_double() : 0.0;
+            double L = std::abs(seg_len);
+            auto theta = [&](double s) {
+                double th = (A0 != 0.0) ? s / A0 : 0.0;
+                if (L > 0.0 && A1 != 0.0)
+                    th += (L / (PI * A1)) * std::sin(PI * s / L);
+                return th;
+            };
+            int n = std::max(32, (int) (std::abs(p) / 0.1) + 1);
+            double px = 0, py = 0, dx = p / n;
+            for (int i = 1; i <= n; ++i) {
+                double th = theta(p * i / n), thm = theta(p * (i - 1) / n);
+                px += (std::cos(th) + std::cos(thm)) * 0.5 * dx;
+                py += (std::sin(th) + std::sin(thm)) * 0.5 * dx;
+            }
+            double thp = theta(p);
+            P = {px, py, 0};
+            T = {std::cos(thp), std::sin(thp), 0};
+            return true;
+        }
+        return false;
+    }
+    // Global (point2d, tangent2d) at local_len along an IfcCurveSegment (parent placed by its
+    // IfcAxis2Placement2D, arc length advancing in the sign of SegmentLength).
+    bool alignment_seg_eval(const Instance *seg, double local_len, Vec3 &gp, Vec3 &gt) {
+        long placement = -1, parent = -1;
+        std::vector<double> meas;
+        for (const Value &a : seg->args) {
+            if (a.is_ref()) {
+                if (placement < 0)
+                    placement = a.i;
+                else
+                    parent = a.i;
+            } else if (a.is_list() && !a.items.empty() && numeric(a.items[0]))
+                meas.push_back(a.items[0].as_double());
+        }
+        if (parent < 0 || meas.size() < 2)
+            return false;
+        double seg_start = meas[0], seg_length = meas[1], sgn = seg_length >= 0 ? 1.0 : -1.0;
+        Vec3 P, T, P0, T0;
+        if (!alignment_parent_eval(parent, seg_start + sgn * local_len, seg_length, P, T))
+            return false;
+        alignment_parent_eval(parent, seg_start, seg_length, P0, T0);
+        if (sgn < 0) {
+            T = T * -1.0;
+            T0 = T0 * -1.0;
+        }
+        // placement IfcAxis2Placement2D(Location, RefDirection)
+        Vec3 o{0, 0, 0}, rd{1, 0, 0};
+        const Instance *pl = inst(placement);
+        if (pl) {
+            if (!pl->args.empty() && pl->args[0].is_ref())
+                o = point(pl->args[0].i);
+            if (pl->args.size() > 1 && pl->args[1].is_ref())
+                rd = dir(pl->args[1].i);
+        }
+        double rn = std::hypot(rd.x, rd.y);
+        if (rn > 1e-12) {
+            rd.x /= rn;
+            rd.y /= rn;
+        }
+        double tn = std::hypot(T0.x, T0.y);
+        Vec3 t0 = tn > 1e-12 ? Vec3{T0.x / tn, T0.y / tn, 0} : Vec3{1, 0, 0};
+        // R = 2x2 rotation taking t0 -> rd
+        double c = t0.x * rd.x + t0.y * rd.y, s = t0.x * rd.y - t0.y * rd.x;
+        auto rot = [&](const Vec3 &v) { return Vec3{c * v.x - s * v.y, s * v.x + c * v.y, 0}; };
+        Vec3 dp = rot(P - P0);
+        gp = {o.x + dp.x, o.y + dp.y, 0};
+        gt = rot(T).normalized();
+        return true;
+    }
+    // Sample the IfcCurveSegments of a composite/base curve -> (cumulative arc length s, 2D point).
+    void alignment_sample(long curve_id, int n_per, std::vector<double> &s_out, std::vector<Vec3> &p_out) {
+        const Instance *in = inst(curve_id);
+        if (!in || in->args.empty() || !in->args[0].is_list())
+            return;
+        double s_acc = 0.0;
+        for (const Value &sref : in->args[0].items) {
+            if (!sref.is_ref())
+                continue;
+            const Instance *seg = inst(sref.i);
+            if (!seg || !iequals(seg->type, "IFCCURVESEGMENT"))
+                continue;
+            double L = 0.0;
+            std::vector<double> meas;
+            for (const Value &a : seg->args)
+                if (a.is_list() && !a.items.empty() && numeric(a.items[0]))
+                    meas.push_back(a.items[0].as_double());
+            if (meas.size() >= 2)
+                L = std::abs(meas[1]);
+            if (L < 1e-9)
+                continue;
+            for (int i = 0; i <= n_per; ++i) {
+                Vec3 gp, gt;
+                if (alignment_seg_eval(seg, L * i / n_per, gp, gt)) {
+                    s_out.push_back(s_acc + L * i / n_per);
+                    p_out.push_back(gp);
+                }
+            }
+            s_acc += L;
+        }
+    }
+    // A composite/segmented alignment curve of IfcCurveSegments -> planar 3D directrix (z=0).
+    std::vector<Vec3> alignment_planar_points(long cid) {
+        std::vector<double> s;
+        std::vector<Vec3> p;
+        alignment_sample(cid, 24, s, p);
+        return p;
+    }
+    // IfcGradientCurve(Segments=vertical gradient, SelfIntersect, BaseCurve=horizontal, EndPoint) ->
+    // 3D directrix: horizontal (x,y) from BaseCurve + z(s) interpolated from the vertical gradient.
+    std::vector<Vec3> alignment_gradient_points(long cid) {
+        const Instance *in = inst(cid);
+        if (!in)
+            return {};
+        long base = (in->args.size() > 2 && in->args[2].is_ref()) ? in->args[2].i : -1;
+        std::vector<double> hs;
+        std::vector<Vec3> hp;
+        if (base >= 0)
+            alignment_sample(base, 24, hs, hp); // horizontal (x,y) along s
+        else
+            alignment_sample(cid, 24, hs, hp);  // SegmentedReferenceCurve: sample its own segments
+        // vertical gradient z(s): the gradient's own segments give (distance, height) points
+        std::vector<double> vs;
+        std::vector<Vec3> vp;
+        if (iequals(in->type, "IFCGRADIENTCURVE"))
+            alignment_sample(cid, 24, vs, vp); // segments (arg 0) are the vertical profile
+        std::vector<Vec3> out;
+        out.reserve(hp.size());
+        for (size_t i = 0; i < hp.size(); ++i) {
+            double z = 0.0;
+            if (!vp.empty()) { // interpolate height over the vertical profile's (x=distance, y=height)
+                double q = hs[i];
+                z = vp.front().y;
+                for (size_t k = 0; k + 1 < vp.size(); ++k)
+                    if ((vp[k].x <= q && q <= vp[k + 1].x) || (vp[k + 1].x <= q && q <= vp[k].x)) {
+                        double dxk = vp[k + 1].x - vp[k].x;
+                        z = std::abs(dxk) < 1e-12 ? vp[k].y
+                                                  : vp[k].y + (vp[k + 1].y - vp[k].y) * (q - vp[k].x) / dxk;
+                        break;
+                    } else if (q > vp[k + 1].x)
+                        z = vp[k + 1].y;
+            }
+            out.push_back({hp[i].x, hp[i].y, z});
+        }
+        return out;
+    }
+    // A 3-point 3D circular arc (fit the plane through the points, circumcircle, sweep a->b via m).
+    static std::vector<Vec3> arc_poly_3d(const Vec3 &a, const Vec3 &m, const Vec3 &b) {
+        Vec3 ab = b - a, am = m - a, nrm = ab.cross(am);
+        if (nrm.norm() < 1e-12)
+            return {a, m, b};
+        Vec3 n = nrm.normalized();
+        double abab = ab.dot(ab), amam = am.dot(am), abam = ab.dot(am);
+        double d = 2.0 * (abab * amam - abam * abam);
+        if (std::abs(d) < 1e-18)
+            return {a, m, b};
+        Vec3 c = a + ab * ((amam * (abab - abam)) / d) + am * ((abab * (amam - abam)) / d);
+        double r = (a - c).norm();
+        Vec3 u = (a - c).normalized(), v = n.cross(u);
+        auto ang = [&](const Vec3 &p) { Vec3 rp = p - c; return std::atan2(rp.dot(v), rp.dot(u)); };
+        double ta = ang(a), tm = ang(m), tb = ang(b);
+        auto wrap = [](double x) {
+            while (x < 0)
+                x += 2 * PI;
+            while (x >= 2 * PI)
+                x -= 2 * PI;
+            return x;
+        };
+        double dab = wrap(tb - ta), dam = wrap(tm - ta);
+        double sweep = (dam <= dab) ? dab : dab - 2 * PI;
+        int ns = std::max(2, (int) std::ceil(std::abs(sweep) / (2 * PI) * 64));
+        std::vector<Vec3> out;
+        out.reserve(ns + 1);
+        for (int i = 0; i <= ns; ++i) {
+            double th = ta + sweep * i / ns;
+            out.push_back(c + u * (r * std::cos(th)) + v * (r * std::sin(th)));
+        }
+        return out;
+    }
+    // A 3D directrix curve -> ordered polyline. Covers IfcPolyline, IfcIndexedPolyCurve (3D, arc-aware),
+    // and IfcCompositeCurve (chained parent curves). Other bases yield empty (-> the sweep is skipped).
+    std::vector<Vec3> directrix_points(long cid) {
+        const Instance *in = inst(cid);
+        if (!in)
+            return {};
+        std::string_view t = in->type;
+        auto push = [](std::vector<Vec3> &pts, const Vec3 &p) {
+            if (pts.empty() || (pts.back() - p).norm() > 1e-9)
+                pts.push_back(p);
+        };
+        if (iequals(t, "IFCPOLYLINE"))
+            return point_list(in->args.empty() ? Value{} : in->args[0]);
+        if (iequals(t, "IFCINDEXEDPOLYCURVE")) {
+            std::vector<Vec3> coords = point_list_3d(ref_arg(*in, 0)), pts;
+            auto at = [&](long i) { return (i >= 1 && (size_t) i < coords.size()) ? coords[i] : Vec3{0, 0, 0}; };
+            const Value *segs = (in->args.size() > 1 && in->args[1].is_list()) ? &in->args[1] : nullptr;
+            if (segs && !segs->items.empty()) {
+                for (size_t k = 0; k + 1 < segs->items.size(); k += 2) {
+                    const Value &kw = segs->items[k], &al = segs->items[k + 1];
+                    if (kw.kind != adacpp::step::Kind::Keyword || !al.is_list() || al.items.empty() ||
+                        !al.items[0].is_list())
+                        continue;
+                    const auto &ix = al.items[0].items;
+                    if (iequals(kw.s, "IFCARCINDEX") && ix.size() == 3) {
+                        for (const Vec3 &q : arc_poly_3d(at(ix[0].i), at(ix[1].i), at(ix[2].i)))
+                            push(pts, q);
+                    } else
+                        for (const Value &iv : ix)
+                            push(pts, at(iv.kind == adacpp::step::Kind::Int ? iv.i : (long) iv.as_double()));
+                }
+            } else
+                for (size_t i = 1; i < coords.size(); ++i)
+                    push(pts, coords[i]);
+            return pts;
+        }
+        // Alignment directrixes: an IfcGradientCurve (horizontal composite + vertical gradient) or a
+        // composite/segmented curve of IfcCurveSegments (line/arc/clothoid/cosine-spiral transitions).
+        if (iequals(t, "IFCGRADIENTCURVE") || iequals(t, "IFCSEGMENTEDREFERENCECURVE"))
+            return alignment_gradient_points(cid);
+        if (iequals(t, "IFCCURVESEGMENT")) { // a single alignment segment (IfcAlignmentSegment axis)
+            double L = 0.0;
+            std::vector<double> meas;
+            for (const Value &a : in->args)
+                if (a.is_list() && !a.items.empty() && numeric(a.items[0]))
+                    meas.push_back(a.items[0].as_double());
+            if (meas.size() >= 2)
+                L = std::abs(meas[1]);
+            std::vector<Vec3> pts;
+            if (L > 1e-9)
+                for (int i = 0; i <= 24; ++i) {
+                    Vec3 gp, gt;
+                    if (alignment_seg_eval(in, L * i / 24, gp, gt))
+                        pts.push_back(gp);
+                }
+            return pts;
+        }
+        if ((iequals(t, "IFCCOMPOSITECURVE")) && !in->args.empty() && in->args[0].is_list()) {
+            // alignment composite: its segments are IfcCurveSegment (not IfcCompositeCurveSegment)
+            for (const Value &sref : in->args[0].items)
+                if (sref.is_ref()) {
+                    const Instance *s0 = inst(sref.i);
+                    if (s0 && iequals(s0->type, "IFCCURVESEGMENT"))
+                        return alignment_planar_points(cid);
+                    break;
+                }
+        }
+        if (iequals(t, "IFCCOMPOSITECURVE") && !in->args.empty() && in->args[0].is_list()) {
+            std::vector<Vec3> pts;
+            for (const Value &sref : in->args[0].items)
+                if (sref.is_ref()) {
+                    const Instance *seg = inst(sref.i); // IfcCompositeCurveSegment(Transition,Same,ParentCurve)
+                    if (seg && seg->args.size() > 2 && seg->args[2].is_ref())
+                        for (const Vec3 &p : directrix_points(seg->args[2].i))
+                            push(pts, p);
+                }
+            return pts;
+        }
+        return {};
+    }
+    // Disk/annulus swept along a directrix -> SweepN with rotation-minimising (parallel-transport)
+    // per-station frames, so the circular profile doesn't twist. Mirrors adapy's _sweep_frames.
+    std::shared_ptr<SweepN> mk_swept_disk(const std::vector<Vec3> &pts, double radius, double inner) {
+        if (pts.size() < 2 || radius <= 0)
+            return nullptr;
+        int n = (int) pts.size();
+        std::vector<Vec3> tan(n);
+        for (int i = 0; i < n; ++i) {
+            Vec3 tv = (i == 0) ? pts[1] - pts[0] : (i == n - 1) ? pts[n - 1] - pts[n - 2] : pts[i + 1] - pts[i - 1];
+            tan[i] = tv.norm() > 1e-12 ? tv.normalized() : Vec3{0, 0, 1};
+        }
+        auto sw = std::make_shared<SweepN>();
+        sw->frame = Frame{}; // origin/dir_x/dir_y are already world
+        sw->origin.resize(n);
+        sw->dir_x.resize(n);
+        sw->dir_y.resize(n);
+        Vec3 up = std::abs(tan[0].z) < 0.9 ? Vec3{0, 0, 1} : Vec3{1, 0, 0};
+        Vec3 dx = (up - tan[0] * tan[0].dot(up)).normalized();
+        for (int i = 0; i < n; ++i) {
+            if (i > 0) { // parallel-transport dx across the tangent turn (Rodrigues)
+                Vec3 axis = tan[i - 1].cross(tan[i]);
+                double s = axis.norm(), cth = tan[i - 1].dot(tan[i]);
+                if (s > 1e-9) {
+                    axis = axis * (1.0 / s);
+                    double ang = std::atan2(s, cth);
+                    dx = dx * std::cos(ang) + axis.cross(dx) * std::sin(ang) +
+                         axis * (axis.dot(dx) * (1 - std::cos(ang)));
+                }
+            }
+            Vec3 ortho = dx - tan[i] * tan[i].dot(dx);
+            if (ortho.norm() < 1e-9) { // dx drifted parallel to the tangent — reseed perpendicular
+                Vec3 up = std::abs(tan[i].z) < 0.9 ? Vec3{0, 0, 1} : Vec3{1, 0, 0};
+                ortho = up - tan[i] * tan[i].dot(up);
+            }
+            dx = ortho.normalized();
+            sw->origin[i] = pts[i];
+            sw->dir_x[i] = dx;
+            sw->dir_y[i] = tan[i].cross(dx);
+        }
+        std::vector<std::vector<Vec3>> holes;
+        if (inner > 1e-9)
+            holes.push_back(circle_poly(inner));
+        sw->profile = make_profile(circle_poly(radius), holes);
+        return sw->profile ? sw : nullptr;
+    }
+    // IfcCartesianPointList3D(CoordList) -> 1-based point array (index 0 is a placeholder).
+    std::vector<Vec3> point_list_3d(long id) {
+        std::vector<Vec3> pts{{0, 0, 0}};
+        const Instance *pl = inst(id);
+        if (pl && !pl->args.empty() && pl->args[0].is_list())
+            for (const Value &row : pl->args[0].items)
+                if (row.is_list() && row.items.size() >= 3)
+                    pts.push_back({row.items[0].as_double(), row.items[1].as_double(), row.items[2].as_double()});
+        return pts;
+    }
+    static void push_pt(std::vector<Vec3> &poly, const std::vector<Vec3> &pts, const Value &iv) {
+        long ix = (iv.kind == adacpp::step::Kind::Int) ? iv.i : (long) iv.as_double(); // 1-based CoordIndex
+        if (ix >= 1 && (size_t) ix < pts.size())
+            poly.push_back(pts[ix]);
+    }
+    // Iterate a COPIED list of face ref-ids, invoking emit(id) per face, dropping cache_ (parsed
+    // statements) every 1024 faces when bounding is on. Callers MUST copy the ids out first: the clear
+    // frees the parent shell/faceset Instance, so iterating its arg list in place would use-after-free
+    // (same hazard the STEP reader guards). Built geometry (surf_cache_) + persistent maps are kept.
+    template <class Emit>
+    void iter_faces_bounded(const std::vector<long> &face_ids, Emit emit) {
+        for (size_t i = 0; i < face_ids.size(); ++i) {
+            emit(face_ids[i]);
+            if (bound_cache_ && (i & 1023u) == 1023u)
+                cache_.clear();
+        }
+    }
+
+    // A shell (IfcClosedShell/IfcOpenShell/IfcConnectedFaceSet): CfsFaces (arg 0) is a list of IfcFace.
+    void add_shell_faces(long shell_id, SolidItemN &out) {
+        const Instance *sh = inst(shell_id);
+        if (!sh || sh->args.empty() || !sh->args[0].is_list())
+            return;
+        std::vector<long> face_ids;
+        face_ids.reserve(sh->args[0].items.size());
+        for (const Value &fref : sh->args[0].items) // copy first — iter_faces_bounded may clear cache_
+            if (fref.is_ref())
+                face_ids.push_back(fref.i);
+        iter_faces_bounded(face_ids, [&](long fid) {
+            if (auto f = face(fid))
+                out.faces.push_back(f);
+        });
     }
     // IfcBooleanResult(Operator, FirstOperand, SecondOperand) -> ng::BooleanN (null if an operand can't
     // be resolved). op: 0 difference / 1 union / 2 intersection. The 1st operand bounds a half-space 2nd.
@@ -905,6 +2145,20 @@ private:
             root.transforms.push_back(M);
             return;
         }
+        // Curve-only body (alignment axis / reference curve / a bare curve rep item) -> a polyline
+        // rendered as GL_LINES. Reuse the directrix sampler (handles gradient/segmented/composite/
+        // polyline/indexed + alignment clothoid/cant).
+        if (iequals(in->type, "IFCGRADIENTCURVE") || iequals(in->type, "IFCSEGMENTEDREFERENCECURVE") ||
+            iequals(in->type, "IFCCOMPOSITECURVE") || iequals(in->type, "IFCPOLYLINE") ||
+            iequals(in->type, "IFCINDEXEDPOLYCURVE") || iequals(in->type, "IFCTRIMMEDCURVE") ||
+            iequals(in->type, "IFCCURVESEGMENT")) {
+            std::vector<Vec3> pts = directrix_points(id);
+            if (pts.size() >= 2)
+                root.polylines.push_back(std::move(pts));
+            else
+                root.recognized_empty = true; // recognized curve, but degenerate (e.g. zero-length segment)
+            return;
+        }
         SolidItemN it = resolve_solid_item(id);
         if (!solid_ok(it))
             return; // unsupported geometry -> product yields nothing here -> OCC fallback
@@ -919,6 +2173,7 @@ private:
             root.extrusion = it.extrusion;
             root.revolve = it.revolve;
             root.boolean = it.boolean;
+            root.sweep = it.sweep;
         }
     }
     // IfcCartesianTransformationOperator3D(Axis1,Axis2,LocalOrigin,Scale,Axis3[,Scale2,Scale3])
@@ -975,6 +2230,90 @@ private:
             }
         return R;
     }
+    // ---- rigid-transform helpers for IfcRelVoidsElement (move an opening into its host's frame) ----
+    // Inverse of a rigid 4x4 (column-major): [R|t] -> [R^T | -R^T t].
+    static std::array<float, 16> rigid_inverse(const std::array<float, 16> &M) {
+        std::array<float, 16> r{};
+        r[0] = M[0]; r[1] = M[4]; r[2] = M[8];   // R^T columns
+        r[4] = M[1]; r[5] = M[5]; r[6] = M[9];
+        r[8] = M[2]; r[9] = M[6]; r[10] = M[10];
+        float tx = M[12], ty = M[13], tz = M[14];
+        r[12] = -(M[0] * tx + M[1] * ty + M[2] * tz); // -R^T t
+        r[13] = -(M[4] * tx + M[5] * ty + M[6] * tz);
+        r[14] = -(M[8] * tx + M[9] * ty + M[10] * tz);
+        r[15] = 1.0f;
+        return r;
+    }
+    static Vec3 xform_dir(const std::array<float, 16> &M, const Vec3 &v) {
+        return {M[0] * v.x + M[4] * v.y + M[8] * v.z, M[1] * v.x + M[5] * v.y + M[9] * v.z,
+                M[2] * v.x + M[6] * v.y + M[10] * v.z};
+    }
+    static Vec3 xform_pt(const std::array<float, 16> &M, const Vec3 &p) {
+        Vec3 r = xform_dir(M, p);
+        return {r.x + M[12], r.y + M[13], r.z + M[14]};
+    }
+    static void xform_frame(Frame &f, const std::array<float, 16> &M) {
+        f.o = xform_pt(M, f.o);
+        f.x = xform_dir(M, f.x);
+        f.y = xform_dir(M, f.y);
+        f.z = xform_dir(M, f.z);
+    }
+    // Move a solid operand into a new coordinate frame by transforming its placement frame(s). Handles
+    // the frame-placed solids (extrude/revolve/sweep) + nested booleans; returns false for face-set
+    // operands (no single frame to move) so the caller skips that cut rather than misplace it.
+    bool xform_solid_item(SolidItemN &it, const std::array<float, 16> &M) {
+        if (it.extrusion) {
+            xform_frame(it.extrusion->frame, M);
+            return true;
+        }
+        if (it.revolve) {
+            xform_frame(it.revolve->frame, M);
+            it.revolve->axis_origin = xform_pt(M, it.revolve->axis_origin);
+            it.revolve->axis_dir = xform_dir(M, it.revolve->axis_dir);
+            return true;
+        }
+        if (it.sweep) {
+            xform_frame(it.sweep->frame, M);
+            return true;
+        }
+        if (it.boolean)
+            return xform_solid_item(it.boolean->a, M) && xform_solid_item(it.boolean->b, M);
+        return false; // face-set operand — no single frame; skip this cut
+    }
+    // A resolved root's geometry as a boolean operand (share the shared_ptrs — the caller replaces root).
+    static SolidItemN root_to_solid(const NgeomRoot &r) {
+        SolidItemN s;
+        s.extrusion = r.extrusion;
+        s.revolve = r.revolve;
+        s.sweep = r.sweep;
+        s.boolean = r.boolean;
+        s.faces = r.faces;
+        return s;
+    }
+    // First 3D body/solid rep-item id of an element (skips 2D FootPrint/Profile/… and Axis reps). 0 if none.
+    long first_body_item(long pid) {
+        const Instance *p = inst(pid);
+        if (!p)
+            return 0;
+        const Instance *pds = inst(ref_arg(*p, 6));
+        if (!pds || pds->args.size() < 3)
+            return 0;
+        for (const Value &srref : pds->args[2].items) {
+            const Instance *sr = inst(srref.i);
+            if (!sr || sr->args.size() < 4)
+                continue;
+            std::string_view id = (sr->args.size() > 1 && sr->args[1].kind == adacpp::step::Kind::Str)
+                                      ? sr->args[1].s
+                                      : std::string_view{};
+            if (id == "FootPrint" || id == "Annotation" || id == "Profile" || id == "Plan" || id == "Box" ||
+                id == "Axis")
+                continue;
+            for (const Value &item : sr->args[3].items)
+                if (item.is_ref())
+                    return item.i;
+        }
+        return 0;
+    }
     static bool is_identity(const std::array<float, 16> &M) {
         static const std::array<float, 16> I = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
         for (int i = 0; i < 16; ++i)
@@ -995,13 +2334,30 @@ private:
         return {(float) f.x.x, (float) f.x.y, (float) f.x.z, 0.0f, (float) f.y.x, (float) f.y.y, (float) f.y.z, 0.0f,
                 (float) f.z.x, (float) f.z.y, (float) f.z.z, 0.0f, (float) f.o.x, (float) f.o.y, (float) f.o.z, 1.0f};
     }
-    // IfcLocalPlacement(PlacementRelTo, RelativePlacement) -> world matrix (recurse up the chain).
+    // Object placement -> world matrix. Handles the IfcLocalPlacement chain and IfcLinearPlacement
+    // (IFC4x3 linear referencing along an alignment). Both recurse up PlacementRelTo (arg 0).
     std::array<float, 16> object_placement(long id, int depth = 0) {
         static const std::array<float, 16> I = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
         const Instance *in = inst(id);
-        if (!in || depth > 64 || !iequals(in->type, "IFCLOCALPLACEMENT"))
+        if (!in || depth > 64)
             return I;
-        std::array<float, 16> rel = (in->args.size() > 1 && in->args[1].is_ref()) ? axis2_mat(in->args[1].i) : I;
+        std::array<float, 16> rel = I;
+        if (iequals(in->type, "IFCLOCALPLACEMENT")) {
+            // (PlacementRelTo, RelativePlacement=IfcAxis2Placement3D)
+            if (in->args.size() > 1 && in->args[1].is_ref())
+                rel = axis2_mat(in->args[1].i);
+        } else if (iequals(in->type, "IFCLINEARPLACEMENT")) {
+            // (PlacementRelTo, RelativePlacement=IfcAxis2PlacementLinear, CartesianPosition=IfcAxis2Placement3D?).
+            // Placing an object by distance-along-the-alignment needs to evaluate the basis curve; exporters
+            // provide the equivalent cartesian frame in the optional CartesianPosition (arg 2) precisely so
+            // readers that don't do linear referencing can still place the object. Prefer it — without it the
+            // object collapsed to the origin (all geoms stacked at 0,0,0). Full IfcPointByDistanceExpression
+            // evaluation (no CartesianPosition) is a follow-up; identity there keeps prior behaviour.
+            if (in->args.size() > 2 && in->args[2].is_ref())
+                rel = axis2_mat(in->args[2].i);
+        } else {
+            return I; // grid placement etc. — unhandled, keep identity
+        }
         if (in->args.size() > 0 && in->args[0].is_ref())
             return mat_mul(object_placement(in->args[0].i, depth + 1), rel);
         return rel;

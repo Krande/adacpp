@@ -28,11 +28,30 @@ public:
         memo_.clear();
         std::vector<std::pair<int, std::string>> roots;
         for (const NgeomRoot &root : doc.roots) {
-            std::vector<uint8_t> body;
-            put_i32(body, (int) root.faces.size());
-            for (const auto &f : root.faces)
-                put_i32(body, face(f));
-            roots.emplace_back(add(tag::CONNECTED_FACE_SET, std::move(body)), root.id);
+            // Analytic solids (extrusion/revolve/boolean/sphere) encode to tags 50-53 so a faces-less
+            // procedural root carries real geometry — previously only CONNECTED_FACE_SET was emitted,
+            // so such a root became an empty buffer and the IfcNgeomStream consumer dropped it.
+            int gi = -1;
+            if (!root.polylines.empty()) {
+                std::vector<uint8_t> b;
+                put_i32(b, (int) root.polylines.size());
+                for (const auto &line : root.polylines) {
+                    put_i32(b, (int) line.size());
+                    for (const Vec3 &p : line)
+                        put_v3(b, p);
+                }
+                gi = add(tag::CURVE_SET, std::move(b));
+            }
+            if (gi < 0 && (root.extrusion || root.revolve || root.boolean || root.sphere || root.sweep))
+                gi = solid_root(root);
+            if (gi < 0) {
+                std::vector<uint8_t> body;
+                put_i32(body, (int) root.faces.size());
+                for (const auto &f : root.faces)
+                    put_i32(body, face(f));
+                gi = add(tag::CONNECTED_FACE_SET, std::move(body));
+            }
+            roots.emplace_back(gi, root.id);
         }
         std::vector<uint8_t> out;
         const char *magic = "ADANGEOM";
@@ -91,6 +110,82 @@ private:
         put_v3(b, loc);
         put_v3(b, axis);
         return add(tag::PLACEMENT1, std::move(b));
+    }
+    // --- analytic solids (tags 50-53) — layouts match ngeom_decode.h + the adapy Python codec ---
+    int extrusion_rec(const std::shared_ptr<ExtrusionN> &ex) {
+        std::vector<uint8_t> b;
+        put_i32(b, face(ex->profile)); // profile FACE_SURFACE
+        put_i32(b, placement3(ex->frame));
+        put_v3(b, ex->direction);
+        put_f64(b, ex->depth);
+        return add(tag::EXTRUDED_AREA_SOLID, std::move(b));
+    }
+    int revolve_rec(const std::shared_ptr<RevolveN> &rv) {
+        std::vector<uint8_t> b;
+        put_i32(b, face(rv->profile));
+        put_i32(b, placement3(rv->frame));
+        put_i32(b, placement1(rv->axis_origin, rv->axis_dir)); // PLACEMENT1 axis
+        put_f64(b, rv->angle);
+        return add(tag::REVOLVED_AREA_SOLID, std::move(b));
+    }
+    int sphere_rec(const std::shared_ptr<SphereN> &sp) {
+        std::vector<uint8_t> b;
+        put_i32(b, placement3(sp->frame)); // centre placement
+        put_f64(b, sp->radius);
+        return add(tag::SPHERE_SOLID, std::move(b));
+    }
+    int sweep_rec(const std::shared_ptr<SweepN> &sw) {
+        std::vector<uint8_t> b;
+        put_i32(b, face(sw->profile));
+        put_i32(b, placement3(sw->frame));
+        put_i32(b, (int) sw->origin.size());
+        for (const Vec3 &v : sw->origin)
+            put_v3(b, v);
+        for (const Vec3 &v : sw->dir_x)
+            put_v3(b, v);
+        for (const Vec3 &v : sw->dir_y)
+            put_v3(b, v);
+        return add(tag::FIXED_REF_SWEPT_SOLID, std::move(b));
+    }
+    int boolean_rec(const std::shared_ptr<BooleanN> &bn) {
+        std::vector<uint8_t> b;
+        put_i32(b, bn->op);
+        put_i32(b, solid_item_rec(bn->a));
+        put_i32(b, solid_item_rec(bn->b));
+        return add(tag::BOOLEAN_RESULT, std::move(b));
+    }
+    // One boolean operand: nested solid, or a shell (CONNECTED_FACE_SET — solid_item_at reads it back
+    // as .faces). Sweep operands aren't emittable here (their baked-frame form is out of scope) -> -1.
+    int solid_item_rec(const SolidItemN &it) {
+        if (it.extrusion)
+            return extrusion_rec(it.extrusion);
+        if (it.revolve)
+            return revolve_rec(it.revolve);
+        if (it.boolean)
+            return boolean_rec(it.boolean);
+        if (it.sweep)
+            return sweep_rec(it.sweep);
+        if (!it.faces.empty()) {
+            std::vector<uint8_t> b;
+            put_i32(b, (int) it.faces.size());
+            for (const auto &f : it.faces)
+                put_i32(b, face(f));
+            return add(tag::CONNECTED_FACE_SET, std::move(b));
+        }
+        return -1;
+    }
+    int solid_root(const NgeomRoot &root) {
+        if (root.extrusion)
+            return extrusion_rec(root.extrusion);
+        if (root.revolve)
+            return revolve_rec(root.revolve);
+        if (root.boolean)
+            return boolean_rec(root.boolean);
+        if (root.sphere)
+            return sphere_rec(root.sphere);
+        if (root.sweep)
+            return sweep_rec(root.sweep);
+        return -1;
     }
     static void rle_knots(const std::vector<double> &U, std::vector<double> &knots, std::vector<int> &mults) {
         for (size_t i = 0; i < U.size();) {

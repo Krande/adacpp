@@ -24,6 +24,8 @@ int main(int argc, char *argv[]) {
     bool meshopt = true;   // EXT_meshopt_compression baked inline by default
     bool profile = false;  // enable the env-gated StepProfiler instrumentation
     bool quiet = false;    // suppress the param echo + progress; keep errors + the final result line
+    bool face_regions = false; // bake per-face clickable regions into scenes[0].extras (opt-in)
+    double model_scale = 0.0;  // >0 => adaptive per-surface density (relaxes tiny features); 0 => fixed
     std::string spill_dir; // empty => private auto-removed mkdtemp spill dir
 
     app.add_option("--stp", stp_file, "STEP input filepath")->required();
@@ -34,6 +36,11 @@ int main(int argc, char *argv[]) {
     app.add_option("--num-threads", num_threads, "Worker threads (0 = all hardware cores)")->default_val(0);
     app.add_flag("--meshopt,!--no-meshopt", meshopt, "Bake EXT_meshopt_compression inline (default ON)");
     app.add_flag("--profile", profile, "Print [STEPPROF] phase/memory/per-solid timing to stderr (StepProfiler)");
+    app.add_flag("--face-regions", face_regions,
+                 "Bake per-face clickable regions into scenes[0].extras (face_ranges_node<m>); opt-in");
+    app.add_option("--model-scale", model_scale,
+                   "Model bbox diagonal for adaptive per-surface density (0 = fixed angle)")
+        ->default_val(0.0);
     app.add_flag("--quiet", quiet, "Suppress the param echo + progress; keep errors and the final result line");
     app.add_option("--spill-dir", spill_dir,
                    "Directory for the per-lane GLB spill files (created if missing, left in place); "
@@ -67,8 +74,8 @@ int main(int argc, char *argv[]) {
     const auto start = std::chrono::high_resolution_clock::now();
     long nsolids = -1;
     try {
-        nsolids =
-            adacpp::stream_step_to_glb(stp_file, glb_file, deflection, angular_deg, num_threads, meshopt, spill_dir);
+        nsolids = adacpp::stream_step_to_glb(stp_file, glb_file, deflection, angular_deg, num_threads, meshopt,
+                                             spill_dir, model_scale, face_regions);
     } catch (const std::exception &ex) {
         std::cerr << "Error: " << ex.what() << "\n";
         return 1;

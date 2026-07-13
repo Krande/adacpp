@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "mem_trim.h"
+#include "mem_tune.h"
 #include "effective_concurrency.h"
 #include "posix_compat.h"
 
@@ -157,10 +158,12 @@ inline void bake(const std::array<float, 16> &M, float usc, const float p[3], fl
 // Returns the number of triangles written, or -1 on I/O error.
 inline long stream_step_to_mesh(const std::string &in_path, const std::string &out_path, MeshFormat fmt,
                                 double deflection, double angular_deg, int num_threads,
-                                const std::string &spill_dir = "") {
+                                const std::string &spill_dir = "", double model_scale = 0.0) {
     using namespace adacpp::ngeom;
     static const std::array<float, 16> kIdentity = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     adacpp::prof::StepProfiler prof("stream_step_to_mesh");
+    adacpp::tune_malloc_for_streaming(); // bound streaming peak RSS (mmap/trim tuning) before the pool
+    adacpp::ngeom::reset_tess_face_stats(); // count dropped faces (audit health flag)
 
     adacpp::step::StreamIndex idx = adacpp::step::StreamIndex::from_file(in_path);
     if (!idx.ok())
@@ -170,6 +173,7 @@ inline long stream_step_to_mesh(const std::string &in_path, const std::string &o
     TessParams tp;
     tp.deflection = deflection;
     tp.max_angle = angular_deg * 3.14159265358979323846 / 180.0;
+    tp.model_scale = model_scale; // >0 => adaptive per-surface density
 
     adacpp::step::Resolver master(idx);
     master.build_metadata(idx.lists);
@@ -177,17 +181,30 @@ inline long stream_step_to_mesh(const std::string &in_path, const std::string &o
 
     int nthreads = num_threads > 0 ? num_threads : (int) adacpp::effective_concurrency();
 
-    // LPT: heaviest solids first so big ones start while every thread is busy.
+    // LPT: heaviest solids first so big ones start while every thread is busy. HUGE roots
+    // (the sorted prefix with >= HUGE_FACES faces) go further: they are processed first, one
+    // at a time, with tessellate_doc's face-level pool — see step_to_glb_stream.h.
     std::vector<long> roots(idx.lists.roots.begin(), idx.lists.roots.end());
+    size_t n_huge = 0;
     if (nthreads > 1) {
+        constexpr size_t HUGE_FACES = 2048;
         std::vector<std::pair<size_t, long>> cost;
         cost.reserve(roots.size());
-        for (long sid : roots)
-            cost.emplace_back(master.solid_face_count(sid), sid);
+        size_t total_faces = 0;
+        for (long sid : roots) {
+            size_t fc = master.solid_cost_estimate(sid); // face count weighted by B-spline complexity
+            total_faces += fc;
+            cost.emplace_back(fc, sid);
+        }
         master.clear_geom_cache();
         std::sort(cost.begin(), cost.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
         for (size_t i = 0; i < cost.size(); ++i)
             roots[i] = cost[i].second;
+        // Tail-dominance test — see step_to_glb_stream.h: only a root bigger than a thread's
+        // fair share of the whole file goes through the serialized face-parallel phase.
+        const size_t fair_share = total_faces / (size_t) nthreads;
+        while (n_huge < cost.size() && cost[n_huge].first >= HUGE_FACES && cost[n_huge].first >= fair_share)
+            ++n_huge;
         prof.phase("lpt_order");
     }
 
@@ -211,8 +228,59 @@ inline long stream_step_to_mesh(const std::string &in_path, const std::string &o
     std::deque<meshwrite::MeshLane> lanes;
     for (int t = 0; t < nthreads; ++t)
         lanes.emplace_back(spill, t, fmt);
-    std::atomic<size_t> next{0};
+    std::atomic<size_t> next{n_huge};
 
+    // One root: resolve with the caller's resolver, tessellate (``tpp.threads`` > 1 runs the
+    // face-level pool), bake into the caller's lane. Shared by the huge-prefix phase and the pool.
+    auto process_root = [&](adacpp::step::Resolver &r, meshwrite::MeshLane &lane, size_t i, const TessParams &tpp) {
+        NgeomRoot root = r.resolve_root(roots[i]);
+        if (root.id.empty())
+            return;
+        NgeomDoc one;
+        one.roots.push_back(std::move(root));
+        TessMesh tm = tessellate_doc(one, tpp);
+        if (tm.indices.empty())
+            return;
+        const NgeomRoot &rr = one.roots[0];
+        const float usc = (float) r.unit_scale();
+        const std::vector<std::array<float, 16>> &tfs = rr.transforms;
+        size_t ninst = tfs.empty() ? 1 : tfs.size();
+        for (size_t k = 0; k < ninst; ++k) {
+            const std::array<float, 16> &M = tfs.empty() ? kIdentity : tfs[k];
+            if (fmt == MeshFormat::OBJ) {
+                lane.add_instance(tm.positions, tm.indices, M, usc); // welded
+            } else {
+                for (size_t e = 0; e + 2 < tm.indices.size(); e += 3) {
+                    float w0[3], w1[3], w2[3];
+                    meshwrite::bake(M, usc, &tm.positions[3 * tm.indices[e]], w0);
+                    meshwrite::bake(M, usc, &tm.positions[3 * tm.indices[e + 1]], w1);
+                    meshwrite::bake(M, usc, &tm.positions[3 * tm.indices[e + 2]], w2);
+                    lane.facet(w0, w1, w2);
+                }
+            }
+        }
+    };
+
+    // Phase A — huge prefix, one root at a time with every thread on its faces.
+    if (n_huge > 0) {
+        TessParams tph = tp;
+        tph.threads = nthreads;
+        adacpp::step::Resolver r0(idx);
+        r0.copy_metadata_from(master);
+        // Phase A resolves each huge solid single-threaded (only tessellate_doc's face pool is
+        // parallel), so bound parse_cache_ here — without it a 61k-face monster's parsed STEP
+        // statements pile up to ~2GB during its one resolve (469826's obj/stl OOM), same as the
+        // STEP->GLB path. Drops that shell to ~432MB by clearing parse_cache_ every 1024 faces
+        // (built ng:: geometry is retained). Phase B (concurrent pool) stays unbounded.
+        r0.enable_parse_cache_bounding();
+        for (size_t i = 0; i < n_huge; ++i) {
+            process_root(r0, lanes[0], i, tph);
+            r0.clear_geom_cache();
+        }
+        adacpp::mem_trim();
+    }
+
+    // Phase B — per-solid worker pool over the rest.
     auto worker = [&](int t) {
         adacpp::step::Resolver r(idx);
         r.copy_metadata_from(master);
@@ -222,32 +290,7 @@ inline long stream_step_to_mesh(const std::string &in_path, const std::string &o
             size_t i = next.fetch_add(1, std::memory_order_relaxed);
             if (i >= roots.size())
                 break;
-            NgeomRoot root = r.resolve_root(roots[i]);
-            if (!root.id.empty()) {
-                NgeomDoc one;
-                one.roots.push_back(std::move(root));
-                TessMesh tm = tessellate_doc(one, tp);
-                if (!tm.indices.empty()) {
-                    const NgeomRoot &rr = one.roots[0];
-                    const float usc = (float) r.unit_scale();
-                    const std::vector<std::array<float, 16>> &tfs = rr.transforms;
-                    size_t ninst = tfs.empty() ? 1 : tfs.size();
-                    for (size_t k = 0; k < ninst; ++k) {
-                        const std::array<float, 16> &M = tfs.empty() ? kIdentity : tfs[k];
-                        if (fmt == MeshFormat::OBJ) {
-                            lane.add_instance(tm.positions, tm.indices, M, usc); // welded
-                        } else {
-                            for (size_t e = 0; e + 2 < tm.indices.size(); e += 3) {
-                                float w0[3], w1[3], w2[3];
-                                meshwrite::bake(M, usc, &tm.positions[3 * tm.indices[e]], w0);
-                                meshwrite::bake(M, usc, &tm.positions[3 * tm.indices[e + 1]], w1);
-                                meshwrite::bake(M, usc, &tm.positions[3 * tm.indices[e + 2]], w2);
-                                lane.facet(w0, w1, w2);
-                            }
-                        }
-                    }
-                }
-            }
+            process_root(r, lane, i, tp);
             r.clear_geom_cache();
             if (++local % 128 == 0)
                 adacpp::mem_trim();
@@ -330,6 +373,9 @@ inline long stream_step_to_mesh(const std::string &in_path, const std::string &o
     if (remove_after)
         ::rmdir(spill.c_str());
     prof.note("threads", nthreads);
+    if (std::uint64_t dropped = adacpp::ngeom::tess_dropped_faces())
+        std::fprintf(stderr, "[GEOMHEALTH-JSON] {\"dropped_faces\":%llu,\"total_faces\":%llu}\n",
+                     (unsigned long long) dropped, (unsigned long long) adacpp::ngeom::tess_total_faces());
     return ok ? (long) total : -1;
 }
 

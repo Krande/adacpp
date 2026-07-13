@@ -33,7 +33,12 @@
 
 #include "../../cad/posix_compat.h"
 
+#ifdef ADACPP_HAVE_ZLIB
+#include <zlib.h>
+#endif
+
 #include "ngeom_bspline.h"  // BSplineCurve / BSplineSurface / expand_knots
+#include "ngeom_sweep.h"    // make_swept_disk (shared with the IFC reader)
 #include "ngeom_topology.h" // pulls ngeom_curves.h / ngeom_surfaces.h / ngeom_math.h
 #include "step_part21.h"
 
@@ -111,6 +116,7 @@ struct TypeLists {
     std::vector<long> srr;    // SHAPE_REPRESENTATION_RELATIONSHIP
     std::vector<long> cdsr;   // CONTEXT_DEPENDENT_SHAPE_REPRESENTATION
     std::vector<long> sdr;    // SHAPE_DEFINITION_REPRESENTATION
+    std::vector<long> nauo;   // NEXT_ASSEMBLY_USAGE_OCCURRENCE (product-tree assembly)
     std::vector<long> units;  // LENGTH_UNIT complex / SI_UNIT
 };
 
@@ -165,9 +171,16 @@ public:
     std::vector<size_t> offs; // statement-start offset, parallel to ids
     TypeLists lists;
 
-    // In-memory: the caller keeps `b` alive; statement_bytes returns views into it.
-    explicit StreamIndex(std::string_view b) : buf_(b) {
-        scan(b, nullptr);
+    // In-memory: the caller keeps `b` alive; statement_bytes returns views into it. gzip bytes are
+    // inflated into owned_ first (buf_ then views the inflated text).
+    explicit StreamIndex(std::string_view b) {
+        if (is_gzip(b.data(), b.size())) {
+            owned_ = gunzip(b.data(), b.size());
+            buf_ = owned_;
+        } else {
+            buf_ = b;
+        }
+        scan(buf_, nullptr);
     }
 
     // File-backed, pread-only (NO mmap): for environments where mmap can't lazily page a large file
@@ -185,6 +198,21 @@ public:
             return si;
         }
         si.fsize_ = (size_t) st.st_size;
+        char magic[2] = {0, 0};
+        if (::pread(si.fd_, magic, 2, 0) == 2 && is_gzip(magic, 2)) {
+            // gzip: read the whole compressed file, inflate, index in memory (no seekable fast path).
+            std::string comp;
+            comp.resize(si.fsize_);
+            ssize_t r = ::pread(si.fd_, comp.data(), si.fsize_, 0);
+            ::close(si.fd_);
+            si.fd_ = -1;
+            if (r == (ssize_t) si.fsize_) {
+                si.owned_ = gunzip(comp.data(), comp.size());
+                si.buf_ = si.owned_;
+                si.scan(si.buf_, nullptr);
+            }
+            return si;
+        }
         si.scan_pread();
         return si;
     }
@@ -208,6 +236,16 @@ public:
             si.fd_ = -1;
             return si;
         }
+        if (is_gzip((const char *) m, si.fsize_)) {
+            // gzip isn't seekable -> inflate fully, drop the fd/mmap, index the inflated text in memory.
+            si.owned_ = gunzip((const char *) m, si.fsize_);
+            ::munmap(m, si.fsize_);
+            ::close(si.fd_);
+            si.fd_ = -1;
+            si.buf_ = si.owned_;
+            si.scan(si.buf_, nullptr);
+            return si;
+        }
         ::madvise(m, si.fsize_, MADV_SEQUENTIAL);
         si.scan(std::string_view((const char *) m, si.fsize_), m); // free-behind during the scan
         ::munmap(m, si.fsize_);
@@ -228,7 +266,10 @@ public:
             ids = std::move(o.ids);
             offs = std::move(o.offs);
             lists = std::move(o.lists);
-            buf_ = o.buf_;
+            owned_ = std::move(o.owned_);
+            // If the source owned its bytes (inflated gzip), buf_ must view OUR moved buffer, not the
+            // source's now-empty one; otherwise carry the external view across verbatim.
+            buf_ = owned_.empty() ? o.buf_ : std::string_view(owned_);
             fd_ = o.fd_;
             fsize_ = o.fsize_;
             o.fd_ = -1;
@@ -539,7 +580,11 @@ private:
             const char *n0 = p;
             while (p < end && (std::isalnum((unsigned char) *p) || *p == '_'))
                 ++p;
-            if (std::string_view(n0, p - n0) == "LENGTH_UNIT")
+            std::string_view sub0(n0, p - n0);
+            // LENGTH_UNIT complex records feed detect_unit_scale; CONVERSION_BASED_UNIT records (e.g. a
+            // 'DEGREE' plane-angle unit) feed detect_angle_scale so a degree-declared cone semi-angle is
+            // converted to radians instead of read as radians (which drops the face).
+            if (sub0 == "LENGTH_UNIT" || sub0 == "CONVERSION_BASED_UNIT")
                 lists.units.push_back(id);
             return;
         }
@@ -548,7 +593,8 @@ private:
             ++p;
         std::string_view t(t0, p - t0);
         if (t == "MANIFOLD_SOLID_BREP" || t == "SHELL_BASED_SURFACE_MODEL" || t == "BREP_WITH_VOIDS" ||
-            t == "EXTRUDED_AREA_SOLID" || t == "REVOLVED_AREA_SOLID" || t == "BOOLEAN_RESULT")
+            t == "EXTRUDED_AREA_SOLID" || t == "REVOLVED_AREA_SOLID" || t == "SWEPT_DISK_SOLID" ||
+            t == "BOOLEAN_RESULT")
             lists.roots.push_back(id);
         else if (t == "STYLED_ITEM")
             lists.styled.push_back(id);
@@ -565,13 +611,52 @@ private:
             lists.cdsr.push_back(id);
         else if (t == "SHAPE_DEFINITION_REPRESENTATION")
             lists.sdr.push_back(id);
+        else if (t == "NEXT_ASSEMBLY_USAGE_OCCURRENCE")
+            lists.nauo.push_back(id);
         else if (t == "SI_UNIT")
             lists.units.push_back(id);
     }
 
-    std::string_view buf_; // in-memory mode (empty in file mode)
+    std::string_view buf_; // in-memory mode (view; may point into owned_ for inflated gzip input)
+    std::string owned_;    // owns inflated bytes when the input was gzip (buf_ then views this)
     int fd_ = -1;          // file mode (>=0)
     size_t fsize_ = 0;
+
+    // gzip magic (RFC 1952): 0x1f 0x8b. A .ifc/.stp may be gzip-compressed on disk.
+    static bool is_gzip(const char *d, size_t n) {
+        return n >= 2 && (unsigned char) d[0] == 0x1f && (unsigned char) d[1] == 0x8b;
+    }
+    // Inflate a whole gzip buffer to text. Empty on failure or when zlib isn't linked (the caller then
+    // sees 0 statements -> products_skipped, never a crash). gzip is not seekable, so it must be fully
+    // inflated up front and indexed in-memory (no mmap/pread fast path).
+    static std::string gunzip(const char *data, size_t n) {
+#ifdef ADACPP_HAVE_ZLIB
+        z_stream zs{};
+        if (inflateInit2(&zs, 15 + 16) != Z_OK) // 15 window bits + 16 => gzip header
+            return {};
+        zs.next_in = (Bytef *) data;
+        zs.avail_in = (uInt) n;
+        std::string out;
+        char tmp[1u << 16];
+        int ret;
+        do {
+            zs.next_out = (Bytef *) tmp;
+            zs.avail_out = sizeof(tmp);
+            ret = inflate(&zs, Z_NO_FLUSH);
+            if (ret != Z_OK && ret != Z_STREAM_END) {
+                inflateEnd(&zs);
+                return {};
+            }
+            out.append(tmp, sizeof(tmp) - zs.avail_out);
+        } while (ret != Z_STREAM_END);
+        inflateEnd(&zs);
+        return out;
+#else
+        (void) data;
+        (void) n;
+        return {};
+#endif
+    }
 };
 
 class Resolver {
@@ -609,7 +694,8 @@ public:
         build_colour_map(tl.styled);
         build_product_name_map(tl.sdr);
         unit_scale_ = detect_unit_scale(tl.units); // BEFORE build_transform_map — its rep_factor needs it
-        build_transform_map(tl.roots, tl.absr, tl.srr, tl.cdsr);
+        angle_scale_ = detect_angle_scale(tl.units); // radians per file plane-angle unit (DEGREE etc.)
+        build_transform_map(tl.roots, tl.absr, tl.srr, tl.cdsr, tl.nauo, tl.sdr);
         clear_geom_cache();
     }
 
@@ -622,6 +708,7 @@ public:
         path_map_ = src.path_map_;
         name_of_rep_ = src.name_of_rep_;
         unit_scale_ = src.unit_scale_;
+        angle_scale_ = src.angle_scale_;
     }
 
     // Resolve one root solid -> NgeomRoot (geometry + colour + per-instance transforms + paths).
@@ -645,6 +732,9 @@ public:
             in = nullptr;
         } else if (in->type == "REVOLVED_AREA_SOLID") {
             root.revolve = build_revolve(in); // ('', #profile, #position, #axis1, angle)
+            in = nullptr;
+        } else if (in->type == "SWEPT_DISK_SOLID") {
+            root.sweep = build_swept_disk(in); // ('', #directrix, radius, inner, start, end)
             in = nullptr;
         } else if (in->type == "BOOLEAN_RESULT") {
             root.boolean = build_boolean(in); // ('', operator, #first, #second)
@@ -741,6 +831,87 @@ public:
         return n;
     }
 
+    // Complexity weight of one surface for the LPT cost proxy. A B-spline surface costs ~ its
+    // control-point grid (nu*nv): that (not face count) is what drives tessellation time — uv-inversion
+    // + grid evaluation scale with the control net. Analytic surfaces (plane/cyl/cone/sphere/torus) are
+    // cheap -> weight 1. One index deref, no geometry built.
+    size_t surface_cost(long surf_id) {
+        const Instance *s = inst(surf_id);
+        if (!s)
+            return 1;
+        const Value *grid = nullptr; // the control_points_list (nested u-rows), when this is a B-spline
+        if (s->complex) {
+            if (const std::vector<Value> *bs = sub(s, "B_SPLINE_SURFACE"))
+                if (bs->size() > 2 && (*bs)[2].kind == Kind::List)
+                    grid = &(*bs)[2];
+        } else if (s->type == "B_SPLINE_SURFACE_WITH_KNOTS" && s->args.size() > 3 &&
+                   s->args[3].kind == Kind::List) {
+            grid = &s->args[3];
+        }
+        if (!grid || grid->items.empty())
+            return 1; // analytic surface
+        size_t nu = grid->items.size();
+        size_t nv = grid->items[0].kind == Kind::List ? grid->items[0].items.size() : 1;
+        size_t cp = nu * nv;
+        return cp < 1 ? 1 : cp;
+    }
+
+    // Surface-aware LPT cost proxy: face count weighted by per-face surface complexity. Face count
+    // alone predicts tessellation time only weakly (Spearman ~0.49) because the real cost is B-spline
+    // uv-inversion, so a small-face solid whose faces are dense B-splines (few faces, very slow) gets
+    // dispatched late and pins a worker at the tail. Sample up to kSample faces' surfaces, average
+    // their weight, and scale by the full face count. Still ~free: a handful of derefs per solid, no
+    // geometry built. Call clear_geom_cache() after the batch.
+    size_t solid_cost_estimate(long sid) {
+        size_t faces = solid_face_count(sid);
+        if (faces == 0)
+            return 0;
+        constexpr size_t kSample = 8;
+        size_t sampled = 0, weight = 0;
+        std::function<void(long)> sample_shell = [&](long shell_id) {
+            if (sampled >= kSample)
+                return;
+            const Instance *sh = inst(shell_id);
+            if (!sh)
+                return;
+            if (sh->type == "ORIENTED_CLOSED_SHELL") {
+                if (sh->args.size() > 2 && sh->args[2].is_ref())
+                    sample_shell(sh->args[2].i);
+                return;
+            }
+            if (sh->args.size() > 1 && sh->args[1].kind == Kind::List) {
+                for (const Value &f : sh->args[1].items) {
+                    if (sampled >= kSample)
+                        break;
+                    ++sampled;
+                    const Instance *face = f.is_ref() ? inst(f.i) : nullptr;
+                    if (face && (face->type == "ADVANCED_FACE" || face->type == "FACE_SURFACE") &&
+                        face->args.size() > 2 && face->args[2].is_ref())
+                        weight += surface_cost(face->args[2].i);
+                    else
+                        weight += 1;
+                }
+            }
+        };
+        const Instance *in = inst(sid);
+        if (!in || in->args.size() < 2)
+            return faces;
+        if (in->type == "MANIFOLD_SOLID_BREP" || in->type == "BREP_WITH_VOIDS") {
+            if (in->args[1].is_ref())
+                sample_shell(in->args[1].i);
+        } else if (in->args[1].kind == Kind::List) {
+            for (const Value &sh : in->args[1].items) {
+                if (sampled >= kSample)
+                    break;
+                if (sh.is_ref())
+                    sample_shell(sh.i);
+            }
+        }
+        if (sampled == 0)
+            return faces;
+        return faces * weight / sampled; // extrapolate the sampled average weight to all faces
+    }
+
     double unit_scale() const {
         return unit_scale_;
     }
@@ -758,13 +929,13 @@ private:
         TypeLists tl;
         for (const auto &[id, in] : *m_) {
             if (in->complex) {
-                if (sub(in, "LENGTH_UNIT"))
+                if (sub(in, "LENGTH_UNIT") || sub(in, "CONVERSION_BASED_UNIT"))
                     tl.units.push_back(id);
                 continue;
             }
             std::string_view t = in->type;
             if (t == "MANIFOLD_SOLID_BREP" || t == "SHELL_BASED_SURFACE_MODEL" || t == "EXTRUDED_AREA_SOLID" ||
-                t == "REVOLVED_AREA_SOLID")
+                t == "REVOLVED_AREA_SOLID" || t == "SWEPT_DISK_SOLID")
                 tl.roots.push_back(id);
             else if (t == "STYLED_ITEM")
                 tl.styled.push_back(id);
@@ -778,6 +949,8 @@ private:
                 tl.cdsr.push_back(id);
             else if (t == "SHAPE_DEFINITION_REPRESENTATION")
                 tl.sdr.push_back(id);
+            else if (t == "NEXT_ASSEMBLY_USAGE_OCCURRENCE")
+                tl.nauo.push_back(id);
             else if (t == "SI_UNIT")
                 tl.units.push_back(id);
         }
@@ -811,6 +984,7 @@ private:
     // parallel writers for those other paths too.
     bool bound_parse_cache_ = false;
     double unit_scale_ = 1.0;
+    double angle_scale_ = 1.0; // radians per the file's plane-angle unit (1.0 = radians; ~0.01745 = degrees)
     std::unordered_map<long, std::shared_ptr<ng::Surface>> surf_cache_;
     std::unordered_map<long, std::shared_ptr<ng::Curve>> curve_cache_;
     std::unordered_map<long, std::shared_ptr<ng::FaceSurfaceN>> face_cache_;
@@ -956,6 +1130,24 @@ private:
         return ex;
     }
 
+    // SWEPT_DISK_SOLID('', #directrix, radius, inner_radius, start, end) -> ng::SweepN. Directrix is a
+    // POLYLINE of 3D points; radius/inner give the disk/annulus. The inverse of emit_swept_disk, so an
+    // IFC->STEP->IFC rebar recovers the same swept disk (shared make_swept_disk with the IFC reader).
+    std::shared_ptr<ng::SweepN> build_swept_disk(const Instance *in) {
+        if (!in || in->args.size() < 3 || !in->args[1].is_ref())
+            return nullptr;
+        const Instance *dc = inst(in->args[1].i);
+        if (!dc || dc->type != "POLYLINE" || dc->args.size() < 2 || dc->args[1].kind != Kind::List)
+            return nullptr;
+        std::vector<ng::Vec3> pts;
+        for (const Value &pr : dc->args[1].items)
+            if (pr.is_ref())
+                pts.push_back(point(pr.i)); // 3D directrix point
+        double radius = in->args[2].as_double();
+        double inner = in->args.size() > 3 ? in->args[3].as_double() : 0.0; // $ => as_double() 0
+        return ng::make_swept_disk(pts, radius, inner);
+    }
+
     // REVOLVED_AREA_SOLID('', #profile, #position, #axis1, angle) -> ng::RevolveN (null if no profile).
     std::shared_ptr<ng::RevolveN> build_revolve(const Instance *in) {
         if (!in || in->args.size() < 5)
@@ -984,6 +1176,8 @@ private:
             it.extrusion = build_extrusion(in);
         else if (in->type == "REVOLVED_AREA_SOLID")
             it.revolve = build_revolve(in);
+        else if (in->type == "SWEPT_DISK_SOLID")
+            it.sweep = build_swept_disk(in);
         else if (in->type == "BOOLEAN_RESULT")
             it.boolean = build_boolean(in);
         else if (in->type == "MANIFOLD_SOLID_BREP" && in->args.size() > 1 && in->args[1].is_ref())
@@ -1175,7 +1369,9 @@ private:
                 else if (t == "CYLINDRICAL_SURFACE" && in->args.size() >= 3)
                     s = std::make_shared<ng::CylinderSurface>(fr, in->args[2].as_double());
                 else if (t == "CONICAL_SURFACE" && in->args.size() >= 4)
-                    s = std::make_shared<ng::ConeSurface>(fr, in->args[2].as_double(), in->args[3].as_double());
+                    // semi-angle is a plane-angle -> convert the file's unit (often DEGREE) to radians.
+                    s = std::make_shared<ng::ConeSurface>(fr, in->args[2].as_double(),
+                                                          in->args[3].as_double() * angle_scale_);
                 else if (t == "SPHERICAL_SURFACE" && in->args.size() >= 3)
                     s = std::make_shared<ng::SphereSurface>(fr, in->args[2].as_double());
                 else if (t == "TOROIDAL_SURFACE" && in->args.size() >= 4)
@@ -1316,6 +1512,7 @@ private:
         if (c != face_cache_.end())
             return c->second;
         auto f = std::make_shared<ng::FaceSurfaceN>();
+        f->src_id = id; // STEP ADVANCED_FACE / FACE_SURFACE entity id -> per-face clickable region label
         const Instance *in = inst(id);
         if (in && (in->type == "ADVANCED_FACE" || in->type == "FACE_SURFACE") && in->args.size() >= 4) {
             if (in->args[1].kind == Kind::List)
@@ -1493,23 +1690,14 @@ private:
     }
 
     // --- length unit -> metres (LENGTH_UNIT / SI_UNIT) ------------------------------------
+    // Only the prefixes real CAD length units use (micro..kilo), matching the Python stream reader's
+    // _SI_PREFIX_SCALE. The large SI prefixes (MEGA..EXA) are never a genuine CAD base unit — some
+    // exporters emit a bogus one (e.g. Storage_Tanks_01.stp declares SI_UNIT(.EXA.,.METRE.), which
+    // would blow ~258 m coordinates up to 2.5e20 m -> off-screen "empty scene"), so an unrecognized
+    // prefix falls through to 1.0 (treat as metres) exactly like the Python reader does.
     static double si_prefix_factor(std::string_view p) {
-        if (p == "EXA")
-            return 1e18;
-        if (p == "PETA")
-            return 1e15;
-        if (p == "TERA")
-            return 1e12;
-        if (p == "GIGA")
-            return 1e9;
-        if (p == "MEGA")
-            return 1e6;
         if (p == "KILO")
             return 1e3;
-        if (p == "HECTO")
-            return 1e2;
-        if (p == "DECA")
-            return 1e1;
         if (p == "DECI")
             return 1e-1;
         if (p == "CENTI")
@@ -1520,9 +1708,7 @@ private:
             return 1e-6;
         if (p == "NANO")
             return 1e-9;
-        if (p == "PICO")
-            return 1e-12;
-        return 1.0;
+        return 1.0; // unprefixed / uncommon-or-bogus prefix -> metres (matches the Python reader)
     }
     // SI_UNIT args: (prefix?, .METRE.). Returns the scale to metres, or <0 if not a length unit.
     static double si_length_scale(const std::vector<Value> &a) {
@@ -1565,6 +1751,44 @@ private:
             }
         }
         return best;
+    }
+
+    // Radians per the model's plane-angle unit. Default 1.0 (SI RADIAN — the common case). A
+    // CONVERSION_BASED_UNIT for PLANE_ANGLE (e.g. 'DEGREE') returns its conversion factor to radians
+    // (~0.01745). Without this, an angle value read from the file (a cone's semi-angle) is treated as
+    // radians: a 45-degree cone becomes a 45-radian cone (nonsense), its faces tessellate to zero
+    // triangles and are silently dropped.
+    double detect_angle_scale(const std::vector<long> &units) {
+        for (long id : units) {
+            const Instance *in = inst(id);
+            if (!in || !in->complex)
+                continue;
+            const auto *cbu = sub(in, "CONVERSION_BASED_UNIT");
+            if (!cbu || !sub(in, "PLANE_ANGLE_UNIT"))
+                continue;
+            // CONVERSION_BASED_UNIT(name, factor_ref); factor_ref ->
+            // PLANE_ANGLE_MEASURE_WITH_UNIT(PLANE_ANGLE_MEASURE(v), base) — v is radians per this unit.
+            // The typed value PLANE_ANGLE_MEASURE(v) parses as a Keyword arg + a List[v] arg, so scan
+            // for the first numeric (or single-element numeric list) among the measure's args.
+            for (const Value &a : *cbu) {
+                if (!a.is_ref())
+                    continue;
+                const Instance *mwu = inst(a.i);
+                if (!mwu || mwu->type != "PLANE_ANGLE_MEASURE_WITH_UNIT")
+                    continue;
+                for (const Value &x : mwu->args) {
+                    double v = 0.0;
+                    if (x.kind == Kind::Real || x.kind == Kind::Int)
+                        v = x.as_double();
+                    else if (x.kind == Kind::List && !x.items.empty() &&
+                             (x.items[0].kind == Kind::Real || x.items[0].kind == Kind::Int))
+                        v = x.items[0].as_double();
+                    if (v > 1e-12)
+                        return v;
+                }
+            }
+        }
+        return 1.0;
     }
 
     // Length-unit scale (to metres) of a representation's OWN context (its
@@ -1705,7 +1929,8 @@ private:
     }
 
     void build_transform_map(const std::vector<long> &root_ids, const std::vector<long> &absr_ids,
-                             const std::vector<long> &srr_ids, const std::vector<long> &cdsr_ids) {
+                             const std::vector<long> &srr_ids, const std::vector<long> &cdsr_ids,
+                             const std::vector<long> &nauo_ids = {}, const std::vector<long> &sdr_ids = {}) {
         std::unordered_set<long> root_set(root_ids.begin(), root_ids.end());
         // Geometry-rep items -> solid. `absr_ids` holds every rep type that can carry
         // geometry (ABSR, plain SHAPE_REPRESENTATION, ...); a rep counts as a geometry
@@ -1822,6 +2047,85 @@ private:
                 }
             if (nontrivial || mats.size() > 1) // skip pure-identity single instance
                 xform_map_[sid] = std::move(mats);
+        }
+
+        // NAUO product-assembly tree. A STEP file written with baked per-leaf geometry (e.g. our own
+        // IFC->STEP emit) carries no CDSR placement graph, so world_matrices() gives every solid a
+        // flat single-level path and the spatial hierarchy collapses on re-import. Recover it from the
+        // PRODUCT-level NEXT_ASSEMBLY_USAGE_OCCURRENCE chain: rep -> leaf PD (via SDR), child PD ->
+        // parent PD (via NAUO), walk to the assembly root and override the solid's path with the full
+        // ancestor chain (leaf level kept as the solid's own (geom_rep, product_name) for consistency
+        // with the CDSR-derived paths, so the IFC writer zones identically).
+        if (!nauo_ids.empty()) {
+            std::unordered_map<long, long> rep_pd; // rep -> leaf PRODUCT_DEFINITION
+            for (long id : sdr_ids) {
+                const Instance *in = inst(id); // SHAPE_DEFINITION_REPRESENTATION(#pds, #rep)
+                if (!in || in->complex || in->args.size() < 2 || !in->args[0].is_ref() || !in->args[1].is_ref())
+                    continue;
+                const Instance *pds = inst(in->args[0].i); // PRODUCT_DEFINITION_SHAPE(name, desc, #pd)
+                if (pds && pds->args.size() > 2 && pds->args[2].is_ref())
+                    rep_pd[in->args[1].i] = pds->args[2].i;
+            }
+            std::unordered_map<long, long> nauo_parent; // child PD -> parent PD
+            for (long id : nauo_ids) {
+                const Instance *in = inst(id); // NAUO(id,name,desc,#relating_pd,#related_pd,ref)
+                if (!in || in->complex || in->args.size() < 5 || !in->args[3].is_ref() || !in->args[4].is_ref())
+                    continue;
+                nauo_parent[in->args[4].i] = in->args[3].i; // related(child) -> relating(parent)
+            }
+            auto pd_name = [&](long pd_id) -> std::string {
+                const Instance *pd = inst(pd_id);
+                const Instance *pdf = (pd && pd->args.size() > 2 && pd->args[2].is_ref()) ? inst(pd->args[2].i) : nullptr;
+                const Instance *prod = (pdf && pdf->args.size() > 2 && pdf->args[2].is_ref()) ? inst(pdf->args[2].i) : nullptr;
+                if (prod && prod->args.size() >= 2)
+                    for (int k : {1, 0}) // PRODUCT(id, name, ...): prefer name, fall back to id
+                        if (prod->args[k].kind == Kind::Str) {
+                            std::string nm = unescape(prod->args[k].s);
+                            const char *ws = " \t\n\r\f\v";
+                            size_t a = nm.find_first_not_of(ws), b = nm.find_last_not_of(ws);
+                            if (a != std::string::npos)
+                                return nm.substr(a, b - a + 1);
+                        }
+                return "asm_" + std::to_string(pd_id);
+            };
+            for (long sid : root_ids) {
+                auto git = geomrep_of_solid.find(sid);
+                if (git == geomrep_of_solid.end())
+                    continue;
+                // Only recover hierarchy from NAUO when CDSR/world_matrices left this solid with a
+                // FLAT path (no assembly nesting) — the baked per-leaf case this fallback targets. A
+                // file with a real CDSR placement graph (e.g. the crane: 10795 CDSR) already has
+                // correct multi-level paths; overwriting them with the deep NAUO ancestor chain is
+                // redundant AND, on a deep/wide assembly, explodes the GLB scene-hierarchy build
+                // (build_scene_extras): ~5x slower + ~700 MB heavier on the crane STEP->GLB.
+                auto exist = path_map_.find(sid);
+                if (exist != path_map_.end() &&
+                    std::any_of(exist->second.begin(), exist->second.end(),
+                                [](const Path &p) { return p.size() > 1; }))
+                    continue; // already has a real CDSR hierarchy — keep it
+                auto rit = rep_pd.find(git->second);
+                if (rit == rep_pd.end())
+                    continue;
+                // Walk the ancestor PD chain above the leaf PD (root-first, excluding the leaf).
+                std::vector<std::pair<long, std::string>> ancestors;
+                std::unordered_set<long> seen;
+                long cur = rit->second; // leaf PD
+                seen.insert(cur);
+                int guard = 0;
+                for (auto pit = nauo_parent.find(cur); pit != nauo_parent.end() && guard++ < 64;
+                     pit = nauo_parent.find(cur)) {
+                    cur = pit->second;
+                    if (!seen.insert(cur).second)
+                        break; // cycle guard
+                    ancestors.push_back({cur, pd_name(cur)});
+                }
+                if (ancestors.empty())
+                    continue; // no assembly nesting -> keep the flat path
+                std::reverse(ancestors.begin(), ancestors.end()); // root-first
+                Path path = std::move(ancestors);
+                path.push_back(path_level(git->second)); // leaf: solid's own (geom_rep, product_name)
+                path_map_[sid] = {std::move(path)};
+            }
         }
     }
 };

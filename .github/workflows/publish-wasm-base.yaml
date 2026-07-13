@@ -78,7 +78,17 @@ jobs:
         # diff utility. OCC-free -> a quick emcc build.
         run: pixi run -e wasm wbuild-glbdiff
 
-      - name: Stage /out (wheel + manifest + sha + step-glb + glb-diff wasm)
+      - name: Build the no-pyodide IFC->GLB wasm module
+        # Standalone embind module (no OCCT, no pyodide, no ifcopenshell) for the viewer's in-browser
+        # IFC->GLB (IfcResolver -> libtess2 -> GLB). OCC-free -> a quick emcc build.
+        run: pixi run -e wasm wbuild-ifcglb
+
+      - name: Build the no-pyodide B-rep writer wasm module
+        # Standalone embind module (no OCCT, no pyodide, no ifcopenshell) for the viewer's in-browser
+        # STEP<->IFC writers (no tessellation). OCC-free -> a quick emcc build.
+        run: pixi run -e wasm wbuild-brepwriter
+
+      - name: Stage /out (wheel + manifest + sha + step-glb + glb-diff + ifc-glb + brep-writer wasm)
         run: |
           mkdir -p out out/wasm
           cp dist/ada_cpp-*.whl out/
@@ -86,11 +96,15 @@ jobs:
           cp build-wasm-stepglb/wasm_output/adacpp_step_glb.wasm out/wasm/
           cp build-wasm-glbdiff/wasm_output/adacpp_glb_diff.js out/wasm/
           cp build-wasm-glbdiff/wasm_output/adacpp_glb_diff.wasm out/wasm/
+          cp build-wasm-ifcglb/wasm_output/adacpp_ifc_glb.js out/wasm/
+          cp build-wasm-ifcglb/wasm_output/adacpp_ifc_glb.wasm out/wasm/
+          cp build-wasm-brepwriter/wasm_output/adacpp_brep_writer.js out/wasm/
+          cp build-wasm-brepwriter/wasm_output/adacpp_brep_writer.wasm out/wasm/
           cd out
           wheel=$(ls ada_cpp-*.whl)
           printf '{"adacpp":"%s"}\n' "$wheel" > manifest.json
           printf '%s\n' "${GITHUB_SHA}" > adacpp.sha
-          echo "Staged $wheel + out/wasm/ (adacpp_step_glb + adacpp_glb_diff .js/.wasm)"
+          echo "Staged $wheel + out/wasm/ (adacpp_step_glb + adacpp_glb_diff + adacpp_ifc_glb + adacpp_brep_writer .js/.wasm)"
 
       - uses: docker/setup-buildx-action@v4
 

@@ -17,6 +17,7 @@
 
 #include "ngeom_boolean.h" // OCC-free CSG (Manifold) for boolean roots
 #include "ngeom_bspline.h"
+#include "ngeom_weld.h" // vertex weld + crease-angle smooth normals (per root)
 #include "ngeom_surfaces.h"
 #include "tesselator.h" // vendored libtess2 (fails soft via setjmp/longjmp -> tessTesselate
                         // returns 0 on any sweep error; no panic to guard against, unlike the original wasm build)
@@ -36,6 +37,23 @@ const bool FDBG = std::getenv("NGEOM_FDBG") != nullptr;
 // NGEOM_TESSDBG: step-by-step tess-path logging (surface params, path, grid dims, pre/post-refine
 // triangle counts, all tess params) — for head-to-head comparison with the reference tessellator's face-debug dump.
 const bool TESSDBG = std::getenv("NGEOM_TESSDBG") != nullptr;
+
+// Face-merge batch size for the huge single-root face-parallel path (tessellate_one_root). The
+// per-face local meshes are held resident until merged; on a 61k-face monster solid the full
+// locals[] is a SECOND complete copy of the solid's soup (~0.5 GB with normals), inflating that
+// root's transient peak. Processing faces in BATCHES caps the resident local meshes to one batch,
+// keeping the merge byte-identical (same face-order append). Defensive memory hygiene — measurably
+// trims the face-parallel merge transient, though it is not the dominant term in the 469826 case.
+// ADA_TESS_FACE_MERGE_BATCH: batch size (default 4096); 0 disables batching (old all-at-once path).
+inline size_t tess_face_merge_batch() {
+    if (const char *e = std::getenv("ADA_TESS_FACE_MERGE_BATCH")) {
+        char *end = nullptr;
+        long v = std::strtol(e, &end, 10);
+        if (end != e && v >= 0)
+            return (size_t) v;
+    }
+    return 4096;
+}
 
 // ---- diagnostics (env-gated) ----------------------------------------------------------------
 [[maybe_unused]] const char *surf_kind(const Surface &s) {
@@ -359,7 +377,7 @@ void delaunay_flip(const std::vector<Uv> &verts, std::vector<Tri> &tris, double 
 }
 
 void refine_uv(const Surface &s, std::vector<Uv> &verts, std::vector<Tri> &tris, double max_du, double max_dv,
-               double defl, bool have_metric, double su, double sv) {
+               double defl, bool have_metric, double su, double sv, double max_angle) {
     std::vector<Vec3> pts3(verts.size());
     for (size_t i = 0; i < verts.size(); ++i)
         pts3[i] = s.point(verts[i][0], verts[i][1]);
@@ -393,9 +411,20 @@ void refine_uv(const Surface &s, std::vector<Uv> &verts, std::vector<Tri> &tris,
 
     auto key = [](uint32_t i, uint32_t j) { return std::make_pair(std::min(i, j), std::max(i, j)); };
 
+    // Angular refinement: split an edge whose surface normal turns more than the (adaptive) max_angle
+    // across it. This is SCALE-INVARIANT, so it captures curved-but-shallow features (a bevel cut into
+    // a large solid, whose chord sag is far below `defl` — the chord-deviation test alone misses it
+    // entirely on a small model). Uses the SAME adaptive relaxation as the boundary discretization so a
+    // tiny curved feature (a bolt on a big assembly) doesn't over-refine — only surfaces at/above ~1%
+    // of the model diagonal get the fine angle. Floored by an absolute min 3D edge length so a sharp
+    // fillet can't recurse without bound; the 12-pass + budget caps below also bound it.
+    const double eff_angle = adaptive_max_angle(s.approx_size(), max_angle);
+    const double cos_max_angle = eff_angle > 0.0 ? std::cos(eff_angle) : -2.0;
+    const double ang_min_len2 = std::pow(std::max(s.approx_size() * 1e-3, 1e-6), 2.0);
+
     for (int pass = 0; pass < 12; ++pass) {
         std::set<std::pair<uint32_t, uint32_t>> marked;
-        // 0 = no, 1 = parametric, 2 = deviation
+        // 0 = no, 1 = parametric, 2 = deviation, 3 = angular
         auto edge_needs_split = [&](uint32_t i, uint32_t j) -> int {
             const Uv &a = verts[i];
             const Uv &b = verts[j];
@@ -406,6 +435,14 @@ void refine_uv(const Surface &s, std::vector<Uv> &verts, std::vector<Tri> &tris,
             Vec3 pa = pts3[i];
             Vec3 chord = pts3[j] - pa;
             double l2 = chord.dot(chord);
+            // Angular split runs BEFORE the chord sub-resolution floor: a small edge across a rounded
+            // feature has a large normal turn but a tiny chord sag, so the floor below would wrongly skip it.
+            if (max_angle > 0.0 && l2 > ang_min_len2) {
+                Vec3 na = s.normal(a[0], a[1]);
+                Vec3 nb = s.normal(b[0], b[1]);
+                if (na.dot(nb) < cos_max_angle)
+                    return 3;
+            }
             if (l2 < (4.0 * defl) * (4.0 * defl))
                 return 0; // sub-resolution floor
             Vec3 m = s.point((a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5);
@@ -560,7 +597,7 @@ void refine_and_emit(const Surface &s, std::vector<Uv> verts, std::vector<Tri> t
     bool needs_dev = dynamic_cast<const PlaneSurface *>(&s) == nullptr;
     size_t pre_refine = tris.size();
     if (std::isfinite(max_du) || std::isfinite(max_dv) || needs_dev)
-        refine_uv(s, verts, tris, max_du, max_dv, tp.deflection, needs_dev, su, sv);
+        refine_uv(s, verts, tris, max_du, max_dv, tp.deflection, needs_dev, su, sv, tp.max_angle);
     if (TESSDBG) {
         std::fprintf(stderr, "TESSDBG   refine_and_emit surf=%s", surf_kind(s));
         log_surf_params(s);
@@ -680,7 +717,14 @@ Rect full_patch_rect(const Surface &s, const std::vector<std::vector<Uv>> &conto
     double ddu = std::abs(du1 - du0), ddv = std::abs(dv1 - dv0);
     if (ddu < 1e-12 || ddv < 1e-12 || du < 1e-6 * ddu || dv < 1e-6 * ddv)
         return {};
-    if (std::abs(poly_area(contours[0])) < 0.92 * du * dv)
+    // Fill the UV bbox as a full grid ONLY when the trim loop essentially IS that rectangle. A truly
+    // untrimmed patch fills its bbox exactly (straight u=const/v=const domain edges lose no area when
+    // discretized, so ratio ~1.0); anything materially below that has curved trim edges cutting into
+    // the bbox (e.g. a bevel cut to fit its neighbours — ratio ~0.95), and filling the rectangle would
+    // replace those trim curves with straight bbox edges. Those must go through the trim-respecting
+    // emit_uv_region path instead.
+    double area_ratio = std::abs(poly_area(contours[0])) / (du * dv);
+    if (area_ratio < 0.995)
         return {};
     return {clampd(umin, du0, du1), clampd(umax, du0, du1), clampd(vmin, dv0, dv1), clampd(vmax, dv0, dv1), true};
 }
@@ -776,9 +820,18 @@ bool tessellate_unbounded(const Surface &s, const TessParams &tp, bool same_sens
         v1 = TWO_PI;
     } else if (const auto *b = dynamic_cast<const BSplineSurface *>(&s)) {
         b->domain(u0, u1, v0, v1);
+        // Full-domain B-spline via the knot-span grid + deflection refinement (budgeted),
+        // NOT the raw parameter-step grid below: u/v parameter scales are unrelated, and
+        // `dv = min(v_step, du)` explodes when one span is degenerate. Real case (Valve
+        // Hall, a 6-face 'DC Voltage Divider' body): a slit-bounded deg-7x7 patch with
+        // u-domain 6.5e-8 wide clamped dv to 6.5e-8 over v-range 0.5 -> nv = 7.8M rows
+        // -> 62.4M triangles from ONE face, 114 s of a 123 s conversion.
+        return tessellate_uv_grid(s, u0, u1, v0, v1, tp, same_sense, mesh);
     } else {
         return false;
     }
+    // Angular parameter grid for the closed quadrics (u/v are both angles here, so the
+    // isotropy clamp is sound).
     double du = s.u_step(tp.deflection, tp.max_angle);
     double dv = std::min(s.v_step(tp.deflection, tp.max_angle), du);
     int nu = std::max(4, (int) std::ceil((u1 - u0) / du));
@@ -1423,8 +1476,20 @@ bool tessellate_face_impl(const FaceSurfaceN &face, const TessParams &tp, TessMe
         return false;
     }
 
+    // Placeholder-plane face (plain IfcFace / explicit face-set polygon): the declared surface is the
+    // z=0 identity plane, so fit the REAL plane from the 3D loop up front. Without this the 3D poly
+    // projects validly onto z=0 (face_to_mesh succeeds, so the on-failure re-fit below never runs) and
+    // the whole face-set collapses flat.
+    std::shared_ptr<PlaneSurface> refit;
+    if (face.fit_plane_from_loop) {
+        refit = fit_plane(loops3d);
+        if (refit)
+            same_sense = true; // fitted normal follows the loop winding
+    }
+    const Surface &use_surf = refit ? *refit : surf;
+
     auto cp = mesh.checkpoint();
-    const char *reason = face_to_mesh(surf, loops3d, tp, same_sense, mesh);
+    const char *reason = face_to_mesh(use_surf, loops3d, tp, same_sense, mesh);
     if (!reason)
         return true;
 
@@ -1442,7 +1507,7 @@ bool tessellate_face_impl(const FaceSurfaceN &face, const TessParams &tp, TessMe
             if (fl.size() != loops3d.size())
                 continue;
             auto cp2 = mesh.checkpoint();
-            if (!face_to_mesh(surf, fl, fine, same_sense, mesh))
+            if (!face_to_mesh(use_surf, fl, fine, same_sense, mesh))
                 return true;
             mesh.rollback(cp2);
         }
@@ -1462,26 +1527,47 @@ bool tessellate_face_impl(const FaceSurfaceN &face, const TessParams &tp, TessMe
 }
 } // namespace
 
+// Per-conversion dropped/total face counters (see ngeom_tessellate.h). Atomic so the face + root pools
+// increment safely; reset once single-threaded before a conversion, read after the pools join.
+static std::atomic<std::uint64_t> g_dropped_faces{0};
+static std::atomic<std::uint64_t> g_total_faces{0};
+std::uint64_t tess_dropped_faces() { return g_dropped_faces.load(std::memory_order_relaxed); }
+std::uint64_t tess_total_faces() { return g_total_faces.load(std::memory_order_relaxed); }
+void reset_tess_face_stats() {
+    g_dropped_faces.store(0, std::memory_order_relaxed);
+    g_total_faces.store(0, std::memory_order_relaxed);
+}
+
 bool tessellate_face(const FaceSurfaceN &face, const TessParams &tp, TessMesh &outm) {
-    if (!FDBG && !TESSDBG)
-        return tessellate_face_impl(face, tp, outm);
-    size_t i0 = outm.indices.size();
-    size_t bpts = 0;
-    for (const FaceBoundN &b : face.bounds)
-        if (b.loop)
-            bpts += b.loop->discretize(tp.deflection, tp.max_angle).size();
-    if (TESSDBG && face.surface) {
-        std::fprintf(stderr, "TESSDBG FACE surf=%s", surf_kind(*face.surface));
-        log_surf_params(*face.surface);
-        std::fprintf(stderr, " bounds=%zu bpts=%zu same_sense=%d\n", face.bounds.size(), bpts, (int) face.same_sense);
+    const size_t i0 = outm.indices.size();
+    bool ok;
+    if (!FDBG && !TESSDBG) {
+        ok = tessellate_face_impl(face, tp, outm);
+    } else {
+        size_t bpts = 0;
+        for (const FaceBoundN &b : face.bounds)
+            if (b.loop)
+                bpts += b.loop->discretize(tp.deflection, tp.max_angle).size();
+        if (TESSDBG && face.surface) {
+            std::fprintf(stderr, "TESSDBG FACE surf=%s", surf_kind(*face.surface));
+            log_surf_params(*face.surface);
+            std::fprintf(stderr, " bounds=%zu bpts=%zu same_sense=%d\n", face.bounds.size(), bpts,
+                         (int) face.same_sense);
+        }
+        ok = tessellate_face_impl(face, tp, outm);
+        if (FDBG)
+            std::fprintf(stderr, "FDBG FACE %-11s bounds=%zu bpts=%zu tris=%zu ok=%d\n",
+                         face.surface ? surf_kind(*face.surface) : "?", face.bounds.size(), bpts,
+                         (outm.indices.size() - i0) / 3, (int) ok);
+        if (TESSDBG)
+            std::fprintf(stderr, "TESSDBG FACE-DONE tris=%zu ok=%d\n", (outm.indices.size() - i0) / 3, (int) ok);
     }
-    bool ok = tessellate_face_impl(face, tp, outm);
-    if (FDBG)
-        std::fprintf(stderr, "FDBG FACE %-11s bounds=%zu bpts=%zu tris=%zu ok=%d\n",
-                     face.surface ? surf_kind(*face.surface) : "?", face.bounds.size(), bpts,
-                     (outm.indices.size() - i0) / 3, (int) ok);
-    if (TESSDBG)
-        std::fprintf(stderr, "TESSDBG FACE-DONE tris=%zu ok=%d\n", (outm.indices.size() - i0) / 3, (int) ok);
+    // Health accounting (always on): a face carrying a real trim boundary that yields NO triangles is
+    // silently dropped geometry — count it. Uses the emitted-triangle delta, not `ok`, since some
+    // failures still return true with an empty result.
+    g_total_faces.fetch_add(1, std::memory_order_relaxed);
+    if (outm.indices.size() == i0 && !face.bounds.empty())
+        g_dropped_faces.fetch_add(1, std::memory_order_relaxed);
     return ok;
 }
 
@@ -1520,6 +1606,8 @@ void tessellate_extrusion(const ExtrusionN &ex, const TessParams &tp, Mesh &mesh
         return;
     const Frame &F = ex.frame;
     const Vec3 d = ex.direction * ex.depth;
+
+    const auto cp0 = mesh.checkpoint(); // this extrusion's triangle range starts here
 
     std::vector<std::vector<Uv>> loops_uv;
     for (const FaceBoundN &b : ex.profile->bounds) {
@@ -1562,6 +1650,28 @@ void tessellate_extrusion(const ExtrusionN &ex, const TessParams &tp, Mesh &mesh
             emit_tri(mesh, b0, t1, t0);
         }
     }
+
+    // Outward-facing normals: emit_tri derives each normal from its winding, so if the profile
+    // loop's discretized orientation is CW the whole extrusion comes out inside-out (negative
+    // signed volume) and shades dark. Flip every triangle in this extrusion's range when that
+    // happens — same guard as tessellate_revolve, robust to the incoming loop orientation.
+    {
+        auto &pos = mesh.m.positions;
+        auto &nrm = mesh.m.normals;
+        const size_t vbeg = cp0[0] / 3, vend = pos.size() / 3;
+        auto Pv = [&](size_t k) -> Vec3 { return {pos[3 * k], pos[3 * k + 1], pos[3 * k + 2]}; };
+        double sv = 0.0;
+        for (size_t k = vbeg; k + 2 < vend; k += 3)
+            sv += Pv(k).dot(Pv(k + 1).cross(Pv(k + 2)));
+        if (sv < 0.0) {
+            for (size_t k = vbeg; k + 2 < vend; k += 3) {
+                for (int c = 0; c < 3; ++c)
+                    std::swap(pos[3 * (k + 1) + c], pos[3 * (k + 2) + c]);
+                for (int c = 0; c < 9; ++c)
+                    nrm[3 * k + c] = -nrm[3 * k + c];
+            }
+        }
+    }
 }
 
 // RevolvedAreaSolid -> sweep the profile boundary ring around (axis_origin, axis_dir) by angle.
@@ -1579,11 +1689,19 @@ void tessellate_revolve(const RevolveN &rv, const TessParams &tp, Mesh &mesh) {
     const double ang = (rv.angle != 0.0) ? rv.angle : TWO_PI;
 
     std::vector<Vec3> ring;
+    std::vector<std::vector<Uv>> loops_uv; // all profile loops (outer + holes) for the end caps
     for (const FaceBoundN &b : rv.profile->bounds) {
         if (!b.loop)
             continue;
-        ring = b.loop->discretize(tp.deflection, tp.max_angle);
-        break; // outer loop; revolved profiles with holes are not expected
+        std::vector<Vec3> r = b.loop->discretize(tp.deflection, tp.max_angle);
+        std::vector<Uv> uv;
+        uv.reserve(r.size());
+        for (const Vec3 &p : r)
+            uv.push_back({p.x, p.y});
+        if (uv.size() >= 3)
+            loops_uv.push_back(std::move(uv));
+        if (ring.empty())
+            ring = std::move(r); // outer loop drives the side walls
     }
     if (ring.size() > 1 && (ring.front() - ring.back()).norm() < 1e-12)
         ring.pop_back();
@@ -1608,6 +1726,7 @@ void tessellate_revolve(const RevolveN &rv, const TessParams &tp, Mesh &mesh) {
             R[j][i] = F.to_world(pr.x, pr.y, pr.z);
         }
     }
+    const auto cp0 = mesh.checkpoint(); // this revolve's triangle range starts here
     for (int j = 0; j < nseg; ++j) {
         const auto &A = R[j];
         const auto &B = R[j + 1];
@@ -1617,8 +1736,47 @@ void tessellate_revolve(const RevolveN &rv, const TessParams &tp, Mesh &mesh) {
             emit_tri(mesh, A[i], B[i2], B[i]);
         }
     }
-    // NOTE: partial revolutions (angle < 2pi) would also need the two profile end caps; adapy's
-    // Cone/Cylinder use full revolutions, so they are not generated here yet.
+
+    // Partial revolution (angle < 2pi): cap the two open ends with the triangulated
+    // profile at th=0 and th=ang, so a swept beam is a closed solid instead of an open
+    // tube. A full turn (cylinder/cone) closes on itself and needs no caps. Mirrors
+    // tessellate_sweep's start/end-cap handling (start reversed so its normal faces out).
+    if (ang < TWO_PI - 1e-6 && !loops_uv.empty()) {
+        auto Pr = [&](double th, double u, double v) -> Vec3 {
+            Vec3 pr = rotate_about({u, v, 0.0}, axo, axd, th);
+            return F.to_world(pr.x, pr.y, pr.z);
+        };
+        Tess2Out cap = run_tess2(loops_uv, 1.0, 1.0);
+        if (cap.ok) {
+            for (const Tri &t : cap.tris) {
+                const Uv &u0 = cap.verts[t[0]], &u1 = cap.verts[t[1]], &u2 = cap.verts[t[2]];
+                emit_tri(mesh, Pr(0.0, u0[0], u0[1]), Pr(0.0, u2[0], u2[1]), Pr(0.0, u1[0], u1[1]));
+                emit_tri(mesh, Pr(ang, u0[0], u0[1]), Pr(ang, u1[0], u1[1]), Pr(ang, u2[0], u2[1]));
+            }
+        }
+    }
+
+    // Outward-facing normals: emit_tri derives each normal from its winding, so if the
+    // profile loop was CW the whole revolve comes out inside-out (negative signed volume)
+    // and shades dark. Flip every triangle in this revolve's range when that happens —
+    // handles walls + caps together regardless of the incoming loop orientation.
+    {
+        auto &pos = mesh.m.positions;
+        auto &nrm = mesh.m.normals;
+        const size_t vbeg = cp0[0] / 3, vend = pos.size() / 3;
+        auto Pv = [&](size_t k) -> Vec3 { return {pos[3 * k], pos[3 * k + 1], pos[3 * k + 2]}; };
+        double sv = 0.0;
+        for (size_t k = vbeg; k + 2 < vend; k += 3)
+            sv += Pv(k).dot(Pv(k + 1).cross(Pv(k + 2)));
+        if (sv < 0.0) {
+            for (size_t k = vbeg; k + 2 < vend; k += 3) {
+                for (int c = 0; c < 3; ++c)
+                    std::swap(pos[3 * (k + 1) + c], pos[3 * (k + 2) + c]);
+                for (int c = 0; c < 9; ++c)
+                    nrm[3 * k + c] = -nrm[3 * k + c];
+            }
+        }
+    }
 }
 
 // FixedReferenceSweptAreaSolid -> sweep the profile along a precomputed field of per-station frames
@@ -1750,6 +1908,10 @@ void append_mesh(TessMesh &dst, const TessMesh &src) {
 
 // Tessellate ONE root's geometry into `out` (no group bookkeeping — the caller records ranges).
 static void tessellate_one_root(const NgeomRoot &root, const TessParams &tp, TessMesh &out) {
+    // Publish the model scale for this worker thread so the curvature functions (angle_step ->
+    // adaptive_max_angle) can relax density on small features without a signature change. Constant
+    // for the whole call, so setting it per root (idempotent) is safe under the root/face pools.
+    tls_model_scale() = tp.model_scale;
     if (root.extrusion) {
         Mesh m(out);
         tessellate_extrusion(*root.extrusion, tp, m);
@@ -1765,6 +1927,26 @@ static void tessellate_one_root(const NgeomRoot &root, const TessParams &tp, Tes
     } else if (root.sphere) {
         Mesh m(out);
         tessellate_sphere(*root.sphere, tp, m);
+    } else if (!root.polylines.empty()) {
+        // Curve-only body -> GL_LINES: emit each polyline's points as a line strip (index pairs).
+        out.mesh_type = MeshType::LINES;
+        for (const auto &line : root.polylines) {
+            if (line.size() < 2)
+                continue;
+            uint32_t base = (uint32_t) (out.positions.size() / 3);
+            for (const Vec3 &p : line) {
+                out.positions.push_back((float) p.x);
+                out.positions.push_back((float) p.y);
+                out.positions.push_back((float) p.z);
+                out.normals.push_back(0.0f);
+                out.normals.push_back(0.0f);
+                out.normals.push_back(1.0f);
+            }
+            for (uint32_t i = 0; i + 1 < line.size(); ++i) {
+                out.indices.push_back(base + i);
+                out.indices.push_back(base + i + 1);
+            }
+        }
     } else {
         if (FDBG) {
             size_t nnull = 0;
@@ -1773,9 +1955,68 @@ static void tessellate_one_root(const NgeomRoot &root, const TessParams &tp, Tes
                     ++nnull;
             std::fprintf(stderr, "FDBG ROOT id=%s faces=%zu null=%zu\n", root.id.c_str(), root.faces.size(), nnull);
         }
-        for (const auto &face : root.faces)
-            if (face)
+        // Face-parallel path for a single HUGE face-set root (tp.threads > 1): one
+        // 61k-face solid otherwise pins a lone worker for the whole conversion tail
+        // (469826: 54 s on one thread while the other three idle after 20 s). Faces
+        // are independent (each tessellate_face builds its own libtess2 tessellator);
+        // per-face local meshes merged in face order keep the output identical to
+        // the serial loop. The 64-face floor keeps small solids on the cheap path.
+        if (tp.threads > 1 && root.faces.size() >= 64 && !tp.capture_face_ranges) {
+            const size_t n = root.faces.size();
+            TessParams tpl = tp;
+            tpl.threads = 1; // no nested pools inside a face
+            // Batch the parallel face tessellation + in-order merge so the resident per-face local
+            // meshes never exceed one batch (a 61k-face locals[] is otherwise a full second copy of
+            // the solid soup ~0.5 GB — the 469826 obj/stl OOM). Faces within a batch run in parallel;
+            // batches (and faces within them) merge in face order, so the output is byte-identical to
+            // the old all-at-once path. batch==0 or >=n => single batch (the original behaviour).
+            size_t batch = tess_face_merge_batch();
+            if (batch == 0 || batch > n)
+                batch = n;
+            for (size_t b0 = 0; b0 < n; b0 += batch) {
+                const size_t b1 = std::min(n, b0 + batch);
+                std::vector<TessMesh> locals(b1 - b0);
+                std::atomic<size_t> next{b0};
+                unsigned nt = std::min<unsigned>((unsigned) tp.threads, (unsigned) (b1 - b0));
+                auto face_worker = [&]() {
+                    // tls_model_scale is thread_local, set (line above) ONLY on the thread that runs
+                    // tessellate_one_root. The SPAWNED face workers start at 0.0 => adaptive density
+                    // OFF => full fine tessellation for whatever share of the faces they grab. So a
+                    // huge solid's triangle count SCALED WITH THREAD COUNT and varied run-to-run with
+                    // scheduling (measured 469826: 12.44M serial -> 14.6M at 4 threads -> 15.85M at 8;
+                    // ~+17% at the 3-thread prod pod). Publishing the model scale on THIS worker makes
+                    // every face use the adaptive density => tri count is thread-invariant + deterministic.
+                    tls_model_scale() = tp.model_scale;
+                    for (size_t i = next.fetch_add(1); i < b1; i = next.fetch_add(1))
+                        if (root.faces[i])
+                            tessellate_face(*root.faces[i], tpl, locals[i - b0]);
+                };
+                std::vector<std::thread> pool;
+                pool.reserve(nt - 1);
+                for (unsigned t = 1; t < nt; ++t)
+                    pool.emplace_back(face_worker);
+                face_worker();
+                for (std::thread &th : pool)
+                    th.join();
+                for (const TessMesh &lm : locals)
+                    append_mesh(out, lm);
+            } // locals freed here -> next batch's peak is one batch, not all n faces
+            return;
+        }
+        for (size_t fi = 0; fi < root.faces.size(); ++fi) {
+            const auto &face = root.faces[fi];
+            if (!face)
+                continue;
+            if (tp.capture_face_ranges) {
+                const uint32_t s = (uint32_t) out.indices.size();
                 tessellate_face(*face, tp, out);
+                const uint32_t c = (uint32_t) out.indices.size() - s;
+                if (c > 0)
+                    out.face_ranges.push_back({s, c, face->src_id, (uint32_t) fi});
+            } else {
+                tessellate_face(*face, tp, out);
+            }
+        }
     }
 }
 
@@ -1788,12 +2029,27 @@ TessMesh tessellate_doc(const NgeomDoc &doc, const TessParams &tp) {
     // serial. Per-root parallelism is the right grain for the merge-preview generate, which streams
     // one root PER PLATE (thousands of roots) so every plate is its own pickable BatchMesh group.
     // Default (threads=1) keeps the serial path — the STEP->GLB process pool stays serial per call.
+    // Weld each ROOT independently (a shared index buffer + crease-angle smooth normals), then append
+    // — per-root keeps group boundaries + picking intact (never merges verts across solids). Skips
+    // LINES (curve bodies). tp.weld=false leaves the raw flat-shaded soup.
+    auto weld_root = [&](TessMesh &rm) {
+        if (tp.weld && rm.mesh_type == MeshType::TRIANGLES && !rm.indices.empty())
+            weld_mesh(rm.positions, rm.indices, rm.normals);
+    };
     unsigned want = tp.threads > 1 ? (unsigned) tp.threads : 1u;
     if (want <= 1 || roots.size() < 2) {
         for (const NgeomRoot &root : roots) {
+            TessMesh rm;
+            tessellate_one_root(root, tp, rm);
+            weld_root(rm);
             uint32_t first = (uint32_t) mesh.indices.size();
             uint32_t vfirst = (uint32_t) (mesh.positions.size() / 3);
-            tessellate_one_root(root, tp, mesh);
+            mesh.mesh_type = rm.mesh_type; // single-root streaming: propagate LINES/TRIANGLES
+            append_mesh(mesh, rm);
+            for (auto fr : rm.face_ranges) { // re-base per-face ranges onto the merged index buffer
+                fr.first_index += first;
+                mesh.face_ranges.push_back(fr);
+            }
             mesh.groups.push_back({root.id, first, (uint32_t) mesh.indices.size() - first, vfirst,
                                    (uint32_t) (mesh.positions.size() / 3) - vfirst});
         }
@@ -1802,12 +2058,16 @@ TessMesh tessellate_doc(const NgeomDoc &doc, const TessParams &tp) {
     std::vector<TessMesh> locals(roots.size());
     std::atomic<size_t> next{0};
     unsigned nthreads = std::min<unsigned>(want, (unsigned) roots.size());
+    TessParams tp1 = tp;
+    tp1.threads = 1; // roots already saturate the pool — no nested face pools per root
     std::vector<std::thread> pool;
     pool.reserve(nthreads);
     for (unsigned t = 0; t < nthreads; ++t)
         pool.emplace_back([&]() {
-            for (size_t i = next.fetch_add(1); i < roots.size(); i = next.fetch_add(1))
-                tessellate_one_root(roots[i], tp, locals[i]);
+            for (size_t i = next.fetch_add(1); i < roots.size(); i = next.fetch_add(1)) {
+                tessellate_one_root(roots[i], tp1, locals[i]);
+                weld_root(locals[i]);
+            }
         });
     for (std::thread &th : pool)
         th.join();
@@ -1815,6 +2075,10 @@ TessMesh tessellate_doc(const NgeomDoc &doc, const TessParams &tp) {
         uint32_t first = (uint32_t) mesh.indices.size();
         uint32_t vfirst = (uint32_t) (mesh.positions.size() / 3);
         append_mesh(mesh, locals[i]);
+        for (auto fr : locals[i].face_ranges) { // re-base per-face ranges onto the merged index buffer
+            fr.first_index += first;
+            mesh.face_ranges.push_back(fr);
+        }
         mesh.groups.push_back({roots[i].id, first, (uint32_t) mesh.indices.size() - first, vfirst,
                                (uint32_t) (mesh.positions.size() / 3) - vfirst});
     }
