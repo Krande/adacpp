@@ -698,7 +698,14 @@ Rect full_patch_rect(const Surface &s, const std::vector<std::vector<Uv>> &conto
     double ddu = std::abs(du1 - du0), ddv = std::abs(dv1 - dv0);
     if (ddu < 1e-12 || ddv < 1e-12 || du < 1e-6 * ddu || dv < 1e-6 * ddv)
         return {};
-    if (std::abs(poly_area(contours[0])) < 0.92 * du * dv)
+    // Fill the UV bbox as a full grid ONLY when the trim loop essentially IS that rectangle. A truly
+    // untrimmed patch fills its bbox exactly (straight u=const/v=const domain edges lose no area when
+    // discretized, so ratio ~1.0); anything materially below that has curved trim edges cutting into
+    // the bbox (e.g. a bevel cut to fit its neighbours — ratio ~0.95), and filling the rectangle would
+    // replace those trim curves with straight bbox edges. Those must go through the trim-respecting
+    // emit_uv_region path instead.
+    double area_ratio = std::abs(poly_area(contours[0])) / (du * dv);
+    if (area_ratio < 0.995)
         return {};
     return {clampd(umin, du0, du1), clampd(umax, du0, du1), clampd(vmin, dv0, dv1), clampd(vmax, dv0, dv1), true};
 }
