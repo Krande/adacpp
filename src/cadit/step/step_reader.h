@@ -1680,23 +1680,14 @@ private:
     }
 
     // --- length unit -> metres (LENGTH_UNIT / SI_UNIT) ------------------------------------
+    // Only the prefixes real CAD length units use (micro..kilo), matching the Python stream reader's
+    // _SI_PREFIX_SCALE. The large SI prefixes (MEGA..EXA) are never a genuine CAD base unit — some
+    // exporters emit a bogus one (e.g. Storage_Tanks_01.stp declares SI_UNIT(.EXA.,.METRE.), which
+    // would blow ~258 m coordinates up to 2.5e20 m -> off-screen "empty scene"), so an unrecognized
+    // prefix falls through to 1.0 (treat as metres) exactly like the Python reader does.
     static double si_prefix_factor(std::string_view p) {
-        if (p == "EXA")
-            return 1e18;
-        if (p == "PETA")
-            return 1e15;
-        if (p == "TERA")
-            return 1e12;
-        if (p == "GIGA")
-            return 1e9;
-        if (p == "MEGA")
-            return 1e6;
         if (p == "KILO")
             return 1e3;
-        if (p == "HECTO")
-            return 1e2;
-        if (p == "DECA")
-            return 1e1;
         if (p == "DECI")
             return 1e-1;
         if (p == "CENTI")
@@ -1707,9 +1698,7 @@ private:
             return 1e-6;
         if (p == "NANO")
             return 1e-9;
-        if (p == "PICO")
-            return 1e-12;
-        return 1.0;
+        return 1.0; // unprefixed / uncommon-or-bogus prefix -> metres (matches the Python reader)
     }
     // SI_UNIT args: (prefix?, .METRE.). Returns the scale to metres, or <0 if not a length unit.
     static double si_length_scale(const std::vector<Value> &a) {
