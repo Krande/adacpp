@@ -377,7 +377,7 @@ void delaunay_flip(const std::vector<Uv> &verts, std::vector<Tri> &tris, double 
 }
 
 void refine_uv(const Surface &s, std::vector<Uv> &verts, std::vector<Tri> &tris, double max_du, double max_dv,
-               double defl, bool have_metric, double su, double sv) {
+               double defl, bool have_metric, double su, double sv, double max_angle) {
     std::vector<Vec3> pts3(verts.size());
     for (size_t i = 0; i < verts.size(); ++i)
         pts3[i] = s.point(verts[i][0], verts[i][1]);
@@ -411,9 +411,20 @@ void refine_uv(const Surface &s, std::vector<Uv> &verts, std::vector<Tri> &tris,
 
     auto key = [](uint32_t i, uint32_t j) { return std::make_pair(std::min(i, j), std::max(i, j)); };
 
+    // Angular refinement: split an edge whose surface normal turns more than the (adaptive) max_angle
+    // across it. This is SCALE-INVARIANT, so it captures curved-but-shallow features (a bevel cut into
+    // a large solid, whose chord sag is far below `defl` — the chord-deviation test alone misses it
+    // entirely on a small model). Uses the SAME adaptive relaxation as the boundary discretization so a
+    // tiny curved feature (a bolt on a big assembly) doesn't over-refine — only surfaces at/above ~1%
+    // of the model diagonal get the fine angle. Floored by an absolute min 3D edge length so a sharp
+    // fillet can't recurse without bound; the 12-pass + budget caps below also bound it.
+    const double eff_angle = adaptive_max_angle(s.approx_size(), max_angle);
+    const double cos_max_angle = eff_angle > 0.0 ? std::cos(eff_angle) : -2.0;
+    const double ang_min_len2 = std::pow(std::max(s.approx_size() * 1e-3, 1e-6), 2.0);
+
     for (int pass = 0; pass < 12; ++pass) {
         std::set<std::pair<uint32_t, uint32_t>> marked;
-        // 0 = no, 1 = parametric, 2 = deviation
+        // 0 = no, 1 = parametric, 2 = deviation, 3 = angular
         auto edge_needs_split = [&](uint32_t i, uint32_t j) -> int {
             const Uv &a = verts[i];
             const Uv &b = verts[j];
@@ -424,6 +435,14 @@ void refine_uv(const Surface &s, std::vector<Uv> &verts, std::vector<Tri> &tris,
             Vec3 pa = pts3[i];
             Vec3 chord = pts3[j] - pa;
             double l2 = chord.dot(chord);
+            // Angular split runs BEFORE the chord sub-resolution floor: a small edge across a rounded
+            // feature has a large normal turn but a tiny chord sag, so the floor below would wrongly skip it.
+            if (max_angle > 0.0 && l2 > ang_min_len2) {
+                Vec3 na = s.normal(a[0], a[1]);
+                Vec3 nb = s.normal(b[0], b[1]);
+                if (na.dot(nb) < cos_max_angle)
+                    return 3;
+            }
             if (l2 < (4.0 * defl) * (4.0 * defl))
                 return 0; // sub-resolution floor
             Vec3 m = s.point((a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5);
@@ -578,7 +597,7 @@ void refine_and_emit(const Surface &s, std::vector<Uv> verts, std::vector<Tri> t
     bool needs_dev = dynamic_cast<const PlaneSurface *>(&s) == nullptr;
     size_t pre_refine = tris.size();
     if (std::isfinite(max_du) || std::isfinite(max_dv) || needs_dev)
-        refine_uv(s, verts, tris, max_du, max_dv, tp.deflection, needs_dev, su, sv);
+        refine_uv(s, verts, tris, max_du, max_dv, tp.deflection, needs_dev, su, sv, tp.max_angle);
     if (TESSDBG) {
         std::fprintf(stderr, "TESSDBG   refine_and_emit surf=%s", surf_kind(s));
         log_surf_params(s);
