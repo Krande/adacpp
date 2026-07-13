@@ -464,50 +464,69 @@ struct LinearExtrusionSurface : Surface {
         // (e.g. knots ~[45.9,71.3]) and seeds Newton onto the wrong fold -> garbled UV loop -> tess2
         // finds no triangles. A dense profile-parameter seed at the curve's own sampling density,
         // then a 1D Newton on the perpendicular distance, converges to the correct u.
+        // squared distance from p to the profile PERPENDICULAR to dir, as a function of profile param
         auto perp2 = [&](double uu) {
             Vec3 d = profile->point(uu) - p;
             double along = dir.dot(d);
             Vec3 perp = d - dir * along;
             return perp.dot(perp);
         };
-        int nseed = profile->uniform_edge_segments();
-        if (nseed <= 0)
-            nseed = std::max(32, profile->discretize_spans(umin, umax) * 4);
-        nseed = nseed < 32 ? 32 : (nseed > 2048 ? 2048 : nseed);
-        double useed = (std::isfinite(uhint) && uhint >= umin && uhint <= umax) ? uhint : umin;
-        double best = perp2(useed);
-        for (int i = 0; i <= nseed; ++i) {
-            double uu = umin + (umax - umin) * i / nseed;
-            double g = perp2(uu);
-            if (g < best) {
-                best = g;
-                useed = uu;
+        double span = umax - umin;
+        double h = span * 1e-6 + 1e-12;
+        // damped 1D Newton on perp2(u) from a seed, clamped to the profile domain
+        auto refine = [&](double useed) {
+            double uu = clampd(useed, umin, umax);
+            for (int it = 0; it < 40; ++it) {
+                double gm = perp2(uu - h), gp = perp2(uu + h), g0 = perp2(uu);
+                double g1 = (gp - gm) * (0.5 / h);          // g'(u)
+                double g2 = (gp - 2.0 * g0 + gm) / (h * h); // g''(u)
+                if (!(std::abs(g2) > 1e-300))
+                    break;
+                double un = clampd(uu - g1 / g2, umin, umax);
+                if (std::abs(un - uu) < span * 1e-12)
+                    break;
+                uu = un;
             }
-        }
-        u = useed;
-        double h = (umax - umin) * 1e-6 + 1e-12;
-        for (int it = 0; it < 40; ++it) {
-            double gm = perp2(u - h), gp = perp2(u + h), g0 = perp2(u);
-            double g1 = (gp - gm) * (0.5 / h);        // g'(u)
-            double g2 = (gp - 2.0 * g0 + gm) / (h * h); // g''(u)
-            if (!(std::abs(g2) > 1e-300))
-                break;
-            double un = clampd(u - g1 / g2, umin, umax);
-            if (std::abs(un - u) < (umax - umin) * 1e-12)
-                break;
-            u = un;
-        }
+            return uu;
+        };
         // v is NOT clamped to [0, depth]: a STEP SURFACE_OF_LINEAR_EXTRUSION is semi-infinite along
         // its axis — the VECTOR magnitude (-> depth) is only a parameter scale, the real extent is set
         // by the trimming face bounds. Clamping to depth pins every boundary point past v=depth onto
         // the v=depth line, collapsing the UV loop (residual == |true_v - depth|) and dropping the face.
         (void) vmin;
         (void) vmax;
-        v = dir.dot(p - profile->point(u));
+        const double tol = 1e-4 * std::max(1.0, approx_size());
+        auto accept = [&](double uu) {
+            u = uu;
+            v = dir.dot(p - profile->point(uu));
+            return (point(u, v) - p).norm();
+        };
+        // Hint first: follow the previous boundary point's branch so consecutive points stay on the
+        // same fold of a self-approaching profile. A global rescan per point would let adjacent points
+        // snap to different folds, producing a self-intersecting UV loop that tess2 fills BEYOND the
+        // true face (triangles extending past its limits). Only rescan when there is no usable hint or
+        // the hint doesn't converge (residual > tol), then take the globally-nearest fold.
+        if (std::isfinite(uhint) && uhint >= umin && uhint <= umax) {
+            if (accept(refine(uhint)) < tol)
+                return true;
+        }
+        int nseed = profile->uniform_edge_segments();
+        if (nseed <= 0)
+            nseed = std::max(32, profile->discretize_spans(umin, umax) * 4);
+        nseed = nseed < 32 ? 32 : (nseed > 2048 ? 2048 : nseed);
+        double useed = umin, best = perp2(umin);
+        for (int i = 1; i <= nseed; ++i) {
+            double uu = umin + span * i / nseed;
+            double g = perp2(uu);
+            if (g < best) {
+                best = g;
+                useed = uu;
+            }
+        }
         // relative tolerance: the 3D boundary point is chord-discretized off the analytic surface by
         // up to ~deflection, so a strict abs check would spuriously reject good inversions on a curved
-        // profile. A truly-off point (wrong fold / clamped v) misses by O(depth), far above this.
-        return (point(u, v) - p).norm() < 1e-4 * std::max(1.0, approx_size());
+        // profile. A truly-off point (wrong fold) misses by O(profile self-approach gap), well above.
+        return accept(refine(useed)) < tol;
     }
     // density floor along the profile (Rust geom.rs Surface::u_step Extrusion arm); v (along dir)
     // is ruled -> INFINITY (base default), matching Rust's `_ => INFINITY` for extrusion v_step.
