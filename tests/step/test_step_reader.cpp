@@ -151,6 +151,41 @@ static void test_curved_surfaces_and_polyloop() {
         CHECK(vclose(lp.polygon[2], 1, 1, 0), "poly-loop point 2");
 }
 
+// A single conical face whose semi-angle (45) is declared in DEGREES via a CONVERSION_BASED_UNIT
+// plane-angle unit. The reader must convert it to radians (pi/4), not read 45 as radians — the
+// latter produces a garbage cone that tessellates to nothing (the GeneratorSet dropped-faces bug).
+static const char *kDegreeConeSolid =
+    "ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\n"
+    "#1=CARTESIAN_POINT('',(0.,0.,0.));\n"
+    "#2=CARTESIAN_POINT('',(1.,0.,0.));\n"
+    "#3=CARTESIAN_POINT('',(1.,1.,0.));\n"
+    "#4=CARTESIAN_POINT('',(0.,1.,0.));\n"
+    "#5=DIRECTION('',(0.,0.,1.));\n"
+    "#6=DIRECTION('',(1.,0.,0.));\n"
+    "#7=AXIS2_PLACEMENT_3D('',#1,#5,#6);\n"
+    "#10=POLY_LOOP('',(#1,#2,#3,#4));\n"
+    "#11=FACE_OUTER_BOUND('',#10,.T.);\n"
+    "#21=CONICAL_SURFACE('',#7,2.,45.);\n"
+    "#31=ADVANCED_FACE('con',(#11),#21,.T.);\n"
+    "#40=CLOSED_SHELL('',(#31));\n"
+    "#50=MANIFOLD_SOLID_BREP('cone',#40);\n"
+    "#22=(NAMED_UNIT(*)PLANE_ANGLE_UNIT()SI_UNIT($,.RADIAN.));\n"
+    "#24=PLANE_ANGLE_MEASURE_WITH_UNIT(PLANE_ANGLE_MEASURE(0.017453292519943295),#22);\n"
+    "#28=(CONVERSION_BASED_UNIT('DEGREE',#24)NAMED_UNIT(#22)PLANE_ANGLE_UNIT());\n"
+    "ENDSEC;\nEND-ISO-10303-21;\n";
+
+static void test_degree_angle_unit() {
+    std::vector<Instance> store;
+    ng::NgeomDoc doc = read_step_brep(kDegreeConeSolid, store);
+    CHECK(doc.roots.size() == 1 && doc.roots[0].faces.size() == 1, "degree-cone solid: 1 face");
+    if (doc.roots.empty() || doc.roots[0].faces.empty())
+        return;
+    auto *con = dynamic_cast<const ng::ConeSurface *>(doc.roots[0].faces[0]->surface.get());
+    CHECK(con && std::abs(con->r0 - 2.0) < 1e-9, "cone radius 2");
+    // 45 DEGREE -> pi/4 rad; read as radians it would stay 45 and the cone would tessellate empty.
+    CHECK(con && std::abs(con->semi_angle - 0.78539816339744831) < 1e-6, "semi-angle 45 DEG -> pi/4 rad");
+}
+
 // A circular disk: a planar face bounded by one full-circle EDGE_CURVE (CIRCLE geometry).
 static const char *kDiskSolid = "ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\n"
                                 "#1=CARTESIAN_POINT('',(0.,0.,0.));\n"
@@ -464,6 +499,7 @@ int main() {
     test_resolve_structure();
     test_tessellate();
     test_curved_surfaces_and_polyloop();
+    test_degree_angle_unit();
     test_conic_edge();
     test_bspline_surfaces();
     test_bspline_edge_curve();

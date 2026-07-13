@@ -580,7 +580,11 @@ private:
             const char *n0 = p;
             while (p < end && (std::isalnum((unsigned char) *p) || *p == '_'))
                 ++p;
-            if (std::string_view(n0, p - n0) == "LENGTH_UNIT")
+            std::string_view sub0(n0, p - n0);
+            // LENGTH_UNIT complex records feed detect_unit_scale; CONVERSION_BASED_UNIT records (e.g. a
+            // 'DEGREE' plane-angle unit) feed detect_angle_scale so a degree-declared cone semi-angle is
+            // converted to radians instead of read as radians (which drops the face).
+            if (sub0 == "LENGTH_UNIT" || sub0 == "CONVERSION_BASED_UNIT")
                 lists.units.push_back(id);
             return;
         }
@@ -690,6 +694,7 @@ public:
         build_colour_map(tl.styled);
         build_product_name_map(tl.sdr);
         unit_scale_ = detect_unit_scale(tl.units); // BEFORE build_transform_map — its rep_factor needs it
+        angle_scale_ = detect_angle_scale(tl.units); // radians per file plane-angle unit (DEGREE etc.)
         build_transform_map(tl.roots, tl.absr, tl.srr, tl.cdsr, tl.nauo, tl.sdr);
         clear_geom_cache();
     }
@@ -703,6 +708,7 @@ public:
         path_map_ = src.path_map_;
         name_of_rep_ = src.name_of_rep_;
         unit_scale_ = src.unit_scale_;
+        angle_scale_ = src.angle_scale_;
     }
 
     // Resolve one root solid -> NgeomRoot (geometry + colour + per-instance transforms + paths).
@@ -923,7 +929,7 @@ private:
         TypeLists tl;
         for (const auto &[id, in] : *m_) {
             if (in->complex) {
-                if (sub(in, "LENGTH_UNIT"))
+                if (sub(in, "LENGTH_UNIT") || sub(in, "CONVERSION_BASED_UNIT"))
                     tl.units.push_back(id);
                 continue;
             }
@@ -978,6 +984,7 @@ private:
     // parallel writers for those other paths too.
     bool bound_parse_cache_ = false;
     double unit_scale_ = 1.0;
+    double angle_scale_ = 1.0; // radians per the file's plane-angle unit (1.0 = radians; ~0.01745 = degrees)
     std::unordered_map<long, std::shared_ptr<ng::Surface>> surf_cache_;
     std::unordered_map<long, std::shared_ptr<ng::Curve>> curve_cache_;
     std::unordered_map<long, std::shared_ptr<ng::FaceSurfaceN>> face_cache_;
@@ -1362,7 +1369,9 @@ private:
                 else if (t == "CYLINDRICAL_SURFACE" && in->args.size() >= 3)
                     s = std::make_shared<ng::CylinderSurface>(fr, in->args[2].as_double());
                 else if (t == "CONICAL_SURFACE" && in->args.size() >= 4)
-                    s = std::make_shared<ng::ConeSurface>(fr, in->args[2].as_double(), in->args[3].as_double());
+                    // semi-angle is a plane-angle -> convert the file's unit (often DEGREE) to radians.
+                    s = std::make_shared<ng::ConeSurface>(fr, in->args[2].as_double(),
+                                                          in->args[3].as_double() * angle_scale_);
                 else if (t == "SPHERICAL_SURFACE" && in->args.size() >= 3)
                     s = std::make_shared<ng::SphereSurface>(fr, in->args[2].as_double());
                 else if (t == "TOROIDAL_SURFACE" && in->args.size() >= 4)
@@ -1742,6 +1751,44 @@ private:
             }
         }
         return best;
+    }
+
+    // Radians per the model's plane-angle unit. Default 1.0 (SI RADIAN — the common case). A
+    // CONVERSION_BASED_UNIT for PLANE_ANGLE (e.g. 'DEGREE') returns its conversion factor to radians
+    // (~0.01745). Without this, an angle value read from the file (a cone's semi-angle) is treated as
+    // radians: a 45-degree cone becomes a 45-radian cone (nonsense), its faces tessellate to zero
+    // triangles and are silently dropped.
+    double detect_angle_scale(const std::vector<long> &units) {
+        for (long id : units) {
+            const Instance *in = inst(id);
+            if (!in || !in->complex)
+                continue;
+            const auto *cbu = sub(in, "CONVERSION_BASED_UNIT");
+            if (!cbu || !sub(in, "PLANE_ANGLE_UNIT"))
+                continue;
+            // CONVERSION_BASED_UNIT(name, factor_ref); factor_ref ->
+            // PLANE_ANGLE_MEASURE_WITH_UNIT(PLANE_ANGLE_MEASURE(v), base) — v is radians per this unit.
+            // The typed value PLANE_ANGLE_MEASURE(v) parses as a Keyword arg + a List[v] arg, so scan
+            // for the first numeric (or single-element numeric list) among the measure's args.
+            for (const Value &a : *cbu) {
+                if (!a.is_ref())
+                    continue;
+                const Instance *mwu = inst(a.i);
+                if (!mwu || mwu->type != "PLANE_ANGLE_MEASURE_WITH_UNIT")
+                    continue;
+                for (const Value &x : mwu->args) {
+                    double v = 0.0;
+                    if (x.kind == Kind::Real || x.kind == Kind::Int)
+                        v = x.as_double();
+                    else if (x.kind == Kind::List && !x.items.empty() &&
+                             (x.items[0].kind == Kind::Real || x.items[0].kind == Kind::Int))
+                        v = x.items[0].as_double();
+                    if (v > 1e-12)
+                        return v;
+                }
+            }
+        }
+        return 1.0;
     }
 
     // Length-unit scale (to metres) of a representation's OWN context (its
