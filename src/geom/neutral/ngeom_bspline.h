@@ -454,10 +454,60 @@ struct LinearExtrusionSurface : Surface {
     Vec3 normal(double u, double v) const override {
         return profile->tangent(u).cross(dir).normalized();
     }
-    bool uv(const Vec3 &p, double uhint, double vhint, double &u, double &v) const override {
+    bool uv(const Vec3 &p, double uhint, double, double &u, double &v) const override {
         double umin, umax, vmin, vmax;
         domain(umin, umax, vmin, vmax);
-        return newton_uv(*this, p, umin, umax, vmin, vmax, uhint, vhint, u, v);
+        // Separable inversion: point(u,v) = profile(u) + dir*v, so for any u the optimal v is the
+        // projection dir.(p - profile(u)) and u alone minimizes the residual PERPENDICULAR to dir.
+        // Search that 1D problem over the profile's OWN parameter instead of the generic 2D grid
+        // (newton_uv): a coarse uniform 12x12 grid aliases against a wiggly B-spline profile domain
+        // (e.g. knots ~[45.9,71.3]) and seeds Newton onto the wrong fold -> garbled UV loop -> tess2
+        // finds no triangles. A dense profile-parameter seed at the curve's own sampling density,
+        // then a 1D Newton on the perpendicular distance, converges to the correct u.
+        auto perp2 = [&](double uu) {
+            Vec3 d = profile->point(uu) - p;
+            double along = dir.dot(d);
+            Vec3 perp = d - dir * along;
+            return perp.dot(perp);
+        };
+        int nseed = profile->uniform_edge_segments();
+        if (nseed <= 0)
+            nseed = std::max(32, profile->discretize_spans(umin, umax) * 4);
+        nseed = nseed < 32 ? 32 : (nseed > 2048 ? 2048 : nseed);
+        double useed = (std::isfinite(uhint) && uhint >= umin && uhint <= umax) ? uhint : umin;
+        double best = perp2(useed);
+        for (int i = 0; i <= nseed; ++i) {
+            double uu = umin + (umax - umin) * i / nseed;
+            double g = perp2(uu);
+            if (g < best) {
+                best = g;
+                useed = uu;
+            }
+        }
+        u = useed;
+        double h = (umax - umin) * 1e-6 + 1e-12;
+        for (int it = 0; it < 40; ++it) {
+            double gm = perp2(u - h), gp = perp2(u + h), g0 = perp2(u);
+            double g1 = (gp - gm) * (0.5 / h);        // g'(u)
+            double g2 = (gp - 2.0 * g0 + gm) / (h * h); // g''(u)
+            if (!(std::abs(g2) > 1e-300))
+                break;
+            double un = clampd(u - g1 / g2, umin, umax);
+            if (std::abs(un - u) < (umax - umin) * 1e-12)
+                break;
+            u = un;
+        }
+        // v is NOT clamped to [0, depth]: a STEP SURFACE_OF_LINEAR_EXTRUSION is semi-infinite along
+        // its axis — the VECTOR magnitude (-> depth) is only a parameter scale, the real extent is set
+        // by the trimming face bounds. Clamping to depth pins every boundary point past v=depth onto
+        // the v=depth line, collapsing the UV loop (residual == |true_v - depth|) and dropping the face.
+        (void) vmin;
+        (void) vmax;
+        v = dir.dot(p - profile->point(u));
+        // relative tolerance: the 3D boundary point is chord-discretized off the analytic surface by
+        // up to ~deflection, so a strict abs check would spuriously reject good inversions on a curved
+        // profile. A truly-off point (wrong fold / clamped v) misses by O(depth), far above this.
+        return (point(u, v) - p).norm() < 1e-4 * std::max(1.0, approx_size());
     }
     // density floor along the profile (Rust geom.rs Surface::u_step Extrusion arm); v (along dir)
     // is ruled -> INFINITY (base default), matching Rust's `_ => INFINITY` for extrusion v_step.
