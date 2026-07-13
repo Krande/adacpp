@@ -2,6 +2,15 @@
 
 
 
+## v0.13.1 (2026-07-13)
+
+### Fix
+
+* fix: put json.hpp on the pyodide + glbdiff wasm include path (#36)
+
+Co-authored-by: Claude Opus 4.8 (1M context) &lt;noreply@anthropic.com&gt; ([`6dcd182`](https://github.com/Krande/adacpp/commit/6dcd1824ae9dc5e3697e76add3f4f855dd6f7950))
+
+
 ## v0.13.0 (2026-07-13)
 
 ### Feature
