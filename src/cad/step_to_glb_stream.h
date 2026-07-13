@@ -15,6 +15,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
+#include <cstdio>
 #include <deque>
 #include <filesystem>
 #include <string>
@@ -46,6 +48,7 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
     using namespace adacpp::ngeom;
     adacpp::prof::StepProfiler prof("stream_step_to_glb");
     adacpp::tune_malloc_for_streaming(); // bound streaming peak RSS (mmap/trim tuning) before the pool
+    adacpp::ngeom::reset_tess_face_stats(); // count dropped faces across this conversion (audit health flag)
 
     // File-backed offset index: mmap to scan (freed-behind), then pread each statement on demand so
     // the file lives in the OS page cache, not process RSS.
@@ -263,6 +266,11 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
             ::rmdir(spill.c_str());
     }
     prof.note("threads", nthreads);
+    // Emit a health line the worker folds into the audit (convert_meta) so silently-dropped faces are
+    // flagged without visual inspection. Only when something dropped — keep the common case quiet.
+    if (std::uint64_t dropped = adacpp::ngeom::tess_dropped_faces())
+        std::fprintf(stderr, "[GEOMHEALTH-JSON] {\"dropped_faces\":%llu,\"total_faces\":%llu}\n",
+                     (unsigned long long) dropped, (unsigned long long) adacpp::ngeom::tess_total_faces());
     return ok ? nwritten.load() : -1;
 }
 

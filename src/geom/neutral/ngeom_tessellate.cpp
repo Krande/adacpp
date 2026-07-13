@@ -1501,26 +1501,47 @@ bool tessellate_face_impl(const FaceSurfaceN &face, const TessParams &tp, TessMe
 }
 } // namespace
 
+// Per-conversion dropped/total face counters (see ngeom_tessellate.h). Atomic so the face + root pools
+// increment safely; reset once single-threaded before a conversion, read after the pools join.
+static std::atomic<std::uint64_t> g_dropped_faces{0};
+static std::atomic<std::uint64_t> g_total_faces{0};
+std::uint64_t tess_dropped_faces() { return g_dropped_faces.load(std::memory_order_relaxed); }
+std::uint64_t tess_total_faces() { return g_total_faces.load(std::memory_order_relaxed); }
+void reset_tess_face_stats() {
+    g_dropped_faces.store(0, std::memory_order_relaxed);
+    g_total_faces.store(0, std::memory_order_relaxed);
+}
+
 bool tessellate_face(const FaceSurfaceN &face, const TessParams &tp, TessMesh &outm) {
-    if (!FDBG && !TESSDBG)
-        return tessellate_face_impl(face, tp, outm);
-    size_t i0 = outm.indices.size();
-    size_t bpts = 0;
-    for (const FaceBoundN &b : face.bounds)
-        if (b.loop)
-            bpts += b.loop->discretize(tp.deflection, tp.max_angle).size();
-    if (TESSDBG && face.surface) {
-        std::fprintf(stderr, "TESSDBG FACE surf=%s", surf_kind(*face.surface));
-        log_surf_params(*face.surface);
-        std::fprintf(stderr, " bounds=%zu bpts=%zu same_sense=%d\n", face.bounds.size(), bpts, (int) face.same_sense);
+    const size_t i0 = outm.indices.size();
+    bool ok;
+    if (!FDBG && !TESSDBG) {
+        ok = tessellate_face_impl(face, tp, outm);
+    } else {
+        size_t bpts = 0;
+        for (const FaceBoundN &b : face.bounds)
+            if (b.loop)
+                bpts += b.loop->discretize(tp.deflection, tp.max_angle).size();
+        if (TESSDBG && face.surface) {
+            std::fprintf(stderr, "TESSDBG FACE surf=%s", surf_kind(*face.surface));
+            log_surf_params(*face.surface);
+            std::fprintf(stderr, " bounds=%zu bpts=%zu same_sense=%d\n", face.bounds.size(), bpts,
+                         (int) face.same_sense);
+        }
+        ok = tessellate_face_impl(face, tp, outm);
+        if (FDBG)
+            std::fprintf(stderr, "FDBG FACE %-11s bounds=%zu bpts=%zu tris=%zu ok=%d\n",
+                         face.surface ? surf_kind(*face.surface) : "?", face.bounds.size(), bpts,
+                         (outm.indices.size() - i0) / 3, (int) ok);
+        if (TESSDBG)
+            std::fprintf(stderr, "TESSDBG FACE-DONE tris=%zu ok=%d\n", (outm.indices.size() - i0) / 3, (int) ok);
     }
-    bool ok = tessellate_face_impl(face, tp, outm);
-    if (FDBG)
-        std::fprintf(stderr, "FDBG FACE %-11s bounds=%zu bpts=%zu tris=%zu ok=%d\n",
-                     face.surface ? surf_kind(*face.surface) : "?", face.bounds.size(), bpts,
-                     (outm.indices.size() - i0) / 3, (int) ok);
-    if (TESSDBG)
-        std::fprintf(stderr, "TESSDBG FACE-DONE tris=%zu ok=%d\n", (outm.indices.size() - i0) / 3, (int) ok);
+    // Health accounting (always on): a face carrying a real trim boundary that yields NO triangles is
+    // silently dropped geometry — count it. Uses the emitted-triangle delta, not `ok`, since some
+    // failures still return true with an empty result.
+    g_total_faces.fetch_add(1, std::memory_order_relaxed);
+    if (outm.indices.size() == i0 && !face.bounds.empty())
+        g_dropped_faces.fetch_add(1, std::memory_order_relaxed);
     return ok;
 }
 

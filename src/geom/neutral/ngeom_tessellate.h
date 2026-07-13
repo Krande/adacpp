@@ -55,6 +55,14 @@ struct TessMesh {
 // Tessellate one neutral face, appending into `out`. Returns true if it produced triangles.
 bool tessellate_face(const FaceSurfaceN &face, const TessParams &tp, TessMesh &out);
 
+// Per-conversion tessellation-health counters (thread-safe across the face/root pools): a face that
+// carries a real trim boundary but fails to produce triangles is silently DROPPED geometry — the class
+// of bug that otherwise only shows up on visual inspection. Reset before a conversion, read after, so
+// the streaming entry points can report a dropped-face count for the audit to flag.
+std::uint64_t tess_dropped_faces();
+std::uint64_t tess_total_faces();
+void reset_tess_face_stats();
+
 // Tessellate a whole decoded document (all roots), one TessMesh with a Group per root.
 TessMesh tessellate_doc(const NgeomDoc &doc, const TessParams &tp);
 

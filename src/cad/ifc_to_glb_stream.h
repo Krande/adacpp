@@ -39,6 +39,7 @@ inline long stream_ifc_to_glb(const std::string &in_path, const std::string &out
                               double model_scale = 0.0, int num_threads = 0) {
     using namespace adacpp::ngeom;
     adacpp::tune_malloc_for_streaming();
+    adacpp::ngeom::reset_tess_face_stats(); // count dropped faces (audit health flag)
     adacpp::step::StreamIndex idx = adacpp::step::StreamIndex::from_file(in_path);
     if (!idx.ok())
         return -1;
@@ -189,6 +190,9 @@ inline long stream_ifc_to_glb(const std::string &in_path, const std::string &out
     }
     if (remove_after)
         ::rmdir(spill.c_str());
+    if (std::uint64_t dropped = adacpp::ngeom::tess_dropped_faces())
+        std::fprintf(stderr, "[GEOMHEALTH-JSON] {\"dropped_faces\":%llu,\"total_faces\":%llu}\n",
+                     (unsigned long long) dropped, (unsigned long long) adacpp::ngeom::tess_total_faces());
     return ok ? nwritten.load() : -1;
 }
 

@@ -163,6 +163,7 @@ inline long stream_step_to_mesh(const std::string &in_path, const std::string &o
     static const std::array<float, 16> kIdentity = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     adacpp::prof::StepProfiler prof("stream_step_to_mesh");
     adacpp::tune_malloc_for_streaming(); // bound streaming peak RSS (mmap/trim tuning) before the pool
+    adacpp::ngeom::reset_tess_face_stats(); // count dropped faces (audit health flag)
 
     adacpp::step::StreamIndex idx = adacpp::step::StreamIndex::from_file(in_path);
     if (!idx.ok())
@@ -372,6 +373,9 @@ inline long stream_step_to_mesh(const std::string &in_path, const std::string &o
     if (remove_after)
         ::rmdir(spill.c_str());
     prof.note("threads", nthreads);
+    if (std::uint64_t dropped = adacpp::ngeom::tess_dropped_faces())
+        std::fprintf(stderr, "[GEOMHEALTH-JSON] {\"dropped_faces\":%llu,\"total_faces\":%llu}\n",
+                     (unsigned long long) dropped, (unsigned long long) adacpp::ngeom::tess_total_faces());
     return ok ? (long) total : -1;
 }
 
