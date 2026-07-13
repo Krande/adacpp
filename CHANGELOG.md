@@ -2,6 +2,15 @@
 
 
 
+## v0.13.0 (2026-07-13)
+
+### Feature
+
+* feat: pure-C++ IFC reader/writer, zero-copy NGEOM streams, tessellation perf (#35)
+
+Co-authored-by: Claude Fable 5 &lt;noreply@anthropic.com&gt; ([`d0ba3a6`](https://github.com/Krande/adacpp/commit/d0ba3a60773063525c6349a059346097396d9180))
+
+
 ## v0.12.0 (2026-07-03)
 
 ### Feature
