@@ -54,6 +54,7 @@ public:
         // subtype) refs an IfcProductDefinitionShape. Resolving by representation — instead of the
         // old cheap name allowlist, which missed subtypes like IfcSanitaryTerminal / MEP / furniture
         // terminals — catches every product the ifcopenshell reader would, with no schema.
+        build_rel_maps(); // populate openings_ so opening elements are excluded (they cut their host)
         std::unordered_set<long> pds; // IfcProductDefinitionShape ids
         std::string scratch;
         for (long id : idx_.ids)
@@ -61,6 +62,8 @@ public:
                 pds.insert(id);
         std::vector<long> roots;
         for (long id : idx_.ids) {
+            if (openings_.count(id))
+                continue; // an IfcOpeningElement — subtracted from its host, not a standalone product
             std::string_view t = type_of(id, scratch);
             if (is_product_type(t)) { // fast path for the common structural types (no full parse)
                 roots.push_back(id);
@@ -290,6 +293,17 @@ public:
                     for (const Value &e : in->args[5].items)
                         if (e.is_ref())
                             parent_of_[e.i] = parent;
+            } else if (iequals(t, "IFCRELVOIDSELEMENT")) {
+                // (…, RelatingBuildingElement=arg 4, RelatedOpeningElement=arg 5): the opening is
+                // subtracted from the host element's solid (a hole/recess) and never rendered on its own.
+                const Instance *in = inst(id);
+                if (!in || in->args.size() < 6)
+                    continue;
+                long host = ref_arg(*in, 4), opening = ref_arg(*in, 5);
+                if (host > 0 && opening > 0) {
+                    voids_[host].push_back(opening);
+                    openings_.insert(opening);
+                }
             }
         }
     }
@@ -424,6 +438,44 @@ public:
             root.revolve = nullptr;
             root.boolean = nullptr;
         }
+        // IfcRelVoidsElement: subtract each opening element's solid (a hole/recess) from this host. The
+        // opening geometry is in the OPENING element's local frame; move it into THIS host's local frame
+        // (inverse(host placement) * opening placement) before the difference — the host's placement is
+        // applied to the whole result below. Face-set openings (no single frame to move) are skipped.
+        if (auto vit = voids_.find(pid); vit != voids_.end()) {
+            SolidItemN base = root_to_solid(root);
+            if (solid_ok(base)) {
+                std::array<float, 16> host_inv = rigid_inverse(object_placement(ref_arg(*p, 5)));
+                SolidItemN acc = base;
+                int cuts = 0;
+                for (long opid : vit->second) {
+                    const Instance *op = inst(opid);
+                    long bid = op ? first_body_item(opid) : 0;
+                    if (!bid)
+                        continue;
+                    SolidItemN cut = resolve_solid_item(bid);
+                    if (!solid_ok(cut))
+                        continue;
+                    std::array<float, 16> rel = mat_mul(host_inv, object_placement(ref_arg(*op, 5)));
+                    if (!xform_solid_item(cut, rel))
+                        continue;
+                    auto bn = std::make_shared<BooleanN>();
+                    bn->op = 0; // difference
+                    bn->a = acc;
+                    bn->b = cut;
+                    acc = SolidItemN{};
+                    acc.boolean = bn;
+                    ++cuts;
+                }
+                if (cuts > 0) {
+                    root.faces.clear();
+                    root.extrusion = nullptr;
+                    root.revolve = nullptr;
+                    root.sweep = nullptr;
+                    root.boolean = acc.boolean;
+                }
+            }
+        }
         // Compose the product's world placement (IfcLocalPlacement chain) onto every instance — the
         // geometry rep is in the element's local frame; ObjectPlacement positions it in the world.
         if (!root.faces.empty() || root.extrusion || root.revolve || root.boolean) {
@@ -487,6 +539,8 @@ public:
         colour_map_built_ = m.colour_map_built_;
         contained_of_ = m.contained_of_;
         parent_of_ = m.parent_of_;
+        voids_ = m.voids_;
+        openings_ = m.openings_;
         rel_maps_built_ = m.rel_maps_built_;
         angle_scale_ = m.angle_scale_;
     }
@@ -551,6 +605,8 @@ private:
     bool colour_map_built_ = false;
     std::unordered_map<long, long> contained_of_; // product -> containing spatial element (IfcRelContained…)
     std::unordered_map<long, long> parent_of_;    // child -> aggregating parent (IfcRelAggregates)
+    std::unordered_map<long, std::vector<long>> voids_; // host element -> opening elements (IfcRelVoidsElement)
+    std::unordered_set<long> openings_;                 // opening element ids (cut from host, not rendered standalone)
     bool rel_maps_built_ = false;
 
     const Instance *inst(long id) {
@@ -2174,6 +2230,90 @@ private:
             }
         return R;
     }
+    // ---- rigid-transform helpers for IfcRelVoidsElement (move an opening into its host's frame) ----
+    // Inverse of a rigid 4x4 (column-major): [R|t] -> [R^T | -R^T t].
+    static std::array<float, 16> rigid_inverse(const std::array<float, 16> &M) {
+        std::array<float, 16> r{};
+        r[0] = M[0]; r[1] = M[4]; r[2] = M[8];   // R^T columns
+        r[4] = M[1]; r[5] = M[5]; r[6] = M[9];
+        r[8] = M[2]; r[9] = M[6]; r[10] = M[10];
+        float tx = M[12], ty = M[13], tz = M[14];
+        r[12] = -(M[0] * tx + M[1] * ty + M[2] * tz); // -R^T t
+        r[13] = -(M[4] * tx + M[5] * ty + M[6] * tz);
+        r[14] = -(M[8] * tx + M[9] * ty + M[10] * tz);
+        r[15] = 1.0f;
+        return r;
+    }
+    static Vec3 xform_dir(const std::array<float, 16> &M, const Vec3 &v) {
+        return {M[0] * v.x + M[4] * v.y + M[8] * v.z, M[1] * v.x + M[5] * v.y + M[9] * v.z,
+                M[2] * v.x + M[6] * v.y + M[10] * v.z};
+    }
+    static Vec3 xform_pt(const std::array<float, 16> &M, const Vec3 &p) {
+        Vec3 r = xform_dir(M, p);
+        return {r.x + M[12], r.y + M[13], r.z + M[14]};
+    }
+    static void xform_frame(Frame &f, const std::array<float, 16> &M) {
+        f.o = xform_pt(M, f.o);
+        f.x = xform_dir(M, f.x);
+        f.y = xform_dir(M, f.y);
+        f.z = xform_dir(M, f.z);
+    }
+    // Move a solid operand into a new coordinate frame by transforming its placement frame(s). Handles
+    // the frame-placed solids (extrude/revolve/sweep) + nested booleans; returns false for face-set
+    // operands (no single frame to move) so the caller skips that cut rather than misplace it.
+    bool xform_solid_item(SolidItemN &it, const std::array<float, 16> &M) {
+        if (it.extrusion) {
+            xform_frame(it.extrusion->frame, M);
+            return true;
+        }
+        if (it.revolve) {
+            xform_frame(it.revolve->frame, M);
+            it.revolve->axis_origin = xform_pt(M, it.revolve->axis_origin);
+            it.revolve->axis_dir = xform_dir(M, it.revolve->axis_dir);
+            return true;
+        }
+        if (it.sweep) {
+            xform_frame(it.sweep->frame, M);
+            return true;
+        }
+        if (it.boolean)
+            return xform_solid_item(it.boolean->a, M) && xform_solid_item(it.boolean->b, M);
+        return false; // face-set operand — no single frame; skip this cut
+    }
+    // A resolved root's geometry as a boolean operand (share the shared_ptrs — the caller replaces root).
+    static SolidItemN root_to_solid(const NgeomRoot &r) {
+        SolidItemN s;
+        s.extrusion = r.extrusion;
+        s.revolve = r.revolve;
+        s.sweep = r.sweep;
+        s.boolean = r.boolean;
+        s.faces = r.faces;
+        return s;
+    }
+    // First 3D body/solid rep-item id of an element (skips 2D FootPrint/Profile/… and Axis reps). 0 if none.
+    long first_body_item(long pid) {
+        const Instance *p = inst(pid);
+        if (!p)
+            return 0;
+        const Instance *pds = inst(ref_arg(*p, 6));
+        if (!pds || pds->args.size() < 3)
+            return 0;
+        for (const Value &srref : pds->args[2].items) {
+            const Instance *sr = inst(srref.i);
+            if (!sr || sr->args.size() < 4)
+                continue;
+            std::string_view id = (sr->args.size() > 1 && sr->args[1].kind == adacpp::step::Kind::Str)
+                                      ? sr->args[1].s
+                                      : std::string_view{};
+            if (id == "FootPrint" || id == "Annotation" || id == "Profile" || id == "Plan" || id == "Box" ||
+                id == "Axis")
+                continue;
+            for (const Value &item : sr->args[3].items)
+                if (item.is_ref())
+                    return item.i;
+        }
+        return 0;
+    }
     static bool is_identity(const std::array<float, 16> &M) {
         static const std::array<float, 16> I = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
         for (int i = 0; i < 16; ++i)
@@ -2194,13 +2334,30 @@ private:
         return {(float) f.x.x, (float) f.x.y, (float) f.x.z, 0.0f, (float) f.y.x, (float) f.y.y, (float) f.y.z, 0.0f,
                 (float) f.z.x, (float) f.z.y, (float) f.z.z, 0.0f, (float) f.o.x, (float) f.o.y, (float) f.o.z, 1.0f};
     }
-    // IfcLocalPlacement(PlacementRelTo, RelativePlacement) -> world matrix (recurse up the chain).
+    // Object placement -> world matrix. Handles the IfcLocalPlacement chain and IfcLinearPlacement
+    // (IFC4x3 linear referencing along an alignment). Both recurse up PlacementRelTo (arg 0).
     std::array<float, 16> object_placement(long id, int depth = 0) {
         static const std::array<float, 16> I = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
         const Instance *in = inst(id);
-        if (!in || depth > 64 || !iequals(in->type, "IFCLOCALPLACEMENT"))
+        if (!in || depth > 64)
             return I;
-        std::array<float, 16> rel = (in->args.size() > 1 && in->args[1].is_ref()) ? axis2_mat(in->args[1].i) : I;
+        std::array<float, 16> rel = I;
+        if (iequals(in->type, "IFCLOCALPLACEMENT")) {
+            // (PlacementRelTo, RelativePlacement=IfcAxis2Placement3D)
+            if (in->args.size() > 1 && in->args[1].is_ref())
+                rel = axis2_mat(in->args[1].i);
+        } else if (iequals(in->type, "IFCLINEARPLACEMENT")) {
+            // (PlacementRelTo, RelativePlacement=IfcAxis2PlacementLinear, CartesianPosition=IfcAxis2Placement3D?).
+            // Placing an object by distance-along-the-alignment needs to evaluate the basis curve; exporters
+            // provide the equivalent cartesian frame in the optional CartesianPosition (arg 2) precisely so
+            // readers that don't do linear referencing can still place the object. Prefer it — without it the
+            // object collapsed to the origin (all geoms stacked at 0,0,0). Full IfcPointByDistanceExpression
+            // evaluation (no CartesianPosition) is a follow-up; identity there keeps prior behaviour.
+            if (in->args.size() > 2 && in->args[2].is_ref())
+                rel = axis2_mat(in->args[2].i);
+        } else {
+            return I; // grid placement etc. — unhandled, keep identity
+        }
         if (in->args.size() > 0 && in->args[0].is_ref())
             return mat_mul(object_placement(in->args[0].i, depth + 1), rel);
         return rel;
