@@ -126,6 +126,18 @@ struct CdtOpts {
     // Pin boundary vertices to their shared-edge points. Unlike the libtess2 track this is free by
     // construction: constraint edges are never split, so a boundary vertex is always a loop vertex.
     bool pin_boundary = true;
+    // Never split a boundary edge during post-triangulation refinement.
+    //
+    // NOT optional, and not the same trade as Libtess2Opts::freeze_boundary. detria guarantees the
+    // constraint edges it returns are unsplit — but refine_uv runs AFTER, knows nothing about
+    // constraints, and will happily split them, manufacturing the very T-junctions detria was chosen
+    // to prevent. Without this the CDT track throws away its own invariant: measured 432 residual
+    // boundary edges on Ventilator with every one of 305 faces on the CDT path (i.e. no grid path
+    // left to blame).
+    bool freeze_boundary = true;
+    // Companion to freeze_boundary; see Libtess2Opts::converged_frac for why freezing without this
+    // makes refine_uv rescan the mesh chasing stragglers.
+    double converged_frac = 50.0;
 };
 
 inline std::optional<TessTrack> parse_track(std::string_view s) {

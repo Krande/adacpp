@@ -807,9 +807,12 @@ void refine_and_emit(const Surface &s, std::vector<Uv> verts, std::vector<Tri> t
     bool needs_dev = dynamic_cast<const PlaneSurface *>(&s) == nullptr;
     size_t pre_refine = tris.size();
     if (std::isfinite(max_du) || std::isfinite(max_dv) || needs_dev) {
+        // Boundary-freeze is per-track. On the CDT track it is mandatory: detria returns unsplit
+        // constraint edges, but refine_uv would split them right back and re-create the T-junctions.
         const bool lt = tp.track == TessTrack::Libtess2;
-        refine_uv(s, verts, tris, max_du, max_dv, tp.deflection, needs_dev, su, sv, tp.max_angle,
-                  lt && tp.libtess2.freeze_boundary, lt ? tp.libtess2.converged_frac : 0.0);
+        const bool freeze = lt ? tp.libtess2.freeze_boundary : tp.cdt.freeze_boundary;
+        const double conv = lt ? tp.libtess2.converged_frac : tp.cdt.converged_frac;
+        refine_uv(s, verts, tris, max_du, max_dv, tp.deflection, needs_dev, su, sv, tp.max_angle, freeze, conv);
     }
     if (TESSDBG) {
         std::fprintf(stderr, "TESSDBG   refine_and_emit surf=%s", surf_kind(s));
