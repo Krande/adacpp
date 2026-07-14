@@ -122,7 +122,11 @@ echo = { cmd = "echo \"$CONDA_PREFIX\"", description = "Echo Hello World" }
 echo2 = { cmd = "echo \"$SP_DIR\"", description = "Echo Hello World" }
 
 [feature.test.target.win-64.tasks]
-install = { cmd = "cmake --preset pixi-test-win && cmake --build build && cmake --install build", description = "Build and install with CMake", inputs = [
+# The vs2022 conda activation exports CMAKE_GENERATOR="Visual Studio 17 2022" +
+# CMAKE_GENERATOR_PLATFORM=x64, but the preset builds with Ninja, which rejects any
+# platform spec ("Generator Ninja does not support platform specification") and then
+# fails to find the compiler at all. Unset them so the preset's generator wins.
+install = { cmd = "unset CMAKE_GENERATOR CMAKE_GENERATOR_PLATFORM CMAKE_GENERATOR_TOOLSET && cmake --preset pixi-test-win && cmake --build build && cmake --install build", description = "Build and install with CMake", inputs = [
     "CMakeLists.txt",
     "CMakePresets.json",
     "cmake/**/*.cmake",
@@ -134,6 +138,17 @@ install = { cmd = "cmake --preset pixi-test-win && cmake --build build && cmake 
 ], outputs = [
     "build/STP2GLB.exe",
     "build/_ada_cpp_ext_impl*.pyd",
+] }
+# Win-64 mirror of the linux build-dist below — see the note there.
+build-dist = { cmd = "unset CMAKE_GENERATOR CMAKE_GENERATOR_PLATFORM CMAKE_GENERATOR_TOOLSET && cmake --preset pixi-test-win && cmake --build build && rm -rf build/dist && mkdir -p build/dist && cp -r src/adacpp build/dist/adacpp && cp build/_ada_cpp_ext_impl*.pyd build/dist/adacpp/ && echo \"bleeding-edge adacpp -> $PIXI_PROJECT_ROOT/build/dist  (bridge via PYTHONPATH)\"", description = "Build native ext + assemble an importable adacpp at build/dist for PYTHONPATH bridging", inputs = [
+    "CMakeLists.txt",
+    "CMakePresets.json",
+    "cmake/**/*.cmake",
+    "src/**/*.cpp",
+    "src/**/*.h",
+    "src/**/*.hpp",
+    "src/**/*.hxx",
+    "src/adacpp/**/*.py",
 ] }
 stp2glb = { cmd = "STP2GLB.exe", description = "Run the C++ tests" }
 
