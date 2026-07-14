@@ -23,6 +23,7 @@
 #include "ngeom_bspline.h"
 #include "ngeom_weld.h" // vertex weld + crease-angle smooth normals (per root)
 #include "ngeom_surfaces.h"
+#include "detria.hpp"   // vendored constrained Delaunay (the `cdt` track)
 #include "tesselator.h" // vendored libtess2 (fails soft via setjmp/longjmp -> tessTesselate
                         // returns 0 on any sweep error; no panic to guard against, unlike the original wasm build)
 
@@ -843,6 +844,177 @@ void refine_and_emit(const Surface &s, std::vector<Uv> verts, std::vector<Tri> t
 }
 
 // loops_p3 (parallel to loops_uv, may be null): shared-edge pins for the boundary vertices.
+// Forward decls: the CDT track sits above these in the file but reuses both — the shared curvature
+// grid (as Steiner points) and libtess2 as its per-face fallback.
+void uv_grid_res(const Surface &s, int &nu, int &nv);
+bool emit_uv_region(const Surface &s, const std::vector<std::vector<Uv>> &loops_uv, const TessParams &tp,
+                    bool same_sense, Mesh &mesh, const std::vector<std::vector<Vec3>> *loops_p3);
+
+// ---- CDT track: one boundary-first path (trim loops as constraints, grid as Steiner) ----------
+//
+// The reason this exists: libtess2 takes no interior points, which forces a separate UV-grid fast
+// path for near-full patches — and that grid tessellates the UV bbox, never sees the trim loop, and
+// so has nothing to pin. It is the only remaining crack source. OCC and truck have no grid path at
+// all: they classifier-filter grid points and insert them as Steiner points into a CDT whose
+// boundary is already constraints. This is that.
+//
+// detria REFUSES to split a constraint edge (it errors instead), which is exactly the invariant
+// pinning needs — a boundary vertex is always a loop vertex, so every boundary vertex can pin.
+// artem-ogre/CDT was rejected precisely because it splits them silently. See
+// dap/plan/v3/spec_cdt_library_selection.md.
+//
+// Fail-soft: any error returns ok=false and the caller falls back to libtess2 for THIS FACE only.
+std::atomic<uint64_t> g_cdt_fallback_faces{0};
+std::atomic<uint64_t> g_cdt_faces{0};
+
+// Even-odd point-in-polygon in UV. Grid points outside the trim region must not be inserted (OCC
+// classifier-filters the same way); an outside Steiner point would be triangulated into the hole.
+//
+// Deliberately per-point, not a per-row scanline. The scanline is asymptotically better and was
+// tried: measured WORSE and noisier (min 4.33 / median 5.03 vs 4.24 / 4.36). Trim loops here are
+// only ~4-40 vertices, so this walk is already trivial, while a per-row crossings-sort pays constant
+// overhead across up to 8192 rows. Don't re-attempt without a model whose loops are much larger.
+bool uv_inside(const std::vector<std::vector<Uv>> &loops, const Uv &p) {
+    bool in = false;
+    for (const auto &l : loops) {
+        for (size_t i = 0, j = l.size() - 1; i < l.size(); j = i++) {
+            const Uv &a = l[i];
+            const Uv &b = l[j];
+            if ((a[1] > p[1]) != (b[1] > p[1])) {
+                double t = (p[1] - a[1]) / (b[1] - a[1]);
+                if (p[0] < a[0] + t * (b[0] - a[0]))
+                    in = !in;
+            }
+        }
+    }
+    return in;
+}
+
+Tess2Out run_detria(const Surface &surf, const std::vector<std::vector<Uv>> &loops_uv,
+                    const std::vector<std::vector<Vec3>> *loops_p3, const TessParams &tp, double su, double sv) {
+    Tess2Out out;
+    if (loops_uv.empty() || loops_uv[0].size() < 3)
+        return out;
+
+    // thread_local so capacity survives across faces: measured zero allocations after the first
+    // face, which matters at ~300k faces. detria ALIASES both the point and index arrays (it does
+    // not copy), so these must outlive triangulate() — hence thread_local, not locals.
+    thread_local detria::Triangulation<detria::PointD, uint32_t> tri;
+    thread_local std::vector<detria::PointD> pts;
+    thread_local std::vector<std::vector<uint32_t>> loop_idx;
+    tri.clear();
+    pts.clear();
+    loop_idx.clear();
+
+    // Loop vertices FIRST (indices [0,N)), Steiner after ([N,end)) — that keeps `out.pin`
+    // index-aligned by construction, with no vertex-index indirection at all.
+    double umin = INF, umax = -INF, vmin = INF, vmax = -INF;
+    for (size_t li = 0; li < loops_uv.size(); ++li) {
+        std::vector<uint32_t> idx;
+        idx.reserve(loops_uv[li].size());
+        for (size_t k = 0; k < loops_uv[li].size(); ++k) {
+            const Uv &p = loops_uv[li][k];
+            umin = std::min(umin, p[0]);
+            umax = std::max(umax, p[0]);
+            vmin = std::min(vmin, p[1]);
+            vmax = std::max(vmax, p[1]);
+            idx.push_back((uint32_t) pts.size());
+            pts.push_back({p[0] * su, p[1] * sv});
+            out.verts.push_back({p[0], p[1]});
+            out.pin.push_back((loops_p3 && li < loops_p3->size() && k < (*loops_p3)[li].size()) ? (*loops_p3)[li][k]
+                                                                                               : nan_vec());
+        }
+        if (idx.size() >= 3)
+            loop_idx.push_back(std::move(idx));
+    }
+    if (loop_idx.empty())
+        return out;
+    const size_t n_boundary = pts.size();
+
+    // Interior Steiner points: the surface's own curvature grid, classifier-filtered to the trim
+    // region. Skipping any point that coincides with a loop vertex is not optional — detria's dedup
+    // runs BEFORE constraints, so DuplicatePointsFound is the first error you hit in practice.
+    if (tp.cdt.grid_steiner) {
+        int nu = 0, nv = 0;
+        uv_grid_res(surf, nu, nv);
+        const double du = umax - umin, dv = vmax - vmin;
+        const double eps = 1e-9 * std::max(std::max(du, dv), 1.0);
+        // Quantized loop-vertex set, so the coincidence test is O(1) per grid point rather than
+        // O(loop). It has to be cheap: the grid runs to 200k points per face (uv_grid_res's cap) and
+        // loops carry hundreds of vertices, so the naive scan is the dominant per-face cost.
+        // Skipping coincident points is not optional — detria's dedup runs BEFORE constraints, so
+        // DuplicatePointsFound is the first error hit in practice, not PointOnConstrainedEdge.
+        thread_local std::unordered_set<uint64_t> loop_keys;
+        loop_keys.clear();
+        const double inv = 1.0 / std::max(eps, 1e-300);
+        auto key_of = [&](const Uv &q) {
+            return ((uint64_t) (int64_t) std::llround(q[0] * inv) << 32) ^
+                   (uint64_t) (uint32_t) (int64_t) std::llround(q[1] * inv);
+        };
+        for (const auto &l : loops_uv)
+            for (const Uv &q : l)
+                loop_keys.insert(key_of(q));
+        for (int j = 1; j < nv; ++j) {
+            for (int i = 1; i < nu; ++i) {
+                Uv g{umin + du * i / nu, vmin + dv * j / nv};
+                if (loop_keys.count(key_of(g)))
+                    continue;
+                if (!uv_inside(loops_uv, g))
+                    continue;
+                pts.push_back({g[0] * su, g[1] * sv});
+                out.verts.push_back(g);
+                out.pin.push_back(nan_vec()); // interior: takes the surface point in refine_and_emit
+            }
+        }
+    }
+
+    tri.setPoints(pts);
+    tri.addOutline(loop_idx[0]);
+    for (size_t i = 1; i < loop_idx.size(); ++i)
+        tri.addHole(loop_idx[i]);
+    if (!tri.triangulate(true)) {
+        if (TESSDBG)
+            std::fprintf(stderr, "TESSDBG   detria failed: %s\n", tri.getErrorMessage().c_str());
+        out.verts.clear();
+        out.pin.clear();
+        return out;
+    }
+    tri.forEachTriangle(
+        [&](detria::Triangle<uint32_t> t) { out.tris.push_back({t.x, t.y, t.z}); },
+        /*cwTriangles=*/false); // CCW, matching run_tess2's winding
+    if (out.tris.empty()) {
+        out.verts.clear();
+        out.pin.clear();
+        return out;
+    }
+    (void) n_boundary;
+    out.ok = true;
+    return out;
+}
+
+// Trim-respecting emit for the CDT track. Same contract as emit_uv_region.
+bool emit_cdt_region(const Surface &s, const std::vector<std::vector<Uv>> &loops_uv, const TessParams &tp,
+                     bool same_sense, Mesh &mesh, const std::vector<std::vector<Vec3>> *loops_p3) {
+    double umin = INF, umax = -INF, vmin = INF, vmax = -INF;
+    for (const auto &l : loops_uv)
+        for (const Uv &p : l) {
+            umin = std::min(umin, p[0]);
+            umax = std::max(umax, p[0]);
+            vmin = std::min(vmin, p[1]);
+            vmax = std::max(vmax, p[1]);
+        }
+    auto [su, sv] = metric_scale(s, umin, umax, vmin, vmax);
+    g_cdt_faces.fetch_add(1, std::memory_order_relaxed);
+    Tess2Out r = run_detria(s, loops_uv, loops_p3, tp, su, sv);
+    if (!r.ok) {
+        // Per-face fallback, never per-model: a face detria rejects is only as bad as the status quo.
+        g_cdt_fallback_faces.fetch_add(1, std::memory_order_relaxed);
+        return emit_uv_region(s, loops_uv, tp, same_sense, mesh, loops_p3);
+    }
+    refine_and_emit(s, std::move(r.verts), std::move(r.tris), su, sv, tp, same_sense, mesh, r.pin);
+    return true;
+}
+
 bool emit_uv_region(const Surface &s, const std::vector<std::vector<Uv>> &loops_uv, const TessParams &tp,
                     bool same_sense, Mesh &mesh, const std::vector<std::vector<Vec3>> *loops_p3 = nullptr) {
     double umin = INF, umax = -INF, vmin = INF, vmax = -INF;
@@ -913,10 +1085,9 @@ std::vector<double> conform_lines(const std::vector<Uv> &ring, bool along_u, dou
 // `ring_uv`/`ring_p3` (both or neither): the trim loop's UV points and their shared-edge 3D points.
 // When given, the grid lines conform to the loop's parameters and the ring vertices are pinned.
 // Null (the default track) => the plain uniform grid, unchanged.
-bool tessellate_uv_grid(const Surface &s, double u0, double u1, double v0, double v1, const TessParams &tp,
-                        bool same_sense, Mesh &mesh, const std::vector<Uv> *ring_uv = nullptr,
-                        const std::vector<Vec3> *ring_p3 = nullptr) {
-    int nu, nv;
+// Curvature grid resolution for a surface. Shared by the libtess2 grid fast path and the CDT
+// track, which inserts the SAME grid as interior Steiner points instead of tessellating a bbox.
+void uv_grid_res(const Surface &s, int &nu, int &nv) {
     if (const auto *b = dynamic_cast<const BSplineSurface *>(&s)) {
         nu = (int) std::clamp((std::max(b->nu - b->u_degree, 1) * 2), 2, 64);
         nv = (int) std::clamp((std::max(b->nv - b->v_degree, 1) * 2), 2, 8192);
@@ -930,6 +1101,13 @@ bool tessellate_uv_grid(const Surface &s, double u0, double u1, double v0, doubl
         else
             nu /= 2;
     }
+}
+
+bool tessellate_uv_grid(const Surface &s, double u0, double u1, double v0, double v1, const TessParams &tp,
+                        bool same_sense, Mesh &mesh, const std::vector<Uv> *ring_uv = nullptr,
+                        const std::vector<Vec3> *ring_p3 = nullptr) {
+    int nu, nv;
+    uv_grid_res(s, nu, nv);
     // Grid lines. Without a ring these are exactly the uniform samples, so the default path is
     // bit-for-bit what it always was.
     std::vector<double> ul, vl;
@@ -1729,10 +1907,10 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
         contours.push_back(std::move(l.uv));
         contours_p3.push_back(std::move(l.pts3));
     }
-    // Pins are consulted only on the watertight track; the default track passes nullptr and runs the
-    // identical code path it always did.
+    // Pins are data-guarded: nullptr => the emit path runs the identical code it always did.
     const std::vector<std::vector<Vec3>> *pins =
         (tp.track == TessTrack::Libtess2 && tp.libtess2.pin_boundary) ? &contours_p3 : nullptr;
+    const std::vector<std::vector<Vec3>> *cdt_pins = tp.cdt.pin_boundary ? &contours_p3 : nullptr;
 
     {
         Rect r = full_wrap_bspline(surf, contours);
@@ -1754,6 +1932,16 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
             diag_set_path("grid_full_domain");
             return nullptr;
         }
+    }
+    // The CDT track has NO grid fast path, by design — that path tessellates the UV bbox, never sees
+    // the trim loop, and so cannot pin, which makes it the only remaining crack source. Here the
+    // grid becomes interior Steiner points inside a boundary-constrained triangulation instead, so
+    // near-full patches and trimmed faces are ONE path and every boundary vertex is a loop vertex.
+    // This is what OCC and truck do.
+    if (tp.track == TessTrack::Cdt) {
+        diag_set_path("emit_cdt_region");
+        return emit_cdt_region(surf, contours, tp, same_sense, mesh, cdt_pins) ? nullptr
+                                                                               : "CDT tessellation produced no triangles";
     }
     // grid_via_emit: skip the UV-bbox grid so this face goes through the pinned emit path below.
     // full_patch_rect's gate is area_ratio >= 0.995, i.e. the trim loop IS the rectangle, so emit
@@ -2436,13 +2624,15 @@ TessMesh tessellate_doc(const NgeomDoc &doc, const TessParams &tp) {
             std::fprintf(stderr,
                          "[EDGEPROF] tessellate_doc=%.3fs  build_loops3d=%.3fs (%.1f%% of tess)\n"
                          "[EDGEPROF] refine passes=%llu  marks=%llu  tris scanned=%llu  marks/pass=%.1f\n"
-                         "[EDGEPROF] conforming grid: applied=%llu bailed=%llu  lines wanted=%llu applied=%llu\n",
+                         "[EDGEPROF] conforming grid: applied=%llu bailed=%llu  lines wanted=%llu applied=%llu\n"
+                         "[EDGEPROF] cdt: faces=%llu fell back to libtess2=%llu\n",
                          tess / 1e9, loops / 1e9, tess ? 100.0 * (double) loops / (double) tess : 0.0,
                          (unsigned long long) g_passes.load(), (unsigned long long) g_marks.load(),
                          (unsigned long long) g_scanned.load(),
                          g_passes.load() ? (double) g_marks.load() / (double) g_passes.load() : 0.0,
                          (unsigned long long) g_conform_ok.load(), (unsigned long long) g_conform_bail.load(),
-                         (unsigned long long) g_conform_want.load(), (unsigned long long) g_conform_lines.load());
+                         (unsigned long long) g_conform_want.load(), (unsigned long long) g_conform_lines.load(),
+                         (unsigned long long) g_cdt_faces.load(), (unsigned long long) g_cdt_fallback_faces.load());
         }
     } _docprof{EDGEPROF, _tess_t0};
     // Opt-in parallelism (tp.threads>1): tessellate ROOTS across a thread pool into per-root local
