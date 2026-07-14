@@ -775,7 +775,8 @@ void refine_uv(const Surface &s, std::vector<Uv> &verts, std::vector<Tri> &tris,
 //
 // Empty pin (the default track) => `is_pinned` is never consulted and the emit loop is unchanged.
 void refine_and_emit(const Surface &s, std::vector<Uv> verts, std::vector<Tri> tris, double su, double sv,
-                     const TessParams &tp, bool same_sense, Mesh &mesh, const std::vector<Vec3> &pin = {}) {
+                     const TessParams &tp, bool same_sense, Mesh &mesh, const std::vector<Vec3> &pin = {},
+                     bool freeze = false, double converged_frac = 0.0) {
     double umin = INF, umax = -INF, vmin = INF, vmax = -INF;
     for (const Uv &p : verts) {
         umin = std::min(umin, p[0]);
@@ -807,12 +808,8 @@ void refine_and_emit(const Surface &s, std::vector<Uv> verts, std::vector<Tri> t
     bool needs_dev = dynamic_cast<const PlaneSurface *>(&s) == nullptr;
     size_t pre_refine = tris.size();
     if (std::isfinite(max_du) || std::isfinite(max_dv) || needs_dev) {
-        // Boundary-freeze is per-track. On the CDT track it is mandatory: detria returns unsplit
-        // constraint edges, but refine_uv would split them right back and re-create the T-junctions.
-        const bool lt = tp.track == TessTrack::Libtess2;
-        const bool freeze = lt ? tp.libtess2.freeze_boundary : tp.cdt.freeze_boundary;
-        const double conv = lt ? tp.libtess2.converged_frac : tp.cdt.converged_frac;
-        refine_uv(s, verts, tris, max_du, max_dv, tp.deflection, needs_dev, su, sv, tp.max_angle, freeze, conv);
+        refine_uv(s, verts, tris, max_du, max_dv, tp.deflection, needs_dev, su, sv, tp.max_angle, freeze,
+                  converged_frac);
     }
     if (TESSDBG) {
         std::fprintf(stderr, "TESSDBG   refine_and_emit surf=%s", surf_kind(s));
@@ -851,7 +848,8 @@ void refine_and_emit(const Surface &s, std::vector<Uv> verts, std::vector<Tri> t
 // grid (as Steiner points) and libtess2 as its per-face fallback.
 void uv_grid_res(const Surface &s, int &nu, int &nv);
 bool emit_uv_region(const Surface &s, const std::vector<std::vector<Uv>> &loops_uv, const TessParams &tp,
-                    bool same_sense, Mesh &mesh, const std::vector<std::vector<Vec3>> *loops_p3);
+                    bool same_sense, Mesh &mesh, const std::vector<std::vector<Vec3>> *loops_p3,
+                    const bool *freeze_override, double conv_override);
 
 // ---- CDT track: one boundary-first path (trim loops as constraints, grid as Steiner) ----------
 //
@@ -873,10 +871,39 @@ std::atomic<uint64_t> g_cdt_faces{0};
 // Even-odd point-in-polygon in UV. Grid points outside the trim region must not be inserted (OCC
 // classifier-filters the same way); an outside Steiner point would be triangulated into the hole.
 //
-// Deliberately per-point, not a per-row scanline. The scanline is asymptotically better and was
-// tried: measured WORSE and noisier (min 4.33 / median 5.03 vs 4.24 / 4.36). Trim loops here are
-// only ~4-40 vertices, so this walk is already trivial, while a per-row crossings-sort pays constant
-// overhead across up to 8192 rows. Don't re-attempt without a model whose loops are much larger.
+// Per-point by default; ADA_TESS_CDT_SCANLINE=1 switches to the per-row variant above, which is
+// asymptotically better (O(nv*loop + nu*nv) vs O(nu*nv*loop)) and produces byte-identical output.
+// On Ventilator the two are EXACTLY neutral (min 3.73 both, median 3.87 both, 7 interleaved rounds
+// on an idle box) because its trim loops are only ~4-40 vertices, so neither term dominates. An
+// earlier A/B called the scanline a regression; that was measured under an audit run at load ~6 and
+// was noise — do not trust it. The toggle stays so the choice can be settled on a model with large
+// loops, where the asymptotics actually bite.
+// A/B toggle (ADA_TESS_CDT_SCANLINE=1): per-row crossings instead of per-point. See uv_inside.
+const bool CDT_SCANLINE = std::getenv("ADA_TESS_CDT_SCANLINE") != nullptr;
+
+// Per-row even-odd crossings of every trim loop with v = vrow, sorted. O(nv*loop + nu*nv) instead of
+// O(nu*nv*loop).
+void uv_row_crossings(const std::vector<std::vector<Uv>> &loops, double vrow, std::vector<double> &xs) {
+    xs.clear();
+    for (const auto &l : loops) {
+        if (l.size() < 2)
+            continue;
+        for (size_t i = 0, j = l.size() - 1; i < l.size(); j = i++) {
+            const Uv &a = l[i];
+            const Uv &b = l[j];
+            if ((a[1] > vrow) != (b[1] > vrow)) {
+                double t = (vrow - a[1]) / (b[1] - a[1]);
+                xs.push_back(a[0] + t * (b[0] - a[0]));
+            }
+        }
+    }
+    std::sort(xs.begin(), xs.end());
+}
+
+inline bool uv_inside_row(const std::vector<double> &xs, double u) {
+    return (size_t) (std::lower_bound(xs.begin(), xs.end(), u) - xs.begin()) % 2 == 1;
+}
+
 bool uv_inside(const std::vector<std::vector<Uv>> &loops, const Uv &p) {
     bool in = false;
     for (const auto &l : loops) {
@@ -957,12 +984,19 @@ Tess2Out run_detria(const Surface &surf, const std::vector<std::vector<Uv>> &loo
         for (const auto &l : loops_uv)
             for (const Uv &q : l)
                 loop_keys.insert(key_of(q));
+        thread_local std::vector<double> xs;
         for (int j = 1; j < nv; ++j) {
+            const double vrow = vmin + dv * j / nv;
+            if (CDT_SCANLINE) {
+                uv_row_crossings(loops_uv, vrow, xs);
+                if (xs.empty())
+                    continue; // row misses the trim region entirely
+            }
             for (int i = 1; i < nu; ++i) {
-                Uv g{umin + du * i / nu, vmin + dv * j / nv};
+                Uv g{umin + du * i / nu, vrow};
                 if (loop_keys.count(key_of(g)))
                     continue;
-                if (!uv_inside(loops_uv, g))
+                if (!(CDT_SCANLINE ? uv_inside_row(xs, g[0]) : uv_inside(loops_uv, g)))
                     continue;
                 pts.push_back({g[0] * su, g[1] * sv});
                 out.verts.push_back(g);
@@ -1012,14 +1046,19 @@ bool emit_cdt_region(const Surface &s, const std::vector<std::vector<Uv>> &loops
     if (!r.ok) {
         // Per-face fallback, never per-model: a face detria rejects is only as bad as the status quo.
         g_cdt_fallback_faces.fetch_add(1, std::memory_order_relaxed);
-        return emit_uv_region(s, loops_uv, tp, same_sense, mesh, loops_p3);
+        // Still freeze: the face is pinned, so refine_uv splitting its boundary would re-open the
+        // seam detria was meant to close. Measured: without this the cdt track goes 0 -> 207 edges.
+        return emit_uv_region(s, loops_uv, tp, same_sense, mesh, loops_p3, &tp.cdt.freeze_boundary,
+                              tp.cdt.converged_frac);
     }
-    refine_and_emit(s, std::move(r.verts), std::move(r.tris), su, sv, tp, same_sense, mesh, r.pin);
+    refine_and_emit(s, std::move(r.verts), std::move(r.tris), su, sv, tp, same_sense, mesh, r.pin,
+                    tp.cdt.freeze_boundary, tp.cdt.converged_frac);
     return true;
 }
 
 bool emit_uv_region(const Surface &s, const std::vector<std::vector<Uv>> &loops_uv, const TessParams &tp,
-                    bool same_sense, Mesh &mesh, const std::vector<std::vector<Vec3>> *loops_p3 = nullptr) {
+                    bool same_sense, Mesh &mesh, const std::vector<std::vector<Vec3>> *loops_p3 = nullptr,
+                    const bool *freeze_override = nullptr, double conv_override = 0.0) {
     double umin = INF, umax = -INF, vmin = INF, vmax = -INF;
     for (const auto &l : loops_uv)
         for (const Uv &p : l) {
@@ -1037,7 +1076,9 @@ bool emit_uv_region(const Surface &s, const std::vector<std::vector<Uv>> &loops_
         if (!r.ok)
             return false;
     }
-    refine_and_emit(s, std::move(r.verts), std::move(r.tris), su, sv, tp, same_sense, mesh, r.pin);
+    refine_and_emit(s, std::move(r.verts), std::move(r.tris), su, sv, tp, same_sense, mesh, r.pin,
+                    freeze_override ? *freeze_override : tp.libtess2.freeze_boundary,
+                    freeze_override ? conv_override : tp.libtess2.converged_frac);
     return true;
 }
 
@@ -1183,7 +1224,8 @@ bool tessellate_uv_grid(const Surface &s, double u0, double u1, double v0, doubl
             pin[(size_t) j * (size_t) w + (size_t) i] = (*ring_p3)[k];
         }
     }
-    refine_and_emit(s, std::move(verts), std::move(tris), su, sv, tp, same_sense, mesh, pin);
+    refine_and_emit(s, std::move(verts), std::move(tris), su, sv, tp, same_sense, mesh, pin,
+                    tp.libtess2.freeze_boundary, tp.libtess2.converged_frac);
     return true;
 }
 
@@ -1911,8 +1953,8 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
         contours_p3.push_back(std::move(l.pts3));
     }
     // Pins are data-guarded: nullptr => the emit path runs the identical code it always did.
-    const std::vector<std::vector<Vec3>> *pins =
-        (tp.track == TessTrack::Libtess2 && tp.libtess2.pin_boundary) ? &contours_p3 : nullptr;
+    const bool lt_like = tp.track == TessTrack::Libtess2 || tp.track == TessTrack::Hybrid;
+    const std::vector<std::vector<Vec3>> *pins = (lt_like && tp.libtess2.pin_boundary) ? &contours_p3 : nullptr;
     const std::vector<std::vector<Vec3>> *cdt_pins = tp.cdt.pin_boundary ? &contours_p3 : nullptr;
 
     {
@@ -1945,6 +1987,15 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
         diag_set_path("emit_cdt_region");
         return emit_cdt_region(surf, contours, tp, same_sense, mesh, cdt_pins) ? nullptr
                                                                                : "CDT tessellation produced no triangles";
+    }
+    // HYBRID: this is the whole point of the track. A face that would take the UV-bbox grid is the
+    // only kind libtess2 cannot pin, so it — and only it — pays for detria. Everything else already
+    // fell through to the pinned emit path above/below at libtess2 speed.
+    if (tp.track == TessTrack::Hybrid && tp.hybrid.cdt_full_patch && full_patch_rect(surf, contours).ok) {
+        diag_set_path("hybrid_cdt_full_patch");
+        if (emit_cdt_region(surf, contours, tp, same_sense, mesh, cdt_pins))
+            return nullptr;
+        // detria declined: fall through to the grid rather than fail the face.
     }
     // grid_via_emit: skip the UV-bbox grid so this face goes through the pinned emit path below.
     // full_patch_rect's gate is area_ratio >= 0.995, i.e. the trim loop IS the rectangle, so emit

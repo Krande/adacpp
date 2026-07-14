@@ -25,9 +25,11 @@ namespace adacpp::ngeom {
 enum class TessTrack : uint8_t {
     Libtess2 = 0,    // DEFAULT — libtess2 winding-rule tessellation of the trim loop, + a UV grid
                      // fast path for near-full patches. Byte-identical at default options.
-    Cdt = 1,         // IN PROGRESS — constrained Delaunay: boundary as constraint edges, interior
-                     // (incl. the surface grid) as Steiner points. One path, boundary-first. See
-                     // CdtOpts for why this exists.
+    Cdt = 1,         // Constrained Delaunay for EVERY face: boundary as constraint edges, interior
+                     // (incl. the surface grid) as Steiner points. One path, boundary-first.
+                     // Watertight, but ~+70% on the crane — see CdtOpts.
+    Hybrid = 5,      // libtess2+pin everywhere, detria ONLY for the faces libtess2 cannot pin.
+                     // The intended default candidate — see HybridOpts.
     TaxonomyOcc = 2, // native-only (ifcopenshell taxonomy -> OCC)
     TaxonomyCgal = 3,
     TaxonomyHybrid = 4,
@@ -140,11 +142,44 @@ struct CdtOpts {
     double converged_frac = 50.0;
 };
 
+// Options for the hybrid track: libtess2+pin everywhere, detria only where libtess2 CANNOT pin.
+//
+// WHY. Measured, both tracks on both models:
+//
+//                    Ventilator (1 solid, 305 faces)     crane (7096 solids, ~299k faces)
+//   libtess2+pin     +0%   9,880 open edges              +0.5%   RSS -1.8%
+//   cdt              +7.6%     0 open edges  WATERTIGHT  +70.2%  RSS +19.0%
+//
+// cdt wins outright on Ventilator and is unaffordable on the crane. The reason is face MIX, not
+// model size: the crane is ~299k mostly-small quadric faces where libtess2's sweep is fast and a
+// full CDT (points + constraints + erase) is pure overhead per face — while pinning already makes
+// those faces watertight-equivalent, because tess2 tessellates their real trim loop.
+//
+// The faces that actually NEED detria are the ones libtess2 hands to tessellate_uv_grid: it fills
+// the UV bbox, never sees the trim loop, and so has nothing to pin (53/305 = 17% on Ventilator).
+// Route by that, not by model, and the cost lands where the benefit is.
+struct HybridOpts {
+    // Send would-be full-patch grid faces to detria. full_patch_rect's gate is area_ratio >= 0.995,
+    // i.e. the trim loop IS the UV rectangle — which is exactly why detria can replace the grid for
+    // them: same region, but with a boundary it can constrain and pin. This is the one grid path
+    // proven to work through detria (it is all 53 of Ventilator's, and they went watertight).
+    bool cdt_full_patch = true;
+    // The OTHER grid paths (full_wrap / full_domain / v-pole) are deliberately NOT routed. Their
+    // gates do not guarantee the loop bounds the region — full_domain_bspline gates on bbox EXTENT
+    // >= 0.9 with no area check, so the loop can cover 90% of the extent at 50% of the area, and a
+    // wrapped/poled loop is not a simple polygon at all. Handing those to a CDT would not just fail,
+    // it could triangulate the wrong region. They stay on the grid and stay unpinnable — an honest
+    // residual on models that use them. Ventilator uses none.
+    bool cdt_wrap_and_pole = false;
+};
+
 inline std::optional<TessTrack> parse_track(std::string_view s) {
     if (s.empty() || s == "libtess2")
         return TessTrack::Libtess2;
     if (s == "cdt")
         return TessTrack::Cdt;
+    if (s == "hybrid-cdt")
+        return TessTrack::Hybrid;
     if (s == "occ" || s == "taxonomy-occ")
         return TessTrack::TaxonomyOcc;
     if (s == "cgal" || s == "taxonomy-cgal")
@@ -160,6 +195,8 @@ inline const char *track_name(TessTrack t) {
         return "libtess2";
     case TessTrack::Cdt:
         return "cdt";
+    case TessTrack::Hybrid:
+        return "hybrid-cdt";
     case TessTrack::TaxonomyOcc:
         return "occ";
     case TessTrack::TaxonomyCgal:
@@ -172,7 +209,7 @@ inline const char *track_name(TessTrack t) {
 
 // Every selectable track name. adapy probes the binding docstrings for these, so keep them in sync.
 inline std::vector<std::string_view> track_names() {
-    return {"libtess2", "cdt", "occ", "cgal", "hybrid"};
+    return {"libtess2", "cdt", "hybrid-cdt", "occ", "cgal", "hybrid"};
 }
 
 } // namespace adacpp::ngeom

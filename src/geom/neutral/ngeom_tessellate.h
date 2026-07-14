@@ -43,6 +43,7 @@ struct TessParams {
     TessTrack track = TessTrack::Libtess2;
     Libtess2Opts libtess2;
     CdtOpts cdt;
+    HybridOpts hybrid;
 };
 
 struct TessMesh {
