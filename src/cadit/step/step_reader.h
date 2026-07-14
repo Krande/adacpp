@@ -1424,6 +1424,10 @@ private:
             return oe;
         bool orientation = enum_true(in->args[4]);
         const Instance *ec = in->args[3].is_ref() ? inst(in->args[3].i) : nullptr;
+        // The EDGE_CURVE #id is the shared-edge identity: both faces of a manifold edge reference
+        // this same instance, with opposite ORIENTED_EDGE.orientation.
+        if (in->args[3].is_ref())
+            oe.edge_id = (int) in->args[3].i;
         if (ec && ec->type == "EDGE_CURVE" && ec->args.size() >= 5) {
             if (ec->args[1].is_ref())
                 oe.e_start = point(ec->args[1].i);

@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <chrono>
 #include <cstdlib>
 #include <limits>
 #include <map>
@@ -160,6 +161,19 @@ void diag_flush_face(const Surface &surf, int64_t face_id, uint32_t face_seq, do
                  d.n_collapsed, p50, p95, mx, p50 / sz, p95 / sz, mx / sz, sz, model_scale);
     d = FaceDiag{};
 }
+
+// ---- TEMPORARY edge-discretization profile (ADA_TESS_EDGEPROF=1) ----------------------------
+// Phase 2 rests on the claim that build_loops3d is "~2x wasted work, real headroom". That claim is
+// unmeasured. This answers two questions before any cache is built:
+//   1. what fraction of tessellation time IS edge discretization?
+//   2. what is the real duplication factor (distinct edge_ids vs discretize calls)?
+// Remove once Phase 2 is decided.
+const bool EDGEPROF = std::getenv("ADA_TESS_EDGEPROF") != nullptr;
+std::atomic<uint64_t> g_loops3d_ns{0};
+std::atomic<uint64_t> g_tess_ns{0};
+std::atomic<uint64_t> g_edge_calls{0};
+std::mutex g_edge_mu;
+std::map<int, int> g_edge_hits; // edge_id -> times discretized
 
 // distinctive surface params, so a face can be matched to the reference output by geometry
 void log_surf_params(const Surface &s) {
@@ -1508,6 +1522,29 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
 // ---- boundary building from neutral topology (build_loops3d / loop_polyline) --------
 std::vector<Loop3> build_loops3d(const FaceSurfaceN &face, const TessParams &tp) {
     std::vector<Loop3> loops;
+    auto _t0 = EDGEPROF ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    struct ProfScope {
+        bool on;
+        std::chrono::steady_clock::time_point t0;
+        ~ProfScope() {
+            if (on)
+                g_loops3d_ns.fetch_add(
+                    (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - t0).count(),
+                    std::memory_order_relaxed);
+        }
+    } _prof{EDGEPROF, _t0};
+    if (EDGEPROF) {
+        for (const FaceBoundN &b : face.bounds) {
+            if (!b.loop || b.loop->is_poly)
+                continue;
+            std::lock_guard<std::mutex> lk(g_edge_mu);
+            for (const OrientedEdgeN &e : b.loop->edges) {
+                g_edge_calls.fetch_add(1, std::memory_order_relaxed);
+                g_edge_hits[e.edge_id]++;
+            }
+        }
+    }
     for (const FaceBoundN &b : face.bounds) {
         if (!b.loop)
             continue;
@@ -2147,6 +2184,35 @@ static void tessellate_one_root(const NgeomRoot &root, const TessParams &tp, Tes
 TessMesh tessellate_doc(const NgeomDoc &doc, const TessParams &tp) {
     TessMesh mesh;
     const auto &roots = doc.roots;
+    auto _tess_t0 = std::chrono::steady_clock::now();
+    struct DocProf {
+        bool on;
+        std::chrono::steady_clock::time_point t0;
+        ~DocProf() {
+            if (!on)
+                return;
+            g_tess_ns.fetch_add((uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    std::chrono::steady_clock::now() - t0).count(),
+                                std::memory_order_relaxed);
+            uint64_t tess = g_tess_ns.load(), loops = g_loops3d_ns.load();
+            size_t distinct = 0, dup = 0, calls = 0;
+            {
+                std::lock_guard<std::mutex> lk(g_edge_mu);
+                distinct = g_edge_hits.size();
+                for (auto &kv : g_edge_hits) {
+                    calls += (size_t) kv.second;
+                    if (kv.second > 1)
+                        ++dup;
+                }
+            }
+            std::fprintf(stderr,
+                         "[EDGEPROF] tessellate_doc=%.3fs  build_loops3d=%.3fs (%.1f%% of tess)\n"
+                         "[EDGEPROF] edge discretize calls=%zu  distinct edge_ids=%zu  "
+                         "duplication=%.2fx  edges seen >1x=%zu\n",
+                         tess / 1e9, loops / 1e9, tess ? 100.0 * (double) loops / (double) tess : 0.0,
+                         calls, distinct, distinct ? (double) calls / (double) distinct : 0.0, dup);
+        }
+    } _docprof{EDGEPROF, _tess_t0};
     // Opt-in parallelism (tp.threads>1): tessellate ROOTS across a thread pool into per-root local
     // buffers, merged in root order. Roots are independent (each tessellate_face allocates its own
     // libtess2 tessellator, no shared state); merging in order makes the output byte-identical to

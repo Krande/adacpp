@@ -130,6 +130,10 @@ struct OrientedEdgeN {
     bool same_sense = true;  // EDGE_CURVE.same_sense
     bool orientation = true; // ORIENTED_EDGE.orientation
     double t_start = 0, t_end = 0;
+    // Source EDGE_CURVE slot ref (ORIENTED_EDGE.edge_element), -1 when unknown. The two faces
+    // sharing a manifold edge carry the SAME edge_id with opposite `orientation` — an exact
+    // integer identity for the shared edge, without quantizing endpoints.
+    int edge_id = -1;
 
     // Ordered points start->end along the edge (endpoints included). Circle/ellipse edges are a
     // faithful port of model.rs edge_polyline+curve_polyline: rebuild the arc CCW from
