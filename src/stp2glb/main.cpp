@@ -25,6 +25,7 @@ int main(int argc, char *argv[]) {
     bool profile = false;  // enable the env-gated StepProfiler instrumentation
     bool quiet = false;    // suppress the param echo + progress; keep errors + the final result line
     bool face_regions = false; // bake per-face clickable regions into scenes[0].extras (opt-in)
+    std::string pipeline;      // tessellation track: "" / libtess2 (default) | libtess2-watertight
     double model_scale = 0.0;  // >0 => adaptive per-surface density (relaxes tiny features); 0 => fixed
     std::string spill_dir; // empty => private auto-removed mkdtemp spill dir
 
@@ -38,6 +39,8 @@ int main(int argc, char *argv[]) {
     app.add_flag("--profile", profile, "Print [STEPPROF] phase/memory/per-solid timing to stderr (StepProfiler)");
     app.add_flag("--face-regions", face_regions,
                  "Bake per-face clickable regions into scenes[0].extras (face_ranges_node<m>); opt-in");
+    app.add_option("--pipeline", pipeline,
+                   "Tessellation track: libtess2 (default) | libtess2-watertight | occ | cgal | hybrid");
     app.add_option("--model-scale", model_scale,
                    "Model bbox diagonal for adaptive per-surface density (0 = fixed angle)")
         ->default_val(0.0);
@@ -75,7 +78,7 @@ int main(int argc, char *argv[]) {
     long nsolids = -1;
     try {
         nsolids = adacpp::stream_step_to_glb(stp_file, glb_file, deflection, angular_deg, num_threads, meshopt,
-                                             spill_dir, model_scale, face_regions);
+                                             spill_dir, model_scale, face_regions, pipeline);
     } catch (const std::exception &ex) {
         std::cerr << "Error: " << ex.what() << "\n";
         return 1;

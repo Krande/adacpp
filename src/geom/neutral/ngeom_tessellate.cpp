@@ -13,6 +13,8 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <unordered_map>
+#include <unordered_set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -172,6 +174,9 @@ const bool EDGEPROF = std::getenv("ADA_TESS_EDGEPROF") != nullptr;
 std::atomic<uint64_t> g_loops3d_ns{0};
 std::atomic<uint64_t> g_tess_ns{0};
 std::atomic<uint64_t> g_edge_calls{0};
+std::atomic<uint64_t> g_passes{0};
+std::atomic<uint64_t> g_marks{0};
+std::atomic<uint64_t> g_scanned{0};
 std::mutex g_edge_mu;
 std::map<int, int> g_edge_hits; // edge_id -> times discretized
 
@@ -222,9 +227,23 @@ struct Mesh {
 struct Loop3 {
     std::vector<Vec3> pts;
 };
+// A NaN Vec3 marks "no pin" — an interior/synthetic vertex whose 3D position is the surface point,
+// not a shared boundary-edge point.
+inline Vec3 nan_vec() {
+    double q = std::numeric_limits<double>::quiet_NaN();
+    return {q, q, q};
+}
+inline bool is_pinned(const Vec3 &p) {
+    return p.x == p.x; // finite (not NaN)
+}
+
 // per-loop UV polyline plus winding bookkeeping
 struct LoopUv {
     std::vector<Uv> uv;
+    std::vector<Vec3> pts3; // 3D point per uv vertex — the SHARED EDGE discretization point for a
+                            // boundary vertex (NaN => synthetic/no pin). Lets the emitter place
+                            // boundary vertices on the shared edge (watertight) instead of on this
+                            // face's own surface re-projection, which diverges from the neighbour's.
     int w = 0;                   // net winding around the u period
     bool interior_above = false; // interior is on +v side of this winding loop
 };
@@ -296,7 +315,15 @@ std::pair<double, double> metric_scale(const Surface &s, double umin, double uma
 // ---- tess2 plumbing --------------------------------------------------------------------------
 // Build tess2's flat (scaled) contour, dropping coincident points + closing dup (
 // sanitize_contour). Returns empty for <3 distinct points.
-std::vector<TESSreal> sanitize_contour(const std::vector<Uv> &l, double su, double sv) {
+// Sanitize the loop into a flat scaled contour AND (when p3 is given) the parallel 3D pin per
+// surviving vertex — dropping the SAME coincident/closing-duplicate points from both, so pins stay
+// index-aligned with the contour.
+//
+// The prototype forked this from sanitize_contour; that fork is inverted here — sanitize_contour is
+// a one-line delegation with no pins, so the DEFAULT track is identical BY CONSTRUCTION rather than
+// by inspecting two copies that must be kept in step.
+std::vector<TESSreal> sanitize_contour_pinned(const std::vector<Uv> &l, const std::vector<Vec3> *p3, double su,
+                                              double sv, std::vector<Vec3> *pin3_out) {
     if (l.size() < 3)
         return {};
     double w = 0, h = 0;
@@ -306,9 +333,10 @@ std::vector<TESSreal> sanitize_contour(const std::vector<Uv> &l, double su, doub
     }
     double eps = 1e-9 * std::max(std::max(w, h), 1.0);
     std::vector<TESSreal> flat;
+    std::vector<Vec3> pins;
     flat.reserve(l.size() * 2);
-    for (const Uv &p : l) {
-        double x = p[0] * su, y = p[1] * sv;
+    for (size_t i = 0; i < l.size(); ++i) {
+        double x = l[i][0] * su, y = l[i][1] * sv;
         if (flat.size() >= 2) {
             double lx = flat[flat.size() - 2], ly = flat[flat.size() - 1];
             if (std::abs(x - lx) <= eps && std::abs(y - ly) <= eps)
@@ -316,34 +344,56 @@ std::vector<TESSreal> sanitize_contour(const std::vector<Uv> &l, double su, doub
         }
         flat.push_back((TESSreal) x);
         flat.push_back((TESSreal) y);
+        if (pin3_out)
+            pins.push_back(p3 && i < p3->size() ? (*p3)[i] : nan_vec());
     }
     if (flat.size() >= 4) {
         size_t n = flat.size();
-        if (std::abs(flat[0] - flat[n - 2]) <= eps && std::abs(flat[1] - flat[n - 1]) <= eps)
+        if (std::abs(flat[0] - flat[n - 2]) <= eps && std::abs(flat[1] - flat[n - 1]) <= eps) {
             flat.resize(n - 2);
+            if (pin3_out && !pins.empty())
+                pins.pop_back();
+        }
     }
     if (flat.size() < 6)
         return {};
+    if (pin3_out)
+        *pin3_out = std::move(pins);
     return flat;
+}
+
+std::vector<TESSreal> sanitize_contour(const std::vector<Uv> &l, double su, double sv) {
+    return sanitize_contour_pinned(l, nullptr, su, sv, nullptr);
 }
 
 struct Tess2Out {
     std::vector<Uv> verts;
+    std::vector<Vec3> pin; // parallel to verts: shared-edge 3D point for a boundary vertex, else NaN
     std::vector<Tri> tris;
     bool ok = false;
 };
 
-Tess2Out run_tess2(const std::vector<std::vector<Uv>> &loops_uv, double su, double sv) {
+// loops_p3 (parallel to loops_uv, may be null): per-vertex 3D pins so boundary vertices can be
+// emitted on the shared edge. When present, out.pin is filled via libtess2's vertex-index map —
+// original boundary vertices carry their pin; Steiner/new vertices get NaN. Null (the default track)
+// => not one extra byte or branch in the hot loop.
+Tess2Out run_tess2(const std::vector<std::vector<Uv>> &loops_uv, double su, double sv,
+                   const std::vector<std::vector<Vec3>> *loops_p3 = nullptr) {
     Tess2Out out;
     TESStesselator *t = tessNewTess(nullptr);
     if (!t)
         return out;
     std::vector<std::vector<TESSreal>> store;
+    std::vector<Vec3> flat_p3; // pin per concatenated input vertex, indexable by tessGetVertexIndices
     store.reserve(loops_uv.size());
-    for (const auto &l : loops_uv) {
-        std::vector<TESSreal> flat = sanitize_contour(l, su, sv);
+    for (size_t li = 0; li < loops_uv.size(); ++li) {
+        std::vector<Vec3> pins;
+        const std::vector<Vec3> *p3 = (loops_p3 && li < loops_p3->size()) ? &(*loops_p3)[li] : nullptr;
+        std::vector<TESSreal> flat = sanitize_contour_pinned(loops_uv[li], p3, su, sv, loops_p3 ? &pins : nullptr);
         if (flat.empty())
             continue;
+        if (loops_p3)
+            flat_p3.insert(flat_p3.end(), pins.begin(), pins.end());
         store.push_back(std::move(flat));
         tessAddContour(t, 2, store.back().data(), sizeof(TESSreal) * 2, (int) store.back().size() / 2);
     }
@@ -353,6 +403,7 @@ Tess2Out run_tess2(const std::vector<std::vector<Uv>> &loops_uv, double su, doub
     }
     const TESSreal *tv = tessGetVertices(t);
     const int nv = tessGetVertexCount(t);
+    const TESSindex *vi = loops_p3 ? tessGetVertexIndices(t) : nullptr; // output vert -> input index
     const TESSindex *te = tessGetElements(t);
     const int ne = tessGetElementCount(t);
     if (nv <= 0 || ne <= 0) {
@@ -360,8 +411,15 @@ Tess2Out run_tess2(const std::vector<std::vector<Uv>> &loops_uv, double su, doub
         return out;
     }
     out.verts.reserve(nv);
-    for (int i = 0; i < nv; ++i)
+    if (loops_p3)
+        out.pin.reserve(nv);
+    for (int i = 0; i < nv; ++i) {
         out.verts.push_back({tv[i * 2] / su, tv[i * 2 + 1] / sv});
+        if (loops_p3) {
+            TESSindex oi = vi ? vi[i] : TESS_UNDEF;
+            out.pin.push_back((oi != TESS_UNDEF && (size_t) oi < flat_p3.size()) ? flat_p3[oi] : nan_vec());
+        }
+    }
     for (int e = 0; e < ne; ++e) {
         const TESSindex *p = &te[e * 3];
         if (p[0] == TESS_UNDEF || p[1] == TESS_UNDEF || p[2] == TESS_UNDEF)
@@ -476,7 +534,8 @@ void delaunay_flip(const std::vector<Uv> &verts, std::vector<Tri> &tris, double 
 }
 
 void refine_uv(const Surface &s, std::vector<Uv> &verts, std::vector<Tri> &tris, double max_du, double max_dv,
-               double defl, bool have_metric, double su, double sv, double max_angle) {
+               double defl, bool have_metric, double su, double sv, double max_angle, bool freeze = false,
+               double converged_frac = 0.0) {
     std::vector<Vec3> pts3(verts.size());
     for (size_t i = 0; i < verts.size(); ++i)
         pts3[i] = s.point(verts[i][0], verts[i][1]);
@@ -509,6 +568,10 @@ void refine_uv(const Surface &s, std::vector<Uv> &verts, std::vector<Tri> &tris,
                      approx_area, budget, max_du, max_dv, (int) check_dev);
 
     auto key = [](uint32_t i, uint32_t j) { return std::make_pair(std::min(i, j), std::max(i, j)); };
+    // Undirected edge as one uint64 — hashable without allocating a node per edge.
+    auto pack = [](uint32_t i, uint32_t j) {
+        return ((uint64_t) std::min(i, j) << 32) | (uint64_t) std::max(i, j);
+    };
 
     // Angular refinement: split an edge whose surface normal turns more than the (adaptive) max_angle
     // across it. This is SCALE-INVARIANT, so it captures curved-but-shallow features (a bevel cut into
@@ -520,6 +583,26 @@ void refine_uv(const Surface &s, std::vector<Uv> &verts, std::vector<Tri> &tris,
     const double eff_angle = adaptive_max_angle(s.approx_size(), max_angle);
     const double cos_max_angle = eff_angle > 0.0 ? std::cos(eff_angle) : -2.0;
     const double ang_min_len2 = std::pow(std::max(s.approx_size() * 1e-3, 1e-6), 2.0);
+
+    // Boundary-edge set for the freeze, computed ONCE. An incidence-1 edge is a trim-loop segment;
+    // because the freeze never splits one, the set is INVARIANT across passes (refinement only
+    // appends interior vertices, so existing index pairs keep their meaning), so there is no reason
+    // to rebuild it per pass. (Measured: hoisting this out of the loop is NOT where the freeze's
+    // cost was — see converged_frac below for what actually cost +65%.)
+    std::unordered_set<uint64_t> boundary;
+    if (freeze) {
+        std::unordered_map<uint64_t, int> inc0;
+        inc0.reserve(tris.size() * 3);
+        for (const Tri &t : tris) {
+            inc0[pack(t[0], t[1])]++;
+            inc0[pack(t[1], t[2])]++;
+            inc0[pack(t[2], t[0])]++;
+        }
+        for (const auto &kv : inc0)
+            if (kv.second == 1)
+                boundary.insert(kv.first);
+    }
+    auto is_interior = [&](uint32_t i, uint32_t j) { return !freeze || !boundary.count(pack(i, j)); };
 
     for (int pass = 0; pass < 12; ++pass) {
         std::set<std::pair<uint32_t, uint32_t>> marked;
@@ -560,7 +643,8 @@ void refine_uv(const Surface &s, std::vector<Uv> &verts, std::vector<Tri> &tris,
             const std::pair<uint32_t, uint32_t> es[3] = {{t[0], t[1]}, {t[1], t[2]}, {t[2], t[0]}};
             for (auto &e : es) {
                 auto k = key(e.first, e.second);
-                if (!marked.count(k) && edge_needs_split(e.first, e.second) != 0)
+                if (is_interior(e.first, e.second) && !marked.count(k) &&
+                    edge_needs_split(e.first, e.second) != 0)
                     marked.insert(k);
             }
             // fold detection: split the longest edge of a folded triangle (first 3 passes)
@@ -585,7 +669,8 @@ void refine_uv(const Surface &s, std::vector<Uv> &verts, std::vector<Tri> &tris,
                             e = {t[2], t[0]};
                         const Uv &ea = verts[e.first];
                         const Uv &eb = verts[e.second];
-                        if (std::abs(eb[0] - ea[0]) > max_du / 8.0 || std::abs(eb[1] - ea[1]) > max_dv / 8.0)
+                        if (is_interior(e.first, e.second) &&
+                            (std::abs(eb[0] - ea[0]) > max_du / 8.0 || std::abs(eb[1] - ea[1]) > max_dv / 8.0))
                             marked.insert(key(e.first, e.second));
                     }
                 }
@@ -657,14 +742,35 @@ void refine_uv(const Surface &s, std::vector<Uv> &verts, std::vector<Tri> &tris,
         tris.swap(out);
         if (have_metric)
             delaunay_flip(verts, tris, su, sv);
+        if (EDGEPROF) {
+            g_passes.fetch_add(1, std::memory_order_relaxed);
+            g_marks.fetch_add(marked.size(), std::memory_order_relaxed);
+            g_scanned.fetch_add(tris.size(), std::memory_order_relaxed);
+        }
+        // Converged-enough exit (watertight track only — it changes which passes run, so it must
+        // never touch the default track's output). The freeze slows triangle growth, so the
+        // `tris.size() > budget` exit fires much later and the loop keeps rescanning the whole mesh
+        // to chase a handful of stragglers: measured 1431 passes / 949k triangles scanned vs 812 /
+        // 578k unfrozen, for only 3.7% more marks. Stop once a pass marks a negligible fraction.
+        if (freeze && converged_frac > 0.0 && marked.size() * converged_frac < tris.size())
+            break;
         if (!split_any || tris.size() > budget)
             break;
     }
 }
 
-// Shared tail of every UV tessellation: drop zero-area tris, normalize winding, refine, map to 3D.
+// Shared tail of every UV tessellation (the GRID paths call this too): drop zero-area tris,
+// normalize winding, refine, map to 3D.
+//
+// `pin` (parallel to the ORIGINAL verts; empty = none) places a boundary vertex at its shared-edge
+// point instead of this face's own surface re-projection, so it coincides with the neighbouring
+// face's vertex and the per-solid weld stitches the seam watertight. Refinement only APPENDS
+// interior vertices, so pins stay index-aligned with the originals. Only POSITION is pinned — the
+// normal stays the per-face surface normal, preserving the crease along the seam.
+//
+// Empty pin (the default track) => `is_pinned` is never consulted and the emit loop is unchanged.
 void refine_and_emit(const Surface &s, std::vector<Uv> verts, std::vector<Tri> tris, double su, double sv,
-                     const TessParams &tp, bool same_sense, Mesh &mesh) {
+                     const TessParams &tp, bool same_sense, Mesh &mesh, const std::vector<Vec3> &pin = {}) {
     double umin = INF, umax = -INF, vmin = INF, vmax = -INF;
     for (const Uv &p : verts) {
         umin = std::min(umin, p[0]);
@@ -695,8 +801,11 @@ void refine_and_emit(const Surface &s, std::vector<Uv> verts, std::vector<Tri> t
     double max_dv = s.v_step(tp.deflection, tp.max_angle);
     bool needs_dev = dynamic_cast<const PlaneSurface *>(&s) == nullptr;
     size_t pre_refine = tris.size();
-    if (std::isfinite(max_du) || std::isfinite(max_dv) || needs_dev)
-        refine_uv(s, verts, tris, max_du, max_dv, tp.deflection, needs_dev, su, sv, tp.max_angle);
+    if (std::isfinite(max_du) || std::isfinite(max_dv) || needs_dev) {
+        const bool wt = tp.track == TessTrack::Libtess2Watertight;
+        refine_uv(s, verts, tris, max_du, max_dv, tp.deflection, needs_dev, su, sv, tp.max_angle,
+                  wt && tp.watertight.freeze_boundary, wt ? tp.watertight.converged_frac : 0.0);
+    }
     if (TESSDBG) {
         std::fprintf(stderr, "TESSDBG   refine_and_emit surf=%s", surf_kind(s));
         log_surf_params(s);
@@ -708,8 +817,9 @@ void refine_and_emit(const Surface &s, std::vector<Uv> verts, std::vector<Tri> t
 
     bool flip = !same_sense;
     uint32_t base = mesh.base();
-    for (const Uv &p : verts) {
-        Vec3 pos = s.point(p[0], p[1]);
+    for (size_t i = 0; i < verts.size(); ++i) {
+        const Uv &p = verts[i];
+        Vec3 pos = (i < pin.size() && is_pinned(pin[i])) ? pin[i] : s.point(p[0], p[1]);
         Vec3 n = s.normal(p[0], p[1]);
         if (flip)
             n = n * -1.0;
@@ -728,8 +838,9 @@ void refine_and_emit(const Surface &s, std::vector<Uv> verts, std::vector<Tri> t
     }
 }
 
+// loops_p3 (parallel to loops_uv, may be null): shared-edge pins for the boundary vertices.
 bool emit_uv_region(const Surface &s, const std::vector<std::vector<Uv>> &loops_uv, const TessParams &tp,
-                    bool same_sense, Mesh &mesh) {
+                    bool same_sense, Mesh &mesh, const std::vector<std::vector<Vec3>> *loops_p3 = nullptr) {
     double umin = INF, umax = -INF, vmin = INF, vmax = -INF;
     for (const auto &l : loops_uv)
         for (const Uv &p : l) {
@@ -739,12 +850,15 @@ bool emit_uv_region(const Surface &s, const std::vector<std::vector<Uv>> &loops_
             vmax = std::max(vmax, p[1]);
         }
     auto [su, sv] = metric_scale(s, umin, umax, vmin, vmax);
-    Tess2Out r = run_tess2(loops_uv, su, sv);
-    if (!r.ok)
+    Tess2Out r = run_tess2(loops_uv, su, sv, loops_p3);
+    if (!r.ok) {
+        // Shrunk-hole retry: no pins (rare degenerate-hole case — the shrunk contour no longer
+        // corresponds 1:1 to the shared-edge points, so pinning it would misplace vertices).
         r = tess2_with_shrunk_holes(loops_uv, su, sv);
-    if (!r.ok)
-        return false;
-    refine_and_emit(s, std::move(r.verts), std::move(r.tris), su, sv, tp, same_sense, mesh);
+        if (!r.ok)
+            return false;
+    }
+    refine_and_emit(s, std::move(r.verts), std::move(r.tris), su, sv, tp, same_sense, mesh, r.pin);
     return true;
 }
 
@@ -1383,6 +1497,11 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
             uv.push_back({u, v});
             sing.push_back(singular(pts[i]) ? 1 : 0);
         }
+        // pts3 is 1:1 with uv here — the shared-edge point behind each boundary vertex. Both faces
+        // of an edge discretize it to byte-identical points, so pinning to these makes their
+        // boundary vertices coincide. The singular-cap walk below inserts synthetic seam vertices,
+        // which get no pin (NaN => the surface point).
+        std::vector<Vec3> pts3 = pts;
         // walk a singular point along the cap line at the u-step
         if (per_u) {
             bool any_sing = false;
@@ -1392,9 +1511,12 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
             if (any_sing) {
                 double du = surf.u_step(tp.deflection, tp.max_angle);
                 std::vector<Uv> out2;
+                std::vector<Vec3> p3out;
                 out2.reserve(uv.size() + 8);
+                p3out.reserve(uv.size() + 8);
                 for (size_t i = 0; i < uv.size(); ++i) {
                     out2.push_back(uv[i]);
+                    p3out.push_back(pts3[i]);
                     if (sing[i]) {
                         double pu = uv[i][0];
                         double nu = uv[(i + 1) % uv.size()][0];
@@ -1403,11 +1525,14 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
                         while (pu - nu > *per_u / 2.0)
                             nu += *per_u;
                         int steps = (int) std::clamp((int) std::ceil(std::abs(nu - pu) / du), 1, 256);
-                        for (int k = 1; k <= steps; ++k)
+                        for (int k = 1; k <= steps; ++k) {
                             out2.push_back({pu + (nu - pu) * k / steps, uv[i][1]});
+                            p3out.push_back(nan_vec()); // synthetic seam vertex — surface point, no pin
+                        }
                     }
                 }
                 uv.swap(out2);
+                pts3.swap(p3out);
             }
         }
         int w = 0;
@@ -1435,7 +1560,7 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
                         p[0] -= shift;
             }
         }
-        loops_uv.push_back({std::move(uv), w, interior_above});
+        loops_uv.push_back({std::move(uv), std::move(pts3), w, interior_above});
     }
 
     auto uv_slit = [&](const LoopUv &l) {
@@ -1486,9 +1611,17 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
     }
 
     std::vector<std::vector<Uv>> contours;
+    std::vector<std::vector<Vec3>> contours_p3; // shared-edge pins parallel to contours
     contours.reserve(loops_uv.size());
-    for (auto &l : loops_uv)
+    contours_p3.reserve(loops_uv.size());
+    for (auto &l : loops_uv) {
         contours.push_back(std::move(l.uv));
+        contours_p3.push_back(std::move(l.pts3));
+    }
+    // Pins are consulted only on the watertight track; the default track passes nullptr and runs the
+    // identical code path it always did.
+    const std::vector<std::vector<Vec3>> *pins =
+        (tp.track == TessTrack::Libtess2Watertight && tp.watertight.pin_boundary) ? &contours_p3 : nullptr;
 
     {
         Rect r = full_wrap_bspline(surf, contours);
@@ -1516,7 +1649,8 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
         return nullptr;
     }
     diag_set_path("emit_uv_region");
-    return emit_uv_region(surf, contours, tp, same_sense, mesh) ? nullptr : "UV tessellation produced no triangles";
+    return emit_uv_region(surf, contours, tp, same_sense, mesh, pins) ? nullptr
+                                                                     : "UV tessellation produced no triangles";
 }
 
 // ---- boundary building from neutral topology (build_loops3d / loop_polyline) --------
@@ -2208,9 +2342,14 @@ TessMesh tessellate_doc(const NgeomDoc &doc, const TessParams &tp) {
             std::fprintf(stderr,
                          "[EDGEPROF] tessellate_doc=%.3fs  build_loops3d=%.3fs (%.1f%% of tess)\n"
                          "[EDGEPROF] edge discretize calls=%zu  distinct edge_ids=%zu  "
-                         "duplication=%.2fx  edges seen >1x=%zu\n",
+                         "duplication=%.2fx  edges seen >1x=%zu\n"
+                         "[EDGEPROF] refine passes=%llu  marks=%llu  tris scanned=%llu  "
+                         "marks/pass=%.1f\n",
                          tess / 1e9, loops / 1e9, tess ? 100.0 * (double) loops / (double) tess : 0.0,
-                         calls, distinct, distinct ? (double) calls / (double) distinct : 0.0, dup);
+                         calls, distinct, distinct ? (double) calls / (double) distinct : 0.0, dup,
+                         (unsigned long long) g_passes.load(), (unsigned long long) g_marks.load(),
+                         (unsigned long long) g_scanned.load(),
+                         g_passes.load() ? (double) g_marks.load() / (double) g_passes.load() : 0.0);
         }
     } _docprof{EDGEPROF, _tess_t0};
     // Opt-in parallelism (tp.threads>1): tessellate ROOTS across a thread pool into per-root local

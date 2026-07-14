@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "../MeshType.h"
+#include "ngeom_tess_track.h"
 #include "ngeom_topology.h"
 
 namespace adacpp::ngeom {
@@ -36,6 +37,11 @@ struct TessParams {
                                        // GLB writer can emit clickable per-face regions. Opt-in (bloats
                                        // the output) and forces serial face tessellation for stable
                                        // face-order ranges. Off => no per-face bookkeeping.
+    // Which tessellation track runs (ngeom_tess_track.h). Default Libtess2 = today's behaviour,
+    // byte-for-byte; `watertight` is read ONLY when track == Libtess2Watertight and is inert
+    // otherwise. Both POD, so TessParams stays trivially copyable for the per-root/per-face copies.
+    TessTrack track = TessTrack::Libtess2;
+    WatertightOpts watertight;
 };
 
 struct TessMesh {
