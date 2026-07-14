@@ -72,6 +72,8 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
         tp.watertight.pin_boundary = std::atoi(e) != 0;
     if (const char *e = std::getenv("ADA_TESS_WT_FREEZE"))
         tp.watertight.freeze_boundary = std::atoi(e) != 0;
+    if (const char *e = std::getenv("ADA_TESS_WT_GRID_VIA_EMIT"))
+        tp.watertight.grid_via_emit = std::atoi(e) != 0;
     if (const char *e = std::getenv("ADA_TESS_WT_CONVERGED"))
         tp.watertight.converged_frac = std::atof(e);
     tp.deflection = deflection;

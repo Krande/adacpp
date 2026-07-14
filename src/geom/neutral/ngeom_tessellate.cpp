@@ -164,21 +164,21 @@ void diag_flush_face(const Surface &surf, int64_t face_id, uint32_t face_seq, do
     d = FaceDiag{};
 }
 
-// ---- TEMPORARY edge-discretization profile (ADA_TESS_EDGEPROF=1) ----------------------------
-// Phase 2 rests on the claim that build_loops3d is "~2x wasted work, real headroom". That claim is
-// unmeasured. This answers two questions before any cache is built:
-//   1. what fraction of tessellation time IS edge discretization?
-//   2. what is the real duplication factor (distinct edge_ids vs discretize calls)?
-// Remove once Phase 2 is decided.
+// ---- refinement profile (ADA_TESS_EDGEPROF=1) -----------------------------------------------
+// Reports where tessellation time actually goes. Two findings this settled, kept here because the
+// numbers keep being needed:
+//   * build_loops3d (edge discretization) is 0.4% of tessellate_doc, and each edge is discretized
+//     exactly 2.00x (once per adjacent face). So sharing/caching edge discretization funds nothing
+//     -- which is why the planned per-root edge cache was cancelled.
+//   * refine passes x tris-scanned is what the boundary freeze inflates (1431 passes / 949k tris
+//     scanned vs 812 / 578k unfrozen, for 3.7% more marks). Time tracks tris-scanned almost
+//     exactly, which is how WatertightOpts::converged_frac was found.
 const bool EDGEPROF = std::getenv("ADA_TESS_EDGEPROF") != nullptr;
 std::atomic<uint64_t> g_loops3d_ns{0};
 std::atomic<uint64_t> g_tess_ns{0};
-std::atomic<uint64_t> g_edge_calls{0};
 std::atomic<uint64_t> g_passes{0};
 std::atomic<uint64_t> g_marks{0};
 std::atomic<uint64_t> g_scanned{0};
-std::mutex g_edge_mu;
-std::map<int, int> g_edge_hits; // edge_id -> times discretized
 
 // distinctive surface params, so a face can be matched to the reference output by geometry
 void log_surf_params(const Surface &s) {
@@ -1644,7 +1644,11 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
             return nullptr;
         }
     }
-    if (tessellate_full_patch(surf, contours, tp, same_sense, mesh)) {
+    // grid_via_emit: skip the UV-bbox grid so this face goes through the pinned emit path below.
+    // full_patch_rect's gate is area_ratio >= 0.995, i.e. the trim loop IS the rectangle, so emit
+    // covers the same region -- but with a boundary it can pin.
+    if (!(tp.track == TessTrack::Libtess2Watertight && tp.watertight.grid_via_emit) &&
+        tessellate_full_patch(surf, contours, tp, same_sense, mesh)) {
         diag_set_path("grid_full_patch");
         return nullptr;
     }
@@ -1668,17 +1672,6 @@ std::vector<Loop3> build_loops3d(const FaceSurfaceN &face, const TessParams &tp)
                     std::memory_order_relaxed);
         }
     } _prof{EDGEPROF, _t0};
-    if (EDGEPROF) {
-        for (const FaceBoundN &b : face.bounds) {
-            if (!b.loop || b.loop->is_poly)
-                continue;
-            std::lock_guard<std::mutex> lk(g_edge_mu);
-            for (const OrientedEdgeN &e : b.loop->edges) {
-                g_edge_calls.fetch_add(1, std::memory_order_relaxed);
-                g_edge_hits[e.edge_id]++;
-            }
-        }
-    }
     for (const FaceBoundN &b : face.bounds) {
         if (!b.loop)
             continue;
@@ -2329,24 +2322,10 @@ TessMesh tessellate_doc(const NgeomDoc &doc, const TessParams &tp) {
                                     std::chrono::steady_clock::now() - t0).count(),
                                 std::memory_order_relaxed);
             uint64_t tess = g_tess_ns.load(), loops = g_loops3d_ns.load();
-            size_t distinct = 0, dup = 0, calls = 0;
-            {
-                std::lock_guard<std::mutex> lk(g_edge_mu);
-                distinct = g_edge_hits.size();
-                for (auto &kv : g_edge_hits) {
-                    calls += (size_t) kv.second;
-                    if (kv.second > 1)
-                        ++dup;
-                }
-            }
             std::fprintf(stderr,
                          "[EDGEPROF] tessellate_doc=%.3fs  build_loops3d=%.3fs (%.1f%% of tess)\n"
-                         "[EDGEPROF] edge discretize calls=%zu  distinct edge_ids=%zu  "
-                         "duplication=%.2fx  edges seen >1x=%zu\n"
-                         "[EDGEPROF] refine passes=%llu  marks=%llu  tris scanned=%llu  "
-                         "marks/pass=%.1f\n",
+                         "[EDGEPROF] refine passes=%llu  marks=%llu  tris scanned=%llu  marks/pass=%.1f\n",
                          tess / 1e9, loops / 1e9, tess ? 100.0 * (double) loops / (double) tess : 0.0,
-                         calls, distinct, distinct ? (double) calls / (double) distinct : 0.0, dup,
                          (unsigned long long) g_passes.load(), (unsigned long long) g_marks.load(),
                          (unsigned long long) g_scanned.load(),
                          g_passes.load() ? (double) g_marks.load() / (double) g_passes.load() : 0.0);

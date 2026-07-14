@@ -44,6 +44,20 @@ struct WatertightOpts {
     // they feed the boundary to a CDT as a *constraint*, which is never split by construction, so
     // they get the effect for free rather than by suppressing a post-hoc refinement pass.
     bool freeze_boundary = false;
+    // Route near-rectangular B-spline patches (tessellate_full_patch) through the pinned
+    // emit_uv_region instead of the UV-bbox grid. The grid path is the ONLY source of residual
+    // cracks: it tessellates the bbox, never sees the trim loop, and so has nothing to pin. On
+    // Ventilator every unpinned face (53/305) takes this branch, so this closes all of them.
+    //
+    // The reference kernels have no grid path at all -- OCC classifier-filters grid points and
+    // inserts them as Steiner points into a CDT whose boundary is already frontier constraints
+    // (one path, boundary-first); truck does the same via spade. libtess2 is a winding-rule
+    // tessellator and cannot take Steiner points, so we cannot copy that directly; routing through
+    // emit is the closest available equivalent.
+    //
+    // The 2026-07-13 note measured this as +48% tris / +79% crane -- but that was UNPINNED and
+    // before converged_frac. Re-measure before trusting it.
+    bool grid_via_emit = false;
     // Stop refining once a pass marks fewer than 1/converged_frac of the triangles. 0 = off (run to
     // the tri budget, as the default track does). Only meaningful with freeze_boundary.
     //
