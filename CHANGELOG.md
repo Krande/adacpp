@@ -2,6 +2,15 @@
 
 
 
+## v0.13.2 (2026-07-14)
+
+### Fix
+
+* fix: guard file-based glb_diff binding out of the wasm build (#37)
+
+Co-authored-by: Claude Opus 4.8 (1M context) &lt;noreply@anthropic.com&gt; ([`d46bdd9`](https://github.com/Krande/adacpp/commit/d46bdd925f350a17693a3f3f3f03ab114fad566b))
+
+
 ## v0.13.1 (2026-07-13)
 
 ### Fix
