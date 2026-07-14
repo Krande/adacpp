@@ -22,7 +22,9 @@
 #include "brep_file_convert.h"    // shared STEP<->IFC file writers (also compiled into the wasm writer)
 #include "ifc_reader.h"          // native IFC advanced-B-rep reader -> ng:: (native IFC->STEP path)
 
-#include "../diff/glb_diff_native.h" // GLB model-diff core (summary match + removed overlay)
+#ifndef __EMSCRIPTEN__
+#include "../diff/glb_diff_native.h" // GLB model-diff core (summary match + removed overlay); file/mmap-based, native-only
+#endif
 #include "../geom/neutral/ngeom_tessellate.h"
 #include "../geom/neutral/ngeom_meshopt.h"
 #include "../cadit/step/step_reader.h"
@@ -771,6 +773,9 @@ long stream_step_to_mesh_impl(const std::string &in_path, const std::string &out
 // round-trip through Python bytes. Memory model: summarise scene then ref, ONE mesh node decoded at a
 // time (peak = largest material chunk), only the KB-scale summary tables survive to match. The
 // removed overlay re-scans the ref and keeps ONLY the removed elements' triangles.
+// Native-only: summarize_glb_file is mmap/POSIX-backed (#ifndef __EMSCRIPTEN__ in glb_diff_native.h).
+// The browser gets GLB-diff from the standalone adacpp_glb_diff embind module (glb_diff_wasm.cpp).
+#ifndef __EMSCRIPTEN__
 nb::dict glb_diff_impl(const std::string &scene_path, const std::string &ref_path, const std::string &mode_s,
                        double tol, uint32_t overlay_rgba) {
     using namespace adacpp::gdiff;
@@ -819,6 +824,7 @@ nb::dict glb_diff_impl(const std::string &scene_path, const std::string &ref_pat
     d["overlay"] = nb::bytes(overlay.data(), overlay.size());
     return d;
 }
+#endif // __EMSCRIPTEN__
 
 // Single-threaded, mmap-free STEP -> GLB (the wasm/OPFS core, exercised natively here as a parity
 // oracle). Creates a temp spill dir, runs step_to_glb_single, returns the triangle count.
@@ -3818,6 +3824,7 @@ void cad_module(nb::module_ &m) {
           "to a binary STL (fmt='stl') or Wavefront OBJ (fmt='obj'). Bounded memory; no Python round-trip. "
           "Returns the triangle count (-1 on I/O error). angular_deg in degrees.");
 
+#ifndef __EMSCRIPTEN__
     m.def("glb_diff", &glb_diff_impl, "scene_path"_a, "ref_path"_a, "mode"_a = "nameThenCentroid", "tol"_a = 1e-3,
           "overlay_rgba"_a = 0xD50000FFu,
           "Diff two GLB FILES (paths, so big GLBs never copy through Python bytes): summarise each one "
@@ -3826,6 +3833,7 @@ void cad_module(nb::module_ &m) {
           "{ops:[(node_id,status)], removed:[node_id], added:[node_id], counts:{...}, overlay:bytes}. "
           "status 0=unchanged 1=added 2=removed 3=modified; overlay is a red GLB of the ref-only geometry. "
           "Handles EXT_meshopt_compression (the viewer GLB format).");
+#endif // __EMSCRIPTEN__
 
     m.def("stream_step_to_glb_st", &stream_step_to_glb_st_impl, "in_path"_a, "out_path"_a, "deflection"_a = 2.0,
           "angular_deg"_a = 20.0, "meshopt"_a = false,
