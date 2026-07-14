@@ -36,9 +36,14 @@ struct WatertightOpts {
     bool pin_boundary = true;
     // Never split an incidence-1 (boundary) edge in refine_uv: a split places the new vertex on the
     // chord, off the shared edge, while the neighbour keeps the original segment -> T-junction.
-    // This is also what cost +34% in the 2026-07-13 attempt (refinement fights a boundary frozen at
-    // a density the surface disagrees with).
-    bool freeze_boundary = true;
+    //
+    // OFF BY DEFAULT — measured to be a bad trade. It buys only ~6 percentage points of crack
+    // reduction (pin alone: -48%; pin+freeze: -54%) and costs +23% (crane) to +64% (ventilator).
+    // Pinning does essentially all the work; boundary-split T-junctions were never the dominant
+    // crack source. Note the reference kernels (OCCT, truck, fornjot) have no analogue of this:
+    // they feed the boundary to a CDT as a *constraint*, which is never split by construction, so
+    // they get the effect for free rather than by suppressing a post-hoc refinement pass.
+    bool freeze_boundary = false;
     // Stop refining once a pass marks fewer than 1/converged_frac of the triangles. 0 = off (run to
     // the tri budget, as the default track does). Only meaningful with freeze_boundary.
     //
