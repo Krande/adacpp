@@ -37,11 +37,12 @@ struct TessParams {
                                        // GLB writer can emit clickable per-face regions. Opt-in (bloats
                                        // the output) and forces serial face tessellation for stable
                                        // face-order ranges. Off => no per-face bookkeeping.
-    // Which tessellation track runs (ngeom_tess_track.h). Default Libtess2 = today's behaviour,
-    // byte-for-byte; `watertight` is read ONLY when track == Libtess2Watertight and is inert
-    // otherwise. Both POD, so TessParams stays trivially copyable for the per-root/per-face copies.
+    // Which tessellation track runs (ngeom_tess_track.h), plus each track's own options. Defaults
+    // are today's behaviour, byte-for-byte. Each opts struct is read only on its own track. All POD,
+    // so TessParams stays trivially copyable for the per-root/per-face copies.
     TessTrack track = TessTrack::Libtess2;
-    WatertightOpts watertight;
+    Libtess2Opts libtess2;
+    CdtOpts cdt;
 };
 
 struct TessMesh {

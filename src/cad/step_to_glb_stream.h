@@ -43,13 +43,17 @@ namespace adacpp {
 //               caller can inspect the intermediate spill files. The lane temp files inside it are
 //               still cleaned up by GlbSpillWriter's destructor; only the user-supplied dir survives.
 // `pipeline` selects the tessellation track (ngeom_tess_track.h): "" / "libtess2" = the default,
-// byte-identical path; "libtess2-watertight" = shared-edge pinned + boundary-frozen. An unknown name
-// is an error (-1) rather than a silent fallback to the default — a caller asking for a track that
-// doesn't exist wants to know, not to get different geometry than it asked for.
+// byte-identical path; "cdt" = the constrained-Delaunay track. An unknown name is an error (-1)
+// rather than a silent fallback to the default — a caller asking for a track that doesn't exist
+// wants to know, not to get different geometry than it asked for.
+//
+// `pin_boundary` is a libtess2 OPTION (not a track): emit boundary vertices at their shared-edge
+// point rather than this face's own surface re-projection. Halves cracks for ~free; off by default
+// only so the shipped output stays byte-identical.
 inline long stream_step_to_glb(const std::string &in_path, const std::string &out_path, double deflection,
                                double angular_deg, int num_threads, bool meshopt, const std::string &spill_dir = "",
                                double model_scale = 0.0, bool face_regions = false,
-                               const std::string &pipeline = "") {
+                               const std::string &pipeline = "", bool pin_boundary = false) {
     using namespace adacpp::ngeom;
     adacpp::prof::StepProfiler prof("stream_step_to_glb");
     adacpp::tune_malloc_for_streaming(); // bound streaming peak RSS (mmap/trim tuning) before the pool
@@ -67,15 +71,20 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
         return -1; // unknown track name
     TessParams tp;
     tp.track = *track;
+    tp.libtess2.pin_boundary = pin_boundary;
     // Experiment knobs: isolate which half of the watertight track costs what.
+    if (const char *e = std::getenv("ADA_TESS_PIN")) // boundary pinning: a libtess2-track option
+        tp.libtess2.pin_boundary = std::atoi(e) != 0;
     if (const char *e = std::getenv("ADA_TESS_WT_PIN"))
-        tp.watertight.pin_boundary = std::atoi(e) != 0;
+        tp.libtess2.pin_boundary = std::atoi(e) != 0;
     if (const char *e = std::getenv("ADA_TESS_WT_FREEZE"))
-        tp.watertight.freeze_boundary = std::atoi(e) != 0;
+        tp.libtess2.freeze_boundary = std::atoi(e) != 0;
     if (const char *e = std::getenv("ADA_TESS_WT_GRID_VIA_EMIT"))
-        tp.watertight.grid_via_emit = std::atoi(e) != 0;
+        tp.libtess2.grid_via_emit = std::atoi(e) != 0;
+    if (const char *e = std::getenv("ADA_TESS_WT_CONFORM_RATIO"))
+        tp.libtess2.conform_max_ratio = std::atoi(e);
     if (const char *e = std::getenv("ADA_TESS_WT_CONVERGED"))
-        tp.watertight.converged_frac = std::atof(e);
+        tp.libtess2.converged_frac = std::atof(e);
     tp.deflection = deflection;
     tp.max_angle = angular_deg * 3.14159265358979323846 / 180.0;
     tp.model_scale = model_scale; // >0 => adaptive per-surface density; the per-solid tpp copies inherit it

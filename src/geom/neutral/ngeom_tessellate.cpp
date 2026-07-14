@@ -806,9 +806,9 @@ void refine_and_emit(const Surface &s, std::vector<Uv> verts, std::vector<Tri> t
     bool needs_dev = dynamic_cast<const PlaneSurface *>(&s) == nullptr;
     size_t pre_refine = tris.size();
     if (std::isfinite(max_du) || std::isfinite(max_dv) || needs_dev) {
-        const bool wt = tp.track == TessTrack::Libtess2Watertight;
+        const bool lt = tp.track == TessTrack::Libtess2;
         refine_uv(s, verts, tris, max_du, max_dv, tp.deflection, needs_dev, su, sv, tp.max_angle,
-                  wt && tp.watertight.freeze_boundary, wt ? tp.watertight.converged_frac : 0.0);
+                  lt && tp.libtess2.freeze_boundary, lt ? tp.libtess2.converged_frac : 0.0);
     }
     if (TESSDBG) {
         std::fprintf(stderr, "TESSDBG   refine_and_emit surf=%s", surf_kind(s));
@@ -933,9 +933,9 @@ bool tessellate_uv_grid(const Surface &s, double u0, double u1, double v0, doubl
     // Grid lines. Without a ring these are exactly the uniform samples, so the default path is
     // bit-for-bit what it always was.
     std::vector<double> ul, vl;
-    if (ring_uv && ring_p3 && tp.track == TessTrack::Libtess2Watertight && tp.watertight.conforming_grid) {
+    if (ring_uv && ring_p3 && tp.track == TessTrack::Libtess2 && tp.libtess2.conforming_grid) {
         bool uok = false, vok = false;
-        const int mr = tp.watertight.conform_max_ratio;
+        const int mr = tp.libtess2.conform_max_ratio;
         ul = conform_lines(*ring_uv, true, u0, u1, v0, v1, nu, mr, uok);
         vl = conform_lines(*ring_uv, false, v0, v1, u0, u1, nv, mr, vok);
         if (EDGEPROF) {
@@ -1732,7 +1732,7 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
     // Pins are consulted only on the watertight track; the default track passes nullptr and runs the
     // identical code path it always did.
     const std::vector<std::vector<Vec3>> *pins =
-        (tp.track == TessTrack::Libtess2Watertight && tp.watertight.pin_boundary) ? &contours_p3 : nullptr;
+        (tp.track == TessTrack::Libtess2 && tp.libtess2.pin_boundary) ? &contours_p3 : nullptr;
 
     {
         Rect r = full_wrap_bspline(surf, contours);
@@ -1758,7 +1758,7 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
     // grid_via_emit: skip the UV-bbox grid so this face goes through the pinned emit path below.
     // full_patch_rect's gate is area_ratio >= 0.995, i.e. the trim loop IS the rectangle, so emit
     // covers the same region -- but with a boundary it can pin.
-    if (!(tp.track == TessTrack::Libtess2Watertight && tp.watertight.grid_via_emit) &&
+    if (!(tp.track == TessTrack::Libtess2 && tp.libtess2.grid_via_emit) &&
         tessellate_full_patch(surf, contours, tp, same_sense, mesh, pins ? &contours_p3 : nullptr)) {
         diag_set_path("grid_full_patch");
         return nullptr;
