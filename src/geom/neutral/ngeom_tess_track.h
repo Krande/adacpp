@@ -44,6 +44,26 @@ struct WatertightOpts {
     // they feed the boundary to a CDT as a *constraint*, which is never split by construction, so
     // they get the effect for free rather than by suppressing a post-hoc refinement pass.
     bool freeze_boundary = false;
+    // Build the UV grid's boundary rows/cols at the trim loop's OWN parameters and pin the ring.
+    //
+    // OFF — MEASURED FAILURE, kept only so the negative result is reproducible. It makes cracks
+    // WORSE, and for a structural reason: a tensor grid forces both opposite rows to share ONE line
+    // set, but the v=v0 row's loop parameters and the v=v1 row's are different, so the union must
+    // contain both — and every line contributed by the OTHER side creates a ring vertex that is not
+    // a loop point, hence unpinned, hence a NEW T-junction. It adds more unpinned ring vertices than
+    // it pins:
+    //   guard=4 (all 53 faces bail)  311,696 tris   9,880 edges    9 nonmanifold
+    //   guard=20                     665,012 tris  16,104 edges  181 nonmanifold
+    //   guard=100                    669,090 tris  16,185 edges  181 nonmanifold
+    // A tensor grid cannot conform to two independently-sampled opposite boundaries. This is why OCC
+    // has no grid path at all: it classifier-filters grid points and inserts them as Steiner points
+    // into a CDT whose boundary is already constraints. libtess2 is a winding-rule tessellator and
+    // takes no Steiner points, so closing the grid path needs a real CDT, not a cleverer grid.
+    bool conforming_grid = false;
+    // Bail to the plain grid if conforming would inflate a line count past this multiple. A tensor
+    // grid cannot have a ring denser than its rows -- N boundary samples on one side force N columns
+    // across the whole patch.
+    int conform_max_ratio = 4;
     // Route near-rectangular B-spline patches (tessellate_full_patch) through the pinned
     // emit_uv_region instead of the UV-bbox grid. The grid path is the ONLY source of residual
     // cracks: it tessellates the bbox, never sees the trim loop, and so has nothing to pin. On

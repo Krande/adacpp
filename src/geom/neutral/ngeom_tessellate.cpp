@@ -179,6 +179,10 @@ std::atomic<uint64_t> g_tess_ns{0};
 std::atomic<uint64_t> g_passes{0};
 std::atomic<uint64_t> g_marks{0};
 std::atomic<uint64_t> g_scanned{0};
+std::atomic<uint64_t> g_conform_ok{0};    // conforming grid applied
+std::atomic<uint64_t> g_conform_bail{0};  // ...bailed on the blow-up guard
+std::atomic<uint64_t> g_conform_lines{0}; // total conformed lines emitted
+std::atomic<uint64_t> g_conform_want{0};  // total lines the loop WANTED
 
 // distinctive surface params, so a face can be matched to the reference output by geometry
 void log_surf_params(const Surface &s) {
@@ -863,8 +867,55 @@ bool emit_uv_region(const Surface &s, const std::vector<std::vector<Uv>> &loops_
 }
 
 // Grid a UV rectangle at ~2 samples/knot-span then refine (tessellate_uv_grid).
+// Conforming grid lines: the uniform samples, PLUS the trim loop's own parameters along each side.
+// `ring` are the loop's UV points; `along_u` picks which axis we are collecting.
+//
+// Why this is cheap here and not a redesign: tessellate_full_patch's gate is area_ratio >= 0.995,
+// i.e. the trim loop IS the UV rectangle, so its points already lie on the bbox sides and the trim
+// edge IS the iso-curve. The crack on these faces is therefore not a surface divergence at all — it
+// is a SAMPLING mismatch on a curve both faces agree on: the grid samples the ring at uniform
+// parameters while the neighbour samples the same shared edge at the edge-discretization's
+// parameters. Putting the loop's parameters into the grid lines removes the mismatch and lets the
+// ring pin. The interior stays a structured tensor grid, untouched.
+//
+// This is NOT the failed annulus (2026-07-13 #3), which ADDED a thin badly-shaped strip; and not
+// grid_via_emit, which discards the grid and over-refines (+44% tris, 481 nonmanifold, measured).
+std::vector<double> conform_lines(const std::vector<Uv> &ring, bool along_u, double a0, double a1, double b0,
+                                  double b1, int n_uniform, int max_ratio, bool &ok) {
+    std::vector<double> lines;
+    lines.reserve(n_uniform + 1 + ring.size());
+    for (int i = 0; i <= n_uniform; ++i)
+        lines.push_back(a0 + (a1 - a0) * i / n_uniform);
+    // A loop point contributes its parameter only if it lies on a side PERPENDICULAR to this axis —
+    // i.e. a point on a b=const side pins a line at its `a`. Points on the other two sides already
+    // sit on the a0/a1 lines and would contribute nothing but duplicates.
+    const double db = std::abs(b1 - b0);
+    const double eps_b = 1e-3 * (db > 0 ? db : 1.0);
+    for (const Uv &p : ring) {
+        const double a = along_u ? p[0] : p[1];
+        const double b = along_u ? p[1] : p[0];
+        if (std::abs(b - b0) <= eps_b || std::abs(b - b1) <= eps_b)
+            lines.push_back(clampd(a, std::min(a0, a1), std::max(a0, a1)));
+    }
+    std::sort(lines.begin(), lines.end());
+    const double da = std::abs(a1 - a0);
+    const double eps_a = 1e-9 * (da > 0 ? da : 1.0);
+    lines.erase(std::unique(lines.begin(), lines.end(),
+                            [&](double x, double y) { return std::abs(x - y) <= eps_a; }),
+                lines.end());
+    // Blow-up guard: a tensor grid cannot have a ring denser than its rows — N boundary samples on
+    // one side force N columns across the whole patch. Past max_ratio x the uniform line count the
+    // union is not worth it; bail and let the caller keep the plain grid.
+    ok = (int) lines.size() <= max_ratio * (n_uniform + 1);
+    return lines;
+}
+
+// `ring_uv`/`ring_p3` (both or neither): the trim loop's UV points and their shared-edge 3D points.
+// When given, the grid lines conform to the loop's parameters and the ring vertices are pinned.
+// Null (the default track) => the plain uniform grid, unchanged.
 bool tessellate_uv_grid(const Surface &s, double u0, double u1, double v0, double v1, const TessParams &tp,
-                        bool same_sense, Mesh &mesh) {
+                        bool same_sense, Mesh &mesh, const std::vector<Uv> *ring_uv = nullptr,
+                        const std::vector<Vec3> *ring_p3 = nullptr) {
     int nu, nv;
     if (const auto *b = dynamic_cast<const BSplineSurface *>(&s)) {
         nu = (int) std::clamp((std::max(b->nu - b->u_degree, 1) * 2), 2, 64);
@@ -879,18 +930,45 @@ bool tessellate_uv_grid(const Surface &s, double u0, double u1, double v0, doubl
         else
             nu /= 2;
     }
-    std::vector<Uv> verts;
-    verts.reserve((size_t) (nu + 1) * (nv + 1));
-    for (int j = 0; j <= nv; ++j) {
-        double v = v0 + (v1 - v0) * j / nv;
-        for (int i = 0; i <= nu; ++i)
-            verts.push_back({u0 + (u1 - u0) * i / nu, v});
+    // Grid lines. Without a ring these are exactly the uniform samples, so the default path is
+    // bit-for-bit what it always was.
+    std::vector<double> ul, vl;
+    if (ring_uv && ring_p3 && tp.track == TessTrack::Libtess2Watertight && tp.watertight.conforming_grid) {
+        bool uok = false, vok = false;
+        const int mr = tp.watertight.conform_max_ratio;
+        ul = conform_lines(*ring_uv, true, u0, u1, v0, v1, nu, mr, uok);
+        vl = conform_lines(*ring_uv, false, v0, v1, u0, u1, nv, mr, vok);
+        if (EDGEPROF) {
+            g_conform_want.fetch_add(ul.size() + vl.size(), std::memory_order_relaxed);
+            (uok && vok ? g_conform_ok : g_conform_bail).fetch_add(1, std::memory_order_relaxed);
+            if (uok && vok)
+                g_conform_lines.fetch_add(ul.size() + vl.size(), std::memory_order_relaxed);
+        }
+        if (!uok || !vok) {
+            ul.clear();
+            vl.clear();
+        }
     }
-    uint32_t w = (uint32_t) (nu + 1);
+    if (ul.empty() || vl.empty()) {
+        ul.clear();
+        vl.clear();
+        for (int i = 0; i <= nu; ++i)
+            ul.push_back(u0 + (u1 - u0) * i / nu);
+        for (int j = 0; j <= nv; ++j)
+            vl.push_back(v0 + (v1 - v0) * j / nv);
+        ring_uv = nullptr; // no conforming lines => nothing to pin against
+    }
+    const int gu = (int) ul.size() - 1, gv = (int) vl.size() - 1;
+    std::vector<Uv> verts;
+    verts.reserve((size_t) (gu + 1) * (gv + 1));
+    for (int j = 0; j <= gv; ++j)
+        for (int i = 0; i <= gu; ++i)
+            verts.push_back({ul[i], vl[j]});
+    uint32_t w = (uint32_t) (gu + 1);
     std::vector<Tri> tris;
-    tris.reserve((size_t) nu * nv * 2);
-    for (uint32_t j = 0; j < (uint32_t) nv; ++j)
-        for (uint32_t i = 0; i < (uint32_t) nu; ++i) {
+    tris.reserve((size_t) gu * gv * 2);
+    for (uint32_t j = 0; j < (uint32_t) gv; ++j)
+        for (uint32_t i = 0; i < (uint32_t) gu; ++i) {
             uint32_t a = j * w + i;
             tris.push_back({a, a + 1, a + w + 1});
             tris.push_back({a, a + w + 1, a + w});
@@ -901,7 +979,30 @@ bool tessellate_uv_grid(const Surface &s, double u0, double u1, double v0, doubl
         std::fprintf(stderr, "TESSDBG   tessellate_uv_grid nu=%d nv=%d (u=[%.4f,%.4f] v=[%.4f,%.4f]) init_tris=%zu\n",
                      nu, nv, u0, u1, v0, v1, tris.size());
     auto [su, sv] = metric_scale(s, u0, u1, v0, v1);
-    refine_and_emit(s, std::move(verts), std::move(tris), su, sv, tp, same_sense, mesh);
+    // Pin the ring: every grid vertex on the border gets the shared-edge 3D point of the loop vertex
+    // sitting at the same UV. The conforming lines put a grid crossing at each loop parameter, so the
+    // match is exact; anything unmatched (interior, or a loop point the guard dropped) stays NaN and
+    // falls back to the surface point in refine_and_emit.
+    std::vector<Vec3> pin;
+    if (ring_uv && ring_p3) {
+        pin.assign(verts.size(), nan_vec());
+        const double tol_u = 1e-9 * std::max(std::abs(u1 - u0), 1.0);
+        const double tol_v = 1e-9 * std::max(std::abs(v1 - v0), 1.0);
+        for (size_t k = 0; k < ring_uv->size() && k < ring_p3->size(); ++k) {
+            const Uv &p = (*ring_uv)[k];
+            auto iu = std::lower_bound(ul.begin(), ul.end(), p[0] - tol_u);
+            auto iv = std::lower_bound(vl.begin(), vl.end(), p[1] - tol_v);
+            if (iu == ul.end() || iv == vl.end())
+                continue;
+            if (std::abs(*iu - p[0]) > tol_u || std::abs(*iv - p[1]) > tol_v)
+                continue;
+            const int i = (int) (iu - ul.begin()), j = (int) (iv - vl.begin());
+            if (i != 0 && i != gu && j != 0 && j != gv)
+                continue; // only the border ring is shared with a neighbour
+            pin[(size_t) j * (size_t) w + (size_t) i] = (*ring_p3)[k];
+        }
+    }
+    refine_and_emit(s, std::move(verts), std::move(tris), su, sv, tp, same_sense, mesh, pin);
     return true;
 }
 
@@ -1010,12 +1111,22 @@ bool bspline_has_v_pole(const Surface &s) {
     return collapsed(0) || collapsed(b->nv - 1);
 }
 
+// `contours_p3` (optional, parallel to contours): shared-edge pins. When present the grid conforms
+// to contours[0] and its ring is pinned — contours[0] IS the rectangle here (area_ratio >= 0.995).
 bool tessellate_full_patch(const Surface &s, const std::vector<std::vector<Uv>> &contours, const TessParams &tp,
-                           bool same_sense, Mesh &mesh) {
+                           bool same_sense, Mesh &mesh,
+                           const std::vector<std::vector<Vec3>> *contours_p3 = nullptr) {
     Rect r = full_patch_rect(s, contours);
     if (!r.ok)
         return false;
-    return tessellate_uv_grid(s, r.u0, r.u1, r.v0, r.v1, tp, same_sense, mesh);
+    const std::vector<Uv> *ring = nullptr;
+    const std::vector<Vec3> *ring3 = nullptr;
+    if (contours_p3 && !contours_p3->empty() && !contours.empty() &&
+        contours[0].size() == (*contours_p3)[0].size()) {
+        ring = &contours[0];
+        ring3 = &(*contours_p3)[0];
+    }
+    return tessellate_uv_grid(s, r.u0, r.u1, r.v0, r.v1, tp, same_sense, mesh, ring, ring3);
 }
 
 // Full-domain tessellation for a closed quadric / B-spline whose only boundary is a slit/seam.
@@ -1648,7 +1759,7 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
     // full_patch_rect's gate is area_ratio >= 0.995, i.e. the trim loop IS the rectangle, so emit
     // covers the same region -- but with a boundary it can pin.
     if (!(tp.track == TessTrack::Libtess2Watertight && tp.watertight.grid_via_emit) &&
-        tessellate_full_patch(surf, contours, tp, same_sense, mesh)) {
+        tessellate_full_patch(surf, contours, tp, same_sense, mesh, pins ? &contours_p3 : nullptr)) {
         diag_set_path("grid_full_patch");
         return nullptr;
     }
@@ -2324,11 +2435,14 @@ TessMesh tessellate_doc(const NgeomDoc &doc, const TessParams &tp) {
             uint64_t tess = g_tess_ns.load(), loops = g_loops3d_ns.load();
             std::fprintf(stderr,
                          "[EDGEPROF] tessellate_doc=%.3fs  build_loops3d=%.3fs (%.1f%% of tess)\n"
-                         "[EDGEPROF] refine passes=%llu  marks=%llu  tris scanned=%llu  marks/pass=%.1f\n",
+                         "[EDGEPROF] refine passes=%llu  marks=%llu  tris scanned=%llu  marks/pass=%.1f\n"
+                         "[EDGEPROF] conforming grid: applied=%llu bailed=%llu  lines wanted=%llu applied=%llu\n",
                          tess / 1e9, loops / 1e9, tess ? 100.0 * (double) loops / (double) tess : 0.0,
                          (unsigned long long) g_passes.load(), (unsigned long long) g_marks.load(),
                          (unsigned long long) g_scanned.load(),
-                         g_passes.load() ? (double) g_marks.load() / (double) g_passes.load() : 0.0);
+                         g_passes.load() ? (double) g_marks.load() / (double) g_passes.load() : 0.0,
+                         (unsigned long long) g_conform_ok.load(), (unsigned long long) g_conform_bail.load(),
+                         (unsigned long long) g_conform_want.load(), (unsigned long long) g_conform_lines.load());
         }
     } _docprof{EDGEPROF, _tess_t0};
     // Opt-in parallelism (tp.threads>1): tessellate ROOTS across a thread pool into per-root local
