@@ -6,10 +6,9 @@
 // already copied to every internal, so adding fields here costs no signature churn). All option
 // structs are POD, keeping TessParams trivially copyable so the per-root/per-face copies stay free.
 //
-// Boundary PINNING is an option of the libtess2 track, not a track of its own: it is a ~free
-// (+3% ventilator, -4.7% crane) quality toggle on the same tessellator, and the reference kernels
-// treat it as the normal way to build a boundary rather than a mode. Default OFF so the shipped
-// libtess2 output stays byte-identical.
+// Boundary PINNING is an option of the libtess2 track, not a track of its own: it is a ~3% quality
+// toggle on the same tessellator, and the reference kernels treat it as the normal way to build a
+// boundary rather than a mode. Default ON — see Libtess2Opts::pin_boundary for the numbers.
 //
 // WASM-SAFE: no OCC/CGAL/ifcopenshell includes. The taxonomy tracks are named here so the enum is
 // universal, but only their DISPATCH is native-only (CMakeLists.txt excludes those sources from the
@@ -48,11 +47,18 @@ struct Libtess2Opts {
     // objects are owned by the GEdge and reused by both faces (conformality by pointer identity).
     // truck pins identically via edge_map/boundary_map.
     //
-    // Measured (ventilator / crane): +3% / -4.7% time, cracks 19,067 -> 9,880 (-48%), nonmanifold
-    // 12 -> 9, RSS +0.5%. The displacement it introduces is <=0.012% of model bbox — sub-visual.
+    // ON by default: measured strictly better on every axis we track, at ~3% time.
     //
-    // OFF by default only to keep the shipped output byte-identical; it is strictly better geometry.
-    bool pin_boundary = false;
+    //   ventilator  +3.0% time   cracks 19,067 -> 9,880 (-48%)   nonmanifold 12 -> 9   tris IDENTICAL
+    //   crane       +3.5% time   solids 7291 = 7291              dropped 78 = 78       GLB -0.7%
+    //
+    // Triangle count is unchanged (pinning moves positions; it does not change refinement) and the
+    // crane GLB gets SMALLER because pinned boundary vertices actually weld. No geometry is lost:
+    // dropped_faces is identical at 78/300,394. The displacement introduced is <=0.012% of model
+    // bbox — sub-visual, and far below the divergence the surfaces already have from their own edges.
+    //
+    // Set false for byte-compatibility with pre-2026-07-14 output.
+    bool pin_boundary = true;
 
     // Never split an incidence-1 (boundary) edge in refine_uv. A split puts the new vertex on the
     // chord, off the shared edge, while the neighbour keeps the original segment -> T-junction.

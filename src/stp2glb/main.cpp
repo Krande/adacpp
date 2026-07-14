@@ -26,7 +26,7 @@ int main(int argc, char *argv[]) {
     bool quiet = false;    // suppress the param echo + progress; keep errors + the final result line
     bool face_regions = false; // bake per-face clickable regions into scenes[0].extras (opt-in)
     std::string pipeline;      // tessellation track: "" / libtess2 (default) | cdt
-    bool pin_boundary = false; // libtess2 option: emit boundary verts at their shared-edge point
+    bool pin_boundary = true; // libtess2 option: emit boundary verts at their shared-edge point
     double model_scale = 0.0;  // >0 => adaptive per-surface density (relaxes tiny features); 0 => fixed
     std::string spill_dir; // empty => private auto-removed mkdtemp spill dir
 
@@ -41,9 +41,9 @@ int main(int argc, char *argv[]) {
     app.add_flag("--face-regions", face_regions,
                  "Bake per-face clickable regions into scenes[0].extras (face_ranges_node<m>); opt-in");
     app.add_option("--pipeline", pipeline, "Tessellation track: libtess2 (default) | cdt | occ | cgal | hybrid");
-    app.add_flag("--pin-boundary", pin_boundary,
-                 "libtess2: emit boundary vertices at their shared-edge point instead of this face's "
-                 "own surface re-projection (halves cracks; ~free)");
+    app.add_flag("--pin-boundary,!--no-pin-boundary", pin_boundary,
+                 "libtess2: emit boundary vertices at their shared-edge point instead of this face's own "
+                 "surface re-projection (default ON; halves cracks for ~3%)");
     app.add_option("--model-scale", model_scale,
                    "Model bbox diagonal for adaptive per-surface density (0 = fixed angle)")
         ->default_val(0.0);

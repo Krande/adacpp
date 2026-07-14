@@ -48,12 +48,13 @@ namespace adacpp {
 // wants to know, not to get different geometry than it asked for.
 //
 // `pin_boundary` is a libtess2 OPTION (not a track): emit boundary vertices at their shared-edge
-// point rather than this face's own surface re-projection. Halves cracks for ~free; off by default
-// only so the shipped output stays byte-identical.
+// point rather than this face's own surface re-projection. ON by default -- halves cracks for ~3%,
+// leaves triangle counts unchanged, and shrinks the GLB (pinned verts weld). Pass false for
+// byte-compatibility with pre-2026-07-14 output.
 inline long stream_step_to_glb(const std::string &in_path, const std::string &out_path, double deflection,
                                double angular_deg, int num_threads, bool meshopt, const std::string &spill_dir = "",
                                double model_scale = 0.0, bool face_regions = false,
-                               const std::string &pipeline = "", bool pin_boundary = false) {
+                               const std::string &pipeline = "", bool pin_boundary = true) {
     using namespace adacpp::ngeom;
     adacpp::prof::StepProfiler prof("stream_step_to_glb");
     adacpp::tune_malloc_for_streaming(); // bound streaming peak RSS (mmap/trim tuning) before the pool
