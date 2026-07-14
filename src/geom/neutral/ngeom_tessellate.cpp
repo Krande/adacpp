@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -74,6 +75,90 @@ inline size_t tess_face_merge_batch() {
     if (dynamic_cast<const RevolutionSurface *>(&s))
         return "revolution";
     return "?";
+}
+
+// ---- UV-inversion residual diagnostic (ADA_TESS_DIAG=<path.csv>) -----------------------------
+//
+// Measures, per face, how far each boundary point lands from the surface after the UV round-trip:
+// r = |surf.point(surf.uv(p)) - p|. This decides whether the shared-edge crack is a real
+// surface-vs-edge gap or an inversion bug, and the two have opposite fixes.
+//
+// The quadric arm is the CONTROL: quadrics invert in closed form, so a large quadric residual
+// cannot be numerical — it would mean the boundary genuinely doesn't lie on its surface. B-spline /
+// revolution / extrusion invert iteratively and are the suspects (bspline_invert always returns
+// true; newton_uv validates with an ABSOLUTE 1e-6).
+//
+// Off by default and observation-only — it never changes a tessellation decision.
+struct TessDiag {
+    std::FILE *fh = nullptr;
+    std::mutex mu;
+    ~TessDiag() {
+        if (fh)
+            std::fclose(fh);
+    }
+};
+
+TessDiag &tess_diag() {
+    static TessDiag d;
+    return d;
+}
+
+const char *tess_diag_path() {
+    static const char *p = std::getenv("ADA_TESS_DIAG");
+    return (p && *p) ? p : nullptr;
+}
+
+const bool DIAG = tess_diag_path() != nullptr;
+
+// Per-face accumulator: one row per face, so a 300k-face model stays a manageable CSV.
+struct FaceDiag {
+    std::vector<double> r; // residual per boundary point (model units)
+    size_t n_uv_fail = 0;  // surf.uv() returned false
+    size_t n_collapsed = 0; // ...and the handler collapsed point i onto i-1 (Defect 2 fired)
+    const char *path = "?"; // which branch of face_to_mesh took the face
+};
+
+// thread_local: DIAG forces threads=1 (see tessellate_one_root), but a stray parallel caller must
+// not interleave two faces' points into one row.
+FaceDiag &face_diag() {
+    static thread_local FaceDiag d;
+    return d;
+}
+
+void diag_set_path(const char *p) {
+    if (DIAG)
+        face_diag().path = p;
+}
+
+double pct(std::vector<double> &v, double q) {
+    if (v.empty())
+        return 0.0;
+    size_t k = (size_t) (q * (double) (v.size() - 1));
+    std::nth_element(v.begin(), v.begin() + k, v.end());
+    return v[k];
+}
+
+void diag_flush_face(const Surface &surf, int64_t face_id, uint32_t face_seq, double model_scale) {
+    if (!DIAG)
+        return;
+    FaceDiag &d = face_diag();
+    TessDiag &t = tess_diag();
+    std::lock_guard<std::mutex> lk(t.mu);
+    if (!t.fh) {
+        t.fh = std::fopen(tess_diag_path(), "w");
+        if (!t.fh)
+            return;
+        std::fprintf(t.fh,
+                     "face_seq,face_id,surf_kind,is_quadric,path_taken,n_bpts,n_uv_fail,n_collapsed,"
+                     "r_p50,r_p95,r_max,r_rel_p50,r_rel_p95,r_rel_max,approx_size,model_scale\n");
+    }
+    double sz = std::max(surf.approx_size(), 1.0);
+    double p50 = pct(d.r, 0.50), p95 = pct(d.r, 0.95);
+    double mx = d.r.empty() ? 0.0 : *std::max_element(d.r.begin(), d.r.end());
+    std::fprintf(t.fh, "%u,%lld,%s,%d,%s,%zu,%zu,%zu,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\n", face_seq,
+                 (long long) face_id, surf_kind(surf), (int) surf.is_quadric(), d.path, d.r.size(), d.n_uv_fail,
+                 d.n_collapsed, p50, p95, mx, p50 / sz, p95 / sz, mx / sz, sz, model_scale);
+    d = FaceDiag{};
 }
 
 // distinctive surface params, so a face can be matched to the reference output by geometry
@@ -1244,8 +1329,22 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
         bool have_hint = false;
         double hu = 0, hv = 0;
         for (size_t i = 0; i < pts.size(); ++i) {
-            double u, v;
-            if (!surf.uv(pts[i], have_hint ? hu : Surface::NAN_HINT, have_hint ? hv : Surface::NAN_HINT, u, v)) {
+            double u = std::numeric_limits<double>::quiet_NaN();
+            double v = u;
+            bool uv_ok = surf.uv(pts[i], have_hint ? hu : Surface::NAN_HINT, have_hint ? hv : Surface::NAN_HINT, u, v);
+            if (DIAG) {
+                // Record the residual of the COMPUTED (u,v) — before the failure handler below
+                // overwrites it — so the number reflects the inversion, not the recovery.
+                FaceDiag &fd = face_diag();
+                if (u == u && v == v)
+                    fd.r.push_back((surf.point(u, v) - pts[i]).norm());
+                if (!uv_ok) {
+                    ++fd.n_uv_fail;
+                    if (i > 0)
+                        ++fd.n_collapsed;
+                }
+            }
+            if (!uv_ok) {
                 u = i > 0 ? uv[i - 1][0] : 0.0;
                 v = i > 0 ? uv[i - 1][1] : 0.0;
             }
@@ -1341,14 +1440,18 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
     for (const LoopUv &l : loops_uv)
         if (!uv_slit(l))
             all_slit = false;
-    if (all_slit)
+    if (all_slit) {
+        diag_set_path("unbounded_slit");
         return tessellate_unbounded(surf, tp, same_sense, mesh) ? nullptr : "slit/full-surface tessellation failed";
+    }
 
     if (loops_uv.size() == 1 && bspline_has_v_pole(surf)) {
         std::vector<std::vector<Uv>> contour = {loops_uv[0].uv};
         Rect r = full_wrap_bspline(surf, contour);
-        if (r.ok && tessellate_uv_grid(surf, r.u0, r.u1, r.v0, r.v1, tp, same_sense, mesh))
+        if (r.ok && tessellate_uv_grid(surf, r.u0, r.u1, r.v0, r.v1, tp, same_sense, mesh)) {
+            diag_set_path("grid_vpole_wrap");
             return nullptr;
+        }
     }
 
     bool any_wind = false;
@@ -1357,9 +1460,12 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
             any_wind = true;
     if (any_wind) {
         auto cp = mesh.checkpoint();
-        if (tessellate_periodic_band(surf, loops_uv, tp, same_sense, mesh))
+        if (tessellate_periodic_band(surf, loops_uv, tp, same_sense, mesh)) {
+            diag_set_path("periodic_band");
             return nullptr;
+        }
         mesh.rollback(cp);
+        diag_set_path("periodic_winding");
         return tessellate_periodic_winding(surf, loops_uv, tp, same_sense, mesh)
                    ? nullptr
                    : "periodic-band (wrap-around) tessellation failed";
@@ -1372,21 +1478,30 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
 
     {
         Rect r = full_wrap_bspline(surf, contours);
-        if (r.ok && tessellate_uv_grid(surf, r.u0, r.u1, r.v0, r.v1, tp, same_sense, mesh))
+        if (r.ok && tessellate_uv_grid(surf, r.u0, r.u1, r.v0, r.v1, tp, same_sense, mesh)) {
+            diag_set_path("grid_full_wrap");
             return nullptr;
+        }
     }
-    if (per_u && complement_interior(contours))
+    if (per_u && complement_interior(contours)) {
+        diag_set_path("periodic_complement");
         return tessellate_periodic_complement(surf, contours, *per_u, tp, same_sense, mesh)
                    ? nullptr
                    : "periodic-complement tessellation failed";
+    }
     {
         Rect r = full_domain_bspline(surf, contours);
         if (r.ok && poly_self_intersects(contours[0]) &&
-            tessellate_uv_grid(surf, r.u0, r.u1, r.v0, r.v1, tp, same_sense, mesh))
+            tessellate_uv_grid(surf, r.u0, r.u1, r.v0, r.v1, tp, same_sense, mesh)) {
+            diag_set_path("grid_full_domain");
             return nullptr;
+        }
     }
-    if (tessellate_full_patch(surf, contours, tp, same_sense, mesh))
+    if (tessellate_full_patch(surf, contours, tp, same_sense, mesh)) {
+        diag_set_path("grid_full_patch");
         return nullptr;
+    }
+    diag_set_path("emit_uv_region");
     return emit_uv_region(surf, contours, tp, same_sense, mesh) ? nullptr : "UV tessellation produced no triangles";
 }
 
@@ -1563,6 +1678,13 @@ bool tessellate_face(const FaceSurfaceN &face, const TessParams &tp, TessMesh &o
             std::fprintf(stderr, "TESSDBG FACE-DONE tris=%zu ok=%d\n", (outm.indices.size() - i0) / 3, (int) ok);
     }
     // Health accounting (always on): a face carrying a real trim boundary that yields NO triangles is
+    // UV-inversion residual row for this face (ADA_TESS_DIAG only; no-op otherwise). Emitted after
+    // the impl so `path` names the branch actually taken, including any retry tier.
+    if (DIAG && face.surface) {
+        static std::atomic<uint32_t> g_diag_seq{0};
+        diag_flush_face(*face.surface, face.src_id, g_diag_seq.fetch_add(1, std::memory_order_relaxed),
+                        tls_model_scale());
+    }
     // silently dropped geometry — count it. Uses the emitted-triangle delta, not `ok`, since some
     // failures still return true with an empty result.
     g_total_faces.fetch_add(1, std::memory_order_relaxed);
@@ -1961,7 +2083,9 @@ static void tessellate_one_root(const NgeomRoot &root, const TessParams &tp, Tes
         // are independent (each tessellate_face builds its own libtess2 tessellator);
         // per-face local meshes merged in face order keep the output identical to
         // the serial loop. The 64-face floor keeps small solids on the cheap path.
-        if (tp.threads > 1 && root.faces.size() >= 64 && !tp.capture_face_ranges) {
+        // DIAG forces the serial loop: the per-face residual accumulator is thread_local, so a
+        // face-parallel run would scatter rows across threads and lose the face-order sequence.
+        if (tp.threads > 1 && root.faces.size() >= 64 && !tp.capture_face_ranges && !DIAG) {
             const size_t n = root.faces.size();
             TessParams tpl = tp;
             tpl.threads = 1; // no nested pools inside a face
