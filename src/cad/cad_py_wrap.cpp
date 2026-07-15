@@ -4147,16 +4147,21 @@ void cad_module(nb::module_ &m) {
                 d["description"] = t.description;
                 d["watertight"] = t.watertight;
                 d["default"] = t.is_default;
+                d["neutral"] = t.neutral;
                 out.append(d);
             }
             return out;
         },
         "Enumerate the tessellation tracks THIS BUILD provides: a list of dicts with name, label, "
-        "description, watertight, default. `name` is the token to pass back as the `pipeline` "
-        "argument of stream_step_to_glb / tessellate_stream.\n\n"
+        "description, watertight, default, neutral. `name` is the token to pass back as the "
+        "`pipeline` argument of stream_step_to_glb / tessellate_stream.\n\n"
         "This is the single source of truth for the track vocabulary: callers must NOT hardcode it. "
         "The list reflects what is actually compiled in (the taxonomy kernels are absent from the "
-        "wasm build), so it answers 'what can I run here?', not 'what exists in principle'.");
+        "wasm build), so it answers 'what can I run here?', not 'what exists in principle'.\n\n"
+        "`neutral` says whether the track meshes NEUTRAL surfaces — the OCC-free path fed by the "
+        "native STEP/IFC readers and the NGEOM wire. The taxonomy tracks (occ/cgal/hybrid) are not "
+        "neutral: on that path they silently mesh as if no track were selected rather than "
+        "erroring, so a caller offering a track choice for a neutral path must filter on this.");
 
     m.def(
         "ifc_taxonomy_settings",
