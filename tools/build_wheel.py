@@ -43,16 +43,22 @@ def _record_line(arcname: str, data: bytes) -> str:
     return f"{arcname},sha256={b64},{len(data)}"
 
 
-def _read_metadata(pyproject: Path) -> tuple[str, str, str, str, list[str]]:
+def _read_metadata(pyproject: Path) -> dict:
     with pyproject.open("rb") as f:
         pp = tomllib.load(f)
     project = pp["project"]
-    name = project["name"]
-    version = project["version"]
-    summary = project.get("description", "")
-    requires_python = project.get("requires-python", "")
-    deps = list(project.get("dependencies", []))
-    return name, version, summary, requires_python, deps
+    lic = project.get("license", "")
+    if isinstance(lic, dict):  # PEP 621 table form: {text = "..."} or {file = "..."}
+        lic = lic.get("text", "")
+    return {
+        "name": project["name"],
+        "version": project["version"],
+        "summary": project.get("description", ""),
+        "requires_python": project.get("requires-python", ""),
+        "deps": list(project.get("dependencies", [])),
+        "license": lic,
+        "classifiers": list(project.get("classifiers", [])),
+    }
 
 
 def main() -> int:
@@ -62,7 +68,9 @@ def main() -> int:
     ap.add_argument("--pyproject", type=Path, default=Path(__file__).parent.parent / "pyproject.toml")
     args = ap.parse_args()
 
-    name, version, summary, requires_python, deps = _read_metadata(args.pyproject)
+    meta = _read_metadata(args.pyproject)
+    name, version = meta["name"], meta["version"]
+    summary, requires_python, deps = meta["summary"], meta["requires_python"], meta["deps"]
     dist_name = name.replace("-", "_")  # PEP 427 normalised name
 
     pkg_root = args.staged / "adacpp"
@@ -75,18 +83,22 @@ def main() -> int:
     wheel_path = args.out_dir / wheel_name
 
     dist_info = f"{dist_name}-{version}.dist-info"
+    # Every field here is sourced from pyproject so the wheel cannot drift from the project's own
+    # declarations — this file hand-writes METADATA, and anything it forgets is simply absent from
+    # the artifact with nothing to catch it.
+    metadata = "Metadata-Version: 2.1\n" f"Name: {name}\n" f"Version: {version}\n" f"Summary: {summary}\n"
+    # The wheel shipped GPL-3.0 code with no licence field, no classifier and no licence text —
+    # nothing in it said what it was. The text itself is bundled further down, because GPL's own
+    # notice promises the recipient "should have received a copy... along with this program".
+    if meta["license"]:
+        metadata += f"License: {meta['license']}\n"
+    metadata += "".join(f"Classifier: {c}\n" for c in meta["classifiers"])
+    metadata += f"Requires-Python: {requires_python}\n"
     # Requires-Dist is what makes micropip install numpy alongside the wheel. Omitting it (as this
     # did) ships a package whose mesh API kills the interpreter: Mesh.positions/.indices are
     # zero-copy nb::ndarray<nb::numpy> views, and with numpy absent nanobind recurses until the
-    # stack blows rather than raising ImportError. Natively nothing noticed, because conda always
-    # had numpy. Sourced from pyproject so the two can't drift.
-    metadata = (
-        "Metadata-Version: 2.1\n"
-        f"Name: {name}\n"
-        f"Version: {version}\n"
-        f"Summary: {summary}\n"
-        f"Requires-Python: {requires_python}\n"
-    ) + "".join(f"Requires-Dist: {d}\n" for d in deps)
+    # stack blows rather than raising ImportError. Natively nothing noticed: conda always had numpy.
+    metadata += "".join(f"Requires-Dist: {d}\n" for d in deps)
     wheel_meta = (
         "Wheel-Version: 1.0\n"
         "Generator: adacpp build_wheel.py\n"
@@ -104,6 +116,16 @@ def main() -> int:
             data = path.read_bytes()
             zf.writestr(arcname, data)
             records.append(_record_line(arcname, data))
+
+        # The licence text itself, so the artifact carries its own terms.
+        lic_path = args.pyproject.parent / "LICENSE"
+        if lic_path.is_file():
+            arcname = f"{dist_info}/licenses/LICENSE"
+            data = lic_path.read_bytes()
+            zf.writestr(arcname, data)
+            records.append(_record_line(arcname, data))
+        else:
+            print(f"warning: no LICENSE next to {args.pyproject} — wheel will ship without one", file=sys.stderr)
 
         # Dist-info metadata.
         for fname, content in (("METADATA", metadata), ("WHEEL", wheel_meta)):
