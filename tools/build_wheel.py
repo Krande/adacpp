@@ -43,7 +43,7 @@ def _record_line(arcname: str, data: bytes) -> str:
     return f"{arcname},sha256={b64},{len(data)}"
 
 
-def _read_metadata(pyproject: Path) -> tuple[str, str, str, str]:
+def _read_metadata(pyproject: Path) -> tuple[str, str, str, str, list[str]]:
     with pyproject.open("rb") as f:
         pp = tomllib.load(f)
     project = pp["project"]
@@ -51,7 +51,8 @@ def _read_metadata(pyproject: Path) -> tuple[str, str, str, str]:
     version = project["version"]
     summary = project.get("description", "")
     requires_python = project.get("requires-python", "")
-    return name, version, summary, requires_python
+    deps = list(project.get("dependencies", []))
+    return name, version, summary, requires_python, deps
 
 
 def main() -> int:
@@ -61,7 +62,7 @@ def main() -> int:
     ap.add_argument("--pyproject", type=Path, default=Path(__file__).parent.parent / "pyproject.toml")
     args = ap.parse_args()
 
-    name, version, summary, requires_python = _read_metadata(args.pyproject)
+    name, version, summary, requires_python, deps = _read_metadata(args.pyproject)
     dist_name = name.replace("-", "_")  # PEP 427 normalised name
 
     pkg_root = args.staged / "adacpp"
@@ -74,13 +75,18 @@ def main() -> int:
     wheel_path = args.out_dir / wheel_name
 
     dist_info = f"{dist_name}-{version}.dist-info"
+    # Requires-Dist is what makes micropip install numpy alongside the wheel. Omitting it (as this
+    # did) ships a package whose mesh API kills the interpreter: Mesh.positions/.indices are
+    # zero-copy nb::ndarray<nb::numpy> views, and with numpy absent nanobind recurses until the
+    # stack blows rather than raising ImportError. Natively nothing noticed, because conda always
+    # had numpy. Sourced from pyproject so the two can't drift.
     metadata = (
         "Metadata-Version: 2.1\n"
         f"Name: {name}\n"
         f"Version: {version}\n"
         f"Summary: {summary}\n"
         f"Requires-Python: {requires_python}\n"
-    )
+    ) + "".join(f"Requires-Dist: {d}\n" for d in deps)
     wheel_meta = (
         "Wheel-Version: 1.0\n"
         "Generator: adacpp build_wheel.py\n"
