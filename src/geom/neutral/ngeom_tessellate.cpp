@@ -1336,6 +1336,171 @@ bool bspline_has_v_pole(const Surface &s) {
 
 // `contours_p3` (optional, parallel to contours): shared-edge pins. When present the grid conforms
 // to contours[0] and its ring is pinned — contours[0] IS the rectangle here (area_ratio >= 0.995).
+// ---- annulus patch: a structured interior stitched to the PINNED trim loop --------------------
+//
+// The grid is the right algorithm for a full patch (full_patch_rect gates area_ratio >= 0.995, so
+// the trim loop IS the rectangle and a tensor grid is exactly correct, and cheap). Its ONLY defect
+// is that its boundary ring sits at uniform parameters, not the loop's, so it cannot pin — which
+// makes it the last crack source. detria fixes that but costs ~3-4x per face (crane: 10.4% of faces
+// -> +25.6%).
+//
+// So: keep the grid, INSET it by one cell, and zipper the gap to the loop. The interior stays a
+// tensor grid; only the ring is stitched, and the ring's outer vertices ARE the loop's vertices, so
+// they pin. O(m+n) triangles, no CDT.
+//
+// Why this is not 2026-07-13's annulus (which over-refined, ~4k tris/face at ~0.42s/face): that one
+// stitched to a loop that, for a full patch, lies essentially ON the rect border — a zero-width
+// strip, hence slivers. Insetting by a full cell gives the strip real width. And the over-refinement
+// it hit was refinement fighting a frozen boundary, which converged_frac now tames.
+//
+// Returns false (caller keeps the plain grid) whenever the shape isn't safely stitchable.
+
+// Signed area in UV; used to put both rings in the same winding before zippering (opposite windings
+// would cross the strip over itself).
+double ring_area(const std::vector<Uv> &r) {
+    double a = 0;
+    for (size_t i = 0, j = r.size() - 1; i < r.size(); j = i++)
+        a += (r[j][0] * r[i][1]) - (r[i][0] * r[j][1]);
+    return a * 0.5;
+}
+
+// Normalized cumulative arc length per vertex, [0,1). The zipper merges the two rings on this
+// parameter, which is what keeps the strip's triangles well-shaped when the rings have very
+// different vertex counts (uniform inner ring vs the loop's own discretization).
+void ring_params(const std::vector<Uv> &r, std::vector<double> &t) {
+    t.assign(r.size(), 0.0);
+    double total = 0;
+    for (size_t i = 0; i < r.size(); ++i) {
+        const Uv &a = r[i];
+        const Uv &b = r[(i + 1) % r.size()];
+        total += std::hypot(b[0] - a[0], b[1] - a[1]);
+        t[i] = total;
+    }
+    if (total <= 0)
+        return;
+    for (double &x : t)
+        x /= total;
+    // t[i] is the param AT THE END of edge i; shift so t[i] is the param of vertex i.
+    double last = 0;
+    for (size_t i = 0; i < t.size(); ++i) {
+        double cur = t[i];
+        t[i] = last;
+        last = cur;
+    }
+}
+
+bool tessellate_annulus_patch(const Surface &s, const Rect &r, const std::vector<Uv> &loop_uv,
+                              const std::vector<Vec3> &loop_p3, const TessParams &tp, bool same_sense,
+                              Mesh &mesh) {
+    int nu = 0, nv = 0;
+    uv_grid_res(s, nu, nv);
+    if (nu < 3 || nv < 3 || loop_uv.size() < 3 || loop_uv.size() != loop_p3.size())
+        return false; // too coarse to inset, or no usable loop
+
+    const double du = (r.u1 - r.u0) / nu, dv = (r.v1 - r.v0) / nv;
+    // Inset grid: interior nodes only, i in [1,nu-1], j in [1,nv-1].
+    const int gu = nu - 2, gv = nv - 2; // cells across the inset grid
+    if (gu < 1 || gv < 1)
+        return false;
+
+    std::vector<Uv> verts;
+    std::vector<Vec3> pin;
+    std::vector<Tri> tris;
+    verts.reserve((size_t) (gu + 1) * (gv + 1) + loop_uv.size());
+    for (int j = 0; j <= gv; ++j)
+        for (int i = 0; i <= gu; ++i) {
+            verts.push_back({r.u0 + du * (i + 1), r.v0 + dv * (j + 1)});
+            pin.push_back(nan_vec()); // interior: the surface point is correct
+        }
+    const uint32_t w = (uint32_t) (gu + 1);
+    for (uint32_t j = 0; j < (uint32_t) gv; ++j)
+        for (uint32_t i = 0; i < (uint32_t) gu; ++i) {
+            uint32_t a = j * w + i;
+            tris.push_back({a, a + 1, a + w + 1});
+            tris.push_back({a, a + w + 1, a + w});
+        }
+
+    // Inner ring, CCW: bottom L->R, right B->T, top R->L, left T->B.
+    std::vector<uint32_t> inner;
+    inner.reserve(2 * (gu + gv));
+    for (int i = 0; i <= gu; ++i)
+        inner.push_back((uint32_t) i);
+    for (int j = 1; j <= gv; ++j)
+        inner.push_back((uint32_t) (j * w + gu));
+    for (int i = gu - 1; i >= 0; --i)
+        inner.push_back((uint32_t) (gv * w + i));
+    for (int j = gv - 1; j >= 1; --j)
+        inner.push_back((uint32_t) (j * w));
+
+    // Outer ring = the trim loop itself, appended as its own vertices and PINNED.
+    std::vector<Uv> inner_uv;
+    inner_uv.reserve(inner.size());
+    for (uint32_t k : inner)
+        inner_uv.push_back(verts[k]);
+    std::vector<Uv> outer_uv = loop_uv;
+    std::vector<Vec3> outer_p3 = loop_p3;
+    if ((ring_area(inner_uv) > 0) != (ring_area(outer_uv) > 0)) {
+        std::reverse(outer_uv.begin(), outer_uv.end());
+        std::reverse(outer_p3.begin(), outer_p3.end());
+    }
+    const uint32_t obase = (uint32_t) verts.size();
+    for (size_t k = 0; k < outer_uv.size(); ++k) {
+        verts.push_back(outer_uv[k]);
+        pin.push_back(outer_p3[k]); // the shared-edge point — this is what makes the seam close
+    }
+
+    // Zipper the strip on normalized arc length. Align the two rings' starts first, otherwise the
+    // strip spirals: pick the outer vertex nearest the inner ring's start.
+    std::vector<double> ti, to;
+    ring_params(inner_uv, ti);
+    ring_params(outer_uv, to);
+    if (ti.empty() || to.empty())
+        return false;
+    size_t o0 = 0;
+    double best = 1e300;
+    for (size_t k = 0; k < outer_uv.size(); ++k) {
+        double d = std::hypot(outer_uv[k][0] - inner_uv[0][0], outer_uv[k][1] - inner_uv[0][1]);
+        if (d < best) {
+            best = d;
+            o0 = k;
+        }
+    }
+    const size_t m = inner.size(), n = outer_uv.size();
+    auto IN = [&](size_t i) { return inner[i % m]; };
+    auto OUT = [&](size_t j) { return (uint32_t) (obase + (o0 + j) % n); };
+    auto TI = [&](size_t i) { return ti[i % m] + (double) (i / m); };
+    auto TO = [&](size_t j) {
+        double t = to[(o0 + j) % n] - to[o0];
+        if (t < 0)
+            t += 1.0;
+        return t + (double) (j / n);
+    };
+    size_t i = 0, j = 0;
+    while (i < m || j < n) {
+        const bool adv_inner = (j >= n) || (i < m && TI(i + 1) <= TO(j + 1));
+        // Winding must MATCH the interior grid's, which is CCW ({a, a+1, a+w+1}). With both rings
+        // CCW and the inner one inside, walking the inner ring forward puts the outer ring on the
+        // right, so the naive {IN(i), IN(i+1), OUT(j)} is CLOCKWISE — inverted against the grid.
+        // refine_and_emit only normalises winding GLOBALLY (one signed-area flip for the whole
+        // face), so a strip wound the other way survives as inverted triangles and shows up as
+        // non-manifold edges rather than as a visible flip.
+        if (adv_inner) {
+            tris.push_back({IN(i), OUT(j), IN(i + 1)});
+            ++i;
+        } else {
+            tris.push_back({IN(i), OUT(j), OUT(j + 1)});
+            ++j;
+        }
+    }
+
+    auto [su, sv] = metric_scale(s, r.u0, r.u1, r.v0, r.v1);
+    // Freeze: the outer ring is the shared boundary; splitting it would undo the pin. converged_frac
+    // is what makes that affordable (see Libtess2Opts::converged_frac).
+    refine_and_emit(s, std::move(verts), std::move(tris), su, sv, tp, same_sense, mesh, pin, true,
+                    tp.libtess2.converged_frac);
+    return true;
+}
+
 bool tessellate_full_patch(const Surface &s, const std::vector<std::vector<Uv>> &contours, const TessParams &tp,
                            bool same_sense, Mesh &mesh,
                            const std::vector<std::vector<Vec3>> *contours_p3 = nullptr) {
@@ -1349,6 +1514,12 @@ bool tessellate_full_patch(const Surface &s, const std::vector<std::vector<Uv>> 
         ring = &contours[0];
         ring3 = &(*contours_p3)[0];
     }
+    // Annulus: the grid's structured interior, but stitched to the PINNED trim loop instead of
+    // ending at a uniform-parameter ring it cannot pin. Falls through to the plain grid if the face
+    // isn't safely stitchable.
+    if (tp.libtess2.annulus_patch && ring && ring3 &&
+        tessellate_annulus_patch(s, r, *ring, *ring3, tp, same_sense, mesh))
+        return true;
     return tessellate_uv_grid(s, r.u0, r.u1, r.v0, r.v1, tp, same_sense, mesh, ring, ring3);
 }
 

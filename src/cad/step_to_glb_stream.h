@@ -84,6 +84,8 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
         tp.libtess2.grid_via_emit = std::atoi(e) != 0;
     if (const char *e = std::getenv("ADA_TESS_WT_CONFORM_RATIO"))
         tp.libtess2.conform_max_ratio = std::atoi(e);
+    if (const char *e = std::getenv("ADA_TESS_ANNULUS"))
+        tp.libtess2.annulus_patch = std::atoi(e) != 0;
     if (const char *e = std::getenv("ADA_TESS_WT_CONVERGED"))
         tp.libtess2.converged_frac = std::atof(e);
     tp.deflection = deflection;

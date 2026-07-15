@@ -88,6 +88,33 @@ struct Libtess2Opts {
     // out — and with it the planned per-root edge cache, whose only purpose was to fund the freeze.
     double converged_frac = 50.0;
 
+    // Replace the UV-bbox grid on full-patch faces with an INSET grid whose one-cell gap to the
+    // trim loop is zippered by a ring of triangles, with the loop's own vertices as the outer ring —
+    // so they pin. Keeps the grid's cheap structured interior (the right algorithm for a full patch)
+    // and fixes its only defect: a boundary at uniform parameters that cannot pin.
+    //
+    // The alternative, routing these faces to detria, is correct but ~3-4x the grid's per-face cost:
+    // on the crane 10.4% of faces (31,076 full-patch B-splines) cost +25.6% that way.
+    //
+    // OFF — FAILED ITS GATE (2026-07-15), kept only so the negative result is reproducible.
+    //
+    // The gate was: reach Ventilator's 0 open edges AND beat hybrid-cdt's +25.6% on the crane.
+    // Measured on Ventilator (pin 9,880 edges / 9 non-manifold / 3.37s; cdt 0 / 0 / 3.70s):
+    //   annulus          6,948 edges   73 non-manifold   3.85s   325,302 tris
+    //   annulus + freeze 6,011 edges   79 non-manifold   3.90s   329,669 tris
+    // It closes ~39% of the cracks but ADDS ~70 non-manifold edges, i.e. the zipper strip is
+    // malformed (self-overlapping, not merely inverted), and it is already slower than cdt while
+    // strictly worse. The crane was not measured: a wrong mesh's cost is not information.
+    //
+    // NB the inset (one full cell) DID fix 2026-07-13's stated failure mode — that annulus stitched
+    // to a loop lying essentially ON the rect border, a zero-width strip of slivers. So the idea is
+    // not refuted by the same mechanism twice; this is a new, unfixed defect in the strip itself.
+    // Anyone resuming: the strip's winding was inverted relative to the grid and is now fixed, but
+    // that changed NOTHING in the metrics because mesh_health sorts edge endpoints and is
+    // winding-agnostic — the remaining defect is topological. Start by extracting ONE annulus face
+    // and checking its strip in isolation, rather than by reading whole-model counts.
+    bool annulus_patch = false;
+
     // --- measured failures, kept OFF and reproducible; do not re-attempt without new insight ---
 
     // Grid boundary rows/cols at the trim loop's own UV parameters + pinned ring.
