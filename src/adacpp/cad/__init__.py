@@ -40,6 +40,10 @@ StepNgeomStream = _cad.StepNgeomStream
 IfcNgeomStream = _cad.IfcNgeomStream
 _step_index_parity = _cad._step_index_parity
 ifc_taxonomy_settings = _cad.ifc_taxonomy_settings
+# Track self-declaration: the single source of truth for which tessellation tracks THIS BUILD
+# provides. Consumers (adapy's registry, the viewer's option schema) must discover the vocabulary
+# from here rather than hardcoding it — adding a track in C++ is then the whole change.
+tess_tracks = _cad.tess_tracks
 meshopt_simplify_mesh = _cad.meshopt_simplify_mesh
 mesh_spike_stats = _cad.mesh_spike_stats
 meshopt_encode_vertex_buffer = _cad.meshopt_encode_vertex_buffer
@@ -138,6 +142,7 @@ __all__ = [
     "tessellate_batch",
     "tessellate_box",
     "tessellate_stream",
+    "tess_tracks",
     "stream_step_to_meshes",
     "stream_step_to_glb",
     "stream_step_to_mesh",

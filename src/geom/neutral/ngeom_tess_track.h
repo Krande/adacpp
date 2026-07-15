@@ -200,6 +200,51 @@ struct HybridOpts {
     bool cdt_wrap_and_pole = false;
 };
 
+// ---- self-declaration: adacpp owns the track vocabulary -------------------------------------
+//
+// adapy must not hardcode which tracks exist — it asks. This is the single source of truth, and it
+// reports only what THIS BUILD can actually run (the taxonomy tracks are compiled out of the wasm
+// branch, so they are not advertised there). Consumers publish the list onward to the frontend and
+// to Python users; adding a track here is the whole change.
+struct TessTrackInfo {
+    const char *name;        // stable token, e.g. "cdt" — what callers pass back as `pipeline`
+    const char *label;       // human-readable, for a UI dropdown
+    const char *description; // one line, for a tooltip
+    bool watertight;         // does it close shared-edge seams?
+    bool is_default;         // the track used when no pipeline is given
+};
+
+inline std::vector<TessTrackInfo> track_infos() {
+    std::vector<TessTrackInfo> out = {
+        {"libtess2", "libtess2 (default)",
+         "OCC-free winding-rule tessellation of the trim loop, with a UV-grid fast path for "
+         "near-full patches. Boundary vertices are pinned to their shared edge, which halves "
+         "shared-edge cracks at no cost.",
+         false, true},
+        {"cdt", "CDT — watertight (slower)",
+         "Constrained Delaunay (detria): trim loops become constraint edges and the surface grid "
+         "becomes interior Steiner points. One boundary-first path, so every boundary vertex pins. "
+         "Produces watertight, manifold solids with fewer triangles, but costs ~+8% on small models "
+         "and can exceed +60% on large multi-solid assemblies.",
+         true, false},
+        {"hybrid-cdt", "Hybrid CDT (experimental)",
+         "libtess2 everywhere, CDT only for faces libtess2 cannot pin. Measured worse than either "
+         "on both axes; retained as evidence, not recommended.",
+         false, false},
+    };
+#if !defined(__EMSCRIPTEN__)
+    // Taxonomy kernels link OCCT/CGAL via ifcopenshell and are excluded from the wasm build, so they
+    // are only real where they are compiled in.
+    out.push_back({"occ", "OCC (ifcopenshell taxonomy)", "Meshes via ifcopenshell's taxonomy on OCCT.",
+                   false, false});
+    out.push_back({"cgal", "CGAL (ifcopenshell taxonomy)", "Meshes via ifcopenshell's taxonomy on CGAL.",
+                   false, false});
+    out.push_back({"hybrid", "Hybrid OCC/CGAL (ifcopenshell taxonomy)",
+                   "ifcopenshell's hybrid OCCT/CGAL kernel selection.", false, false});
+#endif
+    return out;
+}
+
 inline std::optional<TessTrack> parse_track(std::string_view s) {
     if (s.empty() || s == "libtess2")
         return TessTrack::Libtess2;
@@ -234,9 +279,12 @@ inline const char *track_name(TessTrack t) {
     return "?";
 }
 
-// Every selectable track name. adapy probes the binding docstrings for these, so keep them in sync.
+// Every selectable track name, derived from track_infos() so the two cannot drift.
 inline std::vector<std::string_view> track_names() {
-    return {"libtess2", "cdt", "hybrid-cdt", "occ", "cgal", "hybrid"};
+    std::vector<std::string_view> out;
+    for (const TessTrackInfo &t : track_infos())
+        out.push_back(t.name);
+    return out;
 }
 
 } // namespace adacpp::ngeom

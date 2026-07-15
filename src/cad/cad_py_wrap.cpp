@@ -3875,6 +3875,28 @@ void cad_module(nb::module_ &m) {
           "a dict of per-field equality (ids/offs/roots/units/styled/absr/srr/cdsr/sdr).");
 
     m.def(
+        "tess_tracks",
+        []() {
+            nb::list out;
+            for (const auto &t : adacpp::ngeom::track_infos()) {
+                nb::dict d;
+                d["name"] = t.name;
+                d["label"] = t.label;
+                d["description"] = t.description;
+                d["watertight"] = t.watertight;
+                d["default"] = t.is_default;
+                out.append(d);
+            }
+            return out;
+        },
+        "Enumerate the tessellation tracks THIS BUILD provides: a list of dicts with name, label, "
+        "description, watertight, default. `name` is the token to pass back as the `pipeline` "
+        "argument of stream_step_to_glb / tessellate_stream.\n\n"
+        "This is the single source of truth for the track vocabulary: callers must NOT hardcode it. "
+        "The list reflects what is actually compiled in (the taxonomy kernels are absent from the "
+        "wasm build), so it answers 'what can I run here?', not 'what exists in principle'.");
+
+    m.def(
         "ifc_taxonomy_settings",
         []() {
             nb::list out;
