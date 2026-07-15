@@ -79,7 +79,14 @@ pyodide-build = "==0.35.0"
 # and cross-platform; clang-format reads the repo-root .clang-format.
 lint-cpp = { cmd = "clang-format -i $(git ls-files 'src/*.cpp' 'src/*.h' 'src/*.hpp')", description = "Format first-party C++ in src/ per .clang-format" }
 lint-cpp-check = { cmd = "clang-format --dry-run --Werror $(git ls-files 'src/*.cpp' 'src/*.h' 'src/*.hpp')", description = "CI gate: fail on any unformatted C++" }
-lint = { cmd = "isort . && black . --config pyproject.toml && ruff check . --fix", depends-on = ["lint-cpp"], description = "Format + lint Python and C++" }
+# Python is scoped with git ls-files for the same reasons as the C++ above, and one more: `isort .`
+# does not honour .gitignore, and the skip list says "build" — which does not match build-prof/ or
+# build-wasm-*/. So a local run reformatted vendored manifold sources inside those trees. Tracked
+# files are exactly the ones we own.
+lint = { cmd = "isort $(git ls-files '*.py') && black --config pyproject.toml $(git ls-files '*.py') && ruff check --fix $(git ls-files '*.py')", depends-on = ["lint-cpp"], description = "Format + lint Python and C++" }
+# CI gate. `lint` is isort/black/ruff --fix: all three MUTATE and exit 0, so the lint job reformatted
+# the runner's checkout and passed no matter what — it could not fail. Check-mode reports instead.
+lint-check = { cmd = "isort --check-only $(git ls-files '*.py') && black --check --config pyproject.toml $(git ls-files '*.py') && ruff check $(git ls-files '*.py')", depends-on = ["lint-cpp-check"], description = "CI gate: fail on any unformatted/unlinted Python or C++" }
 
 [feature.wasm.tasks]
 clean = { cmd = "rm -rf build-wasm && mkdir -p build-wasm" }
@@ -93,7 +100,10 @@ build-occt-wasm = { cmd = "emcmake cmake --preset wasm-pyodide -DPython_INCLUDE_
 wbuild-pyodide = { cmd = "emcmake cmake --preset wasm-pyodide -DPython_INCLUDE_DIR=\"$(pyodide config get python_include_dir)\" -DTINY_INCLUDE_DIR=$CONDA_PREFIX/include && cmake --build build/wasm-pyodide", description = "Build the adacpp nanobind module for pyodide" }
 pack-wheel-pyodide = { cmd = "rm -rf build/wasm-pyodide/install dist && cmake --install build/wasm-pyodide --prefix build/wasm-pyodide/install && python tools/build_wheel.py build/wasm-pyodide/install/wheel dist", description = "Build a pyodide-tagged wheel from the wasm-pyodide build", depends-on = ["wbuild-pyodide"] }
 tools-install = { cmd = "cd tools && npm install --silent", description = "Install npm helpers (pyodide for the wheel sanity test) into tools/node_modules" }
-test-wheel-pyodide = { cmd = "node tools/test_wheel_pyodide.js", description = "Smoke-test the pyodide wheel via node-pyodide", depends-on = ["pack-wheel-pyodide", "tools-install"] }
+test-wheel-pyodide = { cmd = "node tools/test_wheel_pyodide.js", description = "Install the pyodide wheel under node-pyodide and assert its surface + a real STEP->GLB conversion", depends-on = ["pack-wheel-pyodide", "tools-install"] }
+# The embind STEP->GLB module the browser loads. The harness existed but was wired to nothing,
+# so a module that builds but cannot convert would have shipped unnoticed.
+test-stepglb-wasm = { cmd = "node tools/test_step_glb_wasm.mjs files/flat_plate_abaqus_10x10_m_wColors.stp", description = "Smoke-test the OCC-free STEP->GLB embind wasm module in node", depends-on = ["wbuild-stepglb"] }
 serve = { cmd = "docker run --rm -p 8088:80 -v $PIXI_PROJECT_ROOT/src/frontend/public:/usr/share/nginx/html:ro -v $PIXI_PROJECT_ROOT/src/frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro -v $PIXI_PROJECT_ROOT/dist:/usr/share/nginx/html/dist:ro nginx:alpine", description = "Serve src/frontend/public on http://localhost:8088 with COOP/COEP headers (requires docker)" }
 
 [feature.conda.tasks]
@@ -101,6 +111,13 @@ conda-build = { cmd = "rattler-build build -r conda/recipe.yaml --experimental",
 
 [feature.test.tasks]
 test = { cmd = "pytest tests/py", description = "Run the tests", depends-on = ["install"] }
+# Regenerate src/adacpp/cad/__init__.py from the compiled extension. Run after adding a binding;
+# tests/py/test_cad_api_generated.py fails if it is stale. Replaces a hand-maintained pair of lists
+# (assignments + __all__) that had already drifted by 15 names and re-exported a wasm-absent binding
+# unguarded.
+gen-cad-api = { cmd = "python tools/gen_cad_api.py", description = "Regenerate the adacpp.cad re-export layer from the built extension", depends-on = [
+    "install",
+] }
 echo = { cmd = "echo \"$CONDA_PREFIX\"", description = "Echo Hello World" }
 echo2 = { cmd = "echo \"$SP_DIR\"", description = "Echo Hello World" }
 

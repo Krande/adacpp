@@ -21,8 +21,8 @@ namespace {
 
 // STEP → IFC. schema = "IFC4X3_ADD2" | "IFC4". Returns the number of solids written (>0 success,
 // 0 = nothing emitted / I/O error). deflection/angular_deg only affect face-set fallbacks.
-long step_to_ifc(const std::string &in_path, const std::string &out_path, const std::string &schema,
-                 double deflection, double angular_deg, long max_solids) {
+long step_to_ifc(const std::string &in_path, const std::string &out_path, const std::string &schema, double deflection,
+                 double angular_deg, long max_solids) {
     adacpp::ifc_emit::FileStats fs =
         adacpp::brep_convert::write_ifc_file_impl(in_path, out_path, schema, deflection, angular_deg, max_solids);
     return fs.solids_out;

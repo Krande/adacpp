@@ -103,8 +103,7 @@ public:
           // already takes — negligible against a solid's resolve+tessellate. It is what
           // identifies the monster solid of a slow conversion without a local re-run;
           // ADACPP_STEP_SOLID_TIMING still enables it standalone.
-          timing_(std::getenv("ADACPP_STEP_PROFILE") != nullptr ||
-                  std::getenv("ADACPP_STEP_SOLID_TIMING") != nullptr),
+          timing_(std::getenv("ADACPP_STEP_PROFILE") != nullptr || std::getenv("ADACPP_STEP_SOLID_TIMING") != nullptr),
           label_(label) {
         on_ = on_ || timing_;
         if (on_) {
@@ -262,8 +261,7 @@ public:
                 std::vector<size_t> order(timed_.size());
                 for (size_t i = 0; i < order.size(); ++i)
                     order[i] = i;
-                std::sort(order.begin(), order.end(),
-                          [&](size_t a, size_t b) { return timed_[a].ms > timed_[b].ms; });
+                std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return timed_[a].ms > timed_[b].ms; });
                 std::string rows;
                 size_t emitted = 0;
                 for (size_t r = 0; r < order.size() && emitted < 10; ++r) {
@@ -280,14 +278,12 @@ public:
                     j += ",\"slowest_solids\":[" + rows + "]";
                 // LPT accuracy signals for continuous tuning: does the cost estimate rank-predict the
                 // actual tessellation time and the per-solid memory proxy (tris)?
-                j += ",\"spearman_est_ms\":" +
-                     fmt_num(spearman([](const SolidTime &s) { return (double) s.est; },
-                                      [](const SolidTime &s) { return s.ms; }),
-                             3);
-                j += ",\"spearman_est_tris\":" +
-                     fmt_num(spearman([](const SolidTime &s) { return (double) s.est; },
-                                      [](const SolidTime &s) { return (double) s.tris; }),
-                             3);
+                j += ",\"spearman_est_ms\":" + fmt_num(spearman([](const SolidTime &s) { return (double) s.est; },
+                                                                [](const SolidTime &s) { return s.ms; }),
+                                                       3);
+                j += ",\"spearman_est_tris\":" + fmt_num(spearman([](const SolidTime &s) { return (double) s.est; },
+                                                                  [](const SolidTime &s) { return (double) s.tris; }),
+                                                         3);
             }
             j += "}";
             std::fprintf(stderr, "[STEPPROF-JSON] %s\n", j.c_str());

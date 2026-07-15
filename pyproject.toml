@@ -10,7 +10,17 @@ authors = [
 ]
 description = "A minimal python wrapping of OCCT using nanobind"
 readme = "README.md"
+# Matches conda/recipe.yaml's `license:` and the classifier below. The project had only the
+# classifier and no LICENSE file at all, which is a weak claim to a licence: the grant terms were
+# not actually stated anywhere, while every vendored dep under third_party/ carried its own text.
+license = { text = "GPL-3.0-or-later" }
 requires-python = ">=3.10"
+# numpy is NOT optional: the mesh/stream API hands back zero-copy nb::ndarray<nb::numpy, ...> views
+# (Mesh.positions, Mesh.indices, the NGEOM stream buffers), so touching any result imports numpy.
+# Leaving it undeclared was invisible natively — conda always has numpy — but under pyodide micropip
+# installs exactly what is declared, and reading Mesh.indices without numpy does NOT raise
+# ImportError: it recurses until the interpreter dies with "Maximum call stack size exceeded".
+dependencies = ["numpy"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",

@@ -389,6 +389,7 @@ inline NgeomDoc decode(const uint8_t *data, size_t n) {
             oe->e_end = es.e_end;
             oe->same_sense = es.e_same_sense;
             oe->orientation = orientation != 0;
+            oe->edge_id = eref; // shared-edge identity: both adjacent faces reference this slot
             oe->geometry = es.e_geom;
             oe->has_params = has_params != 0;
             oe->t_start = ts;

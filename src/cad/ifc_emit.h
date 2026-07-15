@@ -197,8 +197,8 @@ private:
                 holes.push_back(polyline2d(out, h));
         }
         if (!holes.empty())
-            return emit(out, "IfcArbitraryProfileDefWithVoids(.AREA.,$,#" + std::to_string(curve) + "," +
-                                 refs(holes) + ")");
+            return emit(out,
+                        "IfcArbitraryProfileDefWithVoids(.AREA.,$,#" + std::to_string(curve) + "," + refs(holes) + ")");
         return emit(out, "IfcArbitraryClosedProfileDef(.AREA.,$,#" + std::to_string(curve) + ")");
     }
     long emit_extrusion(std::string &out, const ExtrusionN &ex) {
@@ -254,8 +254,8 @@ private:
             dpts.push_back(sw.frame.to_world(o.x, o.y, o.z));
         long directrix = polyline3d(out, dpts);
         std::string inner_s = inner > 1e-9 ? ("," + ifc_real(inner)) : ",$";
-        return emit(out, "IfcSweptDiskSolid(#" + std::to_string(directrix) + "," + ifc_real(radius) + inner_s +
-                             ",$,$)");
+        return emit(out,
+                    "IfcSweptDiskSolid(#" + std::to_string(directrix) + "," + ifc_real(radius) + inner_s + ",$,$)");
     }
     long emit_solid_operand(std::string &out, const SolidItemN &it) {
         if (it.extrusion)
@@ -275,8 +275,8 @@ private:
         if (!a || !bb)
             return 0;
         const char *op = b.op == 1 ? ".UNION." : (b.op == 2 ? ".INTERSECTION." : ".DIFFERENCE.");
-        return emit(out, std::string("IfcBooleanResult(") + op + ",#" + std::to_string(a) + ",#" +
-                             std::to_string(bb) + ")");
+        return emit(out,
+                    std::string("IfcBooleanResult(") + op + ",#" + std::to_string(a) + ",#" + std::to_string(bb) + ")");
     }
 
     long emit(std::string &out, const std::string &body) {

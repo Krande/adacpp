@@ -20,13 +20,15 @@ int main(int argc, char *argv[]) {
     std::string glb_file;
     double deflection = 2.0;
     double angular_deg = 20.0;
-    int num_threads = 0;   // 0 = all hardware cores
-    bool meshopt = true;   // EXT_meshopt_compression baked inline by default
-    bool profile = false;  // enable the env-gated StepProfiler instrumentation
-    bool quiet = false;    // suppress the param echo + progress; keep errors + the final result line
+    int num_threads = 0;       // 0 = all hardware cores
+    bool meshopt = true;       // EXT_meshopt_compression baked inline by default
+    bool profile = false;      // enable the env-gated StepProfiler instrumentation
+    bool quiet = false;        // suppress the param echo + progress; keep errors + the final result line
     bool face_regions = false; // bake per-face clickable regions into scenes[0].extras (opt-in)
+    std::string pipeline;      // tessellation track: "" / libtess2 (default) | cdt
+    bool pin_boundary = true;  // libtess2 option: emit boundary verts at their shared-edge point
     double model_scale = 0.0;  // >0 => adaptive per-surface density (relaxes tiny features); 0 => fixed
-    std::string spill_dir; // empty => private auto-removed mkdtemp spill dir
+    std::string spill_dir;     // empty => private auto-removed mkdtemp spill dir
 
     app.add_option("--stp", stp_file, "STEP input filepath")->required();
     app.add_option("--glb", glb_file, "GLB output filepath")->required();
@@ -38,6 +40,10 @@ int main(int argc, char *argv[]) {
     app.add_flag("--profile", profile, "Print [STEPPROF] phase/memory/per-solid timing to stderr (StepProfiler)");
     app.add_flag("--face-regions", face_regions,
                  "Bake per-face clickable regions into scenes[0].extras (face_ranges_node<m>); opt-in");
+    app.add_option("--pipeline", pipeline, "Tessellation track: libtess2 (default) | cdt | occ | cgal | hybrid");
+    app.add_flag("--pin-boundary,!--no-pin-boundary", pin_boundary,
+                 "libtess2: emit boundary vertices at their shared-edge point instead of this face's own "
+                 "surface re-projection (default ON; halves cracks for ~3%)");
     app.add_option("--model-scale", model_scale,
                    "Model bbox diagonal for adaptive per-surface density (0 = fixed angle)")
         ->default_val(0.0);
@@ -75,7 +81,7 @@ int main(int argc, char *argv[]) {
     long nsolids = -1;
     try {
         nsolids = adacpp::stream_step_to_glb(stp_file, glb_file, deflection, angular_deg, num_threads, meshopt,
-                                             spill_dir, model_scale, face_regions);
+                                             spill_dir, model_scale, face_regions, pipeline, pin_boundary);
     } catch (const std::exception &ex) {
         std::cerr << "Error: " << ex.what() << "\n";
         return 1;

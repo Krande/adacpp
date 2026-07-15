@@ -45,8 +45,8 @@ struct GlbSolid {
     std::array<float, 4> color{0.5f, 0.5f, 0.5f, 1.0f};
     std::vector<std::array<float, 16>> transforms;
     std::vector<FaceSub> face_ranges; // per-face regions (relative to this solid); empty unless captured
-    std::string id;           // solid's own name (fallback leaf name)
-    std::string product_name; // the solid's product name (the picking leaf name `gid`); "" => use id
+    std::string id;                   // solid's own name (fallback leaf name)
+    std::string product_name;         // the solid's product name (the picking leaf name `gid`); "" => use id
     // Per-instance assembly path (root-first (rep_id, product_name) levels, last level = the solid's
     // own product), parallel to transforms. The writer emits ONE pickable leaf per instance — named
     // gid (k==0) / gid/k+1 — parented under path[:-1] (the solid's own level collapses into the leaf),
@@ -587,9 +587,9 @@ class GlbSpillWriter {
 public:
     struct MatLane {
         std::array<float, 4> color{0.5f, 0.5f, 0.5f, 1.0f};
-        std::string pos_path, idx_path;   // set only once this material has spilled to disk
+        std::string pos_path, idx_path; // set only once this material has spilled to disk
         std::ofstream pos, idx;
-        std::string pos_buf, idx_buf;     // in-RAM bytes while !spilled (then flushed to file + cleared)
+        std::string pos_buf, idx_buf; // in-RAM bytes while !spilled (then flushed to file + cleared)
         bool spilled = false;
         uint32_t vert_count = 0, index_count = 0, idx_max = 0;
         float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};

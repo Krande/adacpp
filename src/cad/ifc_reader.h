@@ -54,7 +54,7 @@ public:
         // subtype) refs an IfcProductDefinitionShape. Resolving by representation — instead of the
         // old cheap name allowlist, which missed subtypes like IfcSanitaryTerminal / MEP / furniture
         // terminals — catches every product the ifcopenshell reader would, with no schema.
-        build_rel_maps(); // populate openings_ so opening elements are excluded (they cut their host)
+        build_rel_maps();             // populate openings_ so opening elements are excluded (they cut their host)
         std::unordered_set<long> pds; // IfcProductDefinitionShape ids
         std::string scratch;
         for (long id : idx_.ids)
@@ -149,7 +149,7 @@ public:
                 !(in->args[1].kind == adacpp::step::Kind::Enum && in->args[1].s == "PLANEANGLEUNIT"))
                 continue;
             const Instance *mwu = inst(ref_arg(*in, 3)); // IfcMeasureWithUnit(ValueComponent, UnitComponent)
-            if (mwu)                                     // ValueComponent = IfcPlaneAngleMeasure(x): [Keyword, List[Real]]
+            if (mwu) // ValueComponent = IfcPlaneAngleMeasure(x): [Keyword, List[Real]]
                 for (const Value &a : mwu->args) {
                     if (numeric(a)) {
                         angle_scale_ = a.as_double();
@@ -365,8 +365,7 @@ public:
             return {};
         };
         auto is_2d_only = [](std::string_view id) {
-            return id == "FootPrint" || id == "Annotation" || id == "Profile" || id == "Plan" ||
-                   id == "Box";
+            return id == "FootPrint" || id == "Annotation" || id == "Profile" || id == "Plan" || id == "Box";
         };
         auto is_axis = [](std::string_view id) { return id == "Axis"; };
         bool has_body = false;
@@ -522,7 +521,9 @@ public:
     // their sub-entities on demand via the pread offset index. Enable ONLY on a single-threaded
     // (phase-A) resolver; the concurrent phase-B pool leaves it off and bounds via clear_cache() per
     // product. A no-op for products under 1024 faces (the mid-shell clear never fires).
-    void enable_cache_bounding() { bound_cache_ = true; }
+    void enable_cache_bounding() {
+        bound_cache_ = true;
+    }
 
     // Build the expensive, read-only, cross-product metadata (colour + spatial-hierarchy maps) ONCE on
     // a master resolver so parallel workers can share it via copy_metadata_from instead of each
@@ -562,9 +563,11 @@ public:
             const Instance *sr = inst(srref.i);
             if (!sr || sr->args.size() < 4 || !sr->args[3].is_list())
                 continue;
-            std::string_view id =
-                (sr->args.size() > 1 && sr->args[1].kind == adacpp::step::Kind::Str) ? sr->args[1].s : std::string_view{};
-            if (id == "FootPrint" || id == "Annotation" || id == "Profile" || id == "Plan" || id == "Box" || id == "Axis")
+            std::string_view id = (sr->args.size() > 1 && sr->args[1].kind == adacpp::step::Kind::Str)
+                                      ? sr->args[1].s
+                                      : std::string_view{};
+            if (id == "FootPrint" || id == "Annotation" || id == "Profile" || id == "Plan" || id == "Box" ||
+                id == "Axis")
                 continue; // 2D / reference reps are not tessellated
             for (const Value &itref : sr->args[3].items)
                 if (const Instance *it = inst(itref.i))
@@ -598,13 +601,13 @@ private:
     std::unordered_map<long, std::shared_ptr<Surface>> surf_cache_;
     bool bound_cache_ = false; // enable_cache_bounding(): drop cache_ mid-shell on huge products
     std::string pread_scratch_;
-    long solid_src_ = 0;      // entity id of the one solid this product carries (mapped instances share it)
-    bool mixed_ = false;      // product has >1 distinct solid / mixes brep+procedural -> skip (OCC)
+    long solid_src_ = 0;       // entity id of the one solid this product carries (mapped instances share it)
+    bool mixed_ = false;       // product has >1 distinct solid / mixes brep+procedural -> skip (OCC)
     double angle_scale_ = 0.0; // radians per model plane-angle unit (0 => not yet computed)
     std::unordered_map<long, std::array<float, 4>> colour_map_; // rep-item id -> rgba (IfcStyledItem)
     bool colour_map_built_ = false;
-    std::unordered_map<long, long> contained_of_; // product -> containing spatial element (IfcRelContained…)
-    std::unordered_map<long, long> parent_of_;    // child -> aggregating parent (IfcRelAggregates)
+    std::unordered_map<long, long> contained_of_;       // product -> containing spatial element (IfcRelContained…)
+    std::unordered_map<long, long> parent_of_;          // child -> aggregating parent (IfcRelAggregates)
     std::unordered_map<long, std::vector<long>> voids_; // host element -> opening elements (IfcRelVoidsElement)
     std::unordered_set<long> openings_;                 // opening element ids (cut from host, not rendered standalone)
     bool rel_maps_built_ = false;
@@ -1537,8 +1540,7 @@ private:
                 for (const Value &cfs : in->args[0].items)
                     if (cfs.is_ref())
                         add_shell_faces(cfs.i, out);
-        } else if (iequals(t, "IFCCONNECTEDFACESET") || iequals(t, "IFCOPENSHELL") ||
-                   iequals(t, "IFCCLOSEDSHELL")) {
+        } else if (iequals(t, "IFCCONNECTEDFACESET") || iequals(t, "IFCOPENSHELL") || iequals(t, "IFCCLOSEDSHELL")) {
             add_shell_faces(id, out);
         } else if (iequals(t, "IFCADVANCEDFACE") || iequals(t, "IFCFACESURFACE") || iequals(t, "IFCFACE")) {
             if (auto f = face(id)) // a bare face as the representation item
@@ -1794,7 +1796,7 @@ private:
         if (base >= 0)
             alignment_sample(base, 24, hs, hp); // horizontal (x,y) along s
         else
-            alignment_sample(cid, 24, hs, hp);  // SegmentedReferenceCurve: sample its own segments
+            alignment_sample(cid, 24, hs, hp); // SegmentedReferenceCurve: sample its own segments
         // vertical gradient z(s): the gradient's own segments give (distance, height) points
         std::vector<double> vs;
         std::vector<Vec3> vp;
@@ -1810,8 +1812,7 @@ private:
                 for (size_t k = 0; k + 1 < vp.size(); ++k)
                     if ((vp[k].x <= q && q <= vp[k + 1].x) || (vp[k + 1].x <= q && q <= vp[k].x)) {
                         double dxk = vp[k + 1].x - vp[k].x;
-                        z = std::abs(dxk) < 1e-12 ? vp[k].y
-                                                  : vp[k].y + (vp[k + 1].y - vp[k].y) * (q - vp[k].x) / dxk;
+                        z = std::abs(dxk) < 1e-12 ? vp[k].y : vp[k].y + (vp[k + 1].y - vp[k].y) * (q - vp[k].x) / dxk;
                         break;
                     } else if (q > vp[k + 1].x)
                         z = vp[k + 1].y;
@@ -1833,7 +1834,10 @@ private:
         Vec3 c = a + ab * ((amam * (abab - abam)) / d) + am * ((abab * (amam - abam)) / d);
         double r = (a - c).norm();
         Vec3 u = (a - c).normalized(), v = n.cross(u);
-        auto ang = [&](const Vec3 &p) { Vec3 rp = p - c; return std::atan2(rp.dot(v), rp.dot(u)); };
+        auto ang = [&](const Vec3 &p) {
+            Vec3 rp = p - c;
+            return std::atan2(rp.dot(v), rp.dot(u));
+        };
         double ta = ang(a), tm = ang(m), tb = ang(b);
         auto wrap = [](double x) {
             while (x < 0)
@@ -1997,8 +2001,7 @@ private:
     // statements) every 1024 faces when bounding is on. Callers MUST copy the ids out first: the clear
     // frees the parent shell/faceset Instance, so iterating its arg list in place would use-after-free
     // (same hazard the STEP reader guards). Built geometry (surf_cache_) + persistent maps are kept.
-    template <class Emit>
-    void iter_faces_bounded(const std::vector<long> &face_ids, Emit emit) {
+    template <class Emit> void iter_faces_bounded(const std::vector<long> &face_ids, Emit emit) {
         for (size_t i = 0; i < face_ids.size(); ++i) {
             emit(face_ids[i]);
             if (bound_cache_ && (i & 1023u) == 1023u)
@@ -2234,9 +2237,15 @@ private:
     // Inverse of a rigid 4x4 (column-major): [R|t] -> [R^T | -R^T t].
     static std::array<float, 16> rigid_inverse(const std::array<float, 16> &M) {
         std::array<float, 16> r{};
-        r[0] = M[0]; r[1] = M[4]; r[2] = M[8];   // R^T columns
-        r[4] = M[1]; r[5] = M[5]; r[6] = M[9];
-        r[8] = M[2]; r[9] = M[6]; r[10] = M[10];
+        r[0] = M[0];
+        r[1] = M[4];
+        r[2] = M[8]; // R^T columns
+        r[4] = M[1];
+        r[5] = M[5];
+        r[6] = M[9];
+        r[8] = M[2];
+        r[9] = M[6];
+        r[10] = M[10];
         float tx = M[12], ty = M[13], tz = M[14];
         r[12] = -(M[0] * tx + M[1] * ty + M[2] * tz); // -R^T t
         r[13] = -(M[4] * tx + M[5] * ty + M[6] * tz);

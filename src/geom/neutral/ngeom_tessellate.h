@@ -12,30 +12,37 @@
 #include <vector>
 
 #include "../MeshType.h"
+#include "ngeom_tess_track.h"
 #include "ngeom_topology.h"
 
 namespace adacpp::ngeom {
 
 struct TessParams {
-    double deflection = 0.0; // chord tolerance for boundary discretization (0 => auto)
-    double max_angle = 0.35; // ~20 deg, max turn between boundary samples
-    int threads = 1;         // >1 tessellates a root's faces across a thread pool. Default 1
-                             // (serial) so callers already parallelising across roots/solids
-                             // (the STEP->GLB process pool) don't oversubscribe; a single
-                             // whole-model call (merge-preview generate) opts into all cores.
-    bool weld = true;         // weld coincident vertices + rebuild a shared index buffer with crease-angle
-                              // smooth normals (ngeom_weld.h) per root, turning the flat-shaded triangle
-                              // soup into a compact indexed mesh (matches OCC density). Off => raw soup.
-    double model_scale = 0.0; // model bbox diagonal (world units). 0 => OFF: the fixed max_angle
-                              // governs every surface (explicit-global-angle mode). >0 => ADAPTIVE:
-                              // the angular ceiling is relaxed for surfaces whose radius is small
-                              // relative to model_scale (imperceptible facets), so dense assemblies
-                              // of tiny curved features (bolts/pins) don't blow the triangle budget
-                              // while large visible surfaces keep the fine max_angle.
+    double deflection = 0.0;          // chord tolerance for boundary discretization (0 => auto)
+    double max_angle = 0.35;          // ~20 deg, max turn between boundary samples
+    int threads = 1;                  // >1 tessellates a root's faces across a thread pool. Default 1
+                                      // (serial) so callers already parallelising across roots/solids
+                                      // (the STEP->GLB process pool) don't oversubscribe; a single
+                                      // whole-model call (merge-preview generate) opts into all cores.
+    bool weld = true;                 // weld coincident vertices + rebuild a shared index buffer with crease-angle
+                                      // smooth normals (ngeom_weld.h) per root, turning the flat-shaded triangle
+                                      // soup into a compact indexed mesh (matches OCC density). Off => raw soup.
+    double model_scale = 0.0;         // model bbox diagonal (world units). 0 => OFF: the fixed max_angle
+                                      // governs every surface (explicit-global-angle mode). >0 => ADAPTIVE:
+                                      // the angular ceiling is relaxed for surfaces whose radius is small
+                                      // relative to model_scale (imperceptible facets), so dense assemblies
+                                      // of tiny curved features (bolts/pins) don't blow the triangle budget
+                                      // while large visible surfaces keep the fine max_angle.
     bool capture_face_ranges = false; // record per-face triangle ranges (TessMesh::face_ranges) so the
-                                       // GLB writer can emit clickable per-face regions. Opt-in (bloats
-                                       // the output) and forces serial face tessellation for stable
-                                       // face-order ranges. Off => no per-face bookkeeping.
+                                      // GLB writer can emit clickable per-face regions. Opt-in (bloats
+                                      // the output) and forces serial face tessellation for stable
+                                      // face-order ranges. Off => no per-face bookkeeping.
+    // Which tessellation track runs (ngeom_tess_track.h), plus each track's own options. Defaults
+    // are today's behaviour, byte-for-byte. Each opts struct is read only on its own track. All POD,
+    // so TessParams stays trivially copyable for the per-root/per-face copies.
+    TessTrack track = TessTrack::Libtess2;
+    Libtess2Opts libtess2;
+    CdtOpts cdt;
 };
 
 struct TessMesh {

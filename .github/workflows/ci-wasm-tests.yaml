@@ -40,12 +40,14 @@ jobs:
       - uses: prefix-dev/setup-pixi@v0.10.0
         with:
           pixi-version: v0.68.0
-          environments: conda
+          # The wasm tasks live in the `wasm` feature. This said `conda`, so pixi solved and
+          # installed the wasm env at run time on every run, uncached.
+          environments: wasm
           cache: true
 
       - name: Use prebuilt OCCT-wasm base (if available)
-        # Point cmake at the reusable OCCT base via WASM_OCCT_PREBUILT_DIR so
-        # the BUILD_WASM=ON configure (wbuild) skips the ~30-min OCCT compile.
+        # Point cmake at the reusable OCCT base via WASM_OCCT_PREBUILT_DIR so the wasm-pyodide
+        # configure skips the ~30-min OCCT compile.
         # Falls back to building OCCT from source when the base isn't published.
         run: |
           echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
@@ -63,6 +65,23 @@ jobs:
             echo "No prebuilt OCCT-wasm base ($base) — building OCCT from source."
           fi
 
-      - name: install package
-        run: |
-          pixi run wbuild
+      # This job used to run `pixi run wbuild` and nothing else. That sets BUILD_PYTHON=OFF and lands
+      # on the legacy stub arm of cmake/wasm_build.cmake, so it cross-compiled OCCT for ~30 minutes
+      # and then built src/wasm_utils.cpp — a single `double multiply(a, b)`. It never compiled
+      # _ada_cpp_ext_impl, so it could not catch a wasm bug in the extension even in principle. It is
+      # how an unguarded `glb_diff = _cad.glb_diff` shipped and broke `import adacpp` under pyodide,
+      # and how the wheel came to declare no numpy dependency.
+      #
+      # Build the artifact the browser actually loads, and import it.
+      - name: install the pyodide cross-build env
+        run: pixi run -e wasm xbuildenv-install
+
+      # Builds the ext for pyodide, packs the wheel, installs the node pyodide runtime, then
+      # installs the wheel under node-pyodide and asserts against it (tools/test_wheel_pyodide.js).
+      - name: build + test the pyodide wheel
+        run: pixi run -e wasm test-wheel-pyodide
+
+      # The OCC-free embind module the browser uses for STEP->GLB. Cheap (~1-2 min, no OCCT) and it
+      # runs a real conversion, so there is no reason it was never wired up.
+      - name: build + smoke-test the STEP->GLB embind module
+        run: pixi run -e wasm test-stepglb-wasm

@@ -35,10 +35,15 @@ else()
 endif ()
 
 # Vendored libtess2 (native + wasm) — boundary-driven triangulator for the step2glb-style
-# tessellation path. Header-path only here; ${LIBTESS2_SOURCES} are appended to
-# ADA_CPP_SOURCES alongside the tessellator once src/visit/tessellate_libtess2.cpp lands.
+# tessellation path. ${LIBTESS2_SOURCES} are appended to ADA_CPP_SOURCES in both the native and
+# wasm branches below; the tessellator itself is src/geom/neutral/ngeom_tessellate.cpp.
 include(cmake/deps_libtess2.cmake)
 include_directories(${LIBTESS2_INCLUDE_DIR})
+
+# Vendored detria (native + wasm) — constrained Delaunay for the `cdt` track. Header-only; also
+# forces NDEBUG, which detria REQUIRES to stay fail-soft (see cmake/deps_detria.cmake).
+include(cmake/deps_detria.cmake)
+include_directories(${DETRIA_INCLUDE_DIR})
 
 # Vendored meshoptimizer (native + wasm) — meshopt_simplify cleanup (step2glb merge parity) +
 # EXT_meshopt_compression encoders. ${MESHOPT_SOURCES} are appended to ADA_CPP_SOURCES below.
