@@ -427,13 +427,14 @@ Mesh tessellate_stream_impl(nb::object buffer, const std::string &pipeline, doub
     // Route via the track vocabulary (ngeom_tess_track.h) rather than a raw string compare. The old
     // code sent anything that wasn't "libtess2" to the taxonomy branch and then split it on '-',
     // which silently misrouted every NGEOM track added since: "cdt" became taxonomy("cdt"), and
-    // "hybrid-cdt" split to taxonomy("cdt"). Wrong geometry, not an error. parse_track also rejects
+    // a dash-split sent "hybrid-cdt" to taxonomy("cdt"). Wrong geometry, not an error. parse_track
+    // also rejects
     // an unknown name outright instead of guessing.
     auto track = parse_track(pipeline);
     if (!track)
         throw std::invalid_argument("unknown tessellation track: '" + pipeline + "' (see tess_tracks())");
     TessMesh tm;
-    if (*track == TessTrack::Libtess2 || *track == TessTrack::Cdt || *track == TessTrack::Hybrid) {
+    if (*track == TessTrack::Libtess2 || *track == TessTrack::Cdt) {
         TessParams tp;
         tp.track = *track;
         tp.deflection = deflection;

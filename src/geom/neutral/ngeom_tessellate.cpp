@@ -2115,8 +2115,8 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
         contours_p3.push_back(std::move(l.pts3));
     }
     // Pins are data-guarded: nullptr => the emit path runs the identical code it always did.
-    const bool lt_like = tp.track == TessTrack::Libtess2 || tp.track == TessTrack::Hybrid;
-    const std::vector<std::vector<Vec3>> *pins = (lt_like && tp.libtess2.pin_boundary) ? &contours_p3 : nullptr;
+    const std::vector<std::vector<Vec3>> *pins =
+        (tp.track == TessTrack::Libtess2 && tp.libtess2.pin_boundary) ? &contours_p3 : nullptr;
     const std::vector<std::vector<Vec3>> *cdt_pins = tp.cdt.pin_boundary ? &contours_p3 : nullptr;
 
     {
@@ -2150,15 +2150,6 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
         return emit_cdt_region(surf, contours, tp, same_sense, mesh, cdt_pins)
                    ? nullptr
                    : "CDT tessellation produced no triangles";
-    }
-    // HYBRID: this is the whole point of the track. A face that would take the UV-bbox grid is the
-    // only kind libtess2 cannot pin, so it — and only it — pays for detria. Everything else already
-    // fell through to the pinned emit path above/below at libtess2 speed.
-    if (tp.track == TessTrack::Hybrid && tp.hybrid.cdt_full_patch && full_patch_rect(surf, contours).ok) {
-        diag_set_path("hybrid_cdt_full_patch");
-        if (emit_cdt_region(surf, contours, tp, same_sense, mesh, cdt_pins))
-            return nullptr;
-        // detria declined: fall through to the grid rather than fail the face.
     }
     // grid_via_emit: skip the UV-bbox grid so this face goes through the pinned emit path below.
     // full_patch_rect's gate is area_ratio >= 0.995, i.e. the trim loop IS the rectangle, so emit

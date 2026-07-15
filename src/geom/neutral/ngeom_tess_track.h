@@ -28,8 +28,6 @@ enum class TessTrack : uint8_t {
     Cdt = 1,         // Constrained Delaunay for EVERY face: boundary as constraint edges, interior
                      // (incl. the surface grid) as Steiner points. One path, boundary-first.
                      // Watertight, but ~+70% on the crane — see CdtOpts.
-    Hybrid = 5,      // libtess2+pin everywhere, detria ONLY for the faces libtess2 cannot pin.
-                     // The intended default candidate — see HybridOpts.
     TaxonomyOcc = 2, // native-only (ifcopenshell taxonomy -> OCC)
     TaxonomyCgal = 3,
     TaxonomyHybrid = 4,
@@ -169,9 +167,7 @@ struct CdtOpts {
     double converged_frac = 50.0;
 };
 
-// Options for the hybrid track: libtess2+pin everywhere, detria only where libtess2 CANNOT pin.
-//
-// WHY. Measured, both tracks on both models:
+// WHY CDT IS OPT-IN AND libtess2+pin IS THE DEFAULT. Measured, both tracks on both models:
 //
 //                    Ventilator (1 solid, 305 faces)     crane (7096 solids, ~299k faces)
 //   libtess2+pin     +0%   9,880 open edges              +0.5%   RSS -1.8%
@@ -182,23 +178,13 @@ struct CdtOpts {
 // full CDT (points + constraints + erase) is pure overhead per face — while pinning already makes
 // those faces watertight-equivalent, because tess2 tessellates their real trim loop.
 //
-// The faces that actually NEED detria are the ones libtess2 hands to tessellate_uv_grid: it fills
-// the UV bbox, never sees the trim loop, and so has nothing to pin (53/305 = 17% on Ventilator).
-// Route by that, not by model, and the cost lands where the benefit is.
-struct HybridOpts {
-    // Send would-be full-patch grid faces to detria. full_patch_rect's gate is area_ratio >= 0.995,
-    // i.e. the trim loop IS the UV rectangle — which is exactly why detria can replace the grid for
-    // them: same region, but with a boundary it can constrain and pin. This is the one grid path
-    // proven to work through detria (it is all 53 of Ventilator's, and they went watertight).
-    bool cdt_full_patch = true;
-    // The OTHER grid paths (full_wrap / full_domain / v-pole) are deliberately NOT routed. Their
-    // gates do not guarantee the loop bounds the region — full_domain_bspline gates on bbox EXTENT
-    // >= 0.9 with no area check, so the loop can cover 90% of the extent at 50% of the area, and a
-    // wrapped/poled loop is not a simple polygon at all. Handing those to a CDT would not just fail,
-    // it could triangulate the wrong region. They stay on the grid and stay unpinnable — an honest
-    // residual on models that use them. Ventilator uses none.
-    bool cdt_wrap_and_pole = false;
-};
+// A "hybrid-cdt" track (libtess2+pin everywhere, detria only for the faces libtess2 cannot pin —
+// the tessellate_uv_grid ones, which fill the UV bbox, never see the trim loop, and so have nothing
+// to pin) was built and REMOVED (2026-07-15). It was worse than both on both axes: +16.3% on
+// Ventilator while still leaving 2,567 open edges, and +25.6% on the crane. Routing the full-patch
+// faces to detria costs ~3-4x the grid's per-face cost (31,076 of the crane's faces, 10.4%, are
+// full-patch B-splines), and for them the grid is the RIGHT algorithm — its only defect is that it
+// cannot pin. Splitting the difference bought the cost of both and the benefit of neither.
 
 // ---- self-declaration: adacpp owns the track vocabulary -------------------------------------
 //
@@ -227,10 +213,6 @@ inline std::vector<TessTrackInfo> track_infos() {
          "Produces watertight, manifold solids with fewer triangles, but costs ~+8% on small models "
          "and can exceed +60% on large multi-solid assemblies.",
          true, false},
-        {"hybrid-cdt", "Hybrid CDT (experimental)",
-         "libtess2 everywhere, CDT only for faces libtess2 cannot pin. Measured worse than either "
-         "on both axes; retained as evidence, not recommended.",
-         false, false},
     };
 #if !defined(__EMSCRIPTEN__)
     // Taxonomy kernels link OCCT/CGAL via ifcopenshell and are excluded from the wasm build, so they
@@ -249,8 +231,6 @@ inline std::optional<TessTrack> parse_track(std::string_view s) {
         return TessTrack::Libtess2;
     if (s == "cdt")
         return TessTrack::Cdt;
-    if (s == "hybrid-cdt")
-        return TessTrack::Hybrid;
     if (s == "occ" || s == "taxonomy-occ")
         return TessTrack::TaxonomyOcc;
     if (s == "cgal" || s == "taxonomy-cgal")
@@ -266,8 +246,6 @@ inline const char *track_name(TessTrack t) {
         return "libtess2";
     case TessTrack::Cdt:
         return "cdt";
-    case TessTrack::Hybrid:
-        return "hybrid-cdt";
     case TessTrack::TaxonomyOcc:
         return "occ";
     case TessTrack::TaxonomyCgal:
