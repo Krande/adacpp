@@ -155,7 +155,14 @@ def render(names: list[str], optional: set[str]) -> str:
         )
         for n in opt:
             reason = _REASONS.get(n, _GENERIC_REASON)
-            body.append(f'{n} = _optional("{n}", "{reason}")\n')
+            # Emit the exploded form WITH a trailing comma ("magic trailing comma"): black keeps a
+            # call like this one-arg-per-line no matter how short, so this output is already
+            # black-canonical and `pixi run lint` is a no-op on it. Emitting the one-liner instead
+            # means black rewraps whenever a reason pushes past the line length, and the reformatted
+            # file then no longer matches generate() — the staleness test fails and the fix looks
+            # like "regenerate", which does not help because black just rewraps it again. A
+            # generated file and a formatter cannot both own the layout; this hands it to black.
+            body.append(f'{n} = _optional(\n    "{n}",\n    "{reason}",\n)\n')
     body.append("\n__all__ = [\n")
     body.extend(f'    "{n}",\n' for n in sorted(always + opt))
     body.append("]\n")

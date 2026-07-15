@@ -79,7 +79,14 @@ pyodide-build = "==0.35.0"
 # and cross-platform; clang-format reads the repo-root .clang-format.
 lint-cpp = { cmd = "clang-format -i $(git ls-files 'src/*.cpp' 'src/*.h' 'src/*.hpp')", description = "Format first-party C++ in src/ per .clang-format" }
 lint-cpp-check = { cmd = "clang-format --dry-run --Werror $(git ls-files 'src/*.cpp' 'src/*.h' 'src/*.hpp')", description = "CI gate: fail on any unformatted C++" }
-lint = { cmd = "isort . && black . --config pyproject.toml && ruff check . --fix", depends-on = ["lint-cpp"], description = "Format + lint Python and C++" }
+# Python is scoped with git ls-files for the same reasons as the C++ above, and one more: `isort .`
+# does not honour .gitignore, and the skip list says "build" — which does not match build-prof/ or
+# build-wasm-*/. So a local run reformatted vendored manifold sources inside those trees. Tracked
+# files are exactly the ones we own.
+lint = { cmd = "isort $(git ls-files '*.py') && black --config pyproject.toml $(git ls-files '*.py') && ruff check --fix $(git ls-files '*.py')", depends-on = ["lint-cpp"], description = "Format + lint Python and C++" }
+# CI gate. `lint` is isort/black/ruff --fix: all three MUTATE and exit 0, so the lint job reformatted
+# the runner's checkout and passed no matter what — it could not fail. Check-mode reports instead.
+lint-check = { cmd = "isort --check-only $(git ls-files '*.py') && black --check --config pyproject.toml $(git ls-files '*.py') && ruff check $(git ls-files '*.py')", depends-on = ["lint-cpp-check"], description = "CI gate: fail on any unformatted/unlinted Python or C++" }
 
 [feature.wasm.tasks]
 clean = { cmd = "rm -rf build-wasm && mkdir -p build-wasm" }

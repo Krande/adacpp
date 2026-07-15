@@ -149,7 +149,10 @@ write_step = _cad.write_step
 # Compiled only in the native build (the #ifndef __EMSCRIPTEN__ guards in
 # cad_py_wrap.cpp). Bound to a stub rather than skipped, so this module's surface and
 # __all__ are the same on every target and the failure lands at the call with a reason.
-glb_diff = _optional("glb_diff", "native-only (mmap/POSIX-backed); the browser build provides GLB-diff via the standalone adacpp_glb_diff embind module")
+glb_diff = _optional(
+    "glb_diff",
+    "native-only (mmap/POSIX-backed); the browser build provides GLB-diff via the standalone adacpp_glb_diff embind module",
+)
 
 __all__ = [
     "AdvancedFaceData",

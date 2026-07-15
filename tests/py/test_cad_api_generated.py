@@ -23,6 +23,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import pathlib
+import re
 import types
 
 import pytest
@@ -105,10 +106,14 @@ def test_conditional_bindings_are_not_bound_flat():
     """
     src = (_ROOT / "src" / "adacpp" / "cad" / "__init__.py").read_text()
     for name in _optional_names():
-        assert f"\n{name} = _cad.{name}\n" not in src, (
-            f"{name} is native-only but bound flat — that is an AttributeError at import on wasm"
-        )
-        assert f'{name} = _optional("{name}"' in src, f"{name} should be bound via _optional()"
+        assert (
+            f"\n{name} = _cad.{name}\n" not in src
+        ), f"{name} is native-only but bound flat — that is an AttributeError at import on wasm"
+        # Matched loosely across newlines: the generator emits the exploded, black-canonical call, and
+        # pinning the exact layout here would just re-fight black every time a reason changes length.
+        assert re.search(
+            rf"^{re.escape(name)} = _optional\(\s*\"{re.escape(name)}\",", src, re.M
+        ), f"{name} should be bound via _optional()"
 
 
 def test_import_survives_a_missing_binding(monkeypatch):
