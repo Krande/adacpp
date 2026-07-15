@@ -224,6 +224,43 @@ struct StepShapeData {
 };
 
 // ----------------------------------------------------------------------------
+// Result structs for imprint_planar_faces (the General-Fuse planar imprint).
+// Plain data, bound read-only; adapy turns them into ACIS SAT topology for the
+// Genie exporter. Mirrors ada.cad.PlanarImprint / ImprintedEdge / ImprintedFace.
+// ----------------------------------------------------------------------------
+
+// A straight edge, as indices into ImprintResult::vertices.
+struct ImprintedEdge {
+    int start = 0;
+    int end = 0;
+};
+
+struct ImprintedFace {
+    std::array<double, 3> origin{};
+    std::array<double, 3> normal{};
+    std::array<double, 3> ref_direction{};
+    // loops[0] is the outer boundary, the rest are holes. Each entry is an
+    // (edge index, forward) pair; forward=false means the loop runs that edge
+    // from its `end` vertex to its `start`. Every loop winds counter-clockwise
+    // about `normal`.
+    std::vector<std::vector<std::pair<int, bool>>> loops;
+};
+
+struct ImprintResult {
+    std::vector<std::array<double, 3>> vertices;
+    std::vector<ImprintedEdge> edges;
+    std::vector<ImprintedFace> faces;
+    // sources[i] = the faces the i-th input outline became.
+    std::vector<std::vector<int>> sources;
+    // curve_sources[i] = the edges the i-th imprint curve became.
+    std::vector<std::vector<int>> curve_sources;
+    // Edges that bound no face (an imprint curve with no face under it). Still
+    // reported, and still reachable via curve_sources: a consumer needs geometry
+    // for them, carried as wire bodies rather than face boundaries.
+    std::vector<int> free_edges;
+};
+
+// ----------------------------------------------------------------------------
 // Primitive factories — single OCCT-backed code path on native + wasm
 // ----------------------------------------------------------------------------
 
@@ -1405,6 +1442,199 @@ ShapeHandle non_manifold_merge_impl(const std::vector<ShapeHandle> &shapes, doub
     if (builder.HasErrors())
         throw std::runtime_error("non_manifold_merge: BOPAlgo_Builder reported errors");
     return ShapeHandle(builder.Shape());
+}
+
+// General-Fuse a set of planar outlines against each other and against
+// `imprint_curves`, returning the merged topology as plain data.
+//
+// Unlike non_manifold_merge this keeps the Modified() history, which is what
+// maps an input outline to the faces it became — the caller needs that to name
+// the faces a plate resolves to. Imprint curves (beam axes) split a face along
+// their line where they lie on it, and drop a vertex where they merely cross
+// it; they survive the fuse as free edges and are deliberately not reported.
+//
+// The whole model is imprinted and extracted in one call: crossing the
+// Python/C++ boundary per face or per edge would dominate the cost.
+ImprintResult imprint_planar_faces_impl(const std::vector<std::vector<std::array<double, 3>>> &outlines,
+                                        const std::vector<std::vector<std::array<double, 3>>> &imprint_curves,
+                                        double tolerance) {
+    ImprintResult out;
+    if (outlines.empty())
+        return out;
+
+    auto mkface = [](const std::vector<std::array<double, 3>> &pts) {
+        if (pts.size() < 3)
+            throw std::runtime_error("imprint_planar_faces: an outline needs at least 3 points");
+        BRepBuilderAPI_MakePolygon mp;
+        for (const auto &p : pts)
+            mp.Add(gp_Pnt(p[0], p[1], p[2]));
+        mp.Close();
+        return TopoDS::Face(BRepBuilderAPI_MakeFace(mp.Wire(), Standard_True).Face());
+    };
+
+    const double tol = tolerance > 0.0 ? tolerance : 1e-12;
+    // One TopoDS_Edge per segment rather than a wire: BOPAlgo's history is
+    // per-argument, and edges give a direct Modified(edge) -> split edges map,
+    // which is what resolves a beam axis to the edges it became.
+    auto mkedges = [&tol](const std::vector<std::array<double, 3>> &pts) {
+        std::vector<TopoDS_Edge> out;
+        for (std::size_t i = 0; i + 1 < pts.size(); ++i) {
+            gp_Pnt a(pts[i][0], pts[i][1], pts[i][2]);
+            gp_Pnt b(pts[i + 1][0], pts[i + 1][1], pts[i + 1][2]);
+            if (a.Distance(b) <= tol)
+                continue; // a zero-length segment would fail the edge build
+            out.push_back(BRepBuilderAPI_MakeEdge(a, b).Edge());
+        }
+        return out;
+    };
+
+    std::vector<TopoDS_Face> inputs;
+    inputs.reserve(outlines.size());
+    for (const auto &o : outlines)
+        inputs.push_back(mkface(o));
+
+    // per curve, the argument edges it contributed
+    std::vector<std::vector<TopoDS_Edge>> curve_edges;
+    std::vector<TopoDS_Edge> cutters;
+    for (const auto &c : imprint_curves) {
+        curve_edges.push_back(mkedges(c));
+        for (const auto &e : curve_edges.back())
+            cutters.push_back(e);
+    }
+
+    TopoDS_Shape res;
+    BOPAlgo_Builder builder;
+    const bool fused = inputs.size() + cutters.size() >= 2;
+    if (!fused) {
+        // General Fuse needs at least two arguments (it raises TooFewArguments
+        // otherwise). A lone outline has nothing to imprint against.
+        res = inputs[0];
+    } else {
+        TopTools_ListOfShape args;
+        for (const auto &f : inputs)
+            args.Append(f);
+        for (const auto &w : cutters)
+            args.Append(w);
+        builder.SetArguments(args);
+        if (tolerance > 0.0)
+            builder.SetFuzzyValue(tolerance);
+        builder.SetRunParallel(Standard_True);
+        builder.Perform();
+        if (builder.HasErrors())
+            throw std::runtime_error("imprint_planar_faces: BOPAlgo_Builder reported errors");
+        res = builder.Shape();
+    }
+
+    // Index the unique sub-shapes. The map's hasher keys on TShape+Location and
+    // ignores orientation, so a FORWARD and a REVERSED use of the same edge
+    // collapse to one index — exactly the sharing we want.
+    //
+    // Index the whole result, faces and free edges alike: an imprint curve with
+    // no face under it survives as a free edge, and the caller still needs
+    // geometry for it (carried as a wire body). Which is which -> free_edges.
+    TopTools_IndexedMapOfShape fmap, vmap, emap;
+    TopExp::MapShapes(res, TopAbs_FACE, fmap);
+    TopExp::MapShapes(res, TopAbs_VERTEX, vmap);
+    TopExp::MapShapes(res, TopAbs_EDGE, emap);
+
+    TopTools_IndexedDataMapOfShapeListOfShape edge_faces;
+    TopExp::MapShapesAndAncestors(res, TopAbs_EDGE, TopAbs_FACE, edge_faces);
+    for (int i = 1; i <= emap.Extent(); ++i) {
+        const TopoDS_Shape &e = emap.FindKey(i);
+        if (!edge_faces.Contains(e) || edge_faces.FindFromKey(e).IsEmpty())
+            out.free_edges.push_back(i - 1);
+    }
+
+    out.vertices.reserve(vmap.Extent());
+    for (int i = 1; i <= vmap.Extent(); ++i) {
+        gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(vmap.FindKey(i)));
+        out.vertices.push_back({p.X(), p.Y(), p.Z()});
+    }
+
+    out.edges.reserve(emap.Extent());
+    for (int i = 1; i <= emap.Extent(); ++i) {
+        TopoDS_Edge e = TopoDS::Edge(emap.FindKey(i).Oriented(TopAbs_FORWARD));
+        ImprintedEdge rec;
+        rec.start = vmap.FindIndex(TopExp::FirstVertex(e, Standard_True)) - 1;
+        rec.end = vmap.FindIndex(TopExp::LastVertex(e, Standard_True)) - 1;
+        out.edges.push_back(rec);
+    }
+
+    out.faces.reserve(fmap.Extent());
+    for (int i = 1; i <= fmap.Extent(); ++i) {
+        TopoDS_Face f = TopoDS::Face(fmap.FindKey(i));
+        BRepAdaptor_Surface surf(f, Standard_True);
+        if (surf.GetType() != GeomAbs_Plane)
+            throw std::runtime_error("imprint_planar_faces: result contains a non-planar face");
+        gp_Pln pln = surf.Plane();
+        gp_Pnt loc = pln.Location();
+        gp_Dir ax = pln.Axis().Direction();
+        gp_Dir xd = pln.XAxis().Direction();
+
+        ImprintedFace rec;
+        rec.origin = {loc.X(), loc.Y(), loc.Z()};
+        rec.normal = {ax.X(), ax.Y(), ax.Z()};
+        rec.ref_direction = {xd.X(), xd.Y(), xd.Z()};
+        // A REVERSED face's true outward normal is the opposite of its
+        // surface's; flipping here keeps every loop below wound
+        // counter-clockwise about the normal we report.
+        if (f.Orientation() == TopAbs_REVERSED)
+            rec.normal = {-rec.normal[0], -rec.normal[1], -rec.normal[2]};
+
+        TopoDS_Wire outer = BRepTools::OuterWire(f);
+        std::vector<TopoDS_Wire> wires;
+        for (TopExp_Explorer wexp(f, TopAbs_WIRE); wexp.More(); wexp.Next())
+            wires.push_back(TopoDS::Wire(wexp.Current()));
+        std::stable_sort(wires.begin(), wires.end(), [&outer](const TopoDS_Wire &a, const TopoDS_Wire &b) {
+            return a.IsSame(outer) && !b.IsSame(outer); // outer loop first
+        });
+
+        for (const auto &w : wires) {
+            std::vector<std::pair<int, bool>> loop;
+            for (BRepTools_WireExplorer we(w, f); we.More(); we.Next()) {
+                const TopoDS_Edge &edge = we.Current();
+                loop.emplace_back(emap.FindIndex(edge) - 1, edge.Orientation() == TopAbs_FORWARD);
+            }
+            rec.loops.push_back(std::move(loop));
+        }
+        out.faces.push_back(std::move(rec));
+    }
+
+    // The result sub-shapes an argument became, as indices into `index_map`.
+    // Only ones present in the map count: an imprint curve with no face under it
+    // survives as a free edge, which bounds nothing and is deliberately absent.
+    auto history = [&](const TopoDS_Shape &shape, const TopTools_IndexedMapOfShape &index_map) {
+        std::vector<int> got;
+        if (!fused) {
+            if (index_map.Contains(shape))
+                got.push_back(index_map.FindIndex(shape) - 1);
+            return got;
+        }
+        const TopTools_ListOfShape &mods = builder.Modified(shape);
+        if (!mods.IsEmpty()) {
+            for (TopTools_ListOfShape::Iterator it(mods); it.More(); it.Next())
+                if (index_map.Contains(it.Value()))
+                    got.push_back(index_map.FindIndex(it.Value()) - 1);
+        } else if (!builder.IsDeleted(shape) && index_map.Contains(shape)) {
+            got.push_back(index_map.FindIndex(shape) - 1); // untouched: passes through as itself
+        }
+        return got;
+    };
+
+    out.sources.reserve(inputs.size());
+    for (const auto &f : inputs)
+        out.sources.push_back(history(f, fmap));
+
+    out.curve_sources.reserve(curve_edges.size());
+    for (const auto &edges_ : curve_edges) {
+        std::vector<int> got;
+        for (const auto &e : edges_)
+            for (int idx : history(e, emap))
+                if (std::find(got.begin(), got.end(), idx) == got.end())
+                    got.push_back(idx);
+        out.curve_sources.push_back(std::move(got));
+    }
+    return out;
 }
 
 // Faithful port of topologic's Topology::Merge over solids: general-fuse the
@@ -3558,6 +3788,25 @@ void cad_module(nb::module_ &m) {
         .def_ro("transforms", &StepRootMeta::transforms)
         .def_ro("instance_paths", &StepRootMeta::instance_paths);
 
+    // Inner classes first — ImprintResult exposes vectors of these.
+    nb::class_<ImprintedEdge>(m, "ImprintedEdge")
+        .def_ro("start", &ImprintedEdge::start)
+        .def_ro("end", &ImprintedEdge::end);
+
+    nb::class_<ImprintedFace>(m, "ImprintedFace")
+        .def_ro("origin", &ImprintedFace::origin)
+        .def_ro("normal", &ImprintedFace::normal)
+        .def_ro("ref_direction", &ImprintedFace::ref_direction)
+        .def_ro("loops", &ImprintedFace::loops);
+
+    nb::class_<ImprintResult>(m, "ImprintResult")
+        .def_ro("vertices", &ImprintResult::vertices)
+        .def_ro("edges", &ImprintResult::edges)
+        .def_ro("faces", &ImprintResult::faces)
+        .def_ro("sources", &ImprintResult::sources)
+        .def_ro("curve_sources", &ImprintResult::curve_sources)
+        .def_ro("free_edges", &ImprintResult::free_edges);
+
     nb::class_<PcurveData>(m, "PcurveData")
         .def_ro("has_pcurve", &PcurveData::has_pcurve)
         .def_ro("degree", &PcurveData::degree)
@@ -4179,6 +4428,13 @@ void cad_module(nb::module_ &m) {
     m.def("non_manifold_merge", &non_manifold_merge_impl, "shapes"_a, "tolerance"_a = 1e-6, "glue"_a = true,
           "Non-manifold fuse (BOPAlgo_Builder) keeping coincident faces shared "
           "between adjacent solids rather than dissolving the partition.");
+
+    m.def("imprint_planar_faces", &imprint_planar_faces_impl, "outlines"_a,
+          "imprint_curves"_a = std::vector<std::vector<std::array<double, 3>>>(), "tolerance"_a = 1e-6,
+          "General-Fuse planar outlines against each other and against imprint_curves "
+          "(e.g. beam axes), returning the merged topology as plain data: welded "
+          "vertices, shared edges, per-face loops, and sources mapping each input "
+          "outline to the faces it became. Ports adapy OccBackend.imprint_planar_faces.");
 
     m.def("merge_cells", &merge_cells_impl, "solids"_a, "tolerance"_a = 0.0,
           "Faithful port of topologic Topology::Merge over solids "

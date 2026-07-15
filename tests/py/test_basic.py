@@ -836,3 +836,92 @@ def test_cad_non_manifold_merge_keeps_shared_face():
     sols = list(adacpp.cad.solids(comp))
     assert len(sols) == 2
     assert len(adacpp.cad.free_faces(sols)) == 10
+
+
+DECK = [(0, 0, 0), (10, 0, 0), (10, 10, 0), (0, 10, 0)]
+BULKHEAD = [(0, 5, 0), (10, 5, 0), (10, 5, 5), (0, 5, 5)]
+
+
+def test_cad_imprint_planar_faces_single_outline_passes_through():
+    """One outline has nothing to imprint against (and General Fuse rejects a
+    lone argument), so it must come back as itself."""
+    res = adacpp.cad.imprint_planar_faces([DECK])
+    assert len(res.faces) == 1
+    assert [list(s) for s in res.sources] == [[0]]
+    assert len(res.vertices) == 4
+
+
+def test_cad_imprint_planar_faces_splits_at_a_t_junction():
+    """A deck crossed by a bulkhead splits into two faces sharing one edge, and
+    the history maps the deck to both halves."""
+    res = adacpp.cad.imprint_planar_faces([DECK, BULKHEAD])
+
+    assert len(res.faces) == 3
+    assert len(res.sources[0]) == 2  # deck split
+    assert len(res.sources[1]) == 1  # bulkhead intact
+    assert not set(res.sources[0]) & set(res.sources[1])
+    assert len(res.vertices) == 8  # welded, not 4 + 4
+
+    # the imprint line is ONE edge, used by all three faces
+    uses = {}
+    for f in res.faces:
+        for loop in f.loops:
+            for edge_idx, _ in loop:
+                uses[edge_idx] = uses.get(edge_idx, 0) + 1
+    assert max(uses.values()) == 3
+
+
+def test_cad_imprint_planar_faces_imprints_a_curve():
+    """A stiffener axis lying on a plate splits it along its line — where most
+    of a stiffened panel's face count comes from."""
+    res = adacpp.cad.imprint_planar_faces([DECK], [[(5, 0, 0), (5, 10, 0)]])
+    assert len(res.faces) == 2
+    assert len(res.sources[0]) == 2
+
+
+def test_cad_imprint_planar_faces_reports_the_edges_a_curve_became():
+    """curve_sources maps a beam axis to the edges it became, so the caller can
+    name them — without it a beam's SAT reference is empty and the consumer
+    rebuilds its geometry."""
+    # one axis across the deck, split in two by a second crossing it
+    res = adacpp.cad.imprint_planar_faces([DECK], [[(5, 0, 0), (5, 10, 0)], [(0, 5, 0), (10, 5, 0)]])
+    assert len(res.curve_sources) == 2
+    for src in res.curve_sources:
+        assert len(src) == 2  # each axis split where the other crosses it
+        for edge_idx in src:
+            assert 0 <= edge_idx < len(res.edges)
+    assert not set(res.curve_sources[0]) & set(res.curve_sources[1])
+
+
+def test_cad_imprint_planar_faces_curve_off_the_face_is_a_free_edge():
+    """An axis with no face under it still needs geometry — it is reported as a
+    free edge (the caller carries those as wire bodies), not dropped."""
+    res = adacpp.cad.imprint_planar_faces([DECK], [[(0, 0, 9), (10, 0, 9)]])
+    assert len(res.curve_sources[0]) == 1
+    assert list(res.free_edges) == list(res.curve_sources[0])
+    # ...and it is genuinely not part of any face loop
+    on_a_face = {i for f in res.faces for loop in f.loops for i, _ in loop}
+    assert not on_a_face & set(res.free_edges)
+
+
+def test_cad_imprint_planar_faces_face_edges_are_not_free():
+    res = adacpp.cad.imprint_planar_faces([DECK, BULKHEAD])
+    assert list(res.free_edges) == []
+
+
+def test_cad_imprint_planar_faces_loops_wind_about_the_normal():
+    """ACIS-style consumers derive a face's material side from its loop winding
+    versus its normal, so every loop must wind counter-clockwise about it."""
+    res = adacpp.cad.imprint_planar_faces([DECK, BULKHEAD])
+    for f in res.faces:
+        pts = []
+        for edge_idx, forward in f.loops[0]:
+            e = res.edges[edge_idx]
+            pts.append(res.vertices[e.start if forward else e.end])
+        n = [0.0, 0.0, 0.0]
+        for i, a in enumerate(pts):
+            b = pts[(i + 1) % len(pts)]
+            n[0] += (a[1] - b[1]) * (a[2] + b[2])
+            n[1] += (a[2] - b[2]) * (a[0] + b[0])
+            n[2] += (a[0] - b[0]) * (a[1] + b[1])
+        assert sum(x * y for x, y in zip(n, f.normal)) > 0
