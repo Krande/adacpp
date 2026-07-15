@@ -424,21 +424,26 @@ Mesh tessellate_stream_impl(nb::object buffer, const std::string &pipeline, doub
         overrides.emplace_back(nb::cast<std::string>(item.first), nb::cast<std::string>(nb::str(item.second)));
     }
 
+    // Route via the track vocabulary (ngeom_tess_track.h) rather than a raw string compare. The old
+    // code sent anything that wasn't "libtess2" to the taxonomy branch and then split it on '-',
+    // which silently misrouted every NGEOM track added since: "cdt" became taxonomy("cdt"), and
+    // "hybrid-cdt" split to taxonomy("cdt"). Wrong geometry, not an error. parse_track also rejects
+    // an unknown name outright instead of guessing.
+    auto track = parse_track(pipeline);
+    if (!track)
+        throw std::invalid_argument("unknown tessellation track: '" + pipeline + "' (see tess_tracks())");
     TessMesh tm;
-    if (pipeline == "libtess2" || pipeline.empty()) {
+    if (*track == TessTrack::Libtess2 || *track == TessTrack::Cdt || *track == TessTrack::Hybrid) {
         TessParams tp;
+        tp.track = *track;
         tp.deflection = deflection;
         tp.max_angle = angular_deg * 3.14159265358979323846 / 180.0;
         tp.threads = threads;  // >1 => parallelise a root's faces (opt-in; default serial)
         tp.model_scale = model_scale;  // >0 => adaptive per-surface density (0 => fixed max_angle)
         tm = tessellate_doc(doc, tp);
     } else {
-        // taxonomy kernels; accept "occ"/"cgal"/"hybrid" or "taxonomy-<k>"
-        std::string kern = pipeline;
-        auto dash = kern.find('-');
-        if (dash != std::string::npos)
-            kern = kern.substr(dash + 1);
-        tm = tessellate_via_taxonomy(doc, kern, deflection, angular_deg, overrides);
+        // ifcopenshell taxonomy kernels: occ | cgal | hybrid.
+        tm = tessellate_via_taxonomy(doc, track_name(*track), deflection, angular_deg, overrides);
     }
 
     std::vector<GroupReference> groups;
