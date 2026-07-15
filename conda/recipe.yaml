@@ -77,8 +77,12 @@ tests:
 
 about:
   license: GPL-3.0-or-later
-  # The repo had no LICENSE file, so the package declared a licence it did not ship the text of.
-  license_file: ../LICENSE
+  # The package declared a licence whose text it did not ship (the repo had no LICENSE file at all).
+  # NOT ../LICENSE: license_file is a glob and cannot traverse out of the recipe directory, so `..`
+  # matches nothing and rattler-build fails the build outright with "No license files were copied".
+  # A bare name resolves against the source dir, which `source: path: ../` above populates with the
+  # whole repo — so this IS the repo-root LICENSE, landing at info/licenses/LICENSE.
+  license_file: LICENSE
   summary: A module with drop-in replacement functions for ada-py written in c++ to improve performance.
   homepage: https://github.com/Krande/adacpp
 
