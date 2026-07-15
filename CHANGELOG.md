@@ -2,6 +2,15 @@
 
 
 
+## v0.14.0 (2026-07-15)
+
+### Feature
+
+* feat: selectable tessellation tracks — boundary pinning by default + a watertight CDT track (#39)
+
+Co-authored-by: Claude Opus 4.8 (1M context) &lt;noreply@anthropic.com&gt; ([`3095175`](https://github.com/Krande/adacpp/commit/309517567fd6ea9354ccceddc378e6cd92ac430e))
+
+
 ## v0.13.2 (2026-07-14)
 
 ### Fix
