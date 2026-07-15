@@ -88,6 +88,17 @@ jobs:
         # STEP<->IFC writers (no tessellation). OCC-free -> a quick emcc build.
         run: pixi run -e wasm wbuild-brepwriter
 
+      # Gate the publish on the artifacts actually working. Every step above only COMPILES; this job
+      # went straight from "it linked" to pushing to ghcr, where the viewer consumes it. That is how
+      # a wheel whose `import adacpp` raised under pyodide became the published artifact — and, later,
+      # one declaring no numpy dependency, which killed the interpreter on any mesh access. Both are
+      # caught just by importing the wheel, which costs seconds here.
+      - name: Smoke-test the artifacts before publishing
+        run: |
+          pixi run -e wasm tools-install
+          pixi run -e wasm node tools/test_wheel_pyodide.js
+          pixi run -e wasm node tools/test_step_glb_wasm.mjs files/flat_plate_abaqus_10x10_m_wColors.stp
+
       - name: Stage /out (wheel + manifest + sha + step-glb + glb-diff + ifc-glb + brep-writer wasm)
         run: |
           mkdir -p out out/wasm

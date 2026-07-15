@@ -2,7 +2,8 @@
   "name": "adacpp-tools",
   "private": true,
   "description": "Node helpers for adacpp's wasm/pyodide pipeline. Run `pixi run -e wasm tools-install` before `pixi run -e wasm test-wheel-pyodide`.",
+  "comment": "Keep the pyodide version in LOCKSTEP with the xbuildenv pin in pixi.toml (xbuildenv-install). tools/build_wheel.py tags the wheel for the xbuildenv's ABI, and micropip rejects a wheel whose platform tag does not match the runtime's exactly. When these drifted (npm 0.27.7 = emscripten-3.1.58 vs a wheel tagged pyodide_2025_0_wasm32), test-wheel-pyodide failed inside micropip before adacpp code ran at all -- so the only test that imports the wasm Python surface was dead, and the unguarded glb_diff re-export shipped.",
   "dependencies": {
-    "pyodide": "0.27.7"
+    "pyodide": "0.29.4"
   }
 }
