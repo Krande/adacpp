@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ada-cpp"
-version = "0.14.0"
+version = "0.15.0"
 authors = [
     { name = "Kristoffer H. Andersen", email = "kristoffer_andersen@outlook.com" },
 ]
@@ -35,6 +35,7 @@ classifiers = [
 [project.urls]
 "Homepage" = "https://github.com/Krande/adacpp"
 "Bug Tracker" = "https://github.com/Krande/adacpp/issues"
+
 
 
 

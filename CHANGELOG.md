@@ -2,6 +2,13 @@
 
 
 
+## v0.15.0 (2026-07-15)
+
+### Feature
+
+* feat: Add imprint_planar_faces; fix the win-64 build and the cad API generator&#39;s encoding (#38) ([`ac3f0fa`](https://github.com/Krande/adacpp/commit/ac3f0fa703ecab58570ec5700d74be9bbea63d14))
+
+
 ## v0.14.0 (2026-07-15)
 
 ### Feature
