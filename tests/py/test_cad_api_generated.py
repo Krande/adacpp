@@ -34,15 +34,29 @@ from adacpp._ada_cpp_ext_impl import cad as _cad
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
 _PUBLIC = {n for n in dir(_cad) if not n.startswith("_")}
 
+# The artifact under test: the INSTALLED adacpp/cad/__init__.py, not the copy in src/. Reading it
+# through the imported module means these tests work against a packaged install (the conda recipe
+# runs them from $PREFIX/etc/conda/test-files, where only tests/ exists) as well as a checkout — and
+# an installed wheel is what a user actually gets.
+_INSTALLED = pathlib.Path(cad.__file__)
+
+# Is the repo source tree available? The conda test env copies only tests/, so tools/ and src/ are
+# absent there and the cross-checks below genuinely cannot run.
+#
+# This is a skip, but not the kind this module was written to kill. The one I removed was
+# pytest.importorskip("tools.gen_cad_api"), which skipped whenever the repo root happened to be off
+# sys.path — invisible, accidental, and it silently disabled the staleness gate in the very CI that
+# was supposed to enforce it. This one keys on an unambiguous fact (no source tree = nothing to check
+# against), names it, and cannot mask a real failure in a checkout: in the repo the marker is always
+# present, so `pixi run -e test test` and the CI build_test job always run these.
+_SRC_TREE = (_ROOT / "tools" / "gen_cad_api.py").is_file() and (_ROOT / "src" / "cad" / "cad_py_wrap.cpp").is_file()
+_needs_src = pytest.mark.skipif(
+    not _SRC_TREE, reason="no source tree (packaged install): nothing to cross-check against"
+)
+
 
 def _load_generator():
-    """Import tools/gen_cad_api.py by path.
-
-    Deliberately NOT ``pytest.importorskip("tools.gen_cad_api")``: that silently skips unless the repo
-    root happens to be on sys.path, which turned the staleness gate into a no-op in CI — the exact
-    failure mode (a gate that passes by not running) this module exists to prevent. If the generator
-    is genuinely missing, fail; do not skip.
-    """
+    """Import tools/gen_cad_api.py by path. Only valid when _SRC_TREE."""
     path = _ROOT / "tools" / "gen_cad_api.py"
     assert path.exists(), f"generator missing at {path}"
     spec = importlib.util.spec_from_file_location("_gen_cad_api", path)
@@ -51,9 +65,19 @@ def _load_generator():
     return mod
 
 
-def _optional_names() -> set[str]:
-    """Bindings the C++ compiles only into the native build."""
+def _cpp_optional_names() -> set[str]:
+    """Bindings the C++ compiles only into the native build. Authoritative; needs the source tree."""
     return _load_generator().native_only_bindings((_ROOT / "src" / "cad" / "cad_py_wrap.cpp").read_text())
+
+
+def _optional_names() -> set[str]:
+    """Names the installed module binds via _optional(), i.e. what THIS artifact declares optional.
+
+    Self-declared, so tests using it are checking the artifact's internal consistency and runtime
+    behaviour — valid anywhere. test_declared_optionals_match_the_cpp pins this against the C++
+    guards so the self-declaration cannot drift into a comfortable lie.
+    """
+    return set(re.findall(r"^(\w+) = _optional\(", _INSTALLED.read_text(), re.M))
 
 
 def test_every_binding_is_re_exported():
@@ -81,6 +105,7 @@ def test_re_exports_are_identity_on_native():
         assert getattr(cad, n) is getattr(_cad, n), f"{n} is not an identity re-export"
 
 
+@_needs_src
 def test_generated_file_is_not_stale():
     """The checked-in file must equal what the generator emits for this extension."""
     gen = _load_generator()
@@ -88,14 +113,28 @@ def test_generated_file_is_not_stale():
     assert out.read_text() == gen.generate(), "adacpp/cad/__init__.py is stale — run `pixi run gen-cad-api`"
 
 
-def test_native_only_bindings_are_detected():
-    """The guard parser must actually find something.
+@_needs_src
+def test_declared_optionals_match_the_cpp():
+    """What the module declares optional must be exactly what the C++ guards out.
 
-    If it silently returned an empty set (a bad regex, a moved file, a refactor of the #ifndef), every
-    other wasm test here would vacuously pass while the real bug walked straight through. glb_diff is
-    the known native-only binding; this pins that detection works at all.
+    The authoritative, non-circular check, and the one that keeps _optional_names() honest: every
+    other test here trusts the module's own `X = _optional(...)` lines, so if those drifted from the
+    #ifndef __EMSCRIPTEN__ guards, the rest would agree with a lie. Needs the source tree.
     """
-    assert "glb_diff" in _optional_names(), "the #ifndef __EMSCRIPTEN__ parser found no native-only bindings"
+    assert _optional_names() == _cpp_optional_names(), (
+        "the module's _optional() bindings disagree with the #ifndef __EMSCRIPTEN__ guards in "
+        "cad_py_wrap.cpp — run `pixi run gen-cad-api`"
+    )
+
+
+def test_native_only_bindings_are_detected():
+    """Detection must actually find something.
+
+    If _optional_names() silently returned an empty set (a bad regex, a moved file, a refactor of the
+    #ifndef), every other wasm test here would vacuously pass while the real bug walked straight
+    through. glb_diff is the known native-only binding; this pins that detection works at all.
+    """
+    assert "glb_diff" in _optional_names(), "found no _optional() bindings — detection is broken"
 
 
 def test_conditional_bindings_are_not_bound_flat():
@@ -104,7 +143,7 @@ def test_conditional_bindings_are_not_bound_flat():
     Regression: `glb_diff = _cad.glb_diff` raised AttributeError at import under pyodide and killed the
     whole module. The generator emits _optional() for these; this pins that it keeps doing so.
     """
-    src = (_ROOT / "src" / "adacpp" / "cad" / "__init__.py").read_text()
+    src = _INSTALLED.read_text()
     for name in _optional_names():
         assert (
             f"\n{name} = _cad.{name}\n" not in src
@@ -140,13 +179,19 @@ def test_import_survives_a_missing_binding(monkeypatch):
 
 
 def test_stub_explains_itself():
-    """A deferred failure is only better than AttributeError if it says why."""
-    gen = _load_generator()
-    src = (_ROOT / "src" / "adacpp" / "cad" / "__init__.py").read_text()
+    """A deferred failure is only better than AttributeError if it says why.
+
+    Asserted on the raised message rather than by grepping the source for the generator's _REASONS
+    text: what reaches the caller is what matters, and this needs no source tree.
+    """
+    ns = _exec_generated_as_wasm()
     for name in _optional_names():
-        reason = gen._REASONS.get(name, gen._GENERIC_REASON)
-        assert reason in src, f"{name}'s stub must carry a reason a reader can act on"
-        assert len(reason) > 20, "the reason must be a sentence, not a shrug"
+        with pytest.raises(NotImplementedError) as exc:
+            ns[name]()
+        msg = str(exc.value)
+        assert name in msg, f"{name}'s error must name the symbol"
+        # A bare "not available" is a shrug; the caller needs to know why and what to reach for.
+        assert len(msg) > len(f"adacpp.cad.{name} is not available in this build: ") + 20, f"reason too thin: {msg}"
 
 
 def _exec_generated_as_wasm():
@@ -158,7 +203,7 @@ def _exec_generated_as_wasm():
     way cannot run at all. Exec'ing the real file's source against a stand-in _cad tests the same
     code with no global mutation.
     """
-    src = (_ROOT / "src" / "adacpp" / "cad" / "__init__.py").read_text()
+    src = _INSTALLED.read_text()
     imp = "from .._ada_cpp_ext_impl import cad as _cad"
     assert imp in src, "generated import line changed — this fake-injection is no longer faithful"
     fake = types.SimpleNamespace(**{n: getattr(_cad, n) for n in _PUBLIC - _optional_names()})
