@@ -175,7 +175,7 @@ def generate() -> str:
     except ImportError as exc:  # pragma: no cover
         raise SystemExit(f"build the extension first (pixi run build-dist): {exc}") from exc
     names = sorted(n for n in dir(_cad) if not n.startswith("_"))
-    optional = native_only_bindings(_WRAP.read_text())
+    optional = native_only_bindings(_WRAP.read_text(encoding="utf-8"))
     # Generation must read a NATIVE build: it is the only one with the full surface. Generating from a
     # wasm build would silently emit a module missing every native-only name, and since the wasm build
     # cannot see them, nothing downstream would notice. Fail loudly instead.
@@ -194,14 +194,18 @@ def main() -> int:
     ap.add_argument("--check", action="store_true", help="exit 1 if the checked-in file is stale")
     args = ap.parse_args()
     new = generate()
+    # Always utf-8: the emitted module and the C++ it is derived from both contain
+    # non-ASCII, and read_text/write_text otherwise follow the platform default —
+    # cp1252 on Windows, which silently rewrites every em-dash to U+FFFD. That
+    # corrupts the file on write and makes --check compare against a mangled read.
     if args.check:
-        cur = _OUT.read_text() if _OUT.exists() else ""
+        cur = _OUT.read_text(encoding="utf-8") if _OUT.exists() else ""
         if cur != new:
             print(f"{_OUT} is STALE — run `pixi run gen-cad-api`", file=sys.stderr)
             return 1
         print(f"{_OUT} is up to date")
         return 0
-    _OUT.write_text(new)
+    _OUT.write_text(new, encoding="utf-8")
     print(f"wrote {_OUT} ({len(new.splitlines())} lines)")
     return 0
 

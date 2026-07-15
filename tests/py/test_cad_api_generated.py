@@ -67,7 +67,8 @@ def _load_generator():
 
 def _cpp_optional_names() -> set[str]:
     """Bindings the C++ compiles only into the native build. Authoritative; needs the source tree."""
-    return _load_generator().native_only_bindings((_ROOT / "src" / "cad" / "cad_py_wrap.cpp").read_text())
+    cpp = (_ROOT / "src" / "cad" / "cad_py_wrap.cpp").read_text(encoding="utf-8")
+    return _load_generator().native_only_bindings(cpp)
 
 
 def _optional_names() -> set[str]:
@@ -77,7 +78,7 @@ def _optional_names() -> set[str]:
     behaviour — valid anywhere. test_declared_optionals_match_the_cpp pins this against the C++
     guards so the self-declaration cannot drift into a comfortable lie.
     """
-    return set(re.findall(r"^(\w+) = _optional\(", _INSTALLED.read_text(), re.M))
+    return set(re.findall(r"^(\w+) = _optional\(", _INSTALLED.read_text(encoding="utf-8"), re.M))
 
 
 def test_every_binding_is_re_exported():
@@ -110,7 +111,10 @@ def test_generated_file_is_not_stale():
     """The checked-in file must equal what the generator emits for this extension."""
     gen = _load_generator()
     out = _ROOT / "src" / "adacpp" / "cad" / "__init__.py"
-    assert out.read_text() == gen.generate(), "adacpp/cad/__init__.py is stale — run `pixi run gen-cad-api`"
+    # utf-8 explicitly: the file has non-ASCII, and read_text() would otherwise
+    # decode it as cp1252 on Windows and never match, whatever it contains
+    current = out.read_text(encoding="utf-8")
+    assert current == gen.generate(), "adacpp/cad/__init__.py is stale — run `pixi run gen-cad-api`"
 
 
 @_needs_src
@@ -143,7 +147,7 @@ def test_conditional_bindings_are_not_bound_flat():
     Regression: `glb_diff = _cad.glb_diff` raised AttributeError at import under pyodide and killed the
     whole module. The generator emits _optional() for these; this pins that it keeps doing so.
     """
-    src = _INSTALLED.read_text()
+    src = _INSTALLED.read_text(encoding="utf-8")
     for name in _optional_names():
         assert (
             f"\n{name} = _cad.{name}\n" not in src
@@ -203,7 +207,7 @@ def _exec_generated_as_wasm():
     way cannot run at all. Exec'ing the real file's source against a stand-in _cad tests the same
     code with no global mutation.
     """
-    src = _INSTALLED.read_text()
+    src = _INSTALLED.read_text(encoding="utf-8")
     imp = "from .._ada_cpp_ext_impl import cad as _cad"
     assert imp in src, "generated import line changed — this fake-injection is no longer faithful"
     fake = types.SimpleNamespace(**{n: getattr(_cad, n) for n in _PUBLIC - _optional_names()})

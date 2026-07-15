@@ -47,6 +47,9 @@ AdvancedFaceData = _cad.AdvancedFaceData
 Color = _cad.Color
 GroupReference = _cad.GroupReference
 IfcNgeomStream = _cad.IfcNgeomStream
+ImprintResult = _cad.ImprintResult
+ImprintedEdge = _cad.ImprintedEdge
+ImprintedFace = _cad.ImprintedFace
 Mesh = _cad.Mesh
 MeshType = _cad.MeshType
 PcurveData = _cad.PcurveData
@@ -92,6 +95,7 @@ faces = _cad.faces
 free_faces = _cad.free_faces
 from_topods_pointer = _cad.from_topods_pointer
 ifc_taxonomy_settings = _cad.ifc_taxonomy_settings
+imprint_planar_faces = _cad.imprint_planar_faces
 is_valid = _cad.is_valid
 loft_profiles = _cad.loft_profiles
 make_box = _cad.make_box
@@ -159,6 +163,9 @@ __all__ = [
     "Color",
     "GroupReference",
     "IfcNgeomStream",
+    "ImprintResult",
+    "ImprintedEdge",
+    "ImprintedFace",
     "Mesh",
     "MeshType",
     "PcurveData",
@@ -205,6 +212,7 @@ __all__ = [
     "from_topods_pointer",
     "glb_diff",
     "ifc_taxonomy_settings",
+    "imprint_planar_faces",
     "is_valid",
     "loft_profiles",
     "make_box",
