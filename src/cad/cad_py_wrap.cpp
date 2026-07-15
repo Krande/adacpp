@@ -789,9 +789,10 @@ Mesh stream_step_to_meshes_impl(const std::string &path, const std::string &pipe
 // now lives in step_to_glb_stream.h (adacpp::stream_step_to_glb) so the standalone OCC-free STP2GLB
 // CLI can reuse it without nanobind/OCCT. This thin wrapper keeps the existing python binding.
 int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_path, double deflection,
-                            double angular_deg, int num_threads, bool meshopt, double model_scale, bool face_regions) {
+                            double angular_deg, int num_threads, bool meshopt, double model_scale, bool face_regions,
+                            const std::string &pipeline, bool pin_boundary) {
     return (int) adacpp::stream_step_to_glb(in_path, out_path, deflection, angular_deg, num_threads, meshopt,
-                                            /*spill_dir=*/"", model_scale, face_regions);
+                                            /*spill_dir=*/"", model_scale, face_regions, pipeline, pin_boundary);
 }
 
 // Native OCC-free IFC -> GLB (IfcResolver: geometry + colour + spatial tree, baked to metres).
@@ -4057,14 +4058,18 @@ void cad_module(nb::module_ &m) {
 
     m.def("stream_step_to_glb", &stream_step_to_glb_impl, "in_path"_a, "out_path"_a, "deflection"_a = 0.0,
           "angular_deg"_a = 20.0, "num_threads"_a = 0, "meshopt"_a = true, "model_scale"_a = 0.0,
-          "face_regions"_a = false,
+          "face_regions"_a = false, "pipeline"_a = "libtess2", "pin_boundary"_a = true,
           "Native STEP -> GLB file: stream the .stp with the native reader (offset index + per-statement "
           "pread, bounded memory), tessellate each solid across num_threads worker threads (0 = auto = "
           "hardware_concurrency clamped to the cgroup cpu quota), each owning a spill lane joined at the "
           "end, bake world transform(s) + "
           "colour, and write a merge-by-colour GLB matching the adapy viewer's structure. meshopt=true "
           "(default) bakes EXT_meshopt_compression inline (no Python re-pack). Returns the number of "
-          "solids written (-1 on I/O error). angular_deg in degrees.");
+          "solids written (-1 on I/O error, and likewise on an unknown pipeline name). angular_deg in "
+          "degrees. pipeline selects the tessellation track by name (see tess_tracks(); '' / 'libtess2' "
+          "= default, 'cdt' = watertight); pin_boundary is a libtess2-track option. The threaded core "
+          "has taken both since the track vocabulary landed — this binding simply never forwarded them, "
+          "so every native conversion silently ran libtess2 no matter what the caller selected.");
 
     m.def("stream_ifc_to_glb", &stream_ifc_to_glb_impl, "in_path"_a, "out_path"_a, "deflection"_a = 0.0,
           "angular_deg"_a = 20.0, "meshopt"_a = true, "model_scale"_a = 0.0, "num_threads"_a = 0,
