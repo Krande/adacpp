@@ -19,7 +19,7 @@
 #include "step_to_mesh_stream.h" // threaded OCC-free STEP->STL/OBJ core (parallel, baked, streaming)
 #include "ifc_emit.h"            // native IFC4 advanced-B-rep emitter (Phase 1, native STEP->IFC writer)
 #include "step_emit.h"           // native AP242 STEP advanced-B-rep emitter (native STEP->STEP writer)
-#include "brep_file_convert.h"    // shared STEP<->IFC file writers (also compiled into the wasm writer)
+#include "brep_file_convert.h"   // shared STEP<->IFC file writers (also compiled into the wasm writer)
 #include "ifc_reader.h"          // native IFC advanced-B-rep reader -> ng:: (native IFC->STEP path)
 
 #ifndef __EMSCRIPTEN__
@@ -438,8 +438,8 @@ Mesh tessellate_stream_impl(nb::object buffer, const std::string &pipeline, doub
         tp.track = *track;
         tp.deflection = deflection;
         tp.max_angle = angular_deg * 3.14159265358979323846 / 180.0;
-        tp.threads = threads;  // >1 => parallelise a root's faces (opt-in; default serial)
-        tp.model_scale = model_scale;  // >0 => adaptive per-surface density (0 => fixed max_angle)
+        tp.threads = threads;         // >1 => parallelise a root's faces (opt-in; default serial)
+        tp.model_scale = model_scale; // >0 => adaptive per-surface density (0 => fixed max_angle)
         tm = tessellate_doc(doc, tp);
     } else {
         // ifcopenshell taxonomy kernels: occ | cgal | hybrid.
@@ -634,9 +634,15 @@ public:
             prof_.note("products_skipped", (double) skipped_);
         }
     }
-    double unit_scale() const { return unit_scale_; }
-    long products_total() const { return (long) roots_.size(); }
-    long products_skipped() const { return skipped_; }
+    double unit_scale() const {
+        return unit_scale_;
+    }
+    long products_total() const {
+        return (long) roots_.size();
+    }
+    long products_skipped() const {
+        return skipped_;
+    }
     nb::tuple next() {
         using namespace adacpp::ngeom;
         // Zero cost when profiling is off: one bool test, no clock reads.
@@ -655,8 +661,8 @@ public:
             // in addition to face sets, so a procedural root carries real geometry. Only a root with
             // NO encodable geometry (empty faces + not one of those solids — e.g. an alignment sweep
             // or an unsupported product) still yields nothing; skip it for the kernel fallback.
-            bool has_solid = root.extrusion || root.revolve || root.boolean || root.sphere || root.sweep ||
-                             !root.polylines.empty();
+            bool has_solid =
+                root.extrusion || root.revolve || root.boolean || root.sphere || root.sweep || !root.polylines.empty();
             if (root.faces.empty() && !has_solid) {
                 // recognized_empty => a degenerate product we DID understand (zero-length curve marker);
                 // don't count it as an unsupported skip (that would drive a wasted OCC fallback).
@@ -745,8 +751,7 @@ Mesh stream_step_to_meshes_impl(const std::string &path, const std::string &pipe
 // now lives in step_to_glb_stream.h (adacpp::stream_step_to_glb) so the standalone OCC-free STP2GLB
 // CLI can reuse it without nanobind/OCCT. This thin wrapper keeps the existing python binding.
 int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_path, double deflection,
-                            double angular_deg, int num_threads, bool meshopt, double model_scale,
-                            bool face_regions) {
+                            double angular_deg, int num_threads, bool meshopt, double model_scale, bool face_regions) {
     return (int) adacpp::stream_step_to_glb(in_path, out_path, deflection, angular_deg, num_threads, meshopt,
                                             /*spill_dir=*/"", model_scale, face_regions);
 }
@@ -2816,7 +2821,6 @@ nb::bytes meshopt_decode_index_sequence_impl(nb::bytes enc, size_t count, size_t
 
 } // namespace
 
-
 // B-rep file→file writers (STEP↔IFC) moved to a shared dep-free header so the embind wasm writer
 // (brep_writer_wasm.cpp) reuses ONE implementation. Brings emit_solid_ifc / emit_spatial_tree /
 // ifc_header_block / write_ifc_file_impl / step_header_block / emit_solid_step / emit_step_assembly_tree
@@ -3118,7 +3122,6 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
     prof.phase("assemble+write");
     return fs;
 }
-
 
 // Native parallel STEP->STEP (AP242). Mirrors the parallel IFC writer: shared StreamIndex, per-worker
 // Resolver, LPT, per-worker lanes, local ids -> atomic-reserve -> renumber. Instances are BAKED
@@ -3453,7 +3456,6 @@ static void step_parity_impl(const std::string &in_path, double deflection, doub
     total_instances_out = total_instances.load();
 }
 
-
 void cad_module(nb::module_ &m) {
     // Kernel-agnostic mesh / color / group types live in cad — they're the
     // surface every backend (native OCCT, wasm OCCT, future CGAL) speaks.
@@ -3674,8 +3676,8 @@ void cad_module(nb::module_ &m) {
         "blobs_to_ifc",
         [](const std::vector<nb::bytes> &blobs, const std::vector<std::array<float, 4>> &colors,
            const std::vector<std::vector<std::array<float, 16>>> &transforms,
-           const std::vector<std::vector<std::vector<std::pair<int, std::string>>>> &paths,
-           const std::string &out_path, const std::string &schema, double unit_scale) -> nb::dict {
+           const std::vector<std::vector<std::vector<std::pair<int, std::string>>>> &paths, const std::string &out_path,
+           const std::string &schema, double unit_scale) -> nb::dict {
             adacpp::ifc_emit::FileStats fs =
                 blobs_to_ifc_impl(blobs, colors, transforms, paths, out_path, schema, unit_scale);
             nb::dict d;

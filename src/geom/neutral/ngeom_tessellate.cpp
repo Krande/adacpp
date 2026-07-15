@@ -116,8 +116,8 @@ const bool DIAG = tess_diag_path() != nullptr;
 
 // Per-face accumulator: one row per face, so a 300k-face model stays a manageable CSV.
 struct FaceDiag {
-    std::vector<double> r; // residual per boundary point (model units)
-    size_t n_uv_fail = 0;  // surf.uv() returned false
+    std::vector<double> r;  // residual per boundary point (model units)
+    size_t n_uv_fail = 0;   // surf.uv() returned false
     size_t n_collapsed = 0; // ...and the handler collapsed point i onto i-1 (Defect 2 fired)
     const char *path = "?"; // which branch of face_to_mesh took the face
 };
@@ -152,9 +152,8 @@ void diag_flush_face(const Surface &surf, int64_t face_id, uint32_t face_seq, do
         t.fh = std::fopen(tess_diag_path(), "w");
         if (!t.fh)
             return;
-        std::fprintf(t.fh,
-                     "face_seq,face_id,surf_kind,is_quadric,path_taken,n_bpts,n_uv_fail,n_collapsed,"
-                     "r_p50,r_p95,r_max,r_rel_p50,r_rel_p95,r_rel_max,approx_size,model_scale\n");
+        std::fprintf(t.fh, "face_seq,face_id,surf_kind,is_quadric,path_taken,n_bpts,n_uv_fail,n_collapsed,"
+                           "r_p50,r_p95,r_max,r_rel_p50,r_rel_p95,r_rel_max,approx_size,model_scale\n");
     }
     double sz = std::max(surf.approx_size(), 1.0);
     double p50 = pct(d.r, 0.50), p95 = pct(d.r, 0.95);
@@ -245,10 +244,10 @@ inline bool is_pinned(const Vec3 &p) {
 // per-loop UV polyline plus winding bookkeeping
 struct LoopUv {
     std::vector<Uv> uv;
-    std::vector<Vec3> pts3; // 3D point per uv vertex — the SHARED EDGE discretization point for a
-                            // boundary vertex (NaN => synthetic/no pin). Lets the emitter place
-                            // boundary vertices on the shared edge (watertight) instead of on this
-                            // face's own surface re-projection, which diverges from the neighbour's.
+    std::vector<Vec3> pts3;      // 3D point per uv vertex — the SHARED EDGE discretization point for a
+                                 // boundary vertex (NaN => synthetic/no pin). Lets the emitter place
+                                 // boundary vertices on the shared edge (watertight) instead of on this
+                                 // face's own surface re-projection, which diverges from the neighbour's.
     int w = 0;                   // net winding around the u period
     bool interior_above = false; // interior is on +v side of this winding loop
 };
@@ -574,9 +573,7 @@ void refine_uv(const Surface &s, std::vector<Uv> &verts, std::vector<Tri> &tris,
 
     auto key = [](uint32_t i, uint32_t j) { return std::make_pair(std::min(i, j), std::max(i, j)); };
     // Undirected edge as one uint64 — hashable without allocating a node per edge.
-    auto pack = [](uint32_t i, uint32_t j) {
-        return ((uint64_t) std::min(i, j) << 32) | (uint64_t) std::max(i, j);
-    };
+    auto pack = [](uint32_t i, uint32_t j) { return ((uint64_t) std::min(i, j) << 32) | (uint64_t) std::max(i, j); };
 
     // Angular refinement: split an edge whose surface normal turns more than the (adaptive) max_angle
     // across it. This is SCALE-INVARIANT, so it captures curved-but-shallow features (a bevel cut into
@@ -648,8 +645,7 @@ void refine_uv(const Surface &s, std::vector<Uv> &verts, std::vector<Tri> &tris,
             const std::pair<uint32_t, uint32_t> es[3] = {{t[0], t[1]}, {t[1], t[2]}, {t[2], t[0]}};
             for (auto &e : es) {
                 auto k = key(e.first, e.second);
-                if (is_interior(e.first, e.second) && !marked.count(k) &&
-                    edge_needs_split(e.first, e.second) != 0)
+                if (is_interior(e.first, e.second) && !marked.count(k) && edge_needs_split(e.first, e.second) != 0)
                     marked.insert(k);
             }
             // fold detection: split the longest edge of a folded triangle (first 3 passes)
@@ -952,7 +948,7 @@ Tess2Out run_detria(const Surface &surf, const std::vector<std::vector<Uv>> &loo
             pts.push_back({p[0] * su, p[1] * sv});
             out.verts.push_back({p[0], p[1]});
             out.pin.push_back((loops_p3 && li < loops_p3->size() && k < (*loops_p3)[li].size()) ? (*loops_p3)[li][k]
-                                                                                               : nan_vec());
+                                                                                                : nan_vec());
         }
         if (idx.size() >= 3)
             loop_idx.push_back(std::move(idx));
@@ -1016,9 +1012,8 @@ Tess2Out run_detria(const Surface &surf, const std::vector<std::vector<Uv>> &loo
         out.pin.clear();
         return out;
     }
-    tri.forEachTriangle(
-        [&](detria::Triangle<uint32_t> t) { out.tris.push_back({t.x, t.y, t.z}); },
-        /*cwTriangles=*/false); // CCW, matching run_tess2's winding
+    tri.forEachTriangle([&](detria::Triangle<uint32_t> t) { out.tris.push_back({t.x, t.y, t.z}); },
+                        /*cwTriangles=*/false); // CCW, matching run_tess2's winding
     if (out.tris.empty()) {
         out.verts.clear();
         out.pin.clear();
@@ -1096,8 +1091,8 @@ bool emit_uv_region(const Surface &s, const std::vector<std::vector<Uv>> &loops_
 //
 // This is NOT the failed annulus (2026-07-13 #3), which ADDED a thin badly-shaped strip; and not
 // grid_via_emit, which discards the grid and over-refines (+44% tris, 481 nonmanifold, measured).
-std::vector<double> conform_lines(const std::vector<Uv> &ring, bool along_u, double a0, double a1, double b0,
-                                  double b1, int n_uniform, int max_ratio, bool &ok) {
+std::vector<double> conform_lines(const std::vector<Uv> &ring, bool along_u, double a0, double a1, double b0, double b1,
+                                  int n_uniform, int max_ratio, bool &ok) {
     std::vector<double> lines;
     lines.reserve(n_uniform + 1 + ring.size());
     for (int i = 0; i <= n_uniform; ++i)
@@ -1116,8 +1111,7 @@ std::vector<double> conform_lines(const std::vector<Uv> &ring, bool along_u, dou
     std::sort(lines.begin(), lines.end());
     const double da = std::abs(a1 - a0);
     const double eps_a = 1e-9 * (da > 0 ? da : 1.0);
-    lines.erase(std::unique(lines.begin(), lines.end(),
-                            [&](double x, double y) { return std::abs(x - y) <= eps_a; }),
+    lines.erase(std::unique(lines.begin(), lines.end(), [&](double x, double y) { return std::abs(x - y) <= eps_a; }),
                 lines.end());
     // Blow-up guard: a tensor grid cannot have a ring denser than its rows — N boundary samples on
     // one side force N columns across the whole patch. Past max_ratio x the uniform line count the
@@ -1390,8 +1384,7 @@ void ring_params(const std::vector<Uv> &r, std::vector<double> &t) {
 }
 
 bool tessellate_annulus_patch(const Surface &s, const Rect &r, const std::vector<Uv> &loop_uv,
-                              const std::vector<Vec3> &loop_p3, const TessParams &tp, bool same_sense,
-                              Mesh &mesh) {
+                              const std::vector<Vec3> &loop_p3, const TessParams &tp, bool same_sense, Mesh &mesh) {
     int nu = 0, nv = 0;
     uv_grid_res(s, nu, nv);
     if (nu < 3 || nv < 3 || loop_uv.size() < 3 || loop_uv.size() != loop_p3.size())
@@ -1502,15 +1495,13 @@ bool tessellate_annulus_patch(const Surface &s, const Rect &r, const std::vector
 }
 
 bool tessellate_full_patch(const Surface &s, const std::vector<std::vector<Uv>> &contours, const TessParams &tp,
-                           bool same_sense, Mesh &mesh,
-                           const std::vector<std::vector<Vec3>> *contours_p3 = nullptr) {
+                           bool same_sense, Mesh &mesh, const std::vector<std::vector<Vec3>> *contours_p3 = nullptr) {
     Rect r = full_patch_rect(s, contours);
     if (!r.ok)
         return false;
     const std::vector<Uv> *ring = nullptr;
     const std::vector<Vec3> *ring3 = nullptr;
-    if (contours_p3 && !contours_p3->empty() && !contours.empty() &&
-        contours[0].size() == (*contours_p3)[0].size()) {
+    if (contours_p3 && !contours_p3->empty() && !contours.empty() && contours[0].size() == (*contours_p3)[0].size()) {
         ring = &contours[0];
         ring3 = &(*contours_p3)[0];
     }
@@ -2156,8 +2147,9 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
     // This is what OCC and truck do.
     if (tp.track == TessTrack::Cdt) {
         diag_set_path("emit_cdt_region");
-        return emit_cdt_region(surf, contours, tp, same_sense, mesh, cdt_pins) ? nullptr
-                                                                               : "CDT tessellation produced no triangles";
+        return emit_cdt_region(surf, contours, tp, same_sense, mesh, cdt_pins)
+                   ? nullptr
+                   : "CDT tessellation produced no triangles";
     }
     // HYBRID: this is the whole point of the track. A face that would take the UV-bbox grid is the
     // only kind libtess2 cannot pin, so it — and only it — pays for detria. Everything else already
@@ -2178,7 +2170,7 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
     }
     diag_set_path("emit_uv_region");
     return emit_uv_region(surf, contours, tp, same_sense, mesh, pins) ? nullptr
-                                                                     : "UV tessellation produced no triangles";
+                                                                      : "UV tessellation produced no triangles";
 }
 
 // ---- boundary building from neutral topology (build_loops3d / loop_polyline) --------
@@ -2190,10 +2182,10 @@ std::vector<Loop3> build_loops3d(const FaceSurfaceN &face, const TessParams &tp)
         std::chrono::steady_clock::time_point t0;
         ~ProfScope() {
             if (on)
-                g_loops3d_ns.fetch_add(
-                    (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::steady_clock::now() - t0).count(),
-                    std::memory_order_relaxed);
+                g_loops3d_ns.fetch_add((uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                           std::chrono::steady_clock::now() - t0)
+                                           .count(),
+                                       std::memory_order_relaxed);
         }
     } _prof{EDGEPROF, _t0};
     for (const FaceBoundN &b : face.bounds) {
@@ -2334,8 +2326,12 @@ bool tessellate_face_impl(const FaceSurfaceN &face, const TessParams &tp, TessMe
 // increment safely; reset once single-threaded before a conversion, read after the pools join.
 static std::atomic<std::uint64_t> g_dropped_faces{0};
 static std::atomic<std::uint64_t> g_total_faces{0};
-std::uint64_t tess_dropped_faces() { return g_dropped_faces.load(std::memory_order_relaxed); }
-std::uint64_t tess_total_faces() { return g_total_faces.load(std::memory_order_relaxed); }
+std::uint64_t tess_dropped_faces() {
+    return g_dropped_faces.load(std::memory_order_relaxed);
+}
+std::uint64_t tess_total_faces() {
+    return g_total_faces.load(std::memory_order_relaxed);
+}
 void reset_tess_face_stats() {
     g_dropped_faces.store(0, std::memory_order_relaxed);
     g_total_faces.store(0, std::memory_order_relaxed);
@@ -2842,9 +2838,10 @@ TessMesh tessellate_doc(const NgeomDoc &doc, const TessParams &tp) {
         ~DocProf() {
             if (!on)
                 return;
-            g_tess_ns.fetch_add((uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                    std::chrono::steady_clock::now() - t0).count(),
-                                std::memory_order_relaxed);
+            g_tess_ns.fetch_add(
+                (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0)
+                    .count(),
+                std::memory_order_relaxed);
             uint64_t tess = g_tess_ns.load(), loops = g_loops3d_ns.load();
             std::fprintf(stderr,
                          "[EDGEPROF] tessellate_doc=%.3fs  build_loops3d=%.3fs (%.1f%% of tess)\n"

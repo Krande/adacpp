@@ -693,7 +693,7 @@ public:
     void build_metadata(const TypeLists &tl) {
         build_colour_map(tl.styled);
         build_product_name_map(tl.sdr);
-        unit_scale_ = detect_unit_scale(tl.units); // BEFORE build_transform_map — its rep_factor needs it
+        unit_scale_ = detect_unit_scale(tl.units);   // BEFORE build_transform_map — its rep_factor needs it
         angle_scale_ = detect_angle_scale(tl.units); // radians per file plane-angle unit (DEGREE etc.)
         build_transform_map(tl.roots, tl.absr, tl.srr, tl.cdsr, tl.nauo, tl.sdr);
         clear_geom_cache();
@@ -844,8 +844,7 @@ public:
             if (const std::vector<Value> *bs = sub(s, "B_SPLINE_SURFACE"))
                 if (bs->size() > 2 && (*bs)[2].kind == Kind::List)
                     grid = &(*bs)[2];
-        } else if (s->type == "B_SPLINE_SURFACE_WITH_KNOTS" && s->args.size() > 3 &&
-                   s->args[3].kind == Kind::List) {
+        } else if (s->type == "B_SPLINE_SURFACE_WITH_KNOTS" && s->args.size() > 3 && s->args[3].kind == Kind::List) {
             grid = &s->args[3];
         }
         if (!grid || grid->items.empty())
@@ -994,7 +993,6 @@ public:
     long degenerate_faces_skipped_ = 0;
 
 private:
-
     struct RGBA {
         float r, g, b, a;
     };
@@ -2079,8 +2077,10 @@ private:
             }
             auto pd_name = [&](long pd_id) -> std::string {
                 const Instance *pd = inst(pd_id);
-                const Instance *pdf = (pd && pd->args.size() > 2 && pd->args[2].is_ref()) ? inst(pd->args[2].i) : nullptr;
-                const Instance *prod = (pdf && pdf->args.size() > 2 && pdf->args[2].is_ref()) ? inst(pdf->args[2].i) : nullptr;
+                const Instance *pdf =
+                    (pd && pd->args.size() > 2 && pd->args[2].is_ref()) ? inst(pd->args[2].i) : nullptr;
+                const Instance *prod =
+                    (pdf && pdf->args.size() > 2 && pdf->args[2].is_ref()) ? inst(pdf->args[2].i) : nullptr;
                 if (prod && prod->args.size() >= 2)
                     for (int k : {1, 0}) // PRODUCT(id, name, ...): prefer name, fall back to id
                         if (prod->args[k].kind == Kind::Str) {
@@ -2104,8 +2104,7 @@ private:
                 // (build_scene_extras): ~5x slower + ~700 MB heavier on the crane STEP->GLB.
                 auto exist = path_map_.find(sid);
                 if (exist != path_map_.end() &&
-                    std::any_of(exist->second.begin(), exist->second.end(),
-                                [](const Path &p) { return p.size() > 1; }))
+                    std::any_of(exist->second.begin(), exist->second.end(), [](const Path &p) { return p.size() > 1; }))
                     continue; // already has a real CDSR hierarchy — keep it
                 auto rit = rep_pd.find(git->second);
                 if (rit == rep_pd.end())
@@ -2124,7 +2123,7 @@ private:
                     ancestors.push_back({cur, pd_name(cur)});
                 }
                 if (ancestors.empty())
-                    continue; // no assembly nesting -> keep the flat path
+                    continue;                                     // no assembly nesting -> keep the flat path
                 std::reverse(ancestors.begin(), ancestors.end()); // root-first
                 Path path = std::move(ancestors);
                 path.push_back(path_level(git->second)); // leaf: solid's own (geom_rep, product_name)

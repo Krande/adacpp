@@ -123,11 +123,11 @@ inline void emit_spatial_tree(std::string &out, const std::function<long()> &nex
     // building-specific IfcBuildingStorey / element-grouping IfcElementAssembly). Zones nest under the
     // root zone (#12) via IfcRelAggregates; the leaf elements are contained in their deepest zone via
     // IfcRelContainedInSpatialStructure (IfcSpatialZone is a valid IfcSpatialElement RelatingStructure).
-    const long ROOT = 12; // the header's root IfcSpatialZone (under IfcProject)
-    std::map<std::vector<int>, long> zone_id;        // rep-id prefix -> IfcSpatialZone id
-    std::map<long, std::vector<long>> agg_children;  // parent zone -> child zones (IfcRelAggregates)
-    std::map<long, std::vector<long>> contained;     // zone -> contained leaf elements (IfcRelContained…)
-    uint64_t aguid = 0xE0000000ull; // zone/rel GUID namespace (disjoint from header 0xF.. + proxies)
+    const long ROOT = 12;                           // the header's root IfcSpatialZone (under IfcProject)
+    std::map<std::vector<int>, long> zone_id;       // rep-id prefix -> IfcSpatialZone id
+    std::map<long, std::vector<long>> agg_children; // parent zone -> child zones (IfcRelAggregates)
+    std::map<long, std::vector<long>> contained;    // zone -> contained leaf elements (IfcRelContained…)
+    uint64_t aguid = 0xE0000000ull;                 // zone/rel GUID namespace (disjoint from header 0xF.. + proxies)
 
     for (size_t i = 0; i < proxies.size(); ++i) {
         const IfcPath &path = (i < paths.size()) ? paths[i] : IfcPath{};
@@ -424,7 +424,7 @@ inline adacpp::ifc_emit::FileStats write_ifc_to_step_impl(const std::string &in_
             buf.clear();
         }
     };
-    std::vector<long> leaf_pds;     // per emitted solid: its PRODUCT_DEFINITION id (for the NAUO tree)
+    std::vector<long> leaf_pds;       // per emitted solid: its PRODUCT_DEFINITION id (for the NAUO tree)
     std::vector<IfcPath2> leaf_paths; // parallel: the solid's assembly path
     for (long pid : roots) {
         NgeomRoot root = r.resolve_product(pid);

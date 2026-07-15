@@ -235,10 +235,9 @@ inline std::vector<TessTrackInfo> track_infos() {
 #if !defined(__EMSCRIPTEN__)
     // Taxonomy kernels link OCCT/CGAL via ifcopenshell and are excluded from the wasm build, so they
     // are only real where they are compiled in.
-    out.push_back({"occ", "OCC (ifcopenshell taxonomy)", "Meshes via ifcopenshell's taxonomy on OCCT.",
-                   false, false});
-    out.push_back({"cgal", "CGAL (ifcopenshell taxonomy)", "Meshes via ifcopenshell's taxonomy on CGAL.",
-                   false, false});
+    out.push_back({"occ", "OCC (ifcopenshell taxonomy)", "Meshes via ifcopenshell's taxonomy on OCCT.", false, false});
+    out.push_back(
+        {"cgal", "CGAL (ifcopenshell taxonomy)", "Meshes via ifcopenshell's taxonomy on CGAL.", false, false});
     out.push_back({"hybrid", "Hybrid OCC/CGAL (ifcopenshell taxonomy)",
                    "ifcopenshell's hybrid OCCT/CGAL kernel selection.", false, false});
 #endif

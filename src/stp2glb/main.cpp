@@ -20,15 +20,15 @@ int main(int argc, char *argv[]) {
     std::string glb_file;
     double deflection = 2.0;
     double angular_deg = 20.0;
-    int num_threads = 0;   // 0 = all hardware cores
-    bool meshopt = true;   // EXT_meshopt_compression baked inline by default
-    bool profile = false;  // enable the env-gated StepProfiler instrumentation
-    bool quiet = false;    // suppress the param echo + progress; keep errors + the final result line
+    int num_threads = 0;       // 0 = all hardware cores
+    bool meshopt = true;       // EXT_meshopt_compression baked inline by default
+    bool profile = false;      // enable the env-gated StepProfiler instrumentation
+    bool quiet = false;        // suppress the param echo + progress; keep errors + the final result line
     bool face_regions = false; // bake per-face clickable regions into scenes[0].extras (opt-in)
     std::string pipeline;      // tessellation track: "" / libtess2 (default) | cdt
-    bool pin_boundary = true; // libtess2 option: emit boundary verts at their shared-edge point
+    bool pin_boundary = true;  // libtess2 option: emit boundary verts at their shared-edge point
     double model_scale = 0.0;  // >0 => adaptive per-surface density (relaxes tiny features); 0 => fixed
-    std::string spill_dir; // empty => private auto-removed mkdtemp spill dir
+    std::string spill_dir;     // empty => private auto-removed mkdtemp spill dir
 
     app.add_option("--stp", stp_file, "STEP input filepath")->required();
     app.add_option("--glb", glb_file, "GLB output filepath")->required();

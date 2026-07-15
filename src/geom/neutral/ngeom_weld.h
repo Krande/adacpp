@@ -22,8 +22,8 @@ namespace adacpp::ngeom {
 // positions/normals: flat xyz (3 per vertex, parallel). indices: flat (3 per triangle). Rewrites all
 // three in place to the welded, indexed form. crease_deg: incident faces whose normals differ by more
 // than this at a shared position stay as separate vertices (hard edge).
-inline void weld_mesh(std::vector<float> &positions, std::vector<uint32_t> &indices,
-                      std::vector<float> &normals, double crease_deg = 40.0) {
+inline void weld_mesh(std::vector<float> &positions, std::vector<uint32_t> &indices, std::vector<float> &normals,
+                      double crease_deg = 40.0) {
     const size_t nt = indices.size() / 3;
     const size_t nv = positions.size() / 3;
     if (nt == 0 || nv == 0)
@@ -35,11 +35,15 @@ inline void weld_mesh(std::vector<float> &positions, std::vector<uint32_t> &indi
     Vec3 lo{1e300, 1e300, 1e300}, hi{-1e300, -1e300, -1e300};
     for (size_t v = 0; v < nv; ++v) {
         double x = positions[3 * v], y = positions[3 * v + 1], z = positions[3 * v + 2];
-        lo.x = std::min(lo.x, x); lo.y = std::min(lo.y, y); lo.z = std::min(lo.z, z);
-        hi.x = std::max(hi.x, x); hi.y = std::max(hi.y, y); hi.z = std::max(hi.z, z);
+        lo.x = std::min(lo.x, x);
+        lo.y = std::min(lo.y, y);
+        lo.z = std::min(lo.z, z);
+        hi.x = std::max(hi.x, x);
+        hi.y = std::max(hi.y, y);
+        hi.z = std::max(hi.z, z);
     }
-    double diag = std::sqrt((hi.x - lo.x) * (hi.x - lo.x) + (hi.y - lo.y) * (hi.y - lo.y) +
-                            (hi.z - lo.z) * (hi.z - lo.z));
+    double diag =
+        std::sqrt((hi.x - lo.x) * (hi.x - lo.x) + (hi.y - lo.y) * (hi.y - lo.y) + (hi.z - lo.z) * (hi.z - lo.z));
     const double inv = 1.0 / (diag > 0 ? diag * 1e-6 : 1e-9);
     auto qcoord = [&](double c) -> int64_t { return (int64_t) std::llround(c * inv); };
 
@@ -67,7 +71,10 @@ inline void weld_mesh(std::vector<float> &positions, std::vector<uint32_t> &indi
     struct KeyHash {
         size_t operator()(const std::array<int64_t, 3> &k) const {
             uint64_t h = 1469598103934665603ull;
-            for (int64_t q : k) { h ^= (uint64_t) q; h *= 1099511628211ull; }
+            for (int64_t q : k) {
+                h ^= (uint64_t) q;
+                h *= 1099511628211ull;
+            }
             return (size_t) h;
         }
     };
@@ -118,7 +125,10 @@ inline void weld_mesh(std::vector<float> &positions, std::vector<uint32_t> &indi
             const Vec3 &fn = fnorm[t];
             int found = -1;
             for (size_t cl = 0; cl < cluster_dir.size(); ++cl)
-                if (cluster_dir[cl].dot(fn) >= crease_cos) { found = (int) cl; break; }
+                if (cluster_dir[cl].dot(fn) >= crease_cos) {
+                    found = (int) cl;
+                    break;
+                }
             if (found < 0) {
                 found = (int) cluster_dir.size();
                 cluster_dir.push_back(fn);
