@@ -210,9 +210,9 @@ inline long stream_step_to_mesh(const std::string &in_path, const std::string &o
 
     std::string spill;
     bool remove_after = false;
-    char tmpl[] = "/tmp/adacpp_mesh_XXXXXX";
+    std::string tmpl = adacpp::temp_template("adacpp_mesh");
     if (spill_dir.empty()) {
-        if (char *dir = ::mkdtemp(tmpl)) {
+        if (char *dir = ::mkdtemp(tmpl.data())) {
             spill = dir;
             remove_after = true;
         }

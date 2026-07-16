@@ -98,9 +98,9 @@ inline long stream_ifc_to_glb(const std::string &in_path, const std::string &out
     // Spill dir: private mkdtemp (auto-removed) unless the caller supplied one.
     std::string spill;
     bool remove_after = false;
-    char tmpl[] = "/tmp/adacpp_ifcglb_XXXXXX";
+    std::string tmpl = adacpp::temp_template("adacpp_ifcglb");
     if (spill_dir.empty()) {
-        if (char *dir = ::mkdtemp(tmpl)) {
+        if (char *dir = ::mkdtemp(tmpl.data())) {
             spill = dir;
             remove_after = true;
         }

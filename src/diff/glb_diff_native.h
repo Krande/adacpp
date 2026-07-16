@@ -97,11 +97,11 @@ inline std::shared_ptr<DiskBuf> decode_to_disk(const unsigned char *enc, size_t 
     size_t dsize = count * stride;
     if (dsize == 0)
         return nullptr;
-    char tmpl[] = "/tmp/adacpp_diffdec_XXXXXX";
-    int fd = ::mkstemp(tmpl);
+    std::string tmpl = adacpp::temp_template("adacpp_diffdec");
+    int fd = ::mkstemp(tmpl.data());
     if (fd < 0)
         return nullptr;
-    ::unlink(tmpl); // disk space freed on close; no path left behind
+    ::unlink(tmpl.c_str()); // disk space freed on close; no path left behind
     auto db = std::make_shared<DiskBuf>();
     db->fd = fd;
     if (::ftruncate(fd, (off_t) dsize) != 0)

@@ -143,9 +143,9 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
     // otherwise the caller's directory (created if missing, left in place afterwards).
     std::string spill;
     bool remove_after = false;
-    char tmpl[] = "/tmp/adacpp_glb_XXXXXX";
+    std::string tmpl = adacpp::temp_template("adacpp_glb");
     if (spill_dir.empty()) {
-        if (char *dir = ::mkdtemp(tmpl)) { // unique spill dir (removed after assembly)
+        if (char *dir = ::mkdtemp(tmpl.data())) { // unique spill dir (removed after assembly)
             spill = dir;
             remove_after = true;
         }

@@ -881,8 +881,8 @@ nb::dict glb_diff_impl(const std::string &scene_path, const std::string &ref_pat
 // oracle). Creates a temp spill dir, runs step_to_glb_single, returns the triangle count.
 long stream_step_to_glb_st_impl(const std::string &in_path, const std::string &out_path, double deflection,
                                 double angular_deg, bool meshopt) {
-    char tmpl[] = "/tmp/adacpp_glbst_XXXXXX";
-    char *dir = ::mkdtemp(tmpl);
+    std::string tmpl = adacpp::temp_template("adacpp_glbst");
+    char *dir = ::mkdtemp(tmpl.data());
     if (!dir)
         return -1;
     long n = adacpp::step_to_glb_single(in_path, out_path, dir, deflection, angular_deg, meshopt);
@@ -1120,6 +1120,103 @@ std::vector<StepShapeData> read_step_shapes_impl(nb::bytes data, const std::stri
         collect_step_shapes(st, ct, free_shapes.Value(i), TopLoc_Location(), out);
     }
     return out;
+}
+
+// STEP bytes -> GLB bytes in one pass, keeping the OCAF document intact end to end.
+//
+// The colour-preserving counterpart to read_step_bytes + write_glb_bytes, which lose it twice over:
+// read_step_bytes uses the plain STEPControl_Reader (no XCAF layer, so STYLED_ITEM is never even
+// looked at) and fuses everything via OneShape(); write_glb_bytes then builds an empty document with
+// no ColorTool. The result is a GLB with zero materials, which a viewer renders in its own default
+// grey. Handing RWGltf the document STEPCAFControl_Reader produced keeps the names, the assembly
+// tree, and both solid-level and per-face colours, without flattening to a shape list (a flat list
+// re-emits a solid AND each of its faces, duplicating the geometry).
+nb::bytes step_bytes_to_glb_bytes_impl(nb::bytes data, double linear_deflection, double angular_deg,
+                                       const std::string &unit) {
+    if (linear_deflection <= 0.0)
+        linear_deflection = 0.1;
+    // Restore the caller's value on exit — "xstep.cascade.unit" is a process-global
+    // Interface_Static parameter; leaving it set leaks into later reads.
+    const InterfaceStaticCValGuard cascade_unit_guard("xstep.cascade.unit");
+
+    const std::filesystem::path tmp_in = make_temp_path("adacpp_step_glb_in", ".stp");
+    {
+        std::ofstream f(tmp_in.string(), std::ios::binary);
+        f.write(data.c_str(), static_cast<std::streamsize>(data.size()));
+    }
+
+    Handle(TDocStd_Document) doc = new TDocStd_Document(TCollection_ExtendedString("MDTV-XCAF"));
+    {
+        STEPCAFControl_Reader reader;
+        reader.SetColorMode(Standard_True);
+        reader.SetNameMode(Standard_True);
+        reader.SetLayerMode(Standard_True);
+        // Set AFTER constructing the reader (its ctor resets the static), before ReadFile —
+        // same order as read_step_shapes / StepStore.create_step_reader.
+        Interface_Static::SetCVal("xstep.cascade.unit", unit.c_str());
+        const IFSelect_ReturnStatus st = reader.ReadFile(tmp_in.string().c_str());
+        if (st != IFSelect_RetDone) {
+            std::error_code ec;
+            std::filesystem::remove(tmp_in, ec);
+            throw std::runtime_error("step_bytes_to_glb_bytes: STEPCAFControl_Reader could not parse the input");
+        }
+        if (!reader.Transfer(doc)) {
+            std::error_code ec;
+            std::filesystem::remove(tmp_in, ec);
+            throw std::runtime_error("step_bytes_to_glb_bytes: transfer to OCAF document failed");
+        }
+    }
+    std::error_code ec_in;
+    std::filesystem::remove(tmp_in, ec_in);
+
+    // RWGltf needs a triangulation per face; mesh every shape the document holds.
+    Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+    TDF_LabelSequence labels;
+    shapeTool->GetFreeShapes(labels);
+    for (int i = 1; i <= labels.Length(); ++i) {
+        const TopoDS_Shape shape = shapeTool->GetShape(labels.Value(i));
+        if (shape.IsNull())
+            continue;
+        // MSVC only defines M_PI under _USE_MATH_DEFINES; spell the conversion out.
+        constexpr double deg2rad = 3.14159265358979323846 / 180.0;
+        BRepMesh_IncrementalMesh(shape, linear_deflection,
+                                 /*relative=*/Standard_False, angular_deg * deg2rad,
+                                 /*parallel=*/Standard_True);
+    }
+
+    const std::filesystem::path tmp = make_temp_path("adacpp_glb", ".glb");
+    const std::string tmpname = tmp.string();
+    {
+        RWGltf_CafWriter writer(TCollection_AsciiString(tmpname.c_str()), /*isBinary=*/Standard_True);
+        // Same Z-up + compact-transform configuration as write_glb_bytes, so both writers
+        // land in the adapy viewer's orientation.
+        writer.ChangeCoordinateSystemConverter().SetInputCoordinateSystem(RWMesh_CoordinateSystem_Zup);
+        writer.SetTransformationFormat(RWGltf_WriterTrsfFormat_Compact);
+        TColStd_IndexedDataMapOfStringString fileInfo;
+        fileInfo.Add(TCollection_AsciiString("Authors"), TCollection_AsciiString("adacpp"));
+        const Message_ProgressRange progress;
+        if (!writer.Perform(doc, fileInfo, progress)) {
+            std::error_code ec;
+            std::filesystem::remove(tmp, ec);
+            throw std::runtime_error("step_bytes_to_glb_bytes: RWGltf_CafWriter::Perform failed");
+        }
+    }
+
+    std::ifstream f(tmpname, std::ios::binary | std::ios::ate);
+    if (!f.is_open()) {
+        std::error_code ec;
+        std::filesystem::remove(tmp, ec);
+        throw std::runtime_error("step_bytes_to_glb_bytes: failed to re-open temp file");
+    }
+    const auto size = static_cast<std::size_t>(f.tellg());
+    f.seekg(0, std::ios::beg);
+    std::vector<char> buffer(size);
+    if (size > 0)
+        f.read(buffer.data(), size);
+    f.close();
+    std::error_code ec;
+    std::filesystem::remove(tmp, ec);
+    return nb::bytes(buffer.data(), buffer.size());
 }
 
 nb::bytes write_glb_bytes_impl(const ShapeHandle &sh, double linear_deflection) {
@@ -3213,8 +3310,8 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
     if (nth > (int) roots.size())
         nth = std::max(1, (int) roots.size());
 
-    char tmpl[] = "/tmp/adacpp_ifc_XXXXXX";
-    char *dir = ::mkdtemp(tmpl);
+    std::string tmpl = adacpp::temp_template("adacpp_ifc");
+    char *dir = ::mkdtemp(tmpl.data());
     if (!dir)
         return fs;
     std::string tdir = dir;
@@ -3394,8 +3491,8 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
     int nth = num_threads > 0 ? num_threads : (int) adacpp::effective_concurrency();
     if (nth > (int) roots.size())
         nth = std::max(1, (int) roots.size());
-    char tmpl[] = "/tmp/adacpp_stp_XXXXXX";
-    char *dir = ::mkdtemp(tmpl);
+    std::string tmpl = adacpp::temp_template("adacpp_stp");
+    char *dir = ::mkdtemp(tmpl.data());
     if (!dir)
         return fs;
     std::string tdir = dir;
@@ -4232,7 +4329,18 @@ void cad_module(nb::module_ &m) {
 
     m.def("write_glb_bytes", &write_glb_bytes_impl, "shape"_a, "linear_deflection"_a = 0.1,
           "Tessellate a ShapeHandle and write a binary glTF (.glb) into "
-          "a bytes buffer. linear_deflection<=0 falls back to 0.1.");
+          "a bytes buffer. linear_deflection<=0 falls back to 0.1. NOTE: a bare ShapeHandle "
+          "carries no colour, so the GLB has NO materials — for STEP input use "
+          "step_bytes_to_glb_bytes, which keeps the file's colours.");
+
+    m.def("step_bytes_to_glb_bytes", &step_bytes_to_glb_bytes_impl, "data"_a, "linear_deflection"_a = 0.1,
+          "angular_deg"_a = 20.0, "unit"_a = "M",
+          "STEP (bytes) -> binary glTF (.glb) (bytes) in one pass via OCAF, keeping the file's "
+          "names, assembly tree and colours (both solid-level and per-face) in the GLB's "
+          "materials. This is the colour-preserving replacement for read_step_bytes + "
+          "write_glb_bytes, which between them drop every colour (plain STEPControl_Reader has no "
+          "XCAF layer; the writer builds a document with no ColorTool) and yield a materialless, "
+          "uniformly grey model. Converts the file's length unit to `unit` (default M).");
 
     // --- shape-algebra verbs (mirror adapy's CadBackend) ---
 
