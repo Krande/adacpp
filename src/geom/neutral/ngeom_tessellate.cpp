@@ -381,9 +381,37 @@ struct Tess2Out {
 // emitted on the shared edge. When present, out.pin is filled via libtess2's vertex-index map —
 // original boundary vertices carry their pin; Steiner/new vertices get NaN. Null (the default track)
 // => not one extra byte or branch in the hot loop.
-Tess2Out run_tess2(const std::vector<std::vector<Uv>> &loops_uv, double su, double sv,
+Tess2Out run_tess2(const std::vector<std::vector<Uv>> &loops_uv_in, double su, double sv,
                    const std::vector<std::vector<Vec3>> *loops_p3 = nullptr) {
     Tess2Out out;
+    // Re-center the UV loops to their min corner before handing them to libtess2. TESSreal is float,
+    // so a face whose parametric coordinates carry a large offset — e.g. a cylinder whose STEP axis
+    // placement sits kilometres from the face, giving an axial v ~6e6 — loses its sub-mm real extent
+    // to float precision: every vertex snaps to the same value, the loop collapses to a line, tess2
+    // returns no triangles and the face silently drops (violating "no geom left behind"). Translating
+    // to the origin keeps the true extent representable; the offset is added back to the output verts,
+    // so the transform is invisible to callers and composes with any su/sv scaling. (measured: cylinder
+    // faces #39996/#40030 on KR_6, v~6e6, dropped -> recovered.)
+    double u0 = INF, v0 = INF;
+    for (const auto &lp : loops_uv_in)
+        for (const Uv &p : lp) {
+            u0 = std::min(u0, p[0]);
+            v0 = std::min(v0, p[1]);
+        }
+    if (!std::isfinite(u0))
+        u0 = 0.0;
+    if (!std::isfinite(v0))
+        v0 = 0.0;
+    std::vector<std::vector<Uv>> shifted;
+    shifted.reserve(loops_uv_in.size());
+    for (const auto &lp : loops_uv_in) {
+        std::vector<Uv> s;
+        s.reserve(lp.size());
+        for (const Uv &p : lp)
+            s.push_back({p[0] - u0, p[1] - v0});
+        shifted.push_back(std::move(s));
+    }
+    const std::vector<std::vector<Uv>> &loops_uv = shifted;
     TESStesselator *t = tessNewTess(nullptr);
     if (!t)
         return out;
@@ -418,7 +446,7 @@ Tess2Out run_tess2(const std::vector<std::vector<Uv>> &loops_uv, double su, doub
     if (loops_p3)
         out.pin.reserve(nv);
     for (int i = 0; i < nv; ++i) {
-        out.verts.push_back({tv[i * 2] / su, tv[i * 2 + 1] / sv});
+        out.verts.push_back({tv[i * 2] / su + u0, tv[i * 2 + 1] / sv + v0}); // undo the re-centering
         if (loops_p3) {
             TESSindex oi = vi ? vi[i] : TESS_UNDEF;
             out.pin.push_back((oi != TESS_UNDEF && (size_t) oi < flat_p3.size()) ? flat_p3[oi] : nan_vec());
