@@ -2059,6 +2059,40 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
         loops_uv.push_back({std::move(uv), std::move(pts3), w, interior_above});
     }
 
+    // ISO 10303-42 material-side selection for a single non-winding loop on a periodic surface. STEP
+    // defines the face's material via same_sense + FACE_OUTER_BOUND.orientation relative to the
+    // surface normal; the loop is INTERIOR-material iff sign(signed UV area) * sign(du x dv . normal)
+    // * same_sense > 0, else the COMPLEMENT. run_tess2's TESS_WINDING_ODD always fills the interior,
+    // so a complement-material face — e.g. a spherical gasket whose boundary encircles the hose
+    // attachment — came out as the small hose-side cap with the gasket itself missing. Route those to
+    // the complement tessellation. Measured on KR_6: exactly 2 faces flip (the gaskets); every other
+    // quadric face (1925 of them) is interior-material and unchanged.
+    if (auto per_u = surf.u_period(); per_u && loops_uv.size() == 1 && loops_uv[0].w == 0
+                                      && loops_uv[0].uv.size() >= 3) {
+        const auto &L = loops_uv[0].uv;
+        double area = 0, uc = 0, vc = 0;
+        for (size_t i = 0; i < L.size(); ++i) {
+            const Uv &a = L[i], &b = L[(i + 1) % L.size()];
+            area += a[0] * b[1] - b[0] * a[1];
+            uc += a[0];
+            vc += a[1];
+        }
+        uc /= (double) L.size();
+        vc /= (double) L.size();
+        const double h = 1e-4;
+        double jdot = (surf.point(uc + h, vc) - surf.point(uc - h, vc))
+                          .cross(surf.point(uc, vc + h) - surf.point(uc, vc - h))
+                          .dot(surf.normal(uc, vc));
+        const int A = area > 0 ? 1 : -1, J = jdot > 0 ? 1 : -1, S = same_sense ? 1 : -1;
+        if (A * J * S < 0) {
+            diag_set_path("iso_complement");
+            std::vector<std::vector<Uv>> contour = {L};
+            return tessellate_periodic_complement(surf, contour, *per_u, tp, same_sense, mesh)
+                       ? nullptr
+                       : "iso-complement tessellation failed";
+        }
+    }
+
     auto uv_slit = [&](const LoopUv &l) {
         if (l.w != 0)
             return false;
