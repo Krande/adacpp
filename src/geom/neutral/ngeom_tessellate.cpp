@@ -2092,7 +2092,11 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
                 vmn = std::min(vmn, q[1]);
                 vmx = std::max(vmx, q[1]);
             }
-        if (vmx - vmn > 1.5 * *per_v && umx - umn < *per_v) {
+        // dv > ~one full period means the boundary wrapped the minor circle and the v-unwrap drifted
+        // (a valid single-valued torus face spans at most one period; a full-circle cross-section
+        // reaches ~per_v plus one discretization step of closing overlap, so 1.1x is the safe line —
+        // it catches the drifters, which start ~1.12 periods, and leaves genuine full circles alone).
+        if (vmx - vmn > 1.1 * *per_v && umx - umn < *per_v) {
             diag_set_path("v_wind_band");
             return tessellate_uv_grid(surf, umn, umx, vmn, vmn + *per_v, tp, same_sense, mesh)
                        ? nullptr
