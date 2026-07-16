@@ -119,7 +119,10 @@ struct FaceDiag {
     std::vector<double> r;  // residual per boundary point (model units)
     size_t n_uv_fail = 0;   // surf.uv() returned false
     size_t n_collapsed = 0; // ...and the handler collapsed point i onto i-1 (Defect 2 fired)
-    const char *path = "?"; // which branch of face_to_mesh took the face
+    const char *path = "?";     // which branch of face_to_mesh took the face
+    double emitted_area = 0;    // 3D area actually tessellated for this face
+    double expected_area = 0;   // expected trimmed surface area (region-fill faces only)
+    bool has_coverage = false;  // expected_area is meaningful (not a winding/periodic face)
 };
 
 // thread_local: DIAG forces threads=1 (see tessellate_one_root), but a stray parallel caller must
@@ -132,6 +135,21 @@ FaceDiag &face_diag() {
 void diag_set_path(const char *p) {
     if (DIAG)
         face_diag().path = p;
+}
+
+// Per-face coverage health (always on, independent of DIAG): the expected trimmed surface area of a
+// region-fill face, set by face_to_mesh from the UV loops, read back by tessellate_face to compare
+// against the area actually emitted. Catches PARTIAL tessellation (a self-intersecting UV loop that
+// tess2 fills only halfway -> a hole the zero-triangle drop counter never sees), which is the gap
+// the drop counter alone leaves open. has_expected is false for winding/periodic faces, whose UV-loop
+// area is not the face area, so they never false-flag.
+struct FaceHealth {
+    double expected_area = 0;
+    bool has_expected = false;
+};
+FaceHealth &face_health() {
+    static thread_local FaceHealth h;
+    return h;
 }
 
 double pct(std::vector<double> &v, double q) {
@@ -153,14 +171,17 @@ void diag_flush_face(const Surface &surf, int64_t face_id, uint32_t face_seq, do
         if (!t.fh)
             return;
         std::fprintf(t.fh, "face_seq,face_id,surf_kind,is_quadric,path_taken,n_bpts,n_uv_fail,n_collapsed,"
-                           "r_p50,r_p95,r_max,r_rel_p50,r_rel_p95,r_rel_max,approx_size,model_scale\n");
+                           "r_p50,r_p95,r_max,r_rel_p50,r_rel_p95,r_rel_max,approx_size,model_scale,"
+                           "emitted_area,expected_area,coverage\n");
     }
     double sz = std::max(surf.approx_size(), 1.0);
     double p50 = pct(d.r, 0.50), p95 = pct(d.r, 0.95);
     double mx = d.r.empty() ? 0.0 : *std::max_element(d.r.begin(), d.r.end());
-    std::fprintf(t.fh, "%u,%lld,%s,%d,%s,%zu,%zu,%zu,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\n", face_seq,
-                 (long long) face_id, surf_kind(surf), (int) surf.is_quadric(), d.path, d.r.size(), d.n_uv_fail,
-                 d.n_collapsed, p50, p95, mx, p50 / sz, p95 / sz, mx / sz, sz, model_scale);
+    double coverage = (d.has_coverage && d.expected_area > 1e-12) ? d.emitted_area / d.expected_area : -1.0;
+    std::fprintf(t.fh, "%u,%lld,%s,%d,%s,%zu,%zu,%zu,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.6g,%.6g,%.4g\n",
+                 face_seq, (long long) face_id, surf_kind(surf), (int) surf.is_quadric(), d.path, d.r.size(),
+                 d.n_uv_fail, d.n_collapsed, p50, p95, mx, p50 / sz, p95 / sz, mx / sz, sz, model_scale,
+                 d.emitted_area, d.has_coverage ? d.expected_area : -1.0, coverage);
     d = FaceDiag{};
 }
 
@@ -2087,6 +2108,48 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
         loops_uv.push_back({std::move(uv), std::move(pts3), w, interior_above});
     }
 
+    // Coverage health: expected trimmed surface area = |net signed UV-loop area| * surface Jacobian at
+    // the UV centre. Exact for constant-Jacobian surfaces (plane/cylinder/cone), a good estimate for
+    // B-splines. Skipped when any loop winds (w != 0) or a period is present: there the UV-loop area is
+    // not the face area (the face wraps a seam), so a ratio against emitted would be meaningless.
+    {
+        FaceHealth &h = face_health();
+        h = FaceHealth{};
+        double umn = INF, umx = -INF, vmn = INF, vmx = -INF, net_uv = 0;
+        bool wraps = false;
+        for (const LoopUv &L : loops_uv) {
+            if (L.w != 0)
+                wraps = true; // u-winding loop: the face spans the seam, UV area != face area
+            double a = 0;
+            for (size_t i = 0; i < L.uv.size(); ++i) {
+                const Uv &p = L.uv[i], &q = L.uv[(i + 1) % L.uv.size()];
+                a += p[0] * q[1] - q[0] * p[1];
+                umn = std::min(umn, p[0]);
+                umx = std::max(umx, p[0]);
+                vmn = std::min(vmn, p[1]);
+                vmx = std::max(vmx, p[1]);
+            }
+            net_uv += 0.5 * a; // holes wind opposite the outer loop, so they subtract
+        }
+        // A period EXISTING doesn't disqualify a face (a 30-deg cylinder patch has u_period=2pi but a
+        // small u-span); only a face whose UV region actually covers a full period wraps the seam, so
+        // its UV-loop area is not the trimmed area. Those (and winding loops) are excluded; ordinary
+        // quadric patches (the dropped-cylinder class) stay IN the coverage check.
+        if (auto pu = surf.u_period(); pu && (umx - umn) > 0.99 * *pu)
+            wraps = true;
+        if (auto pv = surf.v_period(); pv && (vmx - vmn) > 0.99 * *pv)
+            wraps = true;
+        if (!wraps && !loops_uv.empty()) {
+            double uc = 0.5 * (umn + umx), vc = 0.5 * (vmn + vmx);
+            double hu = std::max((umx - umn) * 1e-4, 1e-9), hv = std::max((vmx - vmn) * 1e-4, 1e-9);
+            Vec3 ru = surf.point(uc + hu, vc) - surf.point(uc - hu, vc);
+            Vec3 rv = surf.point(uc, vc + hv) - surf.point(uc, vc - hv);
+            double jac = ru.cross(rv).norm() / (4.0 * hu * hv); // |dP/du x dP/dv|
+            h.expected_area = std::abs(net_uv) * jac;
+            h.has_expected = std::isfinite(h.expected_area);
+        }
+    }
+
     // ISO 10303-42 material-side selection for a single non-winding loop on a periodic surface. STEP
     // defines the face's material via same_sense + FACE_OUTER_BOUND.orientation relative to the
     // surface normal; the loop is INTERIOR-material iff sign(signed UV area) * sign(du x dv . normal)
@@ -2414,15 +2477,23 @@ bool tessellate_face_impl(const FaceSurfaceN &face, const TessParams &tp, TessMe
 // increment safely; reset once single-threaded before a conversion, read after the pools join.
 static std::atomic<std::uint64_t> g_dropped_faces{0};
 static std::atomic<std::uint64_t> g_total_faces{0};
+// Faces that tessellated but covered < half their expected surface area — a partial fill (e.g. a
+// self-intersecting UV loop tess2 only half-filled). Distinct from dropped (zero triangles); this is
+// the "detection gap" the drop counter alone leaves: geometry that is present but incomplete.
+static std::atomic<std::uint64_t> g_suspect_faces{0};
 std::uint64_t tess_dropped_faces() {
     return g_dropped_faces.load(std::memory_order_relaxed);
 }
 std::uint64_t tess_total_faces() {
     return g_total_faces.load(std::memory_order_relaxed);
 }
+std::uint64_t tess_suspect_faces() {
+    return g_suspect_faces.load(std::memory_order_relaxed);
+}
 void reset_tess_face_stats() {
     g_dropped_faces.store(0, std::memory_order_relaxed);
     g_total_faces.store(0, std::memory_order_relaxed);
+    g_suspect_faces.store(0, std::memory_order_relaxed);
 }
 
 bool tessellate_face(const FaceSurfaceN &face, const TessParams &tp, TessMesh &outm) {
@@ -2449,10 +2520,30 @@ bool tessellate_face(const FaceSurfaceN &face, const TessParams &tp, TessMesh &o
         if (TESSDBG)
             std::fprintf(stderr, "TESSDBG FACE-DONE tris=%zu ok=%d\n", (outm.indices.size() - i0) / 3, (int) ok);
     }
-    // Health accounting (always on): a face carrying a real trim boundary that yields NO triangles is
-    // UV-inversion residual row for this face (ADA_TESS_DIAG only; no-op otherwise). Emitted after
-    // the impl so `path` names the branch actually taken, including any retry tier.
+    // Coverage health (always on): sum the 3D area this face actually emitted and compare it to the
+    // expected trimmed area face_to_mesh computed from the UV loops. A partial fill (< half the
+    // expected area) is a face that tessellated but left a hole — the gap the zero-triangle drop
+    // counter can't see. FaceHealth is consumed (and reset) here regardless of DIAG.
+    FaceHealth &fh = face_health();
+    double emitted_area = 0;
+    {
+        const auto &pos = outm.positions;
+        const auto &idx = outm.indices;
+        for (size_t k = i0; k + 2 < idx.size(); k += 3) {
+            uint32_t a = idx[k], b = idx[k + 1], c = idx[k + 2];
+            if (3 * (size_t) c + 2 >= pos.size())
+                continue;
+            Vec3 A{pos[3 * a], pos[3 * a + 1], pos[3 * a + 2]};
+            Vec3 B{pos[3 * b], pos[3 * b + 1], pos[3 * b + 2]};
+            Vec3 C{pos[3 * c], pos[3 * c + 1], pos[3 * c + 2]};
+            emitted_area += 0.5 * (B - A).cross(C - A).norm();
+        }
+    }
     if (DIAG && face.surface) {
+        FaceDiag &d = face_diag();
+        d.emitted_area = emitted_area;
+        d.expected_area = fh.expected_area;
+        d.has_coverage = fh.has_expected;
         static std::atomic<uint32_t> g_diag_seq{0};
         diag_flush_face(*face.surface, face.src_id, g_diag_seq.fetch_add(1, std::memory_order_relaxed),
                         tls_model_scale());
@@ -2460,8 +2551,13 @@ bool tessellate_face(const FaceSurfaceN &face, const TessParams &tp, TessMesh &o
     // silently dropped geometry — count it. Uses the emitted-triangle delta, not `ok`, since some
     // failures still return true with an empty result.
     g_total_faces.fetch_add(1, std::memory_order_relaxed);
-    if (outm.indices.size() == i0 && !face.bounds.empty())
+    bool dropped = outm.indices.size() == i0 && !face.bounds.empty();
+    if (dropped)
         g_dropped_faces.fetch_add(1, std::memory_order_relaxed);
+    // Partial fill: tessellated (not dropped) but covered < half the expected area — the detection gap.
+    else if (fh.has_expected && fh.expected_area > 1e-6 && emitted_area < 0.5 * fh.expected_area)
+        g_suspect_faces.fetch_add(1, std::memory_order_relaxed);
+    fh = FaceHealth{}; // reset for the next face (DIAG-independent)
     return ok;
 }
 

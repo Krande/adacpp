@@ -82,6 +82,9 @@ bool tessellate_face(const FaceSurfaceN &face, const TessParams &tp, TessMesh &o
 // the streaming entry points can report a dropped-face count for the audit to flag.
 std::uint64_t tess_dropped_faces();
 std::uint64_t tess_total_faces();
+// Faces that tessellated but covered < half their expected surface area (a partial fill / hole) —
+// present-but-incomplete geometry the zero-triangle dropped count can't catch.
+std::uint64_t tess_suspect_faces();
 void reset_tess_face_stats();
 
 // Tessellate a whole decoded document (all roots), one TessMesh with a Group per root.
