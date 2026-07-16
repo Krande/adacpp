@@ -2075,6 +2075,30 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
     for (const LoopUv &l : loops_uv)
         if (!uv_slit(l))
             all_slit = false;
+    // V-winding band: a doubly-periodic surface (torus/tube) whose boundary sweeps a full minor
+    // circle in v while spanning only a short arc in u. The per-point unwrap keeps consecutive v
+    // within half a period, so a full wrap DOESN'T fold back — v drifts monotonically past per_v and
+    // the UV loop collapses to a near-degenerate vertical sliver. That sliver has ~zero polygon area,
+    // so it's misclassified as a slit and tessellated as the WHOLE torus (measured: 118 such faces
+    // produced 57x their true surface area on KR_6). The u-winding case is already handled above;
+    // this is its v analog. Tessellate the real geometry directly: a grid band over the actual small
+    // u-arc x one full minor period.
+    if (per_v && !loops_uv.empty()) {
+        double umn = INF, umx = -INF, vmn = INF, vmx = -INF;
+        for (const auto &lp : loops_uv)
+            for (const Uv &q : lp.uv) {
+                umn = std::min(umn, q[0]);
+                umx = std::max(umx, q[0]);
+                vmn = std::min(vmn, q[1]);
+                vmx = std::max(vmx, q[1]);
+            }
+        if (vmx - vmn > 1.5 * *per_v && umx - umn < *per_v) {
+            diag_set_path("v_wind_band");
+            return tessellate_uv_grid(surf, umn, umx, vmn, vmn + *per_v, tp, same_sense, mesh)
+                       ? nullptr
+                       : "v-winding band tessellation failed";
+        }
+    }
     if (all_slit) {
         diag_set_path("unbounded_slit");
         return tessellate_unbounded(surf, tp, same_sense, mesh) ? nullptr : "slit/full-surface tessellation failed";
