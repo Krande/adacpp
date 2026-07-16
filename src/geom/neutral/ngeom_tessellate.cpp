@@ -2154,11 +2154,18 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
                 vmn = std::min(vmn, q[1]);
                 vmx = std::max(vmx, q[1]);
             }
-        // dv > ~one full period means the boundary wrapped the minor circle and the v-unwrap drifted
-        // (a valid single-valued torus face spans at most one period; a full-circle cross-section
-        // reaches ~per_v plus one discretization step of closing overlap, so 1.1x is the safe line —
-        // it catches the drifters, which start ~1.12 periods, and leaves genuine full circles alone).
-        if (vmx - vmn > 1.1 * *per_v && umx - umn < *per_v) {
+        // dv > one full period means the boundary wrapped the minor circle and the v-unwrap drifted:
+        // a full v-wrap MUST span >= per_v (you can't traverse the whole minor circle in less), while a
+        // non-wrapping single-valued face spans < per_v. So per_v is the exact separatrix. The overshoot
+        // beyond per_v is drift from the face's u-caps and SHRINKS as the sampling coarsens — measured
+        // on KR_6 face #42987: 1.216x per_v at 128 boundary pts (fine) but only 1.084x at 83 pts under
+        // adaptive coarsening. The old 1.1x line was calibrated on fine tessellation (drifters seen
+        // >=1.12x) and wrongly dropped the coarsened 1.084x drifter into the periodic-complement branch
+        // -> the whole torus tessellated (rogue-donut artifact). Non-winding torus faces top out at
+        // 0.99x per_v on this model, so 1.02x clears them with margin while catching coarsened drifters.
+        // Catching a genuine full ring here is harmless: the grid below tessellates [vmn, vmn+per_v],
+        // which IS the full ring.
+        if (vmx - vmn > 1.02 * *per_v && umx - umn < *per_v) {
             diag_set_path("v_wind_band");
             return tessellate_uv_grid(surf, umn, umx, vmn, vmn + *per_v, tp, same_sense, mesh)
                        ? nullptr
