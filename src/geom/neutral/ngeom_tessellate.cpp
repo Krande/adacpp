@@ -43,6 +43,18 @@ const bool FDBG = std::getenv("NGEOM_FDBG") != nullptr;
 // triangle counts, all tess params) — for head-to-head comparison with the reference tessellator's face-debug dump.
 const bool TESSDBG = std::getenv("NGEOM_TESSDBG") != nullptr;
 
+// ADA_BAND_DEBUG: per-band arc-length loft diagnostics (periodic tube bands). Prints, for each band,
+// the two rings' sizes and the max cross-ring arc-length skew of BOTH the new aligned loft AND the
+// legacy libtess2 monotone triangulation (run side by side), so the de-twist is measurable from one
+// binary. A small loft skew (~one segment) vs a large legacy skew (drift toward ~0.5) IS the twist.
+const bool BANDDBG = std::getenv("ADA_BAND_DEBUG") != nullptr;
+// ADA_BAND_LEGACY: force the pre-fix polygon+libtess2 band path (the twisting one). Escape hatch and
+// A/B lever; the arc-length loft is the default.
+const bool BAND_LEGACY = std::getenv("ADA_BAND_LEGACY") != nullptr;
+// Source entity id of the face currently being tessellated, for targeted band debug. Thread-local so
+// the parallel face pool cannot interleave; set once per face in tessellate_face.
+thread_local int64_t g_cur_face_id = 0;
+
 // Face-merge batch size for the huge single-root face-parallel path (tessellate_one_root). The
 // per-face local meshes are held resident until merged; on a 61k-face monster solid the full
 // locals[] is a SECOND complete copy of the solid's soup (~0.5 GB with normals), inflating that
@@ -1710,6 +1722,181 @@ bool tessellate_periodic_winding(const Surface &s, const std::vector<LoopUv> &lo
     return emit_uv_region(s, all, tp, same_sense, mesh);
 }
 
+// Normalized cumulative 3D arc length along a ring of UV points (chord length between consecutive
+// surface points / total). This is the correspondence parameter for the loft: two rings evaluated at
+// the same fraction sit at the same angular position around the tube, so linking them makes a
+// "vertical" quad strip rather than a diagonal spiral. Falls back to index-fraction for a null-length
+// ring so the merge below still terminates.
+std::vector<double> ring_arc_norm(const Surface &s, const std::vector<Uv> &r) {
+    std::vector<double> c(r.size(), 0.0);
+    if (r.size() < 2)
+        return c;
+    Vec3 prev = s.point(r[0][0], r[0][1]);
+    for (size_t k = 1; k < r.size(); ++k) {
+        Vec3 cur = s.point(r[k][0], r[k][1]);
+        c[k] = c[k - 1] + (cur - prev).norm();
+        prev = cur;
+    }
+    double tot = c.back();
+    if (tot > 1e-300)
+        for (double &x : c)
+            x /= tot;
+    else
+        for (size_t k = 0; k < c.size(); ++k)
+            c[k] = (double) k / (double) (c.size() - 1);
+    return c;
+}
+
+// Two-pointer arc-length strip merge of the two boundary rings (bottom, top) of a periodic band.
+// Returns the aligned quad triangulation (2 tris/quad) over a COMBINED vertex list [bottom | top]:
+// bottom vertex i is index i, top vertex j is index bottom.size()+j. Every triangle uses ONLY
+// original ring vertices — no interior/Steiner point is created — so no shared boundary vertex moves
+// and the band stays watertight to its neighbours; the closed-U seam closes exactly as before because
+// the ring endpoints (u=c and u=c+period) evaluate to the same surface point and the per-solid weld
+// fuses them. Because we always advance whichever ring is BEHIND in normalized arc length, the two
+// linked vertices never differ by more than one segment in arc length: the strip cannot drift/spiral,
+// which is the whole point (libtess2's monotone triangulation of bottom+reversed-top drifts).
+std::vector<Tri> band_loft_strip(const std::vector<double> &sb, const std::vector<double> &st, size_t nb, size_t nt) {
+    std::vector<Tri> tris;
+    if (nb < 2 || nt < 2)
+        return tris;
+    tris.reserve(nb + nt);
+    auto BI = [](size_t i) { return (uint32_t) i; };
+    auto TI = [&](size_t j) { return (uint32_t) (nb + j); };
+    size_t i = 0, j = 0;
+    while (i + 1 < nb || j + 1 < nt) {
+        bool adv_bottom;
+        if (i + 1 >= nb)
+            adv_bottom = false;
+        else if (j + 1 >= nt)
+            adv_bottom = true;
+        else
+            adv_bottom = sb[i + 1] <= st[j + 1];
+        if (adv_bottom) {
+            tris.push_back({BI(i), BI(i + 1), TI(j)});
+            ++i;
+        } else {
+            tris.push_back({BI(i), TI(j), TI(j + 1)});
+            ++j;
+        }
+    }
+    return tris;
+}
+
+// Max cross-ring arc-length skew of a strip: over every triangle edge that links a bottom vertex to a
+// top vertex, the largest |arc_bottom - arc_top|. Aligned quads keep this ~one segment; a drifting
+// (twisted) triangulation lets it grow toward ~0.5. Used only for ADA_BAND_DEBUG evidence.
+double strip_arc_skew(const std::vector<Tri> &tris, const std::vector<double> &sb, const std::vector<double> &st,
+                      size_t nb) {
+    double mx = 0.0;
+    for (const Tri &t : tris)
+        for (int k = 0; k < 3; ++k) {
+            uint32_t a = t[k], b = t[(k + 1) % 3];
+            bool a_bot = a < nb, b_bot = b < nb;
+            if (a_bot == b_bot)
+                continue; // same ring: not a connecting edge
+            double arc_b = a_bot ? sb[a] : sb[b];
+            double arc_t = a_bot ? st[b - nb] : st[a - nb];
+            mx = std::max(mx, std::abs(arc_b - arc_t));
+        }
+    return mx;
+}
+
+// Structured arc-length loft of a band's two boundary rings into aligned quads, then the SAME
+// refine/emit tail as emit_uv_region (refine_uv adds curvature subdivision in u and v for a bending
+// tube; no pins, so the boundary is handled exactly as the prior band path did). This REPLACES
+// libtess2's monotone CDT of (bottom + reversed-top), which linked bottom[i] to a drifting top[k] and
+// so spiralled the tube.
+bool emit_band_loft(const Surface &s, const std::vector<Uv> &bottom, const std::vector<Uv> &top, const TessParams &tp,
+                    bool same_sense, Mesh &mesh) {
+    const size_t nb = bottom.size(), nt = top.size();
+    if (nb < 2 || nt < 2)
+        return false;
+    std::vector<double> sb = ring_arc_norm(s, bottom);
+    std::vector<double> st = ring_arc_norm(s, top);
+    std::vector<Tri> tris = band_loft_strip(sb, st, nb, nt);
+    if (tris.empty())
+        return false;
+
+    std::vector<Uv> verts;
+    verts.reserve(nb + nt);
+    for (const Uv &p : bottom)
+        verts.push_back(p);
+    for (const Uv &p : top)
+        verts.push_back(p);
+
+    if (BANDDBG) {
+        // Side-by-side: the legacy libtess2 triangulation of the same rings, scored on the same skew
+        // metric, so the twist is visible from one run. run_tess2 emits no interior points, so every
+        // legacy output vertex is an original ring vertex — recoverable by nearest-ring-vertex match.
+        double umn = INF, umx = -INF, vmn = INF, vmx = -INF;
+        for (const Uv &p : verts) {
+            umn = std::min(umn, p[0]);
+            umx = std::max(umx, p[0]);
+            vmn = std::min(vmn, p[1]);
+            vmx = std::max(vmx, p[1]);
+        }
+        auto [su2, sv2] = metric_scale(s, umn, umx, vmn, vmx);
+        std::vector<Uv> poly = bottom;
+        for (auto it = top.rbegin(); it != top.rend(); ++it)
+            poly.push_back(*it);
+        Tess2Out lg = run_tess2({poly}, su2, sv2);
+        double legacy_skew = -1.0;
+        if (lg.ok) {
+            // map each legacy vertex to (ring, arc) by nearest original ring vertex in UV
+            std::vector<uint32_t> ring_idx(lg.verts.size());
+            std::vector<char> ring_is_bot(lg.verts.size());
+            for (size_t vk = 0; vk < lg.verts.size(); ++vk) {
+                double best = INF;
+                uint32_t bi = 0;
+                char bot = 1;
+                for (size_t q = 0; q < verts.size(); ++q) {
+                    double d = std::abs(verts[q][0] - lg.verts[vk][0]) + std::abs(verts[q][1] - lg.verts[vk][1]);
+                    if (d < best) {
+                        best = d;
+                        bot = q < nb ? 1 : 0;
+                        bi = bot ? (uint32_t) q : (uint32_t) (q - nb);
+                    }
+                }
+                ring_idx[vk] = bi;
+                ring_is_bot[vk] = bot;
+            }
+            legacy_skew = 0.0;
+            for (const Tri &t : lg.tris)
+                for (int k = 0; k < 3; ++k) {
+                    uint32_t a = t[k], b = t[(k + 1) % 3];
+                    if (ring_is_bot[a] == ring_is_bot[b])
+                        continue;
+                    double arc_b = ring_is_bot[a] ? sb[ring_idx[a]] : sb[ring_idx[b]];
+                    double arc_t = ring_is_bot[a] ? st[ring_idx[b]] : st[ring_idx[a]];
+                    legacy_skew = std::max(legacy_skew, std::abs(arc_b - arc_t));
+                }
+        }
+        double seg = 0.0;
+        for (size_t k = 1; k < nb; ++k)
+            seg = std::max(seg, sb[k] - sb[k - 1]);
+        for (size_t k = 1; k < nt; ++k)
+            seg = std::max(seg, st[k] - st[k - 1]);
+        std::fprintf(stderr,
+                     "[BANDDBG] face=%lld bottom=%zu top=%zu tris=%zu loft_arc_skew=%.4f "
+                     "legacy_arc_skew=%.4f max_seg=%.4f%s\n",
+                     (long long) g_cur_face_id, nb, nt, tris.size(), strip_arc_skew(tris, sb, st, nb), legacy_skew, seg,
+                     strip_arc_skew(tris, sb, st, nb) <= seg + 1e-9 ? " ALIGNED" : " DRIFT");
+    }
+
+    double umin = INF, umax = -INF, vmin = INF, vmax = -INF;
+    for (const Uv &p : verts) {
+        umin = std::min(umin, p[0]);
+        umax = std::max(umax, p[0]);
+        vmin = std::min(vmin, p[1]);
+        vmax = std::max(vmax, p[1]);
+    }
+    auto [su, sv] = metric_scale(s, umin, umax, vmin, vmax);
+    refine_and_emit(s, std::move(verts), std::move(tris), su, sv, tp, same_sense, mesh, {}, tp.libtess2.freeze_boundary,
+                    tp.libtess2.converged_frac);
+    return true;
+}
+
 bool tessellate_periodic_band(const Surface &s, const std::vector<LoopUv> &loops_uv, const TessParams &tp,
                               bool same_sense, Mesh &mesh) {
     auto puopt = s.u_period();
@@ -1822,10 +2009,9 @@ bool tessellate_periodic_band(const Surface &s, const std::vector<LoopUv> &loops
         const BandCurve &bottom = curves[i];
         const BandCurve &top = curves[i + 1];
         double vb = mean_v(bottom), vt = mean_v(top);
-        std::vector<Uv> poly = bottom.pts;
-        for (auto it = top.pts.rbegin(); it != top.pts.rend(); ++it)
-            poly.push_back(*it);
-        std::vector<std::vector<Uv>> contours = {poly};
+        // Holes that fall inside this band's v-span: a simple ring-to-ring loft cannot carve a hole,
+        // so a holed band keeps the libtess2 CDT path below (correctness over de-twist for that case).
+        std::vector<std::vector<Uv>> band_holes;
         for (const auto &h : holes) {
             double hv = 0;
             for (const Uv &p : h)
@@ -1842,9 +2028,25 @@ bool tessellate_periodic_band(const Surface &s, const std::vector<LoopUv> &loops
                 if (shift != 0.0)
                     for (Uv &p : hh)
                         p[0] -= shift;
-                contours.push_back(hh);
+                band_holes.push_back(std::move(hh));
             }
         }
+        // Default: structured arc-length loft (aligned quads, cannot twist). Fall back to libtess2's
+        // monotone triangulation only when the band has a hole (loft can't represent it) or a ring is
+        // degenerate, or when ADA_BAND_LEGACY forces the pre-fix path.
+        if (!BAND_LEGACY && band_holes.empty() && bottom.pts.size() >= 2 && top.pts.size() >= 2) {
+            any |= emit_band_loft(s, bottom.pts, top.pts, tp, same_sense, mesh);
+            continue;
+        }
+        if (BANDDBG)
+            std::fprintf(stderr, "[BANDDBG] face=%lld FALLBACK-LEGACY bottom=%zu top=%zu band_holes=%zu\n",
+                         (long long) g_cur_face_id, bottom.pts.size(), top.pts.size(), band_holes.size());
+        std::vector<Uv> poly = bottom.pts;
+        for (auto it = top.pts.rbegin(); it != top.pts.rend(); ++it)
+            poly.push_back(*it);
+        std::vector<std::vector<Uv>> contours = {poly};
+        for (auto &hh : band_holes)
+            contours.push_back(std::move(hh));
         any |= emit_uv_region(s, contours, tp, same_sense, mesh);
     }
     return any;
@@ -2539,6 +2741,7 @@ void reset_tess_face_stats() {
 
 bool tessellate_face(const FaceSurfaceN &face, const TessParams &tp, TessMesh &outm) {
     const size_t i0 = outm.indices.size();
+    g_cur_face_id = face.src_id; // for targeted band debug (ADA_BAND_DEBUG)
     bool ok;
     if (!FDBG && !TESSDBG) {
         ok = tessellate_face_impl(face, tp, outm);
