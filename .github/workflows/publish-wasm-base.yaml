@@ -20,7 +20,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write # attach the wasm modules to the GitHub release on tag pushes
   packages: write
 
 jobs:
@@ -103,19 +103,75 @@ jobs:
         run: |
           mkdir -p out out/wasm
           cp dist/ada_cpp-*.whl out/
+          # .js + .wasm + the emscripten-generated .d.ts (from --emit-tsd) for each module.
           cp build-wasm-stepglb/wasm_output/adacpp_step_glb.js out/wasm/
           cp build-wasm-stepglb/wasm_output/adacpp_step_glb.wasm out/wasm/
+          cp build-wasm-stepglb/wasm_output/adacpp_step_glb.d.ts out/wasm/
           cp build-wasm-glbdiff/wasm_output/adacpp_glb_diff.js out/wasm/
           cp build-wasm-glbdiff/wasm_output/adacpp_glb_diff.wasm out/wasm/
+          cp build-wasm-glbdiff/wasm_output/adacpp_glb_diff.d.ts out/wasm/
           cp build-wasm-ifcglb/wasm_output/adacpp_ifc_glb.js out/wasm/
           cp build-wasm-ifcglb/wasm_output/adacpp_ifc_glb.wasm out/wasm/
+          cp build-wasm-ifcglb/wasm_output/adacpp_ifc_glb.d.ts out/wasm/
           cp build-wasm-brepwriter/wasm_output/adacpp_brep_writer.js out/wasm/
           cp build-wasm-brepwriter/wasm_output/adacpp_brep_writer.wasm out/wasm/
+          cp build-wasm-brepwriter/wasm_output/adacpp_brep_writer.d.ts out/wasm/
+          cp wasm-types/README.md out/wasm/
+          cp wasm-types/THIRD_PARTY_LICENSES.txt out/wasm/  # GPL-3.0 notice + permissive-dep attributions
           cd out
           wheel=$(ls ada_cpp-*.whl)
           printf '{"adacpp":"%s"}\n' "$wheel" > manifest.json
           printf '%s\n' "${GITHUB_SHA}" > adacpp.sha
-          echo "Staged $wheel + out/wasm/ (adacpp_step_glb + adacpp_glb_diff + adacpp_ifc_glb + adacpp_brep_writer .js/.wasm)"
+          echo "Staged $wheel + out/wasm/ (adacpp_step_glb + adacpp_glb_diff + adacpp_ifc_glb + adacpp_brep_writer .js/.wasm/.d.ts)"
+
+      # Bundle the four OCC-free wasm modules (.js + .wasm + generated .d.ts + README) into a single
+      # versioned zip, so a release carries both the individual files (fetch just one module) and a
+      # one-download bundle. The .wasm-base image already got the same files staged above.
+      - name: Bundle wasm modules for the release
+        run: |
+          ref="${GITHUB_REF_NAME}"
+          ver="${ref#v}"                       # tag v1.2.3 -> 1.2.3
+          [ "$ver" = "$ref" ] && ver="${GITHUB_SHA::7}"   # non-tag dispatch: short sha
+          zip="adacpp-wasm-${ver}.zip"
+          ( cd out/wasm && zip -X -r "../../${zip}" . )
+          echo "ADACPP_WASM_ZIP=${zip}" >> "$GITHUB_ENV"
+          echo "Bundled ${zip}:"; unzip -l "${zip}"
+
+      # On a tag push, attach the wasm modules to the GitHub release for that tag. softprops upserts,
+      # so it creates the release if the release-on-new-tag job hasn't yet, or adds assets if it has —
+      # no ordering dependency between the two workflows. Mirrors build-stp2glb.yaml's release step.
+      - name: Attach wasm modules to the GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          # Best-effort append: the license/source note is authoritatively shipped as
+          # THIRD_PARTY_LICENSES.txt (in the zip + as an individual asset). This body note is a
+          # convenience pointer; if the release-on-new-tag job regenerates the body after this runs,
+          # the bundled file still carries the compliant notice.
+          append_body: true
+          body: |
+            ---
+            **Precompiled wasm modules** (`adacpp_*.js`/`.wasm`, `adacpp-wasm-*.zip`) are part of
+            adacpp and are licensed under **GPL-3.0-or-later**. The Corresponding Source is this
+            repository at the tag above (https://github.com/Krande/adacpp). They bundle third-party
+            components under permissive licences (libtess2 — SGI-B-2.0; detria/meshoptimizer/
+            nlohmann-json — MIT; Manifold — Apache-2.0); see `THIRD_PARTY_LICENSES.txt` in the
+            bundle. Use and redistribution are subject to the GPL-3.0-or-later.
+          files: |
+            out/wasm/adacpp_step_glb.js
+            out/wasm/adacpp_step_glb.wasm
+            out/wasm/adacpp_step_glb.d.ts
+            out/wasm/adacpp_ifc_glb.js
+            out/wasm/adacpp_ifc_glb.wasm
+            out/wasm/adacpp_ifc_glb.d.ts
+            out/wasm/adacpp_brep_writer.js
+            out/wasm/adacpp_brep_writer.wasm
+            out/wasm/adacpp_brep_writer.d.ts
+            out/wasm/adacpp_glb_diff.js
+            out/wasm/adacpp_glb_diff.wasm
+            out/wasm/adacpp_glb_diff.d.ts
+            out/wasm/THIRD_PARTY_LICENSES.txt
+            ${{ env.ADACPP_WASM_ZIP }}
 
       - uses: docker/setup-buildx-action@v4
 
