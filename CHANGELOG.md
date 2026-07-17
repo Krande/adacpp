@@ -2,6 +2,15 @@
 
 
 
+## v0.16.1 (2026-07-17)
+
+### Fix
+
+* fix: per-face STEP colours without --face-regions, plus CLI positional args + pipeline validation (#41)
+
+Co-authored-by: Claude Opus 4.8 &lt;noreply@anthropic.com&gt; ([`aada2a1`](https://github.com/Krande/adacpp/commit/aada2a1066c62674f51c3ce37aadba0a067d35c2))
+
+
 ## v0.16.0 (2026-07-17)
 
 ### Feature
