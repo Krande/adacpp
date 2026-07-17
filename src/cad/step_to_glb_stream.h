@@ -90,8 +90,13 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
         tp.libtess2.converged_frac = std::atof(e);
     tp.deflection = deflection;
     tp.max_angle = angular_deg * 3.14159265358979323846 / 180.0;
-    tp.model_scale = model_scale;          // >0 => adaptive per-surface density; the per-solid tpp copies inherit it
-    tp.capture_face_ranges = face_regions; // opt-in per-face clickable regions -> scenes[0].extras
+    tp.model_scale = model_scale; // >0 => adaptive per-surface density; the per-solid tpp copies inherit it
+    // Always capture per-face ranges: split_solid_by_face_colour needs each face's colour + triangle
+    // range to bucket AP214 per-face styling into per-colour materials, independent of the picking
+    // opt-in. The picking EXTRAS (face_ranges_node<m>) stay gated on `face_regions` — the ranges are
+    // dropped after the colour split when they weren't requested (process_root below). Capture is now
+    // parallel-safe (recorded in the tessellator's in-order merge), so this keeps big files parallel.
+    tp.capture_face_ranges = true;
 
     // Metadata (colour/transform/path maps) once; workers copy these read-only maps.
     adacpp::step::Resolver master(idx);
@@ -222,8 +227,11 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
                 }
                 // A solid whose faces carry distinct per-face colours (AP214 per-face styling) is split
                 // into one primitive/material per colour; single-colour solids pass through unchanged.
-                for (adacpp::glb::GlbSolid &part : adacpp::glb::split_solid_by_face_colour(gs))
-                    lane.add(part); // spilled to disk immediately
+                for (adacpp::glb::GlbSolid &part : adacpp::glb::split_solid_by_face_colour(gs)) {
+                    if (!face_regions)
+                        part.face_ranges.clear(); // colour split done; drop picking ranges (opt-in extras)
+                    lane.add(part);               // spilled to disk immediately
+                }
                 nwritten.fetch_add(1, std::memory_order_relaxed);
             };
             // Phase A — the huge prefix, one root at a time BEFORE the pool starts: every thread

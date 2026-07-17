@@ -3198,7 +3198,10 @@ static void tessellate_one_root(const NgeomRoot &root, const TessParams &tp, Tes
         // the serial loop. The 64-face floor keeps small solids on the cheap path.
         // DIAG forces the serial loop: the per-face residual accumulator is thread_local, so a
         // face-parallel run would scatter rows across threads and lose the face-order sequence.
-        if (tp.threads > 1 && root.faces.size() >= 64 && !tp.capture_face_ranges && !DIAG) {
+        // Face-range capture happens in the in-order merge below, so it no longer forces the serial
+        // path — big colour-bearing solids stay parallel. DIAG still forces serial (its per-face
+        // residual accumulator is thread_local and would scatter across face workers).
+        if (tp.threads > 1 && root.faces.size() >= 64 && !DIAG) {
             const size_t n = root.faces.size();
             TessParams tpl = tp;
             tpl.threads = 1; // no nested pools inside a face
@@ -3235,8 +3238,24 @@ static void tessellate_one_root(const NgeomRoot &root, const TessParams &tp, Tes
                 face_worker();
                 for (std::thread &th : pool)
                     th.join();
-                for (const TessMesh &lm : locals)
-                    append_mesh(out, lm);
+                // Merge in face order (identical to the serial loop). Capture per-face ranges HERE
+                // when requested, measuring each face's [start,count) as it lands in the merged
+                // buffer — same result as the serial capture path, but without giving up parallelism.
+                for (size_t li = 0; li < locals.size(); ++li) {
+                    const size_t fi = b0 + li;
+                    if (tp.capture_face_ranges && root.faces[fi]) {
+                        const uint32_t s = (uint32_t) out.indices.size();
+                        append_mesh(out, locals[li]);
+                        const uint32_t c = (uint32_t) out.indices.size() - s;
+                        if (c > 0) {
+                            const auto &f = *root.faces[fi];
+                            out.face_ranges.push_back(
+                                {s, c, f.src_id, (uint32_t) fi, f.has_color, f.cr, f.cg, f.cb, f.ca});
+                        }
+                    } else {
+                        append_mesh(out, locals[li]);
+                    }
+                }
             } // locals freed here -> next batch's peak is one batch, not all n faces
             return;
         }
