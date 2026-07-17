@@ -76,13 +76,11 @@ int main(int argc, char *argv[]) {
     std::string schema = "IFC4X3_ADD2"; // target IFC schema (STEP->IFC)
     long max_solids = 0;                // cap on solids/products emitted for STEP<->IFC (0 = no cap)
 
-    // Positional `adacpp input output` — the natural CLI shape. --stp/--glb are kept as hidden
-    // back-compat aliases for the old STEP->GLB-only CLI so existing scripts keep working.
-    app.add_option("input,-i,--input,--stp", input, "Input filepath (.stp/.step/.p21, .ifc)")->required();
-    app.add_option("output,-o,--output,--glb", output, "Output filepath (.glb, .ifc, .stp/.step)")->required();
+    // Positional `adacpp input output`.
+    app.add_option("input,-i,--input", input, "Input filepath (.stp/.step/.p21, .ifc)")->required();
+    app.add_option("output,-o,--output", output, "Output filepath (.glb, .ifc, .stp/.step)")->required();
 
-    // --lin-defl kept as an alias for backwards compatibility with the old OCCT CLI.
-    app.add_option("--deflection,--lin-defl", deflection, "Linear deflection (GLB paths)")->default_val(2.0);
+    app.add_option("--deflection", deflection, "Linear deflection (GLB paths)")->default_val(2.0);
     app.add_option("--angular-deg", angular_deg, "Angular deflection (degrees)")->default_val(20.0);
     app.add_option("--num-threads", num_threads, "Worker threads (0 = all hardware cores; GLB paths)")
         ->default_val(0);
