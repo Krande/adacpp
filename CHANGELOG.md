@@ -2,6 +2,15 @@
 
 
 
+## v0.16.0 (2026-07-17)
+
+### Feature
+
+* feat: native OCC-free STEP/IFC to GLB with tessellation tracks and colour/curved-surface fidelity (#40)
+
+Co-authored-by: Claude Opus 4.8 (1M context) &lt;noreply@anthropic.com&gt; ([`3e5f9fc`](https://github.com/Krande/adacpp/commit/3e5f9fc4fd5a087f7a4a8d8f6763854b68d98225))
+
+
 ## v0.15.0 (2026-07-15)
 
 ### Feature
