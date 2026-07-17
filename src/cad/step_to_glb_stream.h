@@ -193,8 +193,8 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
                 // Carry per-face clickable regions (relative to this solid's index buffer) when captured.
                 gs.face_ranges.reserve(tm.face_ranges.size());
                 for (const auto &fr : tm.face_ranges)
-                    gs.face_ranges.push_back({fr.first_index, fr.index_count, fr.face_id, fr.face_seq,
-                                              fr.has_color, fr.cr, fr.cg, fr.cb, fr.ca});
+                    gs.face_ranges.push_back({fr.first_index, fr.index_count, fr.face_id, fr.face_seq, fr.has_color,
+                                              fr.cr, fr.cg, fr.cb, fr.ca});
                 gs.color = {rr.cr, rr.cg, rr.cb, rr.ca}; // grey default when !has_color
                 gs.transforms = rr.transforms;
                 gs.id = rr.id; // fallback leaf name

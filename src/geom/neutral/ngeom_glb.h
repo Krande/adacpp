@@ -92,8 +92,10 @@ inline uint32_t pad4(uint32_t n) {
 // the renderer treats the sRGB value as linear and its display gamma-encode lifts mid channels
 // (e.g. deep orange 0.4 -> ~0.67 green), yellowing the colour. Applied to RGB only, not alpha.
 inline float srgb_to_linear(float c) {
-    if (c <= 0.0f) return 0.0f;
-    if (c >= 1.0f) return 1.0f;
+    if (c <= 0.0f)
+        return 0.0f;
+    if (c >= 1.0f)
+        return 1.0f;
     return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
 }
 

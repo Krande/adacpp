@@ -128,14 +128,14 @@ const bool DIAG = tess_diag_path() != nullptr;
 
 // Per-face accumulator: one row per face, so a 300k-face model stays a manageable CSV.
 struct FaceDiag {
-    std::vector<double> r;  // residual per boundary point (model units)
-    size_t n_uv_fail = 0;   // surf.uv() returned false
-    size_t n_collapsed = 0; // ...and the handler collapsed point i onto i-1 (Defect 2 fired)
-    const char *path = "?";     // which branch of face_to_mesh took the face
-    double emitted_area = 0;    // 3D area actually tessellated for this face
-    double expected_area = 0;   // expected trimmed surface area (region-fill faces only)
-    bool has_coverage = false;  // expected_area is meaningful (not a winding/periodic face)
-    size_t n_tris = 0;          // triangles emitted for this face (characterization)
+    std::vector<double> r;     // residual per boundary point (model units)
+    size_t n_uv_fail = 0;      // surf.uv() returned false
+    size_t n_collapsed = 0;    // ...and the handler collapsed point i onto i-1 (Defect 2 fired)
+    const char *path = "?";    // which branch of face_to_mesh took the face
+    double emitted_area = 0;   // 3D area actually tessellated for this face
+    double expected_area = 0;  // expected trimmed surface area (region-fill faces only)
+    bool has_coverage = false; // expected_area is meaningful (not a winding/periodic face)
+    size_t n_tris = 0;         // triangles emitted for this face (characterization)
 };
 
 // thread_local: DIAG forces threads=1 (see tessellate_one_root), but a stray parallel caller must
@@ -193,8 +193,8 @@ void diag_flush_face(const Surface &surf, int64_t face_id, uint32_t face_seq, do
     double coverage = (d.has_coverage && d.expected_area > 1e-12) ? d.emitted_area / d.expected_area : -1.0;
     std::fprintf(t.fh, "%u,%lld,%s,%d,%s,%zu,%zu,%zu,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.6g,%.6g,%.4g,%zu\n",
                  face_seq, (long long) face_id, surf_kind(surf), (int) surf.is_quadric(), d.path, d.r.size(),
-                 d.n_uv_fail, d.n_collapsed, p50, p95, mx, p50 / sz, p95 / sz, mx / sz, sz, model_scale,
-                 d.emitted_area, d.has_coverage ? d.expected_area : -1.0, coverage, d.n_tris);
+                 d.n_uv_fail, d.n_collapsed, p50, p95, mx, p50 / sz, p95 / sz, mx / sz, sz, model_scale, d.emitted_area,
+                 d.has_coverage ? d.expected_area : -1.0, coverage, d.n_tris);
     d = FaceDiag{};
 }
 
@@ -2382,8 +2382,8 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
     // attachment — came out as the small hose-side cap with the gasket itself missing. Route those to
     // the complement tessellation. Measured on KR_6: exactly 2 faces flip (the gaskets); every other
     // quadric face (1925 of them) is interior-material and unchanged.
-    if (auto per_u = surf.u_period(); per_u && loops_uv.size() == 1 && loops_uv[0].w == 0
-                                      && loops_uv[0].uv.size() >= 3) {
+    if (auto per_u = surf.u_period();
+        per_u && loops_uv.size() == 1 && loops_uv[0].w == 0 && loops_uv[0].uv.size() >= 3) {
         const auto &L = loops_uv[0].uv;
         double area = 0, uc = 0, vc = 0;
         for (size_t i = 0; i < L.size(); ++i) {
@@ -3249,8 +3249,8 @@ static void tessellate_one_root(const NgeomRoot &root, const TessParams &tp, Tes
                 tessellate_face(*face, tp, out);
                 const uint32_t c = (uint32_t) out.indices.size() - s;
                 if (c > 0)
-                    out.face_ranges.push_back({s, c, face->src_id, (uint32_t) fi, face->has_color, face->cr,
-                                               face->cg, face->cb, face->ca});
+                    out.face_ranges.push_back(
+                        {s, c, face->src_id, (uint32_t) fi, face->has_color, face->cr, face->cg, face->cb, face->ca});
             } else {
                 tessellate_face(*face, tp, out);
             }
