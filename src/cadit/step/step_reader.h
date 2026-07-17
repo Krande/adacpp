@@ -1036,6 +1036,11 @@ private:
     static bool enum_true(const Value &v) {
         return !(v.kind == Kind::Enum && v.s == "F");
     }
+    // Closed/periodic flag: true ONLY when the enum is explicitly .T. (.F./.U./missing -> not closed).
+    // Conservative on purpose — a spurious "closed" would send an open patch down the periodic seam path.
+    static bool enum_flag_true(const Value &v) {
+        return v.kind == Kind::Enum && v.s == "T";
+    }
 
     static ng::Vec3 vec3_of(const Value &list) {
         ng::Vec3 r{0, 0, 0};
@@ -1243,14 +1248,20 @@ private:
     }
 
     // Build a BSplineSurface from raw Part-21 args (grid = list of u-rows of control-point refs;
-    // optional weights = same-shaped grid of reals). u_closed/v_closed are left default, matching
-    // ngeom_decode.h (which reads but ignores them).
+    // optional weights = same-shaped grid of reals). u_closed/v_closed (the B_SPLINE_SURFACE Part-21
+    // enum flags) MUST be honoured: a closed/periodic surface (e.g. a hose, whose u knot vector is
+    // non-clamped with end multiplicity < degree+1) covers a full u/v period, so the tessellator has
+    // to unwrap the seam. Dropping them routes the face through the generic (non-periodic) path, which
+    // tears the tube at the u=umin/umax seam. See ngeom_bspline.h BSplineSurface::point (period wrap).
     std::shared_ptr<ng::Surface> build_bspline_surface(long u_deg, long v_deg, const Value &grid, const Value &u_mults,
                                                        const Value &v_mults, const Value &u_knots, const Value &v_knots,
-                                                       const Value *weights) {
+                                                       const Value *weights, bool u_closed = false,
+                                                       bool v_closed = false) {
         auto s = std::make_shared<ng::BSplineSurface>();
         s->u_degree = (int) u_deg;
         s->v_degree = (int) v_deg;
+        s->u_closed = u_closed;
+        s->v_closed = v_closed;
         if (grid.kind != Kind::List || grid.items.empty())
             return s;
         s->nu = (int) grid.items.size();
@@ -1288,8 +1299,12 @@ private:
         const auto *rat = sub(in, "RATIONAL_B_SPLINE_SURFACE");
         if (!bs || !bk || bs->size() < 3 || bk->size() < 4)
             return nullptr;
+        // B_SPLINE_SURFACE sub-args (no leading name): 0=u_deg,1=v_deg,2=grid,3=surface_form,
+        // 4=u_closed,5=v_closed,6=self_intersect.
+        bool u_closed = bs->size() > 4 && enum_flag_true((*bs)[4]);
+        bool v_closed = bs->size() > 5 && enum_flag_true((*bs)[5]);
         return build_bspline_surface((*bs)[0].i, (*bs)[1].i, (*bs)[2], (*bk)[0], (*bk)[1], (*bk)[2], (*bk)[3],
-                                     (rat && !rat->empty()) ? &(*rat)[0] : nullptr);
+                                     (rat && !rat->empty()) ? &(*rat)[0] : nullptr, u_closed, v_closed);
     }
     std::shared_ptr<ng::Curve> bspline_curve_complex(const Instance *in) {
         const auto *bc = sub(in, "B_SPLINE_CURVE");
@@ -1333,8 +1348,11 @@ private:
         } else if (in) {
             std::string_view t = in->type;
             if (t == "B_SPLINE_SURFACE_WITH_KNOTS" && in->args.size() >= 12)
+                // args: 0=name,1=u_deg,2=v_deg,3=grid,4=form,5=u_closed,6=v_closed,7=self_int,
+                // 8=u_mults,9=v_mults,10=u_knots,11=v_knots.
                 s = build_bspline_surface(in->args[1].i, in->args[2].i, in->args[3], in->args[8], in->args[9],
-                                          in->args[10], in->args[11], nullptr);
+                                          in->args[10], in->args[11], nullptr, enum_flag_true(in->args[5]),
+                                          enum_flag_true(in->args[6]));
             else if (t == "SURFACE_OF_LINEAR_EXTRUSION" && in->args.size() >= 3 && in->args[1].is_ref() &&
                      in->args[2].is_ref()) {
                 // SURFACE_OF_LINEAR_EXTRUSION('',#swept_curve,#VECTOR('',#dir,depth))

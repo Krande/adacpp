@@ -212,12 +212,31 @@ struct BSplineSurface : Surface {
         vmax = Uv[nv];
     }
 
+    // Reduce a parameter into the knot domain [lo,hi]. A CLOSED/periodic direction repeats with
+    // period (hi-lo), so WRAP (fmod) rather than clamp: this makes evaluation continuous ACROSS the
+    // u=umin/umax seam. The periodic tessellation paths (tessellate_periodic_band / _winding) place
+    // sample points a little past the seam (u in [seam, seam+period]); clamping would pin every
+    // over-the-seam point onto the umax edge and tear the tube, whereas wrapping lands them back on
+    // the real periodic geometry (S(umax)==S(umin) for a closed surface). An OPEN direction still
+    // clamps, so a stray FD/Newton probe past the end returns the boundary point, not an extrapolation.
+    static double reduce_param(double t, double lo, double hi, bool closed) {
+        if (closed) {
+            double span = hi - lo;
+            if (span > 1e-300) {
+                double r = std::fmod(t - lo, span);
+                if (r < 0.0)
+                    r += span;
+                return lo + r;
+            }
+        }
+        return clampd(t, lo, hi);
+    }
+
     Vec3 point(double u, double v) const override {
         using namespace bspline_detail;
-        // clamp to the knot domain (Rust BSplineSurface::point) — return the boundary point
-        // rather than extrapolating when a FD/Newton probe steps just outside.
-        u = clampd(u, Uu[u_degree], Uu[nu]);
-        v = clampd(v, Uv[v_degree], Uv[nv]);
+        // Reduce into the knot domain: wrap a closed/periodic direction (seam-continuous), else clamp.
+        u = reduce_param(u, Uu[u_degree], Uu[nu], u_closed);
+        v = reduce_param(v, Uv[v_degree], Uv[nv], v_closed);
         int su = find_span(nu - 1, u_degree, u, Uu);
         int sv = find_span(nv - 1, v_degree, v, Uv);
         if (u_degree <= kDeBoorMaxDeg && v_degree <= kDeBoorMaxDeg) {
