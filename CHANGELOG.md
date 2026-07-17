@@ -2,6 +2,15 @@
 
 
 
+## v0.17.0 (2026-07-17)
+
+### Feature
+
+* feat: attach OCC-free wasm modules to releases + adacpp CLI with STEP/IFC conversion paths (#42)
+
+Co-authored-by: Claude Opus 4.8 (1M context) &lt;noreply@anthropic.com&gt; ([`0805d9d`](https://github.com/Krande/adacpp/commit/0805d9d01b6f7a694003a4cce11a51f08fc6f450))
+
+
 ## v0.16.1 (2026-07-17)
 
 ### Fix
