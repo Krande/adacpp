@@ -136,7 +136,7 @@ install = { cmd = "unset CMAKE_GENERATOR CMAKE_GENERATOR_PLATFORM CMAKE_GENERATO
     "src/**/*.hxx",
     "src/adacpp/**/*.py",
 ], outputs = [
-    "build/STP2GLB.exe",
+    "build/adacpp.exe",
     "build/_ada_cpp_ext_impl*.pyd",
 ] }
 # Win-64 mirror of the linux build-dist below — see the note there.
@@ -150,7 +150,7 @@ build-dist = { cmd = "unset CMAKE_GENERATOR CMAKE_GENERATOR_PLATFORM CMAKE_GENER
     "src/**/*.hxx",
     "src/adacpp/**/*.py",
 ] }
-stp2glb = { cmd = "STP2GLB.exe", description = "Run the C++ tests" }
+stp2glb = { cmd = "adacpp.exe", description = "Run the standalone adacpp CLI" }
 
 [feature.test.target.linux-64.tasks]
 install = { cmd = "cmake --preset pixi-test-linux && cmake --build build && cmake --install build", description = "Build and install with CMake", inputs = [
@@ -163,7 +163,7 @@ install = { cmd = "cmake --preset pixi-test-linux && cmake --build build && cmak
     "src/**/*.hxx",
     "src/adacpp/**/*.py",
 ], outputs = [
-    "build/STP2GLB",
+    "build/adacpp",
     "build/_ada_cpp_ext_impl*.so",
 ] }
 # Build the native extension and assemble an importable adacpp package (python sources + the
@@ -183,7 +183,7 @@ build-dist = { cmd = "cmake --preset pixi-test-linux && cmake --build build && r
 ], outputs = [
     "build/dist/adacpp/_ada_cpp_ext_impl.abi3.so",
 ] }
-stp2glb = { cmd = "STP2GLB", description = "Run the C++ tests" }
+stp2glb = { cmd = "adacpp", description = "Run the standalone adacpp CLI" }
 
 [feature.test.target.win-64.activation.env]
 STP2GLB_EXE_DIR = "%CONDA_PREFIX%/Library/bin"
@@ -205,7 +205,7 @@ gxx = "*"
 # Configure with BUILD_STP2GLB_STANDALONE=ON (skips OCCT/CGAL/gmsh/IFC/Python) and build only the
 # STP2GLB target. TINY_INCLUDE_DIR puts $CONDA_PREFIX/include (where CLI/CLI.hpp lives) on the include
 # path; CMAKE_PREFIX_PATH lets find_package(Threads) + manifold resolve against the lean env.
-build-stp2glb = { cmd = "cmake -S . -B build-stp2glb -G Ninja -DBUILD_STP2GLB_STANDALONE=ON -DBUILD_PYTHON=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DTINY_INCLUDE_DIR=$CONDA_PREFIX/include && cmake --build build-stp2glb --target STP2GLB && echo \"STP2GLB -> $PIXI_PROJECT_ROOT/build-stp2glb/STP2GLB\"", description = "Build ONLY the OCC-free standalone STP2GLB CLI (no OCCT/CGAL/gmsh/IFC/Python)" }
+build-stp2glb = { cmd = "cmake -S . -B build-stp2glb -G Ninja -DBUILD_STP2GLB_STANDALONE=ON -DBUILD_PYTHON=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DTINY_INCLUDE_DIR=$CONDA_PREFIX/include && cmake --build build-stp2glb --target STP2GLB && echo \"adacpp -> $PIXI_PROJECT_ROOT/build-stp2glb/adacpp\"", description = "Build ONLY the OCC-free standalone adacpp CLI (no OCCT/CGAL/gmsh/IFC/Python)" }
 
 [feature.stp2glb.target.win-64.tasks]
 # Win-64 mirror of the standalone build. Two platform diffs: CLI11 headers live under Library/include
@@ -213,7 +213,7 @@ build-stp2glb = { cmd = "cmake -S . -B build-stp2glb -G Ninja -DBUILD_STP2GLB_ST
 # (same as build-dist). Same OCC-free BUILD_STP2GLB_STANDALONE config — the CMake standalone block
 # static-links the MSVC runtime, so the resulting STP2GLB.exe imports only KERNEL32 (no VC++ redist,
 # no conda env).
-build-stp2glb = { cmd = "unset CMAKE_GENERATOR CMAKE_GENERATOR_PLATFORM CMAKE_GENERATOR_TOOLSET && cmake -S . -B build-stp2glb -G Ninja -DBUILD_STP2GLB_STANDALONE=ON -DBUILD_PYTHON=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DTINY_INCLUDE_DIR=$CONDA_PREFIX/Library/include && cmake --build build-stp2glb --target STP2GLB && echo \"STP2GLB -> $PIXI_PROJECT_ROOT/build-stp2glb/STP2GLB.exe\"", description = "Build ONLY the OCC-free standalone STP2GLB.exe CLI on Windows" }
+build-stp2glb = { cmd = "unset CMAKE_GENERATOR CMAKE_GENERATOR_PLATFORM CMAKE_GENERATOR_TOOLSET && cmake -S . -B build-stp2glb -G Ninja -DBUILD_STP2GLB_STANDALONE=ON -DBUILD_PYTHON=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DTINY_INCLUDE_DIR=$CONDA_PREFIX/Library/include && cmake --build build-stp2glb --target STP2GLB && echo \"adacpp -> $PIXI_PROJECT_ROOT/build-stp2glb/adacpp.exe\"", description = "Build ONLY the OCC-free standalone adacpp.exe CLI on Windows" }
 
 [feature.test.target.linux-64.activation.env]
 STP2GLB_EXE_DIR = "$CONDA_PREFIX/bin"
