@@ -12,11 +12,16 @@ set(STP2GLB_SOURCES
 )
 set(STP2GLB_HEADERS
         src/cad/step_to_glb_stream.h
+        src/cad/ifc_to_glb_stream.h   # IFC -> GLB
+        src/cad/brep_file_convert.h   # STEP <-> IFC
 )
 
 add_executable(STP2GLB ${STP2GLB_SOURCES} ${STP2GLB_HEADERS})
 
+# The CLI is shipped as `adacpp` (it now does STEP/IFC -> GLB and STEP <-> IFC, not just STEP->GLB).
+# The CMake target keeps its historical name so `--target STP2GLB` and the ctest wiring are unchanged.
 set_target_properties(STP2GLB PROPERTIES
+        OUTPUT_NAME "adacpp"
         INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/bin"
 )
 # OCC-free: link only manifold (mesh-boolean for the libtess2 path), pthreads, and the C++ stdlib.

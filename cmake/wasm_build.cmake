@@ -21,6 +21,7 @@ if (BUILD_GLB_DIFF_WASM)
             "-sEXPORT_ES6=1"
             "-sEXPORT_NAME=createAdacppGlbDiff"
             "-sENVIRONMENT=web,worker,node"
+            "--emit-tsd" "adacpp_glb_diff.d.ts"
             "-sSTACK_SIZE=1048576")
     return() # standalone target
 endif ()
@@ -48,6 +49,7 @@ if (BUILD_STEP_GLB_WASM)
             "-sEXPORT_ES6=1"
             "-sEXPORT_NAME=createAdacppStepGlb"
             "-sENVIRONMENT=web,worker,node"
+            "--emit-tsd" "adacpp_step_glb.d.ts"
             "-sSTACK_SIZE=1048576")
     return() # standalone target; skip the legacy WASM_UTILS stub below
 endif ()
@@ -76,6 +78,7 @@ if (BUILD_IFC_GLB_WASM)
             "-sEXPORT_ES6=1"
             "-sEXPORT_NAME=createAdacppIfcGlb"
             "-sENVIRONMENT=web,worker,node"
+            "--emit-tsd" "adacpp_ifc_glb.d.ts"
             "-sSTACK_SIZE=1048576")
     return() # standalone target; skip the legacy WASM_UTILS stub below
 endif ()
@@ -98,6 +101,7 @@ if (BUILD_BREP_WRITER_WASM)
             "-sEXPORT_ES6=1"
             "-sEXPORT_NAME=createAdacppBrepWriter"
             "-sENVIRONMENT=web,worker,node"
+            "--emit-tsd" "adacpp_brep_writer.d.ts"
             "-sSTACK_SIZE=1048576")
     return() # standalone target; skip the legacy WASM_UTILS stub below
 endif ()
