@@ -87,6 +87,15 @@ inline std::string fnum(double v) {
 inline uint32_t pad4(uint32_t n) {
     return (4 - (n & 3u)) & 3u;
 }
+// STEP COLOUR_RGB values are sRGB (display) colours, but glTF baseColorFactor is defined in LINEAR
+// space — so write the sRGB->linear transform, matching what OCC's XCAF does on import. Without it
+// the renderer treats the sRGB value as linear and its display gamma-encode lifts mid channels
+// (e.g. deep orange 0.4 -> ~0.67 green), yellowing the colour. Applied to RGB only, not alpha.
+inline float srgb_to_linear(float c) {
+    if (c <= 0.0f) return 0.0f;
+    if (c >= 1.0f) return 1.0f;
+    return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+}
 
 constexpr float IDENT[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
 
@@ -269,8 +278,9 @@ inline bool glb_write_framed(const std::string &path, const std::vector<MatHeade
         meshes << (i ? "," : "") << "{\"name\":\"node" << i
                << "\",\"primitives\":[{\"attributes\":{\"POSITION\":" << i * 2 + 1 << "},\"indices\":" << i * 2
                << ",\"mode\":4,\"material\":" << i << "}]}";
-        materials << (i ? "," : "") << "{\"pbrMetallicRoughness\":{\"baseColorFactor\":[" << fnum(m.color[0]) << ","
-                  << fnum(m.color[1]) << "," << fnum(m.color[2]) << "," << fnum(m.color[3])
+        materials << (i ? "," : "") << "{\"pbrMetallicRoughness\":{\"baseColorFactor\":["
+                  << fnum(srgb_to_linear(m.color[0])) << "," << fnum(srgb_to_linear(m.color[1])) << ","
+                  << fnum(srgb_to_linear(m.color[2])) << "," << fnum(m.color[3])
                   << "],\"metallicFactor\":0.1,\"roughnessFactor\":0.7},\"doubleSided\":true"
                   << (m.color[3] < 1.0f ? ",\"alphaMode\":\"BLEND\"" : "") << "}";
     }
@@ -430,8 +440,9 @@ inline bool glb_write_framed_meshopt(const std::string &path, const std::vector<
         meshes << (i ? "," : "") << "{\"name\":\"node" << i
                << "\",\"primitives\":[{\"attributes\":{\"POSITION\":" << i * 2 + 1 << "},\"indices\":" << i * 2
                << ",\"mode\":4,\"material\":" << i << "}]}";
-        materials << (i ? "," : "") << "{\"pbrMetallicRoughness\":{\"baseColorFactor\":[" << fnum(h.color[0]) << ","
-                  << fnum(h.color[1]) << "," << fnum(h.color[2]) << "," << fnum(h.color[3])
+        materials << (i ? "," : "") << "{\"pbrMetallicRoughness\":{\"baseColorFactor\":["
+                  << fnum(srgb_to_linear(h.color[0])) << "," << fnum(srgb_to_linear(h.color[1])) << ","
+                  << fnum(srgb_to_linear(h.color[2])) << "," << fnum(h.color[3])
                   << "],\"metallicFactor\":0.1,\"roughnessFactor\":0.7},\"doubleSided\":true"
                   << (h.color[3] < 1.0f ? ",\"alphaMode\":\"BLEND\"" : "") << "}";
     }
