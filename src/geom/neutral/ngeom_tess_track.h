@@ -198,6 +198,13 @@ struct TessTrackInfo {
     const char *description; // one line, for a tooltip
     bool watertight;         // does it close shared-edge seams?
     bool is_default;         // the track used when no pipeline is given
+    // Does this track mesh NEUTRAL surfaces — the OCC-free path fed by the native STEP/IFC readers
+    // and by the NGEOM wire? The taxonomy tracks do not: they need ifcopenshell taxonomy geometry,
+    // which those readers never build. Handing one to a neutral-surface caller does not fail — it
+    // silently meshes as though no track were selected (occ/cgal/hybrid emit byte-identical output
+    // there, none of it ifcopenshell's). So a caller offering a track CHOICE for a neutral path
+    // must filter on this, or it advertises kernels that path cannot run.
+    bool neutral;
 };
 
 inline std::vector<TessTrackInfo> track_infos() {
@@ -206,22 +213,23 @@ inline std::vector<TessTrackInfo> track_infos() {
          "OCC-free winding-rule tessellation of the trim loop, with a UV-grid fast path for "
          "near-full patches. Boundary vertices are pinned to their shared edge, which halves "
          "shared-edge cracks at no cost.",
-         false, true},
+         false, true, /*neutral=*/true},
         {"cdt", "CDT — watertight (slower)",
          "Constrained Delaunay (detria): trim loops become constraint edges and the surface grid "
          "becomes interior Steiner points. One boundary-first path, so every boundary vertex pins. "
          "Produces watertight, manifold solids with fewer triangles, but costs ~+8% on small models "
          "and can exceed +60% on large multi-solid assemblies.",
-         true, false},
+         true, false, /*neutral=*/true},
     };
 #if !defined(__EMSCRIPTEN__)
     // Taxonomy kernels link OCCT/CGAL via ifcopenshell and are excluded from the wasm build, so they
     // are only real where they are compiled in.
-    out.push_back({"occ", "OCC (ifcopenshell taxonomy)", "Meshes via ifcopenshell's taxonomy on OCCT.", false, false});
-    out.push_back(
-        {"cgal", "CGAL (ifcopenshell taxonomy)", "Meshes via ifcopenshell's taxonomy on CGAL.", false, false});
+    out.push_back({"occ", "OCC (ifcopenshell taxonomy)", "Meshes via ifcopenshell's taxonomy on OCCT.", false, false,
+                   /*neutral=*/false});
+    out.push_back({"cgal", "CGAL (ifcopenshell taxonomy)", "Meshes via ifcopenshell's taxonomy on CGAL.", false, false,
+                   /*neutral=*/false});
     out.push_back({"hybrid", "Hybrid OCC/CGAL (ifcopenshell taxonomy)",
-                   "ifcopenshell's hybrid OCCT/CGAL kernel selection.", false, false});
+                   "ifcopenshell's hybrid OCCT/CGAL kernel selection.", false, false, /*neutral=*/false});
 #endif
     return out;
 }

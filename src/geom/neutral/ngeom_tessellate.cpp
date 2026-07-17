@@ -43,6 +43,18 @@ const bool FDBG = std::getenv("NGEOM_FDBG") != nullptr;
 // triangle counts, all tess params) — for head-to-head comparison with the reference tessellator's face-debug dump.
 const bool TESSDBG = std::getenv("NGEOM_TESSDBG") != nullptr;
 
+// ADA_BAND_DEBUG: per-band arc-length loft diagnostics (periodic tube bands). Prints, for each band,
+// the two rings' sizes and the max cross-ring arc-length skew of BOTH the new aligned loft AND the
+// legacy libtess2 monotone triangulation (run side by side), so the de-twist is measurable from one
+// binary. A small loft skew (~one segment) vs a large legacy skew (drift toward ~0.5) IS the twist.
+const bool BANDDBG = std::getenv("ADA_BAND_DEBUG") != nullptr;
+// ADA_BAND_LEGACY: force the pre-fix polygon+libtess2 band path (the twisting one). Escape hatch and
+// A/B lever; the arc-length loft is the default.
+const bool BAND_LEGACY = std::getenv("ADA_BAND_LEGACY") != nullptr;
+// Source entity id of the face currently being tessellated, for targeted band debug. Thread-local so
+// the parallel face pool cannot interleave; set once per face in tessellate_face.
+thread_local int64_t g_cur_face_id = 0;
+
 // Face-merge batch size for the huge single-root face-parallel path (tessellate_one_root). The
 // per-face local meshes are held resident until merged; on a 61k-face monster solid the full
 // locals[] is a SECOND complete copy of the solid's soup (~0.5 GB with normals), inflating that
@@ -116,10 +128,14 @@ const bool DIAG = tess_diag_path() != nullptr;
 
 // Per-face accumulator: one row per face, so a 300k-face model stays a manageable CSV.
 struct FaceDiag {
-    std::vector<double> r;  // residual per boundary point (model units)
-    size_t n_uv_fail = 0;   // surf.uv() returned false
-    size_t n_collapsed = 0; // ...and the handler collapsed point i onto i-1 (Defect 2 fired)
-    const char *path = "?"; // which branch of face_to_mesh took the face
+    std::vector<double> r;     // residual per boundary point (model units)
+    size_t n_uv_fail = 0;      // surf.uv() returned false
+    size_t n_collapsed = 0;    // ...and the handler collapsed point i onto i-1 (Defect 2 fired)
+    const char *path = "?";    // which branch of face_to_mesh took the face
+    double emitted_area = 0;   // 3D area actually tessellated for this face
+    double expected_area = 0;  // expected trimmed surface area (region-fill faces only)
+    bool has_coverage = false; // expected_area is meaningful (not a winding/periodic face)
+    size_t n_tris = 0;         // triangles emitted for this face (characterization)
 };
 
 // thread_local: DIAG forces threads=1 (see tessellate_one_root), but a stray parallel caller must
@@ -132,6 +148,21 @@ FaceDiag &face_diag() {
 void diag_set_path(const char *p) {
     if (DIAG)
         face_diag().path = p;
+}
+
+// Per-face coverage health (always on, independent of DIAG): the expected trimmed surface area of a
+// region-fill face, set by face_to_mesh from the UV loops, read back by tessellate_face to compare
+// against the area actually emitted. Catches PARTIAL tessellation (a self-intersecting UV loop that
+// tess2 fills only halfway -> a hole the zero-triangle drop counter never sees), which is the gap
+// the drop counter alone leaves open. has_expected is false for winding/periodic faces, whose UV-loop
+// area is not the face area, so they never false-flag.
+struct FaceHealth {
+    double expected_area = 0;
+    bool has_expected = false;
+};
+FaceHealth &face_health() {
+    static thread_local FaceHealth h;
+    return h;
 }
 
 double pct(std::vector<double> &v, double q) {
@@ -153,14 +184,17 @@ void diag_flush_face(const Surface &surf, int64_t face_id, uint32_t face_seq, do
         if (!t.fh)
             return;
         std::fprintf(t.fh, "face_seq,face_id,surf_kind,is_quadric,path_taken,n_bpts,n_uv_fail,n_collapsed,"
-                           "r_p50,r_p95,r_max,r_rel_p50,r_rel_p95,r_rel_max,approx_size,model_scale\n");
+                           "r_p50,r_p95,r_max,r_rel_p50,r_rel_p95,r_rel_max,approx_size,model_scale,"
+                           "emitted_area,expected_area,coverage,n_tris\n");
     }
     double sz = std::max(surf.approx_size(), 1.0);
     double p50 = pct(d.r, 0.50), p95 = pct(d.r, 0.95);
     double mx = d.r.empty() ? 0.0 : *std::max_element(d.r.begin(), d.r.end());
-    std::fprintf(t.fh, "%u,%lld,%s,%d,%s,%zu,%zu,%zu,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\n", face_seq,
-                 (long long) face_id, surf_kind(surf), (int) surf.is_quadric(), d.path, d.r.size(), d.n_uv_fail,
-                 d.n_collapsed, p50, p95, mx, p50 / sz, p95 / sz, mx / sz, sz, model_scale);
+    double coverage = (d.has_coverage && d.expected_area > 1e-12) ? d.emitted_area / d.expected_area : -1.0;
+    std::fprintf(t.fh, "%u,%lld,%s,%d,%s,%zu,%zu,%zu,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.6g,%.6g,%.4g,%zu\n",
+                 face_seq, (long long) face_id, surf_kind(surf), (int) surf.is_quadric(), d.path, d.r.size(),
+                 d.n_uv_fail, d.n_collapsed, p50, p95, mx, p50 / sz, p95 / sz, mx / sz, sz, model_scale, d.emitted_area,
+                 d.has_coverage ? d.expected_area : -1.0, coverage, d.n_tris);
     d = FaceDiag{};
 }
 
@@ -381,9 +415,37 @@ struct Tess2Out {
 // emitted on the shared edge. When present, out.pin is filled via libtess2's vertex-index map —
 // original boundary vertices carry their pin; Steiner/new vertices get NaN. Null (the default track)
 // => not one extra byte or branch in the hot loop.
-Tess2Out run_tess2(const std::vector<std::vector<Uv>> &loops_uv, double su, double sv,
+Tess2Out run_tess2(const std::vector<std::vector<Uv>> &loops_uv_in, double su, double sv,
                    const std::vector<std::vector<Vec3>> *loops_p3 = nullptr) {
     Tess2Out out;
+    // Re-center the UV loops to their min corner before handing them to libtess2. TESSreal is float,
+    // so a face whose parametric coordinates carry a large offset — e.g. a cylinder whose STEP axis
+    // placement sits kilometres from the face, giving an axial v ~6e6 — loses its sub-mm real extent
+    // to float precision: every vertex snaps to the same value, the loop collapses to a line, tess2
+    // returns no triangles and the face silently drops (violating "no geom left behind"). Translating
+    // to the origin keeps the true extent representable; the offset is added back to the output verts,
+    // so the transform is invisible to callers and composes with any su/sv scaling. (measured: cylinder
+    // faces #39996/#40030 on KR_6, v~6e6, dropped -> recovered.)
+    double u0 = INF, v0 = INF;
+    for (const auto &lp : loops_uv_in)
+        for (const Uv &p : lp) {
+            u0 = std::min(u0, p[0]);
+            v0 = std::min(v0, p[1]);
+        }
+    if (!std::isfinite(u0))
+        u0 = 0.0;
+    if (!std::isfinite(v0))
+        v0 = 0.0;
+    std::vector<std::vector<Uv>> shifted;
+    shifted.reserve(loops_uv_in.size());
+    for (const auto &lp : loops_uv_in) {
+        std::vector<Uv> s;
+        s.reserve(lp.size());
+        for (const Uv &p : lp)
+            s.push_back({p[0] - u0, p[1] - v0});
+        shifted.push_back(std::move(s));
+    }
+    const std::vector<std::vector<Uv>> &loops_uv = shifted;
     TESStesselator *t = tessNewTess(nullptr);
     if (!t)
         return out;
@@ -418,7 +480,7 @@ Tess2Out run_tess2(const std::vector<std::vector<Uv>> &loops_uv, double su, doub
     if (loops_p3)
         out.pin.reserve(nv);
     for (int i = 0; i < nv; ++i) {
-        out.verts.push_back({tv[i * 2] / su, tv[i * 2 + 1] / sv});
+        out.verts.push_back({tv[i * 2] / su + u0, tv[i * 2 + 1] / sv + v0}); // undo the re-centering
         if (loops_p3) {
             TESSindex oi = vi ? vi[i] : TESS_UNDEF;
             out.pin.push_back((oi != TESS_UNDEF && (size_t) oi < flat_p3.size()) ? flat_p3[oi] : nan_vec());
@@ -1146,6 +1208,27 @@ bool tessellate_uv_grid(const Surface &s, double u0, double u1, double v0, doubl
                         const std::vector<Vec3> *ring_p3 = nullptr) {
     int nu, nv;
     uv_grid_res(s, nu, nv);
+    // Curvature-correct the initial resolution for quadrics (cyl/cone/sphere/torus) from the actual
+    // parametric span and the curvature step, instead of the flat 8x8 seed. refine_uv can only HALVE
+    // an edge, so an 8-division seed on a 2*pi minor circle overshoots the angular target on the way
+    // down (8->16->32->64 to reach ~36), inflating a torus band ~3x. Sizing the grid AT the target
+    // (ceil(span/u_step)) lands each edge already within the angular+chord tolerance, so refinement
+    // adds ~nothing and the band matches OCC's ring density. B-splines keep their span-based seed
+    // (their u_step is parametric, not curvature). u_step==INFINITY (flat direction) keeps the seed.
+    if (dynamic_cast<const BSplineSurface *>(&s) == nullptr) {
+        const double us = s.u_step(tp.deflection, tp.max_angle);
+        const double vs = s.v_step(tp.deflection, tp.max_angle);
+        if (std::isfinite(us) && us > 1e-12)
+            nu = (int) std::clamp((long) std::ceil(std::abs(u1 - u0) / us), 2L, 4096L);
+        if (std::isfinite(vs) && vs > 1e-12)
+            nv = (int) std::clamp((long) std::ceil(std::abs(v1 - v0) / vs), 2L, 4096L);
+        while ((long) nu * nv > 200000) {
+            if (nv > nu)
+                nv /= 2;
+            else
+                nu /= 2;
+        }
+    }
     // Grid lines. Without a ring these are exactly the uniform samples, so the default path is
     // bit-for-bit what it always was.
     std::vector<double> ul, vl;
@@ -1639,6 +1722,181 @@ bool tessellate_periodic_winding(const Surface &s, const std::vector<LoopUv> &lo
     return emit_uv_region(s, all, tp, same_sense, mesh);
 }
 
+// Normalized cumulative 3D arc length along a ring of UV points (chord length between consecutive
+// surface points / total). This is the correspondence parameter for the loft: two rings evaluated at
+// the same fraction sit at the same angular position around the tube, so linking them makes a
+// "vertical" quad strip rather than a diagonal spiral. Falls back to index-fraction for a null-length
+// ring so the merge below still terminates.
+std::vector<double> ring_arc_norm(const Surface &s, const std::vector<Uv> &r) {
+    std::vector<double> c(r.size(), 0.0);
+    if (r.size() < 2)
+        return c;
+    Vec3 prev = s.point(r[0][0], r[0][1]);
+    for (size_t k = 1; k < r.size(); ++k) {
+        Vec3 cur = s.point(r[k][0], r[k][1]);
+        c[k] = c[k - 1] + (cur - prev).norm();
+        prev = cur;
+    }
+    double tot = c.back();
+    if (tot > 1e-300)
+        for (double &x : c)
+            x /= tot;
+    else
+        for (size_t k = 0; k < c.size(); ++k)
+            c[k] = (double) k / (double) (c.size() - 1);
+    return c;
+}
+
+// Two-pointer arc-length strip merge of the two boundary rings (bottom, top) of a periodic band.
+// Returns the aligned quad triangulation (2 tris/quad) over a COMBINED vertex list [bottom | top]:
+// bottom vertex i is index i, top vertex j is index bottom.size()+j. Every triangle uses ONLY
+// original ring vertices — no interior/Steiner point is created — so no shared boundary vertex moves
+// and the band stays watertight to its neighbours; the closed-U seam closes exactly as before because
+// the ring endpoints (u=c and u=c+period) evaluate to the same surface point and the per-solid weld
+// fuses them. Because we always advance whichever ring is BEHIND in normalized arc length, the two
+// linked vertices never differ by more than one segment in arc length: the strip cannot drift/spiral,
+// which is the whole point (libtess2's monotone triangulation of bottom+reversed-top drifts).
+std::vector<Tri> band_loft_strip(const std::vector<double> &sb, const std::vector<double> &st, size_t nb, size_t nt) {
+    std::vector<Tri> tris;
+    if (nb < 2 || nt < 2)
+        return tris;
+    tris.reserve(nb + nt);
+    auto BI = [](size_t i) { return (uint32_t) i; };
+    auto TI = [&](size_t j) { return (uint32_t) (nb + j); };
+    size_t i = 0, j = 0;
+    while (i + 1 < nb || j + 1 < nt) {
+        bool adv_bottom;
+        if (i + 1 >= nb)
+            adv_bottom = false;
+        else if (j + 1 >= nt)
+            adv_bottom = true;
+        else
+            adv_bottom = sb[i + 1] <= st[j + 1];
+        if (adv_bottom) {
+            tris.push_back({BI(i), BI(i + 1), TI(j)});
+            ++i;
+        } else {
+            tris.push_back({BI(i), TI(j), TI(j + 1)});
+            ++j;
+        }
+    }
+    return tris;
+}
+
+// Max cross-ring arc-length skew of a strip: over every triangle edge that links a bottom vertex to a
+// top vertex, the largest |arc_bottom - arc_top|. Aligned quads keep this ~one segment; a drifting
+// (twisted) triangulation lets it grow toward ~0.5. Used only for ADA_BAND_DEBUG evidence.
+double strip_arc_skew(const std::vector<Tri> &tris, const std::vector<double> &sb, const std::vector<double> &st,
+                      size_t nb) {
+    double mx = 0.0;
+    for (const Tri &t : tris)
+        for (int k = 0; k < 3; ++k) {
+            uint32_t a = t[k], b = t[(k + 1) % 3];
+            bool a_bot = a < nb, b_bot = b < nb;
+            if (a_bot == b_bot)
+                continue; // same ring: not a connecting edge
+            double arc_b = a_bot ? sb[a] : sb[b];
+            double arc_t = a_bot ? st[b - nb] : st[a - nb];
+            mx = std::max(mx, std::abs(arc_b - arc_t));
+        }
+    return mx;
+}
+
+// Structured arc-length loft of a band's two boundary rings into aligned quads, then the SAME
+// refine/emit tail as emit_uv_region (refine_uv adds curvature subdivision in u and v for a bending
+// tube; no pins, so the boundary is handled exactly as the prior band path did). This REPLACES
+// libtess2's monotone CDT of (bottom + reversed-top), which linked bottom[i] to a drifting top[k] and
+// so spiralled the tube.
+bool emit_band_loft(const Surface &s, const std::vector<Uv> &bottom, const std::vector<Uv> &top, const TessParams &tp,
+                    bool same_sense, Mesh &mesh) {
+    const size_t nb = bottom.size(), nt = top.size();
+    if (nb < 2 || nt < 2)
+        return false;
+    std::vector<double> sb = ring_arc_norm(s, bottom);
+    std::vector<double> st = ring_arc_norm(s, top);
+    std::vector<Tri> tris = band_loft_strip(sb, st, nb, nt);
+    if (tris.empty())
+        return false;
+
+    std::vector<Uv> verts;
+    verts.reserve(nb + nt);
+    for (const Uv &p : bottom)
+        verts.push_back(p);
+    for (const Uv &p : top)
+        verts.push_back(p);
+
+    if (BANDDBG) {
+        // Side-by-side: the legacy libtess2 triangulation of the same rings, scored on the same skew
+        // metric, so the twist is visible from one run. run_tess2 emits no interior points, so every
+        // legacy output vertex is an original ring vertex — recoverable by nearest-ring-vertex match.
+        double umn = INF, umx = -INF, vmn = INF, vmx = -INF;
+        for (const Uv &p : verts) {
+            umn = std::min(umn, p[0]);
+            umx = std::max(umx, p[0]);
+            vmn = std::min(vmn, p[1]);
+            vmx = std::max(vmx, p[1]);
+        }
+        auto [su2, sv2] = metric_scale(s, umn, umx, vmn, vmx);
+        std::vector<Uv> poly = bottom;
+        for (auto it = top.rbegin(); it != top.rend(); ++it)
+            poly.push_back(*it);
+        Tess2Out lg = run_tess2({poly}, su2, sv2);
+        double legacy_skew = -1.0;
+        if (lg.ok) {
+            // map each legacy vertex to (ring, arc) by nearest original ring vertex in UV
+            std::vector<uint32_t> ring_idx(lg.verts.size());
+            std::vector<char> ring_is_bot(lg.verts.size());
+            for (size_t vk = 0; vk < lg.verts.size(); ++vk) {
+                double best = INF;
+                uint32_t bi = 0;
+                char bot = 1;
+                for (size_t q = 0; q < verts.size(); ++q) {
+                    double d = std::abs(verts[q][0] - lg.verts[vk][0]) + std::abs(verts[q][1] - lg.verts[vk][1]);
+                    if (d < best) {
+                        best = d;
+                        bot = q < nb ? 1 : 0;
+                        bi = bot ? (uint32_t) q : (uint32_t) (q - nb);
+                    }
+                }
+                ring_idx[vk] = bi;
+                ring_is_bot[vk] = bot;
+            }
+            legacy_skew = 0.0;
+            for (const Tri &t : lg.tris)
+                for (int k = 0; k < 3; ++k) {
+                    uint32_t a = t[k], b = t[(k + 1) % 3];
+                    if (ring_is_bot[a] == ring_is_bot[b])
+                        continue;
+                    double arc_b = ring_is_bot[a] ? sb[ring_idx[a]] : sb[ring_idx[b]];
+                    double arc_t = ring_is_bot[a] ? st[ring_idx[b]] : st[ring_idx[a]];
+                    legacy_skew = std::max(legacy_skew, std::abs(arc_b - arc_t));
+                }
+        }
+        double seg = 0.0;
+        for (size_t k = 1; k < nb; ++k)
+            seg = std::max(seg, sb[k] - sb[k - 1]);
+        for (size_t k = 1; k < nt; ++k)
+            seg = std::max(seg, st[k] - st[k - 1]);
+        std::fprintf(stderr,
+                     "[BANDDBG] face=%lld bottom=%zu top=%zu tris=%zu loft_arc_skew=%.4f "
+                     "legacy_arc_skew=%.4f max_seg=%.4f%s\n",
+                     (long long) g_cur_face_id, nb, nt, tris.size(), strip_arc_skew(tris, sb, st, nb), legacy_skew, seg,
+                     strip_arc_skew(tris, sb, st, nb) <= seg + 1e-9 ? " ALIGNED" : " DRIFT");
+    }
+
+    double umin = INF, umax = -INF, vmin = INF, vmax = -INF;
+    for (const Uv &p : verts) {
+        umin = std::min(umin, p[0]);
+        umax = std::max(umax, p[0]);
+        vmin = std::min(vmin, p[1]);
+        vmax = std::max(vmax, p[1]);
+    }
+    auto [su, sv] = metric_scale(s, umin, umax, vmin, vmax);
+    refine_and_emit(s, std::move(verts), std::move(tris), su, sv, tp, same_sense, mesh, {}, tp.libtess2.freeze_boundary,
+                    tp.libtess2.converged_frac);
+    return true;
+}
+
 bool tessellate_periodic_band(const Surface &s, const std::vector<LoopUv> &loops_uv, const TessParams &tp,
                               bool same_sense, Mesh &mesh) {
     auto puopt = s.u_period();
@@ -1751,10 +2009,9 @@ bool tessellate_periodic_band(const Surface &s, const std::vector<LoopUv> &loops
         const BandCurve &bottom = curves[i];
         const BandCurve &top = curves[i + 1];
         double vb = mean_v(bottom), vt = mean_v(top);
-        std::vector<Uv> poly = bottom.pts;
-        for (auto it = top.pts.rbegin(); it != top.pts.rend(); ++it)
-            poly.push_back(*it);
-        std::vector<std::vector<Uv>> contours = {poly};
+        // Holes that fall inside this band's v-span: a simple ring-to-ring loft cannot carve a hole,
+        // so a holed band keeps the libtess2 CDT path below (correctness over de-twist for that case).
+        std::vector<std::vector<Uv>> band_holes;
         for (const auto &h : holes) {
             double hv = 0;
             for (const Uv &p : h)
@@ -1771,9 +2028,25 @@ bool tessellate_periodic_band(const Surface &s, const std::vector<LoopUv> &loops
                 if (shift != 0.0)
                     for (Uv &p : hh)
                         p[0] -= shift;
-                contours.push_back(hh);
+                band_holes.push_back(std::move(hh));
             }
         }
+        // Default: structured arc-length loft (aligned quads, cannot twist). Fall back to libtess2's
+        // monotone triangulation only when the band has a hole (loft can't represent it) or a ring is
+        // degenerate, or when ADA_BAND_LEGACY forces the pre-fix path.
+        if (!BAND_LEGACY && band_holes.empty() && bottom.pts.size() >= 2 && top.pts.size() >= 2) {
+            any |= emit_band_loft(s, bottom.pts, top.pts, tp, same_sense, mesh);
+            continue;
+        }
+        if (BANDDBG)
+            std::fprintf(stderr, "[BANDDBG] face=%lld FALLBACK-LEGACY bottom=%zu top=%zu band_holes=%zu\n",
+                         (long long) g_cur_face_id, bottom.pts.size(), top.pts.size(), band_holes.size());
+        std::vector<Uv> poly = bottom.pts;
+        for (auto it = top.pts.rbegin(); it != top.pts.rend(); ++it)
+            poly.push_back(*it);
+        std::vector<std::vector<Uv>> contours = {poly};
+        for (auto &hh : band_holes)
+            contours.push_back(std::move(hh));
         any |= emit_uv_region(s, contours, tp, same_sense, mesh);
     }
     return any;
@@ -2059,6 +2332,82 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
         loops_uv.push_back({std::move(uv), std::move(pts3), w, interior_above});
     }
 
+    // Coverage health: expected trimmed surface area = |net signed UV-loop area| * surface Jacobian at
+    // the UV centre. Exact for constant-Jacobian surfaces (plane/cylinder/cone), a good estimate for
+    // B-splines. Skipped when any loop winds (w != 0) or a period is present: there the UV-loop area is
+    // not the face area (the face wraps a seam), so a ratio against emitted would be meaningless.
+    {
+        FaceHealth &h = face_health();
+        h = FaceHealth{};
+        double umn = INF, umx = -INF, vmn = INF, vmx = -INF, net_uv = 0;
+        bool wraps = false;
+        for (const LoopUv &L : loops_uv) {
+            if (L.w != 0)
+                wraps = true; // u-winding loop: the face spans the seam, UV area != face area
+            double a = 0;
+            for (size_t i = 0; i < L.uv.size(); ++i) {
+                const Uv &p = L.uv[i], &q = L.uv[(i + 1) % L.uv.size()];
+                a += p[0] * q[1] - q[0] * p[1];
+                umn = std::min(umn, p[0]);
+                umx = std::max(umx, p[0]);
+                vmn = std::min(vmn, p[1]);
+                vmx = std::max(vmx, p[1]);
+            }
+            net_uv += 0.5 * a; // holes wind opposite the outer loop, so they subtract
+        }
+        // A period EXISTING doesn't disqualify a face (a 30-deg cylinder patch has u_period=2pi but a
+        // small u-span); only a face whose UV region actually covers a full period wraps the seam, so
+        // its UV-loop area is not the trimmed area. Those (and winding loops) are excluded; ordinary
+        // quadric patches (the dropped-cylinder class) stay IN the coverage check.
+        if (auto pu = surf.u_period(); pu && (umx - umn) > 0.99 * *pu)
+            wraps = true;
+        if (auto pv = surf.v_period(); pv && (vmx - vmn) > 0.99 * *pv)
+            wraps = true;
+        if (!wraps && !loops_uv.empty()) {
+            double uc = 0.5 * (umn + umx), vc = 0.5 * (vmn + vmx);
+            double hu = std::max((umx - umn) * 1e-4, 1e-9), hv = std::max((vmx - vmn) * 1e-4, 1e-9);
+            Vec3 ru = surf.point(uc + hu, vc) - surf.point(uc - hu, vc);
+            Vec3 rv = surf.point(uc, vc + hv) - surf.point(uc, vc - hv);
+            double jac = ru.cross(rv).norm() / (4.0 * hu * hv); // |dP/du x dP/dv|
+            h.expected_area = std::abs(net_uv) * jac;
+            h.has_expected = std::isfinite(h.expected_area);
+        }
+    }
+
+    // ISO 10303-42 material-side selection for a single non-winding loop on a periodic surface. STEP
+    // defines the face's material via same_sense + FACE_OUTER_BOUND.orientation relative to the
+    // surface normal; the loop is INTERIOR-material iff sign(signed UV area) * sign(du x dv . normal)
+    // * same_sense > 0, else the COMPLEMENT. run_tess2's TESS_WINDING_ODD always fills the interior,
+    // so a complement-material face — e.g. a spherical gasket whose boundary encircles the hose
+    // attachment — came out as the small hose-side cap with the gasket itself missing. Route those to
+    // the complement tessellation. Measured on KR_6: exactly 2 faces flip (the gaskets); every other
+    // quadric face (1925 of them) is interior-material and unchanged.
+    if (auto per_u = surf.u_period();
+        per_u && loops_uv.size() == 1 && loops_uv[0].w == 0 && loops_uv[0].uv.size() >= 3) {
+        const auto &L = loops_uv[0].uv;
+        double area = 0, uc = 0, vc = 0;
+        for (size_t i = 0; i < L.size(); ++i) {
+            const Uv &a = L[i], &b = L[(i + 1) % L.size()];
+            area += a[0] * b[1] - b[0] * a[1];
+            uc += a[0];
+            vc += a[1];
+        }
+        uc /= (double) L.size();
+        vc /= (double) L.size();
+        const double h = 1e-4;
+        double jdot = (surf.point(uc + h, vc) - surf.point(uc - h, vc))
+                          .cross(surf.point(uc, vc + h) - surf.point(uc, vc - h))
+                          .dot(surf.normal(uc, vc));
+        const int A = area > 0 ? 1 : -1, J = jdot > 0 ? 1 : -1, S = same_sense ? 1 : -1;
+        if (A * J * S < 0) {
+            diag_set_path("iso_complement");
+            std::vector<std::vector<Uv>> contour = {L};
+            return tessellate_periodic_complement(surf, contour, *per_u, tp, same_sense, mesh)
+                       ? nullptr
+                       : "iso-complement tessellation failed";
+        }
+    }
+
     auto uv_slit = [&](const LoopUv &l) {
         if (l.w != 0)
             return false;
@@ -2075,6 +2424,41 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
     for (const LoopUv &l : loops_uv)
         if (!uv_slit(l))
             all_slit = false;
+    // V-winding band: a doubly-periodic surface (torus/tube) whose boundary sweeps a full minor
+    // circle in v while spanning only a short arc in u. The per-point unwrap keeps consecutive v
+    // within half a period, so a full wrap DOESN'T fold back — v drifts monotonically past per_v and
+    // the UV loop collapses to a near-degenerate vertical sliver. That sliver has ~zero polygon area,
+    // so it's misclassified as a slit and tessellated as the WHOLE torus (measured: 118 such faces
+    // produced 57x their true surface area on KR_6). The u-winding case is already handled above;
+    // this is its v analog. Tessellate the real geometry directly: a grid band over the actual small
+    // u-arc x one full minor period.
+    if (per_v && !loops_uv.empty()) {
+        double umn = INF, umx = -INF, vmn = INF, vmx = -INF;
+        for (const auto &lp : loops_uv)
+            for (const Uv &q : lp.uv) {
+                umn = std::min(umn, q[0]);
+                umx = std::max(umx, q[0]);
+                vmn = std::min(vmn, q[1]);
+                vmx = std::max(vmx, q[1]);
+            }
+        // dv > one full period means the boundary wrapped the minor circle and the v-unwrap drifted:
+        // a full v-wrap MUST span >= per_v (you can't traverse the whole minor circle in less), while a
+        // non-wrapping single-valued face spans < per_v. So per_v is the exact separatrix. The overshoot
+        // beyond per_v is drift from the face's u-caps and SHRINKS as the sampling coarsens — measured
+        // on KR_6 face #42987: 1.216x per_v at 128 boundary pts (fine) but only 1.084x at 83 pts under
+        // adaptive coarsening. The old 1.1x line was calibrated on fine tessellation (drifters seen
+        // >=1.12x) and wrongly dropped the coarsened 1.084x drifter into the periodic-complement branch
+        // -> the whole torus tessellated (rogue-donut artifact). Non-winding torus faces top out at
+        // 0.99x per_v on this model, so 1.02x clears them with margin while catching coarsened drifters.
+        // Catching a genuine full ring here is harmless: the grid below tessellates [vmn, vmn+per_v],
+        // which IS the full ring.
+        if (vmx - vmn > 1.02 * *per_v && umx - umn < *per_v) {
+            diag_set_path("v_wind_band");
+            return tessellate_uv_grid(surf, umn, umx, vmn, vmn + *per_v, tp, same_sense, mesh)
+                       ? nullptr
+                       : "v-winding band tessellation failed";
+        }
+    }
     if (all_slit) {
         diag_set_path("unbounded_slit");
         return tessellate_unbounded(surf, tp, same_sense, mesh) ? nullptr : "slit/full-surface tessellation failed";
@@ -2254,6 +2638,19 @@ bool tessellate_face_impl(const FaceSurfaceN &face, const TessParams &tp, TessMe
     bool same_sense = face.same_sense;
 
     std::vector<Loop3> loops3d = build_loops3d(face, tp);
+    // A face WITH bounds whose loops all discretized to <3 points: chord-simplification of a
+    // small/gently-curved B-spline boundary (simplify_polyline_dp) can flatten every edge to its
+    // endpoints and collapse the loop. Re-discretize progressively finer (which keeps more boundary
+    // points) before giving up, so the simplification can never drop a face that used to tessellate.
+    if (loops3d.empty() && !face.bounds.empty()) {
+        for (double div : {8.0, 64.0, 512.0}) {
+            TessParams fine = tp;
+            fine.deflection = std::max(tp.deflection / div, 1e-5);
+            loops3d = build_loops3d(face, fine);
+            if (!loops3d.empty())
+                break;
+        }
+    }
     if (loops3d.empty()) {
         if (tessellate_unbounded(surf, tp, same_sense, mesh))
             return true;
@@ -2276,24 +2673,30 @@ bool tessellate_face_impl(const FaceSurfaceN &face, const TessParams &tp, TessMe
 
     auto cp = mesh.checkpoint();
     const char *reason = face_to_mesh(use_surf, loops3d, tp, same_sense, mesh);
-    if (!reason)
+    auto produced = [&]() { return mesh.checkpoint()[1] > cp[1]; };
+    if (!reason && produced())
         return true;
 
     // recovery: a tess2 failure on a thin curved face is usually a self-intersecting boundary
-    // from coarse arc discretization — re-discretize much finer and retry.
-    bool reason_tess2 = std::string(reason).find("tess2") != std::string::npos ||
-                        std::string(reason).find("UV tessellation") != std::string::npos;
-    if (reason_tess2) {
+    // from coarse arc discretization — re-discretize much finer and retry. Also fires when the face
+    // succeeded-but-emitted-nothing: chord-simplification (simplify_polyline_dp) can over-flatten a
+    // winding/wrap boundary so a periodic/slit path misclassifies it and emits zero — the finer
+    // re-discretization restores the boundary points the wrap detection needs.
+    bool reason_tess2 = reason && (std::string(reason).find("tess2") != std::string::npos ||
+                                   std::string(reason).find("UV tessellation") != std::string::npos);
+    if (reason_tess2 || !produced()) {
         mesh.rollback(cp);
-        for (double div : {8.0, 64.0}) {
-            TessParams fine;
+        for (double div : {8.0, 64.0, 512.0}) {
+            TessParams fine = tp;
             fine.deflection = std::max(tp.deflection / div, 1e-4);
             fine.max_angle = std::max(tp.max_angle / std::sqrt(div), 0.02);
             std::vector<Loop3> fl = build_loops3d(face, fine);
-            if (fl.size() != loops3d.size())
+            // A collapsed face may have lost loops under simplification, so the finer count is the
+            // authoritative one; only bail if finer STILL yields nothing.
+            if (fl.empty())
                 continue;
             auto cp2 = mesh.checkpoint();
-            if (!face_to_mesh(use_surf, fl, fine, same_sense, mesh))
+            if (!face_to_mesh(use_surf, fl, fine, same_sense, mesh) && mesh.checkpoint()[1] > cp2[1])
                 return true;
             mesh.rollback(cp2);
         }
@@ -2317,19 +2720,28 @@ bool tessellate_face_impl(const FaceSurfaceN &face, const TessParams &tp, TessMe
 // increment safely; reset once single-threaded before a conversion, read after the pools join.
 static std::atomic<std::uint64_t> g_dropped_faces{0};
 static std::atomic<std::uint64_t> g_total_faces{0};
+// Faces that tessellated but covered < half their expected surface area — a partial fill (e.g. a
+// self-intersecting UV loop tess2 only half-filled). Distinct from dropped (zero triangles); this is
+// the "detection gap" the drop counter alone leaves: geometry that is present but incomplete.
+static std::atomic<std::uint64_t> g_suspect_faces{0};
 std::uint64_t tess_dropped_faces() {
     return g_dropped_faces.load(std::memory_order_relaxed);
 }
 std::uint64_t tess_total_faces() {
     return g_total_faces.load(std::memory_order_relaxed);
 }
+std::uint64_t tess_suspect_faces() {
+    return g_suspect_faces.load(std::memory_order_relaxed);
+}
 void reset_tess_face_stats() {
     g_dropped_faces.store(0, std::memory_order_relaxed);
     g_total_faces.store(0, std::memory_order_relaxed);
+    g_suspect_faces.store(0, std::memory_order_relaxed);
 }
 
 bool tessellate_face(const FaceSurfaceN &face, const TessParams &tp, TessMesh &outm) {
     const size_t i0 = outm.indices.size();
+    g_cur_face_id = face.src_id; // for targeted band debug (ADA_BAND_DEBUG)
     bool ok;
     if (!FDBG && !TESSDBG) {
         ok = tessellate_face_impl(face, tp, outm);
@@ -2352,10 +2764,31 @@ bool tessellate_face(const FaceSurfaceN &face, const TessParams &tp, TessMesh &o
         if (TESSDBG)
             std::fprintf(stderr, "TESSDBG FACE-DONE tris=%zu ok=%d\n", (outm.indices.size() - i0) / 3, (int) ok);
     }
-    // Health accounting (always on): a face carrying a real trim boundary that yields NO triangles is
-    // UV-inversion residual row for this face (ADA_TESS_DIAG only; no-op otherwise). Emitted after
-    // the impl so `path` names the branch actually taken, including any retry tier.
+    // Coverage health (always on): sum the 3D area this face actually emitted and compare it to the
+    // expected trimmed area face_to_mesh computed from the UV loops. A partial fill (< half the
+    // expected area) is a face that tessellated but left a hole — the gap the zero-triangle drop
+    // counter can't see. FaceHealth is consumed (and reset) here regardless of DIAG.
+    FaceHealth &fh = face_health();
+    double emitted_area = 0;
+    {
+        const auto &pos = outm.positions;
+        const auto &idx = outm.indices;
+        for (size_t k = i0; k + 2 < idx.size(); k += 3) {
+            uint32_t a = idx[k], b = idx[k + 1], c = idx[k + 2];
+            if (3 * (size_t) c + 2 >= pos.size())
+                continue;
+            Vec3 A{pos[3 * a], pos[3 * a + 1], pos[3 * a + 2]};
+            Vec3 B{pos[3 * b], pos[3 * b + 1], pos[3 * b + 2]};
+            Vec3 C{pos[3 * c], pos[3 * c + 1], pos[3 * c + 2]};
+            emitted_area += 0.5 * (B - A).cross(C - A).norm();
+        }
+    }
     if (DIAG && face.surface) {
+        FaceDiag &d = face_diag();
+        d.emitted_area = emitted_area;
+        d.expected_area = fh.expected_area;
+        d.has_coverage = fh.has_expected;
+        d.n_tris = (outm.indices.size() - i0) / 3;
         static std::atomic<uint32_t> g_diag_seq{0};
         diag_flush_face(*face.surface, face.src_id, g_diag_seq.fetch_add(1, std::memory_order_relaxed),
                         tls_model_scale());
@@ -2363,8 +2796,13 @@ bool tessellate_face(const FaceSurfaceN &face, const TessParams &tp, TessMesh &o
     // silently dropped geometry — count it. Uses the emitted-triangle delta, not `ok`, since some
     // failures still return true with an empty result.
     g_total_faces.fetch_add(1, std::memory_order_relaxed);
-    if (outm.indices.size() == i0 && !face.bounds.empty())
+    bool dropped = outm.indices.size() == i0 && !face.bounds.empty();
+    if (dropped)
         g_dropped_faces.fetch_add(1, std::memory_order_relaxed);
+    // Partial fill: tessellated (not dropped) but covered < half the expected area — the detection gap.
+    else if (fh.has_expected && fh.expected_area > 1e-6 && emitted_area < 0.5 * fh.expected_area)
+        g_suspect_faces.fetch_add(1, std::memory_order_relaxed);
+    fh = FaceHealth{}; // reset for the next face (DIAG-independent)
     return ok;
 }
 
@@ -2811,7 +3249,8 @@ static void tessellate_one_root(const NgeomRoot &root, const TessParams &tp, Tes
                 tessellate_face(*face, tp, out);
                 const uint32_t c = (uint32_t) out.indices.size() - s;
                 if (c > 0)
-                    out.face_ranges.push_back({s, c, face->src_id, (uint32_t) fi});
+                    out.face_ranges.push_back(
+                        {s, c, face->src_id, (uint32_t) fi, face->has_color, face->cr, face->cg, face->cb, face->ca});
             } else {
                 tessellate_face(*face, tp, out);
             }

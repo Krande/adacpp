@@ -25,6 +25,19 @@ OPTION(BUILD_DEBUG_TESTS "Build the testing tree used primarily for debugging." 
 # python module are both skipped below regardless of how the caller set BUILD_PYTHON.
 if (BUILD_STP2GLB_STANDALONE)
     set(BUILD_PYTHON OFF CACHE BOOL "Disabled by BUILD_STP2GLB_STANDALONE" FORCE)
+    # Ship a portable CLI: statically link the C++ runtime so the released binary runs with no conda
+    # env, no Visual C++ redistributable, and no dependency on the host libstdc++ version. MSVC ->
+    # static /MT runtime; GCC/Clang -> static libstdc++/libgcc (glibc stays dynamic, as intended).
+    # Set before any target / FetchContent so every object in the standalone build agrees.
+    if (POLICY CMP0091)
+        cmake_policy(SET CMP0091 NEW)  # honour CMAKE_MSVC_RUNTIME_LIBRARY
+    endif ()
+    if (MSVC)
+        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+            CACHE STRING "Static MSVC runtime for the standalone CLI" FORCE)
+    else ()
+        add_link_options(-static-libstdc++ -static-libgcc)
+    endif ()
 endif ()
 
 if (DEFINED TINY_INCLUDE_DIR)

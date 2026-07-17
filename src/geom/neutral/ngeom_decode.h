@@ -318,9 +318,9 @@ inline NgeomDoc decode(const uint8_t *data, size_t n) {
             auto s = std::make_shared<BSplineSurface>();
             s->u_degree = r.i32();
             s->v_degree = r.i32();
-            r.i32(); // u_closed
-            r.i32(); // v_closed
-            r.i32(); // self_intersect
+            s->u_closed = r.i32() != 0; // periodic in u: honoured for seam-continuous evaluation/tessellation
+            s->v_closed = r.i32() != 0; // periodic in v
+            r.i32();                    // self_intersect (unused for eval)
             s->nu = r.i32();
             s->nv = r.i32();
             int ncp = s->nu * s->nv;

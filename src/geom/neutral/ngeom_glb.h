@@ -37,6 +37,11 @@ struct FaceSub {
     uint32_t length = 0; // index count (3 * triangles)
     int64_t face_id = 0; // source entity id (STEP/IFC #id), 0 if unknown
     uint32_t seq = 0;    // 0-based face position within the solid
+    // Per-face presentation colour (STEP per-face styling). has_color=false => inherit the solid's base
+    // colour. Used only by split_solid_by_face_colour to bucket a solid's faces into per-colour GlbSolids;
+    // ignored by the picking/draw-range machinery downstream.
+    bool has_color = false;
+    float cr = 0.5f, cg = 0.5f, cb = 0.5f, ca = 1.0f;
 };
 
 struct GlbSolid {
@@ -81,6 +86,17 @@ inline std::string fnum(double v) {
 }
 inline uint32_t pad4(uint32_t n) {
     return (4 - (n & 3u)) & 3u;
+}
+// STEP COLOUR_RGB values are sRGB (display) colours, but glTF baseColorFactor is defined in LINEAR
+// space — so write the sRGB->linear transform, matching what OCC's XCAF does on import. Without it
+// the renderer treats the sRGB value as linear and its display gamma-encode lifts mid channels
+// (e.g. deep orange 0.4 -> ~0.67 green), yellowing the colour. Applied to RGB only, not alpha.
+inline float srgb_to_linear(float c) {
+    if (c <= 0.0f)
+        return 0.0f;
+    if (c >= 1.0f)
+        return 1.0f;
+    return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
 }
 
 constexpr float IDENT[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
@@ -264,8 +280,9 @@ inline bool glb_write_framed(const std::string &path, const std::vector<MatHeade
         meshes << (i ? "," : "") << "{\"name\":\"node" << i
                << "\",\"primitives\":[{\"attributes\":{\"POSITION\":" << i * 2 + 1 << "},\"indices\":" << i * 2
                << ",\"mode\":4,\"material\":" << i << "}]}";
-        materials << (i ? "," : "") << "{\"pbrMetallicRoughness\":{\"baseColorFactor\":[" << fnum(m.color[0]) << ","
-                  << fnum(m.color[1]) << "," << fnum(m.color[2]) << "," << fnum(m.color[3])
+        materials << (i ? "," : "") << "{\"pbrMetallicRoughness\":{\"baseColorFactor\":["
+                  << fnum(srgb_to_linear(m.color[0])) << "," << fnum(srgb_to_linear(m.color[1])) << ","
+                  << fnum(srgb_to_linear(m.color[2])) << "," << fnum(m.color[3])
                   << "],\"metallicFactor\":0.1,\"roughnessFactor\":0.7},\"doubleSided\":true"
                   << (m.color[3] < 1.0f ? ",\"alphaMode\":\"BLEND\"" : "") << "}";
     }
@@ -425,8 +442,9 @@ inline bool glb_write_framed_meshopt(const std::string &path, const std::vector<
         meshes << (i ? "," : "") << "{\"name\":\"node" << i
                << "\",\"primitives\":[{\"attributes\":{\"POSITION\":" << i * 2 + 1 << "},\"indices\":" << i * 2
                << ",\"mode\":4,\"material\":" << i << "}]}";
-        materials << (i ? "," : "") << "{\"pbrMetallicRoughness\":{\"baseColorFactor\":[" << fnum(h.color[0]) << ","
-                  << fnum(h.color[1]) << "," << fnum(h.color[2]) << "," << fnum(h.color[3])
+        materials << (i ? "," : "") << "{\"pbrMetallicRoughness\":{\"baseColorFactor\":["
+                  << fnum(srgb_to_linear(h.color[0])) << "," << fnum(srgb_to_linear(h.color[1])) << ","
+                  << fnum(srgb_to_linear(h.color[2])) << "," << fnum(h.color[3])
                   << "],\"metallicFactor\":0.1,\"roughnessFactor\":0.7},\"doubleSided\":true"
                   << (h.color[3] < 1.0f ? ",\"alphaMode\":\"BLEND\"" : "") << "}";
     }
@@ -484,6 +502,74 @@ inline bool glb_write_framed_meshopt(const std::string &path, const std::vector<
 }
 
 } // namespace glb_detail
+
+// Split one tessellated solid into one GlbSolid per DISTINCT face colour, so a per-face-styled solid
+// (STEP AP214 OVER_RIDING_STYLED_ITEM) becomes one glTF primitive/material per colour under the existing
+// merge-by-colour scheme. Each face's effective colour is its own captured colour, else the solid's base
+// colour (`s.color`). Requirements this preserves:
+//   * Solids whose faces all share one colour return a SINGLE GlbSolid (no extra primitives) — identical
+//     to the pre-split output except the base colour is upgraded to that shared face colour when present.
+//   * face_ranges stay valid: each sub-solid's ranges are rebased onto its own compacted index buffer and
+//     still tile it contiguously, so the face_ranges_node<m> picking contract holds per material.
+//   * All geometry is preserved: the split only runs when the captured face ranges cover the whole index
+//     buffer (they do on the capture path); otherwise it degrades to a single primitive (base colour).
+inline std::vector<GlbSolid> split_solid_by_face_colour(const GlbSolid &s) {
+    if (s.face_ranges.empty())
+        return {s}; // no per-face styling captured -> unchanged
+    auto eff = [&](const FaceSub &f) -> std::array<float, 4> {
+        return f.has_color ? std::array<float, 4>{f.cr, f.cg, f.cb, f.ca} : s.color;
+    };
+    std::map<std::array<int, 4>, size_t> group_of; // colour key -> group index (first-appearance order)
+    std::vector<std::array<float, 4>> group_col;
+    size_t covered = 0;
+    for (const FaceSub &f : s.face_ranges) {
+        covered += f.length;
+        auto k = glb_detail::colour_key(eff(f));
+        if (group_of.emplace(k, group_of.size()).second)
+            group_col.push_back(eff(f));
+    }
+    // Single distinct colour (or ranges don't fully tile the buffer -> can't safely re-slice): keep one
+    // primitive, adopting the shared face colour when the faces all override the base.
+    if (group_col.size() <= 1 || covered != s.indices.size()) {
+        GlbSolid one = s;
+        if (group_col.size() == 1)
+            one.color = group_col[0];
+        return {one};
+    }
+    std::vector<GlbSolid> out(group_col.size());
+    const size_t nv = s.positions.size() / 3;
+    std::vector<std::vector<uint32_t>> remap(group_col.size()); // per group: old vertex -> new (compacted)
+    for (size_t g = 0; g < group_col.size(); ++g) {
+        out[g].color = group_col[g];
+        out[g].transforms = s.transforms;
+        out[g].id = s.id;
+        out[g].product_name = s.product_name;
+        out[g].instance_paths = s.instance_paths;
+        remap[g].assign(nv, 0xFFFFFFFFu);
+    }
+    for (const FaceSub &f : s.face_ranges) {
+        size_t g = group_of[glb_detail::colour_key(eff(f))];
+        GlbSolid &o = out[g];
+        std::vector<uint32_t> &rm = remap[g];
+        uint32_t new_start = (uint32_t) o.indices.size();
+        uint32_t end = f.start + f.length;
+        for (uint32_t k = f.start; k < end && k < s.indices.size(); ++k) {
+            uint32_t ov = s.indices[k];
+            uint32_t nvid = (ov < rm.size()) ? rm[ov] : 0xFFFFFFFFu;
+            if (nvid == 0xFFFFFFFFu) {
+                nvid = (uint32_t) (o.positions.size() / 3);
+                if (ov < rm.size())
+                    rm[ov] = nvid;
+                o.positions.push_back(s.positions[3 * ov]);
+                o.positions.push_back(s.positions[3 * ov + 1]);
+                o.positions.push_back(s.positions[3 * ov + 2]);
+            }
+            o.indices.push_back(nvid);
+        }
+        o.face_ranges.push_back({new_start, f.length, f.face_id, f.seq, f.has_color, f.cr, f.cg, f.cb, f.ca});
+    }
+    return out;
+}
 
 // In-RAM merge-by-colour writer (for small/medium inputs + tests). meshopt=true bakes
 // EXT_meshopt_compression directly (falls back to raw on any encode failure).

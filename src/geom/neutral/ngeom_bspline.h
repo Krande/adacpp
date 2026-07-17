@@ -212,12 +212,31 @@ struct BSplineSurface : Surface {
         vmax = Uv[nv];
     }
 
+    // Reduce a parameter into the knot domain [lo,hi]. A CLOSED/periodic direction repeats with
+    // period (hi-lo), so WRAP (fmod) rather than clamp: this makes evaluation continuous ACROSS the
+    // u=umin/umax seam. The periodic tessellation paths (tessellate_periodic_band / _winding) place
+    // sample points a little past the seam (u in [seam, seam+period]); clamping would pin every
+    // over-the-seam point onto the umax edge and tear the tube, whereas wrapping lands them back on
+    // the real periodic geometry (S(umax)==S(umin) for a closed surface). An OPEN direction still
+    // clamps, so a stray FD/Newton probe past the end returns the boundary point, not an extrapolation.
+    static double reduce_param(double t, double lo, double hi, bool closed) {
+        if (closed) {
+            double span = hi - lo;
+            if (span > 1e-300) {
+                double r = std::fmod(t - lo, span);
+                if (r < 0.0)
+                    r += span;
+                return lo + r;
+            }
+        }
+        return clampd(t, lo, hi);
+    }
+
     Vec3 point(double u, double v) const override {
         using namespace bspline_detail;
-        // clamp to the knot domain (Rust BSplineSurface::point) — return the boundary point
-        // rather than extrapolating when a FD/Newton probe steps just outside.
-        u = clampd(u, Uu[u_degree], Uu[nu]);
-        v = clampd(v, Uv[v_degree], Uv[nv]);
+        // Reduce into the knot domain: wrap a closed/periodic direction (seam-continuous), else clamp.
+        u = reduce_param(u, Uu[u_degree], Uu[nu], u_closed);
+        v = reduce_param(v, Uv[v_degree], Uv[nv], v_closed);
         int su = find_span(nu - 1, u_degree, u, Uu);
         int sv = find_span(nv - 1, v_degree, v, Uv);
         if (u_degree <= kDeBoorMaxDeg && v_degree <= kDeBoorMaxDeg) {
@@ -581,7 +600,52 @@ struct RevolutionSurface : Surface {
     bool uv(const Vec3 &p, double uhint, double vhint, double &u, double &v) const override {
         double umin, umax, vmin, vmax;
         domain(umin, umax, vmin, vmax);
-        return newton_uv(*this, p, umin, umax, vmin, vmax, uhint, vhint, u, v);
+        (void) vhint;
+        // Decoupled seed. The point's AXIAL position and RADIUS about the axis are invariant under
+        // the revolution, so v depends only on those — recover it by a 1D scan of the profile,
+        // independent of u; then u is simply the azimuth of p relative to profile(v) about the axis.
+        // The generic newton_uv's uniform 2D grid seed aliases against a wiggly high-degree profile
+        // (measured: 91% inversion failures on a degree-5 revolution -> a garbage UV boundary and
+        // holes in the tessellated face), so seed this way and only then Newton-refine.
+        Vec3 relp = p - axis_loc;
+        const double axial_p = axis_dir.dot(relp);
+        const Vec3 perp_p = relp - axis_dir * axial_p;
+        const double rad_p = perp_p.norm();
+        double bestv = vmin, bestd = 1e300;
+        const int NV = 128;
+        for (int j = 0; j <= NV; ++j) {
+            double vv = vmin + (vmax - vmin) * j / NV;
+            Vec3 c = profile->point(vv) - axis_loc;
+            double ax = axis_dir.dot(c);
+            double rd = (c - axis_dir * ax).norm();
+            double d = (ax - axial_p) * (ax - axial_p) + (rd - rad_p) * (rd - rad_p);
+            if (d < bestd) {
+                bestd = d;
+                bestv = vv;
+            }
+        }
+        // u is the azimuth of p relative to profile(bestv) about the axis — compute it directly from
+        // geometry. Do NOT seed u from the caller's uhint: on a face where earlier points fail to
+        // invert, the boundary loop's failure handler pins their u to the predecessor's, so the hint
+        // is a poisoned 0 that drags Newton into a v-boundary divergence.
+        double useed = 0.0;
+        Vec3 pc = profile->point(bestv) - axis_loc;
+        Vec3 perp_c = pc - axis_dir * axis_dir.dot(pc);
+        if (perp_c.norm() > 1e-9 && rad_p > 1e-9) {
+            Vec3 a = perp_c.normalized(), b = perp_p.normalized();
+            double ang = std::atan2(axis_dir.dot(a.cross(b)), clampd(a.dot(b), -1.0, 1.0));
+            useed = ang < 0 ? ang + TWO_PI : ang;
+        } else if (uhint == uhint && uhint >= umin && uhint <= umax) {
+            useed = uhint; // p sits on the axis (radius ~0): azimuth is undefined, fall back to the hint
+        }
+        newton_uv(*this, p, umin, umax, vmin, vmax, useed, bestv, u, v);
+        // Accept on a SCALE-RELATIVE residual, not newton_uv's absolute 1e-6 mm (a nanometre tolerance
+        // that a geometrically perfect inversion on a ~100 mm surface still "fails"). A finite-difference
+        // Jacobian over a wiggly high-degree profile converges to ~1e-5 of the surface radius; a genuine
+        // off-surface point is ~1e-1. Rejecting the former made the boundary loop's failure handler
+        // collapse ~90% of points onto their predecessor and tore holes in the face.
+        const double scale = std::max(relp.norm(), 1.0);
+        return (point(u, v) - p).norm() < 1e-3 * scale;
     }
     void periods(bool &up, double &uper, bool &vp, double &vper) const override {
         up = true;

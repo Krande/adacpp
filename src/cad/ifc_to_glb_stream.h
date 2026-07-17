@@ -34,9 +34,15 @@
 
 namespace adacpp {
 
+// `pipeline` / `face_regions` / `pin_boundary` mean exactly what they do on stream_step_to_glb, and
+// for the same reason: both converters feed the SAME neutral tessellator (TessParams) and the SAME
+// GLB writer (ngeom_glb.h). Neither is a STEP feature — the track vocabulary and per-face region
+// capture live in the ngeom layer, so the only thing that ever made them STEP-only was this
+// function not forwarding them.
 inline long stream_ifc_to_glb(const std::string &in_path, const std::string &out_path, double deflection,
                               double angular_deg, bool meshopt, const std::string &spill_dir = "",
-                              double model_scale = 0.0, int num_threads = 0) {
+                              double model_scale = 0.0, int num_threads = 0, const std::string &pipeline = "",
+                              bool face_regions = false, bool pin_boundary = true) {
     using namespace adacpp::ngeom;
     adacpp::tune_malloc_for_streaming();
     adacpp::ngeom::reset_tess_face_stats(); // count dropped faces (audit health flag)
@@ -49,7 +55,15 @@ inline long stream_ifc_to_glb(const std::string &in_path, const std::string &out
     std::vector<long> roots = master.proxy_roots();
     const double usc = master.unit_scale(); // metres per file length-unit -> bake to metres
 
+    // Unknown track => -1, never a silent fallback: a caller asking for a track that doesn't exist
+    // wants to know, not to get different geometry than it asked for (same contract as STEP's).
+    auto track = parse_track(pipeline);
+    if (!track)
+        return -1;
     TessParams tp;
+    tp.track = *track;
+    tp.libtess2.pin_boundary = pin_boundary;
+    tp.capture_face_ranges = face_regions; // opt-in per-face clickable regions -> scenes[0].extras
     tp.deflection = deflection;
     tp.max_angle = angular_deg * PI / 180.0;
     tp.threads = 1;
@@ -84,9 +98,9 @@ inline long stream_ifc_to_glb(const std::string &in_path, const std::string &out
     // Spill dir: private mkdtemp (auto-removed) unless the caller supplied one.
     std::string spill;
     bool remove_after = false;
-    char tmpl[] = "/tmp/adacpp_ifcglb_XXXXXX";
+    std::string tmpl = adacpp::temp_template("adacpp_ifcglb");
     if (spill_dir.empty()) {
-        if (char *dir = ::mkdtemp(tmpl)) {
+        if (char *dir = ::mkdtemp(tmpl.data())) {
             spill = dir;
             remove_after = true;
         }
@@ -124,6 +138,13 @@ inline long stream_ifc_to_glb(const std::string &in_path, const std::string &out
             adacpp::glb::GlbSolid gs;
             gs.positions = std::move(tm.positions);
             gs.indices = std::move(tm.indices);
+            // Carry per-face clickable regions (relative to this product's index buffer) when
+            // captured — mirrors stream_step_to_glb. Capturing them in TessParams is not enough:
+            // the writer reads them off GlbSolid, so without this the flag would cost the serial
+            // face path and emit nothing.
+            gs.face_ranges.reserve(tm.face_ranges.size());
+            for (const auto &fr : tm.face_ranges)
+                gs.face_ranges.push_back({fr.first_index, fr.index_count, fr.face_id, fr.face_seq});
             gs.color = {rr.cr, rr.cg, rr.cb, rr.ca}; // grey default when !has_color
             gs.transforms = rr.transforms;
             gs.id = rr.id;
@@ -190,9 +211,15 @@ inline long stream_ifc_to_glb(const std::string &in_path, const std::string &out
     }
     if (remove_after)
         ::rmdir(spill.c_str());
-    if (std::uint64_t dropped = adacpp::ngeom::tess_dropped_faces())
-        std::fprintf(stderr, "[GEOMHEALTH-JSON] {\"dropped_faces\":%llu,\"total_faces\":%llu}\n",
-                     (unsigned long long) dropped, (unsigned long long) adacpp::ngeom::tess_total_faces());
+    {
+        std::uint64_t dropped = adacpp::ngeom::tess_dropped_faces();
+        std::uint64_t suspect = adacpp::ngeom::tess_suspect_faces();
+        if (dropped || suspect)
+            std::fprintf(stderr,
+                         "[GEOMHEALTH-JSON] {\"dropped_faces\":%llu,\"suspect_faces\":%llu,\"total_faces\":%llu}\n",
+                         (unsigned long long) dropped, (unsigned long long) suspect,
+                         (unsigned long long) adacpp::ngeom::tess_total_faces());
+    }
     return ok ? nwritten.load() : -1;
 }
 

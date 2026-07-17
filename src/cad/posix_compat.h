@@ -27,6 +27,7 @@
 #include <io.h>
 #include <mutex>
 #include <share.h>
+#include <string>
 #include <sys/stat.h>
 #include <unordered_map>
 
@@ -114,13 +115,33 @@ inline int msync(void *addr, size_t length, int) {
     return FlushViewOfFile(addr, length) ? 0 : -1; // flush a writable mapping to disk
 }
 
+// Windows has no /tmp. The native readers hardcode "/tmp/foo_XXXXXX" templates (fine on Linux/wasm);
+// on Windows MSVC resolves "/tmp" to "C:\tmp", which usually doesn't exist, so _mkdir fails and the
+// whole conversion returns -1. Redirect a leading "/tmp/" to the process temp dir (GetTempPathA) so
+// the same hardcoded templates land under a real directory. Callers use mkdtemp's RETURN value (not
+// the passed template), so returning a shim-owned buffer with the longer real path is safe even
+// though it no longer aliases `tmpl`.
+inline std::string _win_tmp_redirect(const char *tmpl) {
+    if (std::strncmp(tmpl, "/tmp/", 5) == 0) {
+        char buf[MAX_PATH];
+        const DWORD n = GetTempPathA(MAX_PATH, buf); // includes a trailing backslash
+        if (n > 0 && n < MAX_PATH)
+            return std::string(buf, n) + (tmpl + 5);
+    }
+    return std::string(tmpl);
+}
+
 inline char *mkdtemp(char *tmpl) {
     // tmpl ends in "XXXXXX"; make it unique then create the directory (POSIX mkdtemp semantics).
-    if (_mktemp_s(tmpl, std::strlen(tmpl) + 1) != 0)
+    // A thread_local buffer holds the /tmp-redirected path so the returned pointer stays valid until
+    // this thread's next mkdtemp call — long enough for the caller to copy it into a std::string.
+    thread_local std::string path;
+    path = _win_tmp_redirect(tmpl);
+    if (_mktemp_s(path.data(), path.size() + 1) != 0) // data() buffer spans size()+1 (incl. NUL)
         return nullptr;
-    if (_mkdir(tmpl) != 0)
+    if (_mkdir(path.c_str()) != 0)
         return nullptr;
-    return tmpl;
+    return path.data();
 }
 inline int ftruncate(int fd, long long length) {
     return _chsize_s(fd, length);
@@ -146,3 +167,39 @@ inline int setenv(const char *name, const char *value, int /*overwrite*/) {
     return _putenv_s(name, value); // _putenv_s always overwrites
 }
 #endif
+
+#include <cstdlib>
+#include <string>
+
+namespace adacpp {
+// Base directory for the readers' scratch files/dirs. An explicit override lets a caller redirect
+// every hardcoded temp location without touching source (e.g. a sandbox with no writable /tmp, or a
+// fast local SSD for spill): $ADACPP_TMPDIR wins, then $TMPDIR, else the platform default (%TEMP%
+// via GetTempPath on Windows, /tmp elsewhere). Never returns a trailing separator.
+inline std::string temp_base_dir() {
+    if (const char *e = std::getenv("ADACPP_TMPDIR"); e && *e)
+        return std::string(e);
+    if (const char *e = std::getenv("TMPDIR"); e && *e)
+        return std::string(e);
+#if defined(_WIN32)
+    char buf[MAX_PATH];
+    const DWORD n = GetTempPathA(MAX_PATH, buf); // ends with a backslash
+    if (n > 0 && n < MAX_PATH) {
+        std::string s(buf, n);
+        while (!s.empty() && (s.back() == '\\' || s.back() == '/'))
+            s.pop_back();
+        return s;
+    }
+    return "."; // last resort: process cwd
+#else
+    return "/tmp";
+#endif
+}
+
+// A mutable mkdtemp/mkstemp template "<temp_base_dir>/<name>_XXXXXX". Returned by value; pass
+// .data() to mkdtemp/mkstemp (they rewrite the XXXXXX in place). Replaces the old hardcoded
+// "/tmp/..._XXXXXX" literals so the override above reaches every scratch path.
+inline std::string temp_template(const char *name) {
+    return temp_base_dir() + "/" + name + "_XXXXXX";
+}
+} // namespace adacpp

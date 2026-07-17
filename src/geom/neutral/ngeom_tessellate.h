@@ -66,6 +66,11 @@ struct TessMesh {
         uint32_t index_count = 0; // number of indices (3 * triangles)
         int64_t face_id = 0;      // source entity id (STEP/IFC #id), 0 if unknown
         uint32_t face_seq = 0;    // 0-based face position within the solid
+        // Per-face presentation colour (from FaceSurfaceN, STEP per-face styling). has_color=false =>
+        // the face inherits the owning solid's base colour. Carried through so the GLB writer can split
+        // a solid into one primitive/material per distinct face colour (merge-by-colour at face level).
+        bool has_color = false;
+        float cr = 0.5f, cg = 0.5f, cb = 0.5f, ca = 1.0f;
     };
     std::vector<FaceRange> face_ranges;
     // Primitive topology of `indices`: TRIANGLES for solids/faces, LINES for curve-only bodies
@@ -82,6 +87,9 @@ bool tessellate_face(const FaceSurfaceN &face, const TessParams &tp, TessMesh &o
 // the streaming entry points can report a dropped-face count for the audit to flag.
 std::uint64_t tess_dropped_faces();
 std::uint64_t tess_total_faces();
+// Faces that tessellated but covered < half their expected surface area (a partial fill / hole) —
+// present-but-incomplete geometry the zero-triangle dropped count can't catch.
+std::uint64_t tess_suspect_faces();
 void reset_tess_face_stats();
 
 // Tessellate a whole decoded document (all roots), one TessMesh with a Group per root.

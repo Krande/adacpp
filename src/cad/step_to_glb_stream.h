@@ -143,9 +143,9 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
     // otherwise the caller's directory (created if missing, left in place afterwards).
     std::string spill;
     bool remove_after = false;
-    char tmpl[] = "/tmp/adacpp_glb_XXXXXX";
+    std::string tmpl = adacpp::temp_template("adacpp_glb");
     if (spill_dir.empty()) {
-        if (char *dir = ::mkdtemp(tmpl)) { // unique spill dir (removed after assembly)
+        if (char *dir = ::mkdtemp(tmpl.data())) { // unique spill dir (removed after assembly)
             spill = dir;
             remove_after = true;
         }
@@ -193,7 +193,8 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
                 // Carry per-face clickable regions (relative to this solid's index buffer) when captured.
                 gs.face_ranges.reserve(tm.face_ranges.size());
                 for (const auto &fr : tm.face_ranges)
-                    gs.face_ranges.push_back({fr.first_index, fr.index_count, fr.face_id, fr.face_seq});
+                    gs.face_ranges.push_back({fr.first_index, fr.index_count, fr.face_id, fr.face_seq, fr.has_color,
+                                              fr.cr, fr.cg, fr.cb, fr.ca});
                 gs.color = {rr.cr, rr.cg, rr.cb, rr.ca}; // grey default when !has_color
                 gs.transforms = rr.transforms;
                 gs.id = rr.id; // fallback leaf name
@@ -219,7 +220,10 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
                         M[14] *= s;
                     }
                 }
-                lane.add(gs); // spilled to disk immediately
+                // A solid whose faces carry distinct per-face colours (AP214 per-face styling) is split
+                // into one primitive/material per colour; single-colour solids pass through unchanged.
+                for (adacpp::glb::GlbSolid &part : adacpp::glb::split_solid_by_face_colour(gs))
+                    lane.add(part); // spilled to disk immediately
                 nwritten.fetch_add(1, std::memory_order_relaxed);
             };
             // Phase A — the huge prefix, one root at a time BEFORE the pool starts: every thread
@@ -303,9 +307,15 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
     prof.note("threads", nthreads);
     // Emit a health line the worker folds into the audit (convert_meta) so silently-dropped faces are
     // flagged without visual inspection. Only when something dropped — keep the common case quiet.
-    if (std::uint64_t dropped = adacpp::ngeom::tess_dropped_faces())
-        std::fprintf(stderr, "[GEOMHEALTH-JSON] {\"dropped_faces\":%llu,\"total_faces\":%llu}\n",
-                     (unsigned long long) dropped, (unsigned long long) adacpp::ngeom::tess_total_faces());
+    {
+        std::uint64_t dropped = adacpp::ngeom::tess_dropped_faces();
+        std::uint64_t suspect = adacpp::ngeom::tess_suspect_faces();
+        if (dropped || suspect)
+            std::fprintf(stderr,
+                         "[GEOMHEALTH-JSON] {\"dropped_faces\":%llu,\"suspect_faces\":%llu,\"total_faces\":%llu}\n",
+                         (unsigned long long) dropped, (unsigned long long) suspect,
+                         (unsigned long long) adacpp::ngeom::tess_total_faces());
+    }
     return ok ? nwritten.load() : -1;
 }
 

@@ -117,6 +117,78 @@ inline std::vector<Vec3> align_polyline_to_vertices(const std::vector<Vec3> &pts
     return std::vector<Vec3>{a, b}; // ia == ib: sub-range within one sample interval
 }
 
+// Chord-deflection simplification of a sampled polyline (Douglas-Peucker). The uniform B-spline
+// edge sampler (uniform_edge_segments) emits a fixed cps*4 points REGARDLESS of tolerance, so a
+// coarse `deflection` never coarsens a B-spline boundary — the dominant source of native's
+// over-tessellation on freeform faces (a face's boundary alone can carry thousands of points, each
+// forcing a CDT triangle the interior refinement then multiplies). Decimating the sampled polyline
+// down to the chord tolerance makes the boundary honour `deflection` like OCC's edge discretization.
+//
+// Douglas-Peucker is used (not a greedy forward walk) because it is DIRECTION-SYMMETRIC: the two
+// faces sharing a manifold edge discretize it in opposite orders, and DP keeps the same point SET
+// either way (the recursive max-deviation split does not depend on traversal direction), so the
+// shared edge stays watertight. Endpoints are always kept. tol<=0 disables (keeps every sample).
+inline std::vector<Vec3> simplify_polyline_dp(const std::vector<Vec3> &p, double tol, double max_angle) {
+    const size_t n = p.size();
+    if (n <= 2 || tol <= 0.0)
+        return p;
+    const double cos_ang = (max_angle > 0.0) ? std::cos(max_angle) : -2.0; // -2 => angle test off
+    std::vector<char> keep(n, 0);
+    keep[0] = keep[n - 1] = 1;
+    // explicit stack of [i,j] ranges whose chord approximates the interior within tol or gets split
+    std::vector<std::pair<size_t, size_t>> stk;
+    stk.emplace_back(0, n - 1);
+    while (!stk.empty()) {
+        auto [i, j] = stk.back();
+        stk.pop_back();
+        if (j <= i + 1)
+            continue;
+        const Vec3 A = p[i], B = p[j];
+        const Vec3 ab = B - A;
+        const double abl2 = ab.dot(ab);
+        double dmax = -1.0;
+        size_t im = i;
+        for (size_t k = i + 1; k < j; ++k) {
+            const Vec3 d = p[k] - A;
+            double sag;
+            if (abl2 < 1e-24)
+                sag = d.norm(); // degenerate chord (closed edge): distance to the shared endpoint
+            else {
+                const double t = d.dot(ab) / abl2; // UNCLAMPED perpendicular distance (standard DP)
+                sag = (d - ab * t).norm();
+            }
+            if (sag > dmax) {
+                dmax = sag;
+                im = k;
+            }
+        }
+        // Angular criterion (keeps curved boundaries — e.g. a tube's end ring — ROUND rather than
+        // letting a within-sag chord octagonalize them, matching OCC's edge angular deflection). The
+        // turn across the chord is measured from the ORIGINAL segments at each end, so it is
+        // reversal-symmetric; the split point (max perpendicular deviation) is symmetric too, so the
+        // decimated point SET is identical whichever direction the two adjacent faces walk the edge.
+        bool angle_split = false;
+        if (cos_ang > -1.5) {
+            const Vec3 d0 = p[i + 1] - p[i];
+            const Vec3 d1 = p[j] - p[j - 1];
+            const double l0 = d0.norm(), l1 = d1.norm();
+            if (l0 > 1e-12 && l1 > 1e-12 && d0.dot(d1) / (l0 * l1) < cos_ang)
+                angle_split = true;
+        }
+        if ((dmax > tol || angle_split) && im > i) {
+            keep[im] = 1;
+            stk.emplace_back(i, im);
+            stk.emplace_back(im, j);
+        }
+    }
+    std::vector<Vec3> out;
+    out.reserve(n);
+    for (size_t k = 0; k < n; ++k)
+        if (keep[k])
+            out.push_back(p[k]);
+    return out;
+}
+
 // One oriented edge of a loop. `start`/`end` are the EDGE_CURVE endpoints with the ORIENTED_EDGE
 // orientation already applied (decode). `e_start`/`e_end` are the raw EDGE_CURVE endpoints and
 // `same_sense`/`orientation` the flags — needed because a *closed* circle/ellipse edge (start==end)
@@ -198,6 +270,9 @@ struct OrientedEdgeN {
                 std::reverse(pts.begin(), pts.end());
             pts.front() = start;
             pts.back() = end;
+            // Decimate the fixed-density B-spline sample to the chord tolerance (see
+            // simplify_polyline_dp): this is what makes a B-spline boundary respond to `deflection`.
+            pts = simplify_polyline_dp(pts, deflection, max_angle);
             return pts;
         } else {
             handled = false;
@@ -317,6 +392,12 @@ struct FaceSurfaceN {
     // real 3D plane is only implied by its boundary points). The tessellator must fit the plane from
     // the 3D loop up front — otherwise the poly projects flat onto the z=0 placeholder plane.
     bool fit_plane_from_loop = false;
+    // Per-face presentation colour (STEP OVER_RIDING_STYLED_ITEM -> COLOUR_RGB, keyed on this face's
+    // ADVANCED_FACE #id). Mirrors NgeomRoot's per-solid colour. has_color=false => the face inherits the
+    // owning solid's base colour. Populated by the native STEP reader (step_reader.h face()); the neutral
+    // decoder / IFC path leave it unset.
+    bool has_color = false;
+    float cr = 0.5f, cg = 0.5f, cb = 0.5f, ca = 1.0f; // rgba in 0..1 when has_color
 };
 
 struct ConnectedFaceSetN {

@@ -124,6 +124,7 @@ sew_faces = _cad.sew_faces
 shape_type = _cad.shape_type
 shells = _cad.shells
 solids = _cad.solids
+step_bytes_to_glb_bytes = _cad.step_bytes_to_glb_bytes
 step_emit_ifc_brep = _cad.step_emit_ifc_brep
 step_parity = _cad.step_parity
 stream_ifc_to_glb = _cad.stream_ifc_to_glb
@@ -241,6 +242,7 @@ __all__ = [
     "shape_type",
     "shells",
     "solids",
+    "step_bytes_to_glb_bytes",
     "step_emit_ifc_brep",
     "step_parity",
     "stream_ifc_to_glb",
