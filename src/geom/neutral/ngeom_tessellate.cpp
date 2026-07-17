@@ -123,6 +123,7 @@ struct FaceDiag {
     double emitted_area = 0;    // 3D area actually tessellated for this face
     double expected_area = 0;   // expected trimmed surface area (region-fill faces only)
     bool has_coverage = false;  // expected_area is meaningful (not a winding/periodic face)
+    size_t n_tris = 0;          // triangles emitted for this face (characterization)
 };
 
 // thread_local: DIAG forces threads=1 (see tessellate_one_root), but a stray parallel caller must
@@ -172,16 +173,16 @@ void diag_flush_face(const Surface &surf, int64_t face_id, uint32_t face_seq, do
             return;
         std::fprintf(t.fh, "face_seq,face_id,surf_kind,is_quadric,path_taken,n_bpts,n_uv_fail,n_collapsed,"
                            "r_p50,r_p95,r_max,r_rel_p50,r_rel_p95,r_rel_max,approx_size,model_scale,"
-                           "emitted_area,expected_area,coverage\n");
+                           "emitted_area,expected_area,coverage,n_tris\n");
     }
     double sz = std::max(surf.approx_size(), 1.0);
     double p50 = pct(d.r, 0.50), p95 = pct(d.r, 0.95);
     double mx = d.r.empty() ? 0.0 : *std::max_element(d.r.begin(), d.r.end());
     double coverage = (d.has_coverage && d.expected_area > 1e-12) ? d.emitted_area / d.expected_area : -1.0;
-    std::fprintf(t.fh, "%u,%lld,%s,%d,%s,%zu,%zu,%zu,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.6g,%.6g,%.4g\n",
+    std::fprintf(t.fh, "%u,%lld,%s,%d,%s,%zu,%zu,%zu,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.6g,%.6g,%.4g,%zu\n",
                  face_seq, (long long) face_id, surf_kind(surf), (int) surf.is_quadric(), d.path, d.r.size(),
                  d.n_uv_fail, d.n_collapsed, p50, p95, mx, p50 / sz, p95 / sz, mx / sz, sz, model_scale,
-                 d.emitted_area, d.has_coverage ? d.expected_area : -1.0, coverage);
+                 d.emitted_area, d.has_coverage ? d.expected_area : -1.0, coverage, d.n_tris);
     d = FaceDiag{};
 }
 
@@ -1195,6 +1196,27 @@ bool tessellate_uv_grid(const Surface &s, double u0, double u1, double v0, doubl
                         const std::vector<Vec3> *ring_p3 = nullptr) {
     int nu, nv;
     uv_grid_res(s, nu, nv);
+    // Curvature-correct the initial resolution for quadrics (cyl/cone/sphere/torus) from the actual
+    // parametric span and the curvature step, instead of the flat 8x8 seed. refine_uv can only HALVE
+    // an edge, so an 8-division seed on a 2*pi minor circle overshoots the angular target on the way
+    // down (8->16->32->64 to reach ~36), inflating a torus band ~3x. Sizing the grid AT the target
+    // (ceil(span/u_step)) lands each edge already within the angular+chord tolerance, so refinement
+    // adds ~nothing and the band matches OCC's ring density. B-splines keep their span-based seed
+    // (their u_step is parametric, not curvature). u_step==INFINITY (flat direction) keeps the seed.
+    if (dynamic_cast<const BSplineSurface *>(&s) == nullptr) {
+        const double us = s.u_step(tp.deflection, tp.max_angle);
+        const double vs = s.v_step(tp.deflection, tp.max_angle);
+        if (std::isfinite(us) && us > 1e-12)
+            nu = (int) std::clamp((long) std::ceil(std::abs(u1 - u0) / us), 2L, 4096L);
+        if (std::isfinite(vs) && vs > 1e-12)
+            nv = (int) std::clamp((long) std::ceil(std::abs(v1 - v0) / vs), 2L, 4096L);
+        while ((long) nu * nv > 200000) {
+            if (nv > nu)
+                nv /= 2;
+            else
+                nu /= 2;
+        }
+    }
     // Grid lines. Without a ring these are exactly the uniform samples, so the default path is
     // bit-for-bit what it always was.
     std::vector<double> ul, vl;
@@ -2414,6 +2436,19 @@ bool tessellate_face_impl(const FaceSurfaceN &face, const TessParams &tp, TessMe
     bool same_sense = face.same_sense;
 
     std::vector<Loop3> loops3d = build_loops3d(face, tp);
+    // A face WITH bounds whose loops all discretized to <3 points: chord-simplification of a
+    // small/gently-curved B-spline boundary (simplify_polyline_dp) can flatten every edge to its
+    // endpoints and collapse the loop. Re-discretize progressively finer (which keeps more boundary
+    // points) before giving up, so the simplification can never drop a face that used to tessellate.
+    if (loops3d.empty() && !face.bounds.empty()) {
+        for (double div : {8.0, 64.0, 512.0}) {
+            TessParams fine = tp;
+            fine.deflection = std::max(tp.deflection / div, 1e-5);
+            loops3d = build_loops3d(face, fine);
+            if (!loops3d.empty())
+                break;
+        }
+    }
     if (loops3d.empty()) {
         if (tessellate_unbounded(surf, tp, same_sense, mesh))
             return true;
@@ -2436,24 +2471,30 @@ bool tessellate_face_impl(const FaceSurfaceN &face, const TessParams &tp, TessMe
 
     auto cp = mesh.checkpoint();
     const char *reason = face_to_mesh(use_surf, loops3d, tp, same_sense, mesh);
-    if (!reason)
+    auto produced = [&]() { return mesh.checkpoint()[1] > cp[1]; };
+    if (!reason && produced())
         return true;
 
     // recovery: a tess2 failure on a thin curved face is usually a self-intersecting boundary
-    // from coarse arc discretization — re-discretize much finer and retry.
-    bool reason_tess2 = std::string(reason).find("tess2") != std::string::npos ||
-                        std::string(reason).find("UV tessellation") != std::string::npos;
-    if (reason_tess2) {
+    // from coarse arc discretization — re-discretize much finer and retry. Also fires when the face
+    // succeeded-but-emitted-nothing: chord-simplification (simplify_polyline_dp) can over-flatten a
+    // winding/wrap boundary so a periodic/slit path misclassifies it and emits zero — the finer
+    // re-discretization restores the boundary points the wrap detection needs.
+    bool reason_tess2 = reason && (std::string(reason).find("tess2") != std::string::npos ||
+                                   std::string(reason).find("UV tessellation") != std::string::npos);
+    if (reason_tess2 || !produced()) {
         mesh.rollback(cp);
-        for (double div : {8.0, 64.0}) {
-            TessParams fine;
+        for (double div : {8.0, 64.0, 512.0}) {
+            TessParams fine = tp;
             fine.deflection = std::max(tp.deflection / div, 1e-4);
             fine.max_angle = std::max(tp.max_angle / std::sqrt(div), 0.02);
             std::vector<Loop3> fl = build_loops3d(face, fine);
-            if (fl.size() != loops3d.size())
+            // A collapsed face may have lost loops under simplification, so the finer count is the
+            // authoritative one; only bail if finer STILL yields nothing.
+            if (fl.empty())
                 continue;
             auto cp2 = mesh.checkpoint();
-            if (!face_to_mesh(use_surf, fl, fine, same_sense, mesh))
+            if (!face_to_mesh(use_surf, fl, fine, same_sense, mesh) && mesh.checkpoint()[1] > cp2[1])
                 return true;
             mesh.rollback(cp2);
         }
@@ -2544,6 +2585,7 @@ bool tessellate_face(const FaceSurfaceN &face, const TessParams &tp, TessMesh &o
         d.emitted_area = emitted_area;
         d.expected_area = fh.expected_area;
         d.has_coverage = fh.has_expected;
+        d.n_tris = (outm.indices.size() - i0) / 3;
         static std::atomic<uint32_t> g_diag_seq{0};
         diag_flush_face(*face.surface, face.src_id, g_diag_seq.fetch_add(1, std::memory_order_relaxed),
                         tls_model_scale());
