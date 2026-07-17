@@ -193,7 +193,8 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
                 // Carry per-face clickable regions (relative to this solid's index buffer) when captured.
                 gs.face_ranges.reserve(tm.face_ranges.size());
                 for (const auto &fr : tm.face_ranges)
-                    gs.face_ranges.push_back({fr.first_index, fr.index_count, fr.face_id, fr.face_seq});
+                    gs.face_ranges.push_back({fr.first_index, fr.index_count, fr.face_id, fr.face_seq,
+                                              fr.has_color, fr.cr, fr.cg, fr.cb, fr.ca});
                 gs.color = {rr.cr, rr.cg, rr.cb, rr.ca}; // grey default when !has_color
                 gs.transforms = rr.transforms;
                 gs.id = rr.id; // fallback leaf name
@@ -219,7 +220,10 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
                         M[14] *= s;
                     }
                 }
-                lane.add(gs); // spilled to disk immediately
+                // A solid whose faces carry distinct per-face colours (AP214 per-face styling) is split
+                // into one primitive/material per colour; single-colour solids pass through unchanged.
+                for (adacpp::glb::GlbSolid &part : adacpp::glb::split_solid_by_face_colour(gs))
+                    lane.add(part); // spilled to disk immediately
                 nwritten.fetch_add(1, std::memory_order_relaxed);
             };
             // Phase A — the huge prefix, one root at a time BEFORE the pool starts: every thread

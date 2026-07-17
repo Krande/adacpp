@@ -317,6 +317,12 @@ struct FaceSurfaceN {
     // real 3D plane is only implied by its boundary points). The tessellator must fit the plane from
     // the 3D loop up front — otherwise the poly projects flat onto the z=0 placeholder plane.
     bool fit_plane_from_loop = false;
+    // Per-face presentation colour (STEP OVER_RIDING_STYLED_ITEM -> COLOUR_RGB, keyed on this face's
+    // ADVANCED_FACE #id). Mirrors NgeomRoot's per-solid colour. has_color=false => the face inherits the
+    // owning solid's base colour. Populated by the native STEP reader (step_reader.h face()); the neutral
+    // decoder / IFC path leave it unset.
+    bool has_color = false;
+    float cr = 0.5f, cg = 0.5f, cb = 0.5f, ca = 1.0f; // rgba in 0..1 when has_color
 };
 
 struct ConnectedFaceSetN {

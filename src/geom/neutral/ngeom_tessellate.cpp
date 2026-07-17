@@ -3004,7 +3004,8 @@ static void tessellate_one_root(const NgeomRoot &root, const TessParams &tp, Tes
                 tessellate_face(*face, tp, out);
                 const uint32_t c = (uint32_t) out.indices.size() - s;
                 if (c > 0)
-                    out.face_ranges.push_back({s, c, face->src_id, (uint32_t) fi});
+                    out.face_ranges.push_back({s, c, face->src_id, (uint32_t) fi, face->has_color, face->cr,
+                                               face->cg, face->cb, face->ca});
             } else {
                 tessellate_face(*face, tp, out);
             }

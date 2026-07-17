@@ -596,7 +596,11 @@ private:
             t == "EXTRUDED_AREA_SOLID" || t == "REVOLVED_AREA_SOLID" || t == "SWEPT_DISK_SOLID" ||
             t == "BOOLEAN_RESULT")
             lists.roots.push_back(id);
-        else if (t == "STYLED_ITEM")
+        else if (t == "STYLED_ITEM" || t == "OVER_RIDING_STYLED_ITEM")
+            // OVER_RIDING_STYLED_ITEM is a STYLED_ITEM subtype (extra 4th over-ridden-style arg,
+            // harmlessly ignored by build_colour_map). AP214 per-face styling emits it in bulk
+            // (this robot file: 33 STYLED_ITEM + 3748 OVER_RIDING_STYLED_ITEM), so dropping it here
+            // discarded 99% of the presentation colours.
             lists.styled.push_back(id);
         else if (t == "ADVANCED_BREP_SHAPE_REPRESENTATION" || t == "SHAPE_REPRESENTATION" ||
                  t == "MANIFOLD_SURFACE_SHAPE_REPRESENTATION" || t == "FACETED_BREP_SHAPE_REPRESENTATION" ||
@@ -936,7 +940,8 @@ private:
             if (t == "MANIFOLD_SOLID_BREP" || t == "SHELL_BASED_SURFACE_MODEL" || t == "EXTRUDED_AREA_SOLID" ||
                 t == "REVOLVED_AREA_SOLID" || t == "SWEPT_DISK_SOLID")
                 tl.roots.push_back(id);
-            else if (t == "STYLED_ITEM")
+            else if (t == "STYLED_ITEM" || t == "OVER_RIDING_STYLED_ITEM")
+                // See the streaming classifier: OVER_RIDING_STYLED_ITEM is the per-face styling subtype.
                 tl.styled.push_back(id);
             else if (t == "ADVANCED_BREP_SHAPE_REPRESENTATION" || t == "SHAPE_REPRESENTATION" ||
                      t == "MANIFOLD_SURFACE_SHAPE_REPRESENTATION" || t == "FACETED_BREP_SHAPE_REPRESENTATION" ||
@@ -1533,6 +1538,16 @@ private:
             return c->second;
         auto f = std::make_shared<ng::FaceSurfaceN>();
         f->src_id = id; // STEP ADVANCED_FACE / FACE_SURFACE entity id -> per-face clickable region label
+        // Per-face colour: AP214 OVER_RIDING_STYLED_ITEM styles target the ADVANCED_FACE #id (this face),
+        // so build_colour_map keys colour_map_ by face id for those. Stamp it here; the per-solid lookup
+        // in resolve_root (colour_map_[solid id]) remains the base/fallback for un-styled faces.
+        if (auto cit = colour_map_.find(id); cit != colour_map_.end()) {
+            f->has_color = true;
+            f->cr = cit->second.r;
+            f->cg = cit->second.g;
+            f->cb = cit->second.b;
+            f->ca = cit->second.a;
+        }
         const Instance *in = inst(id);
         if (in && (in->type == "ADVANCED_FACE" || in->type == "FACE_SURFACE") && in->args.size() >= 4) {
             if (in->args[1].kind == Kind::List)
