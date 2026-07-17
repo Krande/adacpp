@@ -1,8 +1,9 @@
 name: build-stp2glb
 
-# Build the standalone OCC-free STP2GLB CLI (no OCCT/CGAL/gmsh/IFC/Python) and publish the Linux
-# binary as a downloadable artifact. Runs on push/dispatch; on a tag push it also attaches the
-# binary to the GitHub release.
+# Build the standalone OCC-free STP2GLB CLI (no OCCT/CGAL/gmsh/IFC/Python) for Linux and Windows and
+# publish each binary as a downloadable artifact. The C++ runtime is static-linked, so the binaries
+# run with no conda env / VC++ redist. Runs on push/dispatch; on a tag push each job also attaches
+# its binary to the GitHub release.
 on:
   workflow_dispatch:
 
@@ -41,14 +42,16 @@ jobs:
         run: |
           pixi run -e stp2glb build-stp2glb
 
-      - name: sanity-check the binary (OCC-free)
+      - name: sanity-check the binary (OCC-free + standalone)
         run: |
           bin=build-stp2glb/STP2GLB
           test -x "$bin"
           ./"$bin" --help
-          # Fail loudly if any OCCT toolkit (libTK*) leaked into the link.
-          if ldd "$bin" | grep -qiE 'libTK'; then
-            echo "ERROR: STP2GLB linked an OCCT toolkit (libTK*) — not OCC-free" >&2
+          # The released CLI must be standalone: no OCCT toolkit (libTK*) and no dynamic C++ runtime
+          # (libstdc++/libgcc are static-linked), so it runs with no conda env. glibc stays dynamic
+          # (OS-provided) by design.
+          if ldd "$bin" | grep -qiE 'libTK|libstdc\+\+|libgcc_s'; then
+            echo "ERROR: STP2GLB linked OCCT or a dynamic C++ runtime — not standalone" >&2
             ldd "$bin"
             exit 1
           fi
@@ -67,3 +70,55 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: build-stp2glb/STP2GLB
+
+  build_stp2glb_win:
+    name: stp2glb-standalone-win
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash -l {0}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+
+      - uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          pixi-version: latest
+          environments: stp2glb
+          cache: true
+
+      # Same lean OCC-free standalone config as Linux; the win-64 pixi task fixes the header path
+      # (Library/include) and unsets the Visual Studio generator vars so the Ninja preset wins.
+      - name: build standalone STP2GLB.exe
+        run: |
+          pixi run -e stp2glb build-stp2glb
+
+      - name: sanity-check the binary (runs + standalone)
+        run: |
+          bin=build-stp2glb/STP2GLB.exe
+          test -f "$bin"
+          ./"$bin" --help
+          # A standalone CLI must import only system DLLs (KERNEL32 + the api-ms-win-crt UCRT, which
+          # ships with Windows). The MSVC runtime is static-linked, so fail if MSVCP140/VCRUNTIME140
+          # (VC++ redist) or any OCCT toolkit leaked into the imports.
+          pixi run -e stp2glb bash -c "dumpbin //dependents '$bin'" > deps.txt
+          cat deps.txt
+          if grep -qiE 'MSVCP140|VCRUNTIME140|libTK' deps.txt; then
+            echo "ERROR: STP2GLB.exe is not standalone (VC++ redist or OCCT leaked into imports)" >&2
+            exit 1
+          fi
+
+      - name: upload STP2GLB.exe artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: STP2GLB-win-64
+          path: build-stp2glb/STP2GLB.exe
+          if-no-files-found: error
+
+      # On a tag push, also attach the Windows binary to the corresponding GitHub release.
+      - name: attach binary to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: build-stp2glb/STP2GLB.exe
