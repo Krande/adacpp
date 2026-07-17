@@ -21,8 +21,8 @@
 
 #include "CLI/CLI.hpp"
 
-#include "../cad/brep_file_convert.h" // write_ifc_file_impl / write_ifc_to_step_impl (STEP <-> IFC)
-#include "../cad/ifc_to_glb_stream.h" // adacpp::stream_ifc_to_glb (IFC -> GLB)
+#include "../cad/brep_file_convert.h"  // write_ifc_file_impl / write_ifc_to_step_impl (STEP <-> IFC)
+#include "../cad/ifc_to_glb_stream.h"  // adacpp::stream_ifc_to_glb (IFC -> GLB)
 #include "../cad/step_to_glb_stream.h" // adacpp::stream_step_to_glb (STEP -> GLB)
 
 namespace {
@@ -64,15 +64,15 @@ int main(int argc, char *argv[]) {
     std::string output;
     double deflection = 2.0;
     double angular_deg = 20.0;
-    int num_threads = 0;       // 0 = all hardware cores (GLB paths)
-    bool meshopt = true;       // EXT_meshopt_compression baked inline by default (GLB paths)
-    bool profile = false;      // env-gated StepProfiler instrumentation (STEP->GLB)
-    bool quiet = false;        // suppress the param echo + progress; keep errors + the final result line
-    bool face_regions = false; // bake per-face clickable regions into scenes[0].extras (GLB paths)
-    std::string pipeline;      // tessellation track: "" / libtess2 (default) | cdt (GLB paths)
-    bool pin_boundary = true;  // libtess2 option (GLB paths)
-    double model_scale = 0.0;  // >0 => adaptive per-surface density (GLB paths)
-    std::string spill_dir;     // per-lane GLB spill dir; empty => private auto-removed mkdtemp
+    int num_threads = 0;                // 0 = all hardware cores (GLB paths)
+    bool meshopt = true;                // EXT_meshopt_compression baked inline by default (GLB paths)
+    bool profile = false;               // env-gated StepProfiler instrumentation (STEP->GLB)
+    bool quiet = false;                 // suppress the param echo + progress; keep errors + the final result line
+    bool face_regions = false;          // bake per-face clickable regions into scenes[0].extras (GLB paths)
+    std::string pipeline;               // tessellation track: "" / libtess2 (default) | cdt (GLB paths)
+    bool pin_boundary = true;           // libtess2 option (GLB paths)
+    double model_scale = 0.0;           // >0 => adaptive per-surface density (GLB paths)
+    std::string spill_dir;              // per-lane GLB spill dir; empty => private auto-removed mkdtemp
     std::string schema = "IFC4X3_ADD2"; // target IFC schema (STEP->IFC)
     long max_solids = 0;                // cap on solids/products emitted for STEP<->IFC (0 = no cap)
 
@@ -82,8 +82,7 @@ int main(int argc, char *argv[]) {
 
     app.add_option("--deflection", deflection, "Linear deflection (GLB paths)")->default_val(2.0);
     app.add_option("--angular-deg", angular_deg, "Angular deflection (degrees)")->default_val(20.0);
-    app.add_option("--num-threads", num_threads, "Worker threads (0 = all hardware cores; GLB paths)")
-        ->default_val(0);
+    app.add_option("--num-threads", num_threads, "Worker threads (0 = all hardware cores; GLB paths)")->default_val(0);
     app.add_flag("--meshopt,!--no-meshopt", meshopt, "Bake EXT_meshopt_compression inline for GLB (default ON)");
     app.add_flag("--profile", profile, "Print [STEPPROF] phase/memory/per-solid timing to stderr (STEP->GLB)");
     app.add_flag("--face-regions", face_regions,
@@ -120,8 +119,8 @@ int main(int argc, char *argv[]) {
     const Fmt out_fmt = fmt_from_path(output);
 
     auto is = [&](Fmt a, Fmt b) { return in_fmt == a && out_fmt == b; };
-    const bool supported = is(Fmt::Step, Fmt::Glb) || is(Fmt::Ifc, Fmt::Glb) || is(Fmt::Step, Fmt::Ifc) ||
-                           is(Fmt::Ifc, Fmt::Step);
+    const bool supported =
+        is(Fmt::Step, Fmt::Glb) || is(Fmt::Ifc, Fmt::Glb) || is(Fmt::Step, Fmt::Ifc) || is(Fmt::Ifc, Fmt::Step);
     if (!supported) {
         std::cerr << "Error: unsupported conversion " << fmt_name(in_fmt) << " -> " << fmt_name(out_fmt) << " (from '"
                   << input << "' -> '" << output << "').\n"
