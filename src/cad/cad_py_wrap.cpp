@@ -2389,24 +2389,19 @@ ShapeHandle build_advanced_face_planar_impl(std::array<double, 3> loc, std::arra
         return wm.Wire();
     };
 
+    const bool have_axis = (std::abs(axis[0]) + std::abs(axis[1]) + std::abs(axis[2])) > 1e-9;
+
     TopoDS_Face face;
     bool done = false;
-    // Primary: infer the plane from the wire — this also builds each edge's 2D p-curve (incl. a
-    // B-spline boundary edge), so a curved-boundary flat plate meshes.
-    {
-        BRepBuilderAPI_MakeFace fm(wire_of(bounds[0]), Standard_True);
-        for (std::size_t b = 1; b < bounds.size(); ++b)
-            fm.Add(wire_of(bounds[b]));
-        if (fm.IsDone()) {
-            face = fm.Face();
-            done = true;
-        }
-    }
-    // Fallback: a only-near-planar wire (import tolerance above Precision::Confusion) defeats
-    // FindPlane above — build on the DECLARED plane (loc + axis normal) instead, which projects
-    // the wire rather than fitting one.
-    const bool have_axis = (std::abs(axis[0]) + std::abs(axis[1]) + std::abs(axis[2])) > 1e-9;
-    if (!done && have_axis) {
+
+    // Build on the EXPLICIT declared plane (loc + axis normal), projecting each wire onto it. This is
+    // exception-guarded, unlike the FindPlane path below whose hole-Add can hard-CRASH (SIGSEGV, not a
+    // catchable Standard_Failure) when a holed face's plane is diagonally oriented. Factored into a
+    // lambda so it can run either FIRST (for holed faces, to sidestep that crash) or as the
+    // near-planar fallback for a single-boundary face.
+    auto try_declared_plane = [&]() {
+        if (done || !have_axis)
+            return;
         try {
             const gp_Pln pln(gp_Pnt(loc[0], loc[1], loc[2]), gp_Dir(axis[0], axis[1], axis[2]));
             BRepBuilderAPI_MakeFace fm(pln, wire_of(bounds[0]), Standard_True);
@@ -2419,7 +2414,31 @@ ShapeHandle build_advanced_face_planar_impl(std::array<double, 3> loc, std::arra
         } catch (const Standard_Failure &) {
             // degenerate declared normal / projection failure → reported below
         }
+    };
+
+    // A holed face (bounds.size() > 1) with a valid declared plane builds on that explicit plane
+    // FIRST. The FindPlane primary path below adds each hole wire with an unguarded MakeFace::Add,
+    // which SIGSEGVs on faces whose plane is diagonally oriented — an uncatchable crash, so the
+    // guarded fallback would never be reached if we hit it. For a single-boundary face we keep
+    // FindPlane primary: it also builds each edge's 2D p-curve, so a curved-boundary flat plate meshes.
+    if (have_axis && bounds.size() > 1)
+        try_declared_plane();
+
+    // Primary (single boundary, or no declared axis): infer the plane from the wire — this also builds
+    // each edge's 2D p-curve (incl. a B-spline boundary edge), so a curved-boundary flat plate meshes.
+    if (!done) {
+        BRepBuilderAPI_MakeFace fm(wire_of(bounds[0]), Standard_True);
+        for (std::size_t b = 1; b < bounds.size(); ++b)
+            fm.Add(wire_of(bounds[b]));
+        if (fm.IsDone()) {
+            face = fm.Face();
+            done = true;
+        }
     }
+    // Fallback: a only-near-planar wire (import tolerance above Precision::Confusion) defeats FindPlane
+    // above — build on the DECLARED plane instead (no-op if the explicit build already ran).
+    try_declared_plane();
+
     if (!done)
         throw std::runtime_error("build_advanced_face_planar: MakeFace failed");
     ShapeFix_Face fixer(face);
