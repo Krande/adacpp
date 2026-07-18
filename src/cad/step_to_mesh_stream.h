@@ -373,15 +373,8 @@ inline long stream_step_to_mesh(const std::string &in_path, const std::string &o
     if (remove_after)
         ::rmdir(spill.c_str());
     prof.note("threads", nthreads);
-    {
-        std::uint64_t dropped = adacpp::ngeom::tess_dropped_faces();
-        std::uint64_t suspect = adacpp::ngeom::tess_suspect_faces();
-        if (dropped || suspect)
-            std::fprintf(stderr,
-                         "[GEOMHEALTH-JSON] {\"dropped_faces\":%llu,\"suspect_faces\":%llu,\"total_faces\":%llu}\n",
-                         (unsigned long long) dropped, (unsigned long long) suspect,
-                         (unsigned long long) adacpp::ngeom::tess_total_faces());
-    }
+    if (adacpp::ngeom::tess_dropped_faces() || adacpp::ngeom::tess_suspect_faces())
+        std::fprintf(stderr, "[GEOMHEALTH-JSON] %s\n", adacpp::ngeom::tess_geomhealth_json().c_str());
     return ok ? (long) total : -1;
 }
 

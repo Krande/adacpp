@@ -73,24 +73,35 @@ inline size_t tess_face_merge_batch() {
 }
 
 // ---- diagnostics (env-gated) ----------------------------------------------------------------
-[[maybe_unused]] const char *surf_kind(const Surface &s) {
+// Stable surface-kind tokens, indexed by surf_kind_index. Kept in lockstep with that function so the
+// per-surface-type drop counters (g_dropped_by_kind) and surf_kind() share one vocabulary.
+constexpr int kNumSurfKinds = 9;
+inline const char *const *surf_kind_names() {
+    static const char *const names[kNumSurfKinds] = {"plane",   "cyl",       "cone",       "sphere", "torus",
+                                                     "bspline", "extrusion", "revolution", "?"};
+    return names;
+}
+int surf_kind_index(const Surface &s) {
     if (dynamic_cast<const PlaneSurface *>(&s))
-        return "plane";
+        return 0;
     if (dynamic_cast<const CylinderSurface *>(&s))
-        return "cyl";
+        return 1;
     if (dynamic_cast<const ConeSurface *>(&s))
-        return "cone";
+        return 2;
     if (dynamic_cast<const SphereSurface *>(&s))
-        return "sphere";
+        return 3;
     if (dynamic_cast<const TorusSurface *>(&s))
-        return "torus";
+        return 4;
     if (dynamic_cast<const BSplineSurface *>(&s))
-        return "bspline";
+        return 5;
     if (dynamic_cast<const LinearExtrusionSurface *>(&s))
-        return "extrusion";
+        return 6;
     if (dynamic_cast<const RevolutionSurface *>(&s))
-        return "revolution";
-    return "?";
+        return 7;
+    return 8;
+}
+[[maybe_unused]] const char *surf_kind(const Surface &s) {
+    return surf_kind_names()[surf_kind_index(s)];
 }
 
 // ---- UV-inversion residual diagnostic (ADA_TESS_DIAG=<path.csv>) -----------------------------
@@ -1683,14 +1694,20 @@ bool tessellate_periodic_winding(const Surface &s, const std::vector<LoopUv> &lo
     if (FDBG)
         std::fprintf(stderr, "FDBG winding %-10s vext=%.4g caps=%d\n", surf_kind(s), vmax - vmin,
                      (int) s.v_caps().has_value());
-    if (!(vmax - vmin > 1e-9 * std::max(std::max(std::abs(vmax), std::abs(vmin)), 1.0)))
-        return false;
 
     double cb = -INF, ct = INF;
     if (auto caps = s.v_caps()) {
         cb = caps->first;
         ct = caps->second;
     }
+    // A FLAT winding loop — every vertex at one v, e.g. a full circle bounding a cone that closes at
+    // its apex (r0 == 0), or a cylinder capped at a pole — has zero v-extent yet is NOT degenerate:
+    // it winds a full period in u and the face is closed by sweeping to the surface's finite v-cap
+    // (the apex/pole), which the vfar logic below already targets. Reject the zero-extent loop only
+    // when there is no finite cap to close it toward (a genuinely collapsed loop).
+    const bool flat_v = !(vmax - vmin > 1e-9 * std::max(std::max(std::abs(vmax), std::abs(vmin)), 1.0));
+    if (flat_v && !(std::isfinite(cb) || std::isfinite(ct)))
+        return false;
     auto below = [&](double c) { return c + 1e-4 * std::max(std::abs(vmax - c), 1.0); };
     auto above = [&](double c) { return c - 1e-4 * std::max(std::abs(c - vmin), 1.0); };
     double vfar;
@@ -2724,6 +2741,10 @@ static std::atomic<std::uint64_t> g_total_faces{0};
 // self-intersecting UV loop tess2 only half-filled). Distinct from dropped (zero triangles); this is
 // the "detection gap" the drop counter alone leaves: geometry that is present but incomplete.
 static std::atomic<std::uint64_t> g_suspect_faces{0};
+// Dropped-face count split by surface kind (indexed by surf_kind_index), so the GEOMHEALTH marker can
+// report a per-type breakdown ({"cone":N,...}) and the audit can bucket dropped geometry automatically
+// rather than by a manual probe. Parallel to g_dropped_faces: their sum equals it.
+static std::atomic<std::uint64_t> g_dropped_by_kind[kNumSurfKinds];
 std::uint64_t tess_dropped_faces() {
     return g_dropped_faces.load(std::memory_order_relaxed);
 }
@@ -2733,10 +2754,32 @@ std::uint64_t tess_total_faces() {
 std::uint64_t tess_suspect_faces() {
     return g_suspect_faces.load(std::memory_order_relaxed);
 }
+std::vector<std::pair<std::string, std::uint64_t>> tess_dropped_by_surface() {
+    std::vector<std::pair<std::string, std::uint64_t>> out;
+    for (int i = 0; i < kNumSurfKinds; ++i) {
+        std::uint64_t c = g_dropped_by_kind[i].load(std::memory_order_relaxed);
+        if (c)
+            out.emplace_back(surf_kind_names()[i], c);
+    }
+    return out;
+}
+std::string tess_geomhealth_json() {
+    std::string by_surf;
+    for (const auto &kv : tess_dropped_by_surface()) {
+        if (!by_surf.empty())
+            by_surf += ",";
+        by_surf += "\"" + kv.first + "\":" + std::to_string(kv.second);
+    }
+    return "{\"dropped_faces\":" + std::to_string(tess_dropped_faces()) +
+           ",\"suspect_faces\":" + std::to_string(tess_suspect_faces()) +
+           ",\"total_faces\":" + std::to_string(tess_total_faces()) + ",\"drop_by_surface\":{" + by_surf + "}}";
+}
 void reset_tess_face_stats() {
     g_dropped_faces.store(0, std::memory_order_relaxed);
     g_total_faces.store(0, std::memory_order_relaxed);
     g_suspect_faces.store(0, std::memory_order_relaxed);
+    for (auto &c : g_dropped_by_kind)
+        c.store(0, std::memory_order_relaxed);
 }
 
 bool tessellate_face(const FaceSurfaceN &face, const TessParams &tp, TessMesh &outm) {
@@ -2797,8 +2840,11 @@ bool tessellate_face(const FaceSurfaceN &face, const TessParams &tp, TessMesh &o
     // failures still return true with an empty result.
     g_total_faces.fetch_add(1, std::memory_order_relaxed);
     bool dropped = outm.indices.size() == i0 && !face.bounds.empty();
-    if (dropped)
+    if (dropped) {
         g_dropped_faces.fetch_add(1, std::memory_order_relaxed);
+        if (face.surface)
+            g_dropped_by_kind[surf_kind_index(*face.surface)].fetch_add(1, std::memory_order_relaxed);
+    }
     // Partial fill: tessellated (not dropped) but covered < half the expected area — the detection gap.
     else if (fh.has_expected && fh.expected_area > 1e-6 && emitted_area < 0.5 * fh.expected_area)
         g_suspect_faces.fetch_add(1, std::memory_order_relaxed);
