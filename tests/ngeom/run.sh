@@ -4,7 +4,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-INC="-I src/geom/neutral -I third_party/libtess2/Include"
+# -I third_party/detria: ngeom_tessellate.cpp includes detria.hpp (the `cdt` track), so the
+# tessellation-linked suites below need it on the include path.
+INC="-I src/geom/neutral -I third_party/libtess2/Include -I third_party/detria"
 TESS_SRC=(third_party/libtess2/Source/*.c)
 
 obj=$(mktemp -d)

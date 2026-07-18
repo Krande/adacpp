@@ -1694,14 +1694,20 @@ bool tessellate_periodic_winding(const Surface &s, const std::vector<LoopUv> &lo
     if (FDBG)
         std::fprintf(stderr, "FDBG winding %-10s vext=%.4g caps=%d\n", surf_kind(s), vmax - vmin,
                      (int) s.v_caps().has_value());
-    if (!(vmax - vmin > 1e-9 * std::max(std::max(std::abs(vmax), std::abs(vmin)), 1.0)))
-        return false;
 
     double cb = -INF, ct = INF;
     if (auto caps = s.v_caps()) {
         cb = caps->first;
         ct = caps->second;
     }
+    // A FLAT winding loop — every vertex at one v, e.g. a full circle bounding a cone that closes at
+    // its apex (r0 == 0), or a cylinder capped at a pole — has zero v-extent yet is NOT degenerate:
+    // it winds a full period in u and the face is closed by sweeping to the surface's finite v-cap
+    // (the apex/pole), which the vfar logic below already targets. Reject the zero-extent loop only
+    // when there is no finite cap to close it toward (a genuinely collapsed loop).
+    const bool flat_v = !(vmax - vmin > 1e-9 * std::max(std::max(std::abs(vmax), std::abs(vmin)), 1.0));
+    if (flat_v && !(std::isfinite(cb) || std::isfinite(ct)))
+        return false;
     auto below = [&](double c) { return c + 1e-4 * std::max(std::abs(vmax - c), 1.0); };
     auto above = [&](double c) { return c - 1e-4 * std::max(std::abs(c - vmin), 1.0); };
     double vfar;

@@ -268,6 +268,61 @@ static void test_cone_axial_v_parameterization() {
     CHECK(on, "cone verts satisfy axial-v radius = r0 + z*tan(a)");
 }
 
+// Guards the apex-terminated cone: a cone bounded by a SINGLE full-circle loop at constant v, closing
+// to its apex on the far side (r0 == 0). The loop has zero v-extent, which the periodic-winding path
+// used to reject (vmax-vmin > 0), silently DROPPING the whole cone to zero triangles. It must now
+// close the winding to the finite v-cap (the apex) and mesh the full cone. This is the trimmed-conical
+// drop class the native path was losing (hundreds of faces per conical-head model).
+static void test_cone_apex_single_loop() {
+    const double a = PI / 6.0;                 // 30 deg
+    const double tan_a = std::tan(a), r0 = 0.0; // apex at v = 0
+    const double vtop = 8.0;
+    auto cone = std::make_shared<ConeSurface>(Frame::from_axis_ref({0, 0, 0}, {0, 0, 1}, {1, 0, 0}), r0, a);
+    // Both orientations that route to the winding path (interior "above" the flat loop) used to drop.
+    for (bool same_sense : {true, false})
+        for (bool ccw : {true, false}) {
+            std::vector<Vec3> pts;
+            const int N = 240; // fine like a real deflection-sampled circle edge
+            for (int i = 0; i < N; ++i) {
+                double u = TWO_PI * i / N;
+                pts.push_back(cone->point(ccw ? u : -u, vtop));
+            }
+            FaceSurfaceN f;
+            f.surface = cone;
+            f.same_sense = same_sense;
+            f.bounds.push_back({poly(pts), true});
+            reset_tess_face_stats();
+            TessMesh m;
+            TessParams tp;
+            tp.deflection = 0.02;
+            CHECK(tessellate_face(f, tp, m), "apex cone tessellates");
+            CHECK(tess_dropped_faces() == 0, "apex cone not dropped");
+            CHECK(m.indices.size() > 0, "apex cone produced triangles");
+            const double r1 = r0 + vtop * tan_a;
+            const double slant = std::sqrt(r1 * r1 + vtop * vtop);
+            const double analytic = PI * r1 * slant; // full cone lateral area
+            CHECK(total_area(m) > 0.97 * analytic && total_area(m) < 1.03 * analytic,
+                  "apex cone lateral area ~ pi*r*slant");
+        }
+    // per-surface-type drop breakdown: a genuinely un-meshable face (a collapsed loop on a plane, which
+    // has no v-cap to recover to) increments the "plane" bucket, and the sum matches tess_dropped_faces.
+    {
+        reset_tess_face_stats();
+        auto plane = std::make_shared<PlaneSurface>(Frame::from_axis_ref({0, 0, 0}, {0, 0, 1}, {1, 0, 0}));
+        FaceSurfaceN f;
+        f.surface = plane;
+        f.same_sense = true;
+        f.bounds.push_back({poly({{0, 0, 0}, {0, 0, 0}, {0, 0, 0}}), true}); // degenerate loop
+        TessMesh m;
+        TessParams tp;
+        tessellate_face(f, tp, m);
+        auto by = tess_dropped_by_surface();
+        std::uint64_t sum = 0;
+        for (auto &kv : by) sum += kv.second;
+        CHECK(sum == tess_dropped_faces(), "drop_by_surface sums to dropped_faces");
+    }
+}
+
 // Guards the B-spline edge boundary fix: an edge whose geometry is a B-spline and which carries
 // NO trim params must be sampled over the curve's FULL natural domain (then aligned to the edge
 // vertices), NOT collapsed to a 2-point straight chord. (The collapse was the dominant ~2x density
@@ -307,6 +362,7 @@ int main() {
     test_full_cylinder_gridded();
     test_full_sphere_gridded();
     test_cone_axial_v_parameterization();
+    test_cone_apex_single_loop();
     test_bspline_edge_samples_natural_domain();
     test_doc_grouping();
     if (g_fail == 0)
