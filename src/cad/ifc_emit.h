@@ -605,14 +605,23 @@ private:
         }
         std::vector<long> bounds;
         for (size_t i = 0; i < fc.bounds.size(); ++i) {
+            // A null/empty INNER (hole) bound must not sink the whole face: a 0-edge hole loop
+            // bounds nothing, so skip it and keep the face's real (outer) geometry. Only a
+            // missing/empty OUTER bound (i == 0) leaves the face with no boundary at all.
             if (!fc.bounds[i].loop) {
-                stats_.drop("loop:null");
-                return 0;
+                if (i == 0) {
+                    stats_.drop("loop:null");
+                    return 0;
+                }
+                continue;
             }
             long lp = loop(out, *fc.bounds[i].loop);
             if (!lp) {
-                stats_.drop("loop:empty");
-                return 0;
+                if (i == 0) {
+                    stats_.drop("loop:empty");
+                    return 0;
+                }
+                continue;
             }
             const char *kw = (i == 0) ? "IfcFaceOuterBound" : "IfcFaceBound";
             bounds.push_back(emit(out, std::string(kw) + "(#" + std::to_string(lp) + "," +
