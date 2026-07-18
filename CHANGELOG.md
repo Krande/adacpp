@@ -2,6 +2,15 @@
 
 
 
+## v0.17.1 (2026-07-18)
+
+### Fix
+
+* fix: keep faces whose inner (hole) loop is empty in the B-rep emitters (#43)
+
+Co-authored-by: Claude Opus 4.8 (1M context) &lt;noreply@anthropic.com&gt; ([`b7135e4`](https://github.com/Krande/adacpp/commit/b7135e423aa2b5c92a454381a144b02f87f814a8))
+
+
 ## v0.17.0 (2026-07-17)
 
 ### Feature
