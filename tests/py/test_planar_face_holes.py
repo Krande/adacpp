@@ -46,10 +46,19 @@ def test_diagonal_planar_face_with_holes_builds():
     # 9-edge outer boundary, NEAR planar: a few vertices sit ~1e-3 off the plane, modelling the
     # import tolerance that defeats FindPlane. This near-planarity + multiple holes is what crashed.
     e = 1.0e-3
-    outer = _loop([
-        _p(-6, -4), _p(-2, -4), _p(2, -4, e), _p(6, -4), _p(6, 0, -e),
-        _p(6, 4), _p(0, 4, e), _p(-6, 4), _p(-6, 0, -e),
-    ])
+    outer = _loop(
+        [
+            _p(-6, -4),
+            _p(-2, -4),
+            _p(2, -4, e),
+            _p(6, -4),
+            _p(6, 0, -e),
+            _p(6, 4),
+            _p(0, 4, e),
+            _p(-6, 4),
+            _p(-6, 0, -e),
+        ]
+    )
     # Four coplanar rectangular holes, wound opposite the outer loop.
     holes = [
         _rect(-5, -3, -3, 3),
