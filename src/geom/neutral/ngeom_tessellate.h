@@ -9,6 +9,8 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "../MeshType.h"
@@ -90,6 +92,14 @@ std::uint64_t tess_total_faces();
 // Faces that tessellated but covered < half their expected surface area (a partial fill / hole) —
 // present-but-incomplete geometry the zero-triangle dropped count can't catch.
 std::uint64_t tess_suspect_faces();
+// Dropped-face count split by kernel surface-kind token ("plane","cyl","cone","sphere","torus",
+// "bspline","extrusion","revolution","?"); only nonzero buckets are returned, and their sum equals
+// tess_dropped_faces(). Lets the audit bucket dropped geometry by surface type automatically.
+std::vector<std::pair<std::string, std::uint64_t>> tess_dropped_by_surface();
+// The full "[GEOMHEALTH-JSON]" payload body (no marker prefix / newline): the dropped/suspect/total
+// counts plus the per-surface-type drop breakdown, as one JSON object. Shared by the STEP/IFC stream
+// entry points so the shape stays identical across every conversion path.
+std::string tess_geomhealth_json();
 void reset_tess_face_stats();
 
 // Tessellate a whole decoded document (all roots), one TessMesh with a Group per root.
