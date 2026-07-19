@@ -354,7 +354,105 @@ static void test_bspline_edge_samples_natural_domain() {
     CHECK(plen > 1.2 * (e.end - e.start).norm(), "B-spline edge polyline follows the curve, not a chord");
 }
 
+// A CLOSED B-spline edge (full NURBS circle, start vertex == end vertex) carries its direction
+// ONLY in same_sense/orientation — the endpoint-distance orientation test is a tie there. Regression
+// for the audit fe84a414 dropped-face family: a closed NURBS tube (9-pt rational circle x linear v)
+// bounded by seam + two full-circle edges, the top one ORIENTED_EDGE .F., silently kept the natural
+// direction, the single loop unwound to |w| = 2 and the whole face was dropped
+// (tessellate_periodic_winding requires |w| == 1).
+static void test_closed_bspline_edge_reversal_and_tube() {
+    const double r = 15.0, h = 3.0, w = std::sqrt(2.0) / 2.0;
+    auto circle_cps = [&](double z) {
+        return std::vector<Vec3>{{r, 0, z},  {r, r, z},  {0, r, z},  {-r, r, z}, {-r, 0, z},
+                                 {-r, -r, z}, {0, -r, z}, {r, -r, z}, {r, 0, z}};
+    };
+    const std::vector<double> cknots = {0, 0.25, 0.5, 0.75, 1.0};
+    const std::vector<int> cmults = {3, 2, 2, 2, 3};
+    const std::vector<double> cweights = {1, w, 1, w, 1, w, 1, w, 1};
+
+    // 1) Unit: a reversed (.F.) closed edge must discretize with the OPPOSITE winding.
+    auto c0 = std::make_shared<BSplineCurve>(2, circle_cps(0.0), cknots, cmults, cweights, true);
+    OrientedEdgeN fwd;
+    fwd.geometry = c0;
+    fwd.has_params = false;
+    fwd.same_sense = true;
+    fwd.orientation = true;
+    fwd.start = fwd.end = fwd.e_start = fwd.e_end = Vec3{r, 0, 0};
+    OrientedEdgeN rev = fwd;
+    rev.orientation = false;
+    auto signed_area_z = [](const std::vector<Vec3> &p) {
+        double a = 0;
+        for (size_t i = 0; i + 1 < p.size(); ++i) a += p[i].x * p[i + 1].y - p[i + 1].x * p[i].y;
+        return 0.5 * a;
+    };
+    auto pf = fwd.discretize(0.5, 0.349);
+    auto pr = rev.discretize(0.5, 0.349);
+    CHECK(pf.size() >= 8 && pr.size() >= 8, "closed B-spline edge discretizes densely");
+    CHECK(signed_area_z(pf) > 0.5 * 3.14159 * r * r,
+          "forward closed B-spline edge winds the curve's natural (CCW) way");
+    CHECK(signed_area_z(pr) < -0.5 * 3.14159 * r * r,
+          "ORIENTED_EDGE .F. reverses a closed B-spline edge (direction from flags, not endpoints)");
+
+    // 2) Face: the full tube (seam .F. + circle@0 .T. + seam .T. + circle@h .F. — the P400/Arestor
+    //    topology) must tessellate with ~the analytic lateral area, not drop.
+    auto surf = std::make_shared<BSplineSurface>();
+    surf->u_degree = 2;
+    surf->v_degree = 1;
+    surf->nu = 9;
+    surf->nv = 2;
+    surf->u_closed = true;
+    for (const Vec3 &p : circle_cps(0.0)) {
+        surf->ctrl.push_back(p);             // iv=0
+        surf->ctrl.push_back({p.x, p.y, h}); // iv=1
+    }
+    for (double wi : cweights) {
+        surf->weights.push_back(wi);
+        surf->weights.push_back(wi);
+    }
+    surf->Uu = {0, 0, 0, 0.25, 0.25, 0.5, 0.5, 0.75, 0.75, 1, 1, 1};
+    surf->Uv = {0, 0, 1, 1};
+
+    auto ch = std::make_shared<BSplineCurve>(2, circle_cps(h), cknots, cmults, cweights, true);
+    OrientedEdgeN seam; // LINE -> null geometry: straight through the endpoints
+    seam.geometry = nullptr;
+    seam.same_sense = true;
+    seam.orientation = true;
+    seam.e_start = Vec3{r, 0, 0};
+    seam.e_end = Vec3{r, 0, h};
+    seam.start = seam.e_start;
+    seam.end = seam.e_end;
+    OrientedEdgeN seam_rev = seam;
+    seam_rev.orientation = false;
+    seam_rev.start = seam.e_end;
+    seam_rev.end = seam.e_start;
+    OrientedEdgeN circ0 = fwd; // closed circle at z=0, forward
+    OrientedEdgeN circh;       // closed circle at z=h, REVERSED
+    circh.geometry = ch;
+    circh.has_params = false;
+    circh.same_sense = true;
+    circh.orientation = false;
+    circh.start = circh.end = circh.e_start = circh.e_end = Vec3{r, 0, h};
+
+    auto lp = std::make_shared<LoopN>();
+    lp->edges = {seam_rev, circ0, seam, circh};
+    FaceSurfaceN face;
+    face.surface = surf;
+    face.same_sense = true;
+    face.bounds.push_back({lp, true});
+
+    TessParams tp;
+    tp.deflection = 0.5;
+    tp.max_angle = 0.175;
+    TessMesh m;
+    bool ok = tessellate_face(face, tp, m);
+    CHECK(ok && m.indices.size() >= 3, "closed NURBS tube face tessellates (was dropped at |w|=2)");
+    double area = total_area(m);
+    double expect = 2.0 * 3.14159265358979 * r * h;
+    CHECK(close(area, expect, 0.05 * expect), "closed NURBS tube area ~ 2*pi*r*h");
+}
+
 int main() {
+    test_closed_bspline_edge_reversal_and_tube();
     test_plane_square_with_hole();
     test_plane_same_sense_false_flips_normal();
     test_cylinder_patch();

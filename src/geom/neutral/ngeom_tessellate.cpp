@@ -1351,7 +1351,13 @@ Rect full_patch_rect(const Surface &s, const std::vector<std::vector<Uv>> &conto
     double area_ratio = std::abs(poly_area(contours[0])) / (du * dv);
     if (area_ratio < 0.995)
         return {};
-    return {clampd(umin, du0, du1), clampd(umax, du0, du1), clampd(vmin, dv0, dv1), clampd(vmax, dv0, dv1), true};
+    Rect r = {clampd(umin, du0, du1), clampd(umax, du0, du1), clampd(vmin, dv0, dv1), clampd(vmax, dv0, dv1), true};
+    // A loop lying (partly) outside the knot domain collapses under the clamp; a zero-extent rect
+    // would grid to zero triangles yet report success, silently dropping the face. Refuse it so the
+    // face falls through to the trim-respecting emit path (whose evaluation wraps periodics safely).
+    if (r.u1 - r.u0 < 1e-9 * ddu || r.v1 - r.v0 < 1e-9 * ddv)
+        return {};
+    return r;
 }
 
 Rect full_domain_bspline(const Surface &s, const std::vector<std::vector<Uv>> &contours) {
@@ -2347,6 +2353,38 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
             }
         }
         loops_uv.push_back({std::move(uv), std::move(pts3), w, interior_above});
+    }
+
+    // Periodic B-spline domain normalization: the per-point unwrap above is anchored to the FIRST
+    // point's inversion, which for a loop starting on the seam can come back on either branch —
+    // the whole loop then unwinds one full period OUTSIDE the knot domain (e.g. u in [-per, 0] for
+    // a domain [0, per]). Surface evaluation wraps (reduce_param), so triangles are right, but the
+    // B-spline rect fast paths (full_patch_rect) clamp their UV bbox INTO the domain, collapsing
+    // such a loop to a zero-width rect -> a "successful" grid of zero triangles -> dropped face
+    // (audit fe84a414 residual: CO2_Comp/P311/P351 closed NURBS tubes). Shift ALL loops together by
+    // the integer period multiple that centres their combined bbox in the domain; an integer-period
+    // shift is an exact identity for a closed direction.
+    if ((per_u || per_v) && !loops_uv.empty()) {
+        if (const auto *bs = dynamic_cast<const BSplineSurface *>(&surf)) {
+            double du0, du1, dv0, dv1;
+            bs->domain(du0, du1, dv0, dv1);
+            double umn = INF, umx = -INF, vmn = INF, vmx = -INF;
+            for (const LoopUv &l : loops_uv)
+                for (const Uv &p : l.uv) {
+                    umn = std::min(umn, p[0]);
+                    umx = std::max(umx, p[0]);
+                    vmn = std::min(vmn, p[1]);
+                    vmx = std::max(vmx, p[1]);
+                }
+            double ku = per_u ? std::round((0.5 * (du0 + du1) - 0.5 * (umn + umx)) / *per_u) : 0.0;
+            double kv = per_v ? std::round((0.5 * (dv0 + dv1) - 0.5 * (vmn + vmx)) / *per_v) : 0.0;
+            if (ku != 0.0 || kv != 0.0)
+                for (LoopUv &l : loops_uv)
+                    for (Uv &p : l.uv) {
+                        p[0] += ku * (per_u ? *per_u : 0.0);
+                        p[1] += kv * (per_v ? *per_v : 0.0);
+                    }
+        }
     }
 
     // Coverage health: expected trimmed surface area = |net signed UV-loop area| * surface Jacobian at
