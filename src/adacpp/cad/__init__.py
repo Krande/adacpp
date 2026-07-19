@@ -129,6 +129,8 @@ step_emit_ifc_brep = _cad.step_emit_ifc_brep
 step_parity = _cad.step_parity
 stream_ifc_to_glb = _cad.stream_ifc_to_glb
 stream_ifc_to_step = _cad.stream_ifc_to_step
+stream_ngeom_to_ifc = _cad.stream_ngeom_to_ifc
+stream_ngeom_to_step = _cad.stream_ngeom_to_step
 stream_step_to_glb = _cad.stream_step_to_glb
 stream_step_to_glb_st = _cad.stream_step_to_glb_st
 stream_step_to_ifc = _cad.stream_step_to_ifc
@@ -247,6 +249,8 @@ __all__ = [
     "step_parity",
     "stream_ifc_to_glb",
     "stream_ifc_to_step",
+    "stream_ngeom_to_ifc",
+    "stream_ngeom_to_step",
     "stream_step_to_glb",
     "stream_step_to_glb_st",
     "stream_step_to_ifc",

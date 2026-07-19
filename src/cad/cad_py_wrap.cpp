@@ -3891,6 +3891,268 @@ static void step_parity_impl(const std::string &in_path, double deflection, doub
     total_instances_out = total_instances.load();
 }
 
+// ---------------------------------------------------------------------------------------------
+// NGEOM-blob record streams -> STEP / IFC files (the ada-object-model export fast path).
+//
+// The Python side walks an assembly, serializes each object's solid_geom() to an NGEOM blob
+// (adapy serialize_geometries — the same vocabulary tessellate_stream decodes), and hands the
+// records to these writers one at a time. Records are consumed LAZILY from any Python iterable
+// (list or generator), and each record is decoded + emitted + released before the next is pulled,
+// so a 100k-solid model streams at bounded memory. This replaces the ~ms/face per-entity Python
+// writers (ifcopenshell / ap242_stream) with the ~µs/face C++ emitters for models whose objects
+// all serialize to NGEOM.
+//
+// Record shape (a tuple/sequence; trailing elements optional):
+//   (name, blob [, color_rgba [, transforms [, paths]]])
+//     name        str|None — product name; non-empty overrides the blob's root id
+//     blob        bytes    — one NGEOM buffer (usually one root; all roots are emitted)
+//     color_rgba  4 floats — presentation colour; alpha < 0 (or None) = no colour
+//     transforms  list of 16-float column-major (glTF) world placements; None/[] = one identity
+//     paths       per-instance assembly path: list of [(rep_id, name), ...] levels, parallel to
+//                 transforms (one entry total when transforms is empty)
+struct NgeomEmitRecord {
+    std::string name;
+    nb::bytes blob;
+    std::array<float, 4> color{0.f, 0.f, 0.f, -1.f}; // alpha<0 sentinel => no colour
+    std::vector<std::array<float, 16>> transforms;
+    std::vector<std::vector<std::pair<int, std::string>>> paths;
+};
+
+static NgeomEmitRecord parse_ngeom_record(nb::handle item) {
+    NgeomEmitRecord rec;
+    nb::sequence seq = nb::cast<nb::sequence>(item);
+    size_t n = nb::len(seq);
+    if (n < 2)
+        throw std::runtime_error("NGEOM record needs at least (name, blob)");
+    if (!seq[0].is_none())
+        rec.name = nb::cast<std::string>(seq[0]);
+    rec.blob = nb::cast<nb::bytes>(seq[1]);
+    if (n > 2 && !seq[2].is_none())
+        rec.color = nb::cast<std::array<float, 4>>(seq[2]);
+    if (n > 3 && !seq[3].is_none())
+        rec.transforms = nb::cast<std::vector<std::array<float, 16>>>(seq[3]);
+    if (n > 4 && !seq[4].is_none())
+        rec.paths = nb::cast<std::vector<std::vector<std::pair<int, std::string>>>>(seq[4]);
+    return rec;
+}
+
+// Attach a record's out-of-band metadata to a decoded root (the blob carries geometry + id only).
+static void apply_record_meta(adacpp::ngeom::NgeomRoot &root, const NgeomEmitRecord &rec) {
+    if (!rec.name.empty())
+        root.id = rec.name;
+    if (rec.color[3] >= 0.0f) {
+        root.has_color = true;
+        root.cr = rec.color[0];
+        root.cg = rec.color[1];
+        root.cb = rec.color[2];
+        root.ca = rec.color[3];
+    }
+    root.transforms = rec.transforms;
+    root.instance_paths = rec.paths;
+}
+
+// NGEOM records -> AP242 STEP file. Serial (one running id, no renumber pass): decode each blob,
+// emit each root via emit_solid_step — mapped-eligible multi-instance solids as ONE shared
+// prototype + per-placement NAUO/CDSR references (write_step_file_impl's pattern), everything else
+// baked per instance — then the NAUO assembly tree from the record paths, the mapped-instance root
+// block (SPF statement order is irrelevant, so it can trail its references), and the colour trailer.
+static adacpp::ifc_emit::FileStats stream_ngeom_to_step_impl(nb::iterable records, const std::string &out_path,
+                                                             double unit_scale, double deflection, double angular_deg) {
+    using adacpp::ngeom::NgeomRoot;
+    using adacpp::step_emit::StepBrepEmitter;
+    adacpp::ifc_emit::FileStats fs;
+    fs.unit_scale = unit_scale;
+    std::FILE *fp = std::fopen(out_path.c_str(), "wb");
+    if (!fp)
+        return fs;
+    std::string hdr = step_header_block(unit_scale);
+    std::fwrite(hdr.data(), 1, hdr.size(), fp);
+    // Reserve the mapped-instance shared-root ids up front (#14..#17 root PRODUCT chain, #18 world
+    // rep — written at the end, only if some solid actually took the mapped path; unused reserved
+    // ids are legal SPF gaps and keep this writer renumber-free).
+    const long K = 18;
+    const long ROOT_PD = 16, WORLD_REP = 18, IDENTITY_AXIS = 13;
+    long nid = K;
+    std::string buf;
+    buf.reserve(1 << 22);
+    auto flush = [&](bool force) {
+        if (buf.size() >= (4u << 20) || force) {
+            std::fwrite(buf.data(), 1, buf.size(), fp);
+            buf.clear();
+        }
+    };
+    const bool bake_forced = step_bake_instances_forced();
+    std::vector<long> leaf_pds;       // baked leaves (mapped leaves hang under ROOT_PD instead)
+    std::vector<IfcPath2> leaf_paths; // parallel: each baked leaf's assembly path
+    std::vector<long> styled;         // STYLED_ITEM ids for the presentation trailer
+    std::vector<long> world_axes;     // mapped-instance AXIS2 ids -> the world rep's items
+    long sid = 0;
+    for (nb::handle item : records) {
+        NgeomEmitRecord rec = parse_ngeom_record(item);
+        adacpp::ngeom::NgeomDoc doc =
+            adacpp::ngeom::decode(reinterpret_cast<const uint8_t *>(rec.blob.c_str()), rec.blob.size());
+        for (NgeomRoot &root : doc.roots) {
+            ++sid;
+            ++fs.solids_in;
+            apply_record_meta(root, rec);
+            std::string nm = root.id.empty() ? ("solid_" + std::to_string(sid)) : adacpp::ifc_emit::ifc_str(root.id);
+            bool any = false;
+            if (!bake_forced && step_mapped_eligible(root)) {
+                StepBrepEmitter em(nid, nullptr, deflection, angular_deg);
+                long rep_id = 0, solid_id = 0;
+                long pd = emit_solid_step(em, buf, root, sid, &rep_id, &solid_id);
+                if (pd) {
+                    emit_step_mapped_instances(em, buf, rep_id, pd, nm, sid, root.transforms, ROOT_PD, WORLD_REP,
+                                               IDENTITY_AXIS, world_axes);
+                    if (root.has_color && solid_id)
+                        styled.push_back(emit_step_color(em, buf, solid_id, root.cr, root.cg, root.cb));
+                    nid = em.current_id();
+                    any = true;
+                    fs.instances_out += (long) root.transforms.size();
+                    accum_geom(fs.geom, em.stats());
+                }
+            } else {
+                size_t ninst = root.transforms.empty() ? 1 : root.transforms.size();
+                for (size_t k = 0; k < ninst; ++k) {
+                    double tf[16];
+                    const double *tfp = nullptr;
+                    if (!root.transforms.empty()) {
+                        // ng:: transforms are column-major glTF; StepBrepEmitter wants row-major.
+                        const std::array<float, 16> &M = root.transforms[k];
+                        tf[0] = M[0];
+                        tf[1] = M[4];
+                        tf[2] = M[8];
+                        tf[3] = M[12];
+                        tf[4] = M[1];
+                        tf[5] = M[5];
+                        tf[6] = M[9];
+                        tf[7] = M[13];
+                        tf[8] = M[2];
+                        tf[9] = M[6];
+                        tf[10] = M[10];
+                        tf[11] = M[14];
+                        tfp = tf;
+                    }
+                    StepBrepEmitter em(nid, tfp, deflection, angular_deg);
+                    long solid_id = 0;
+                    long pd = emit_solid_step(em, buf, root, sid, nullptr, &solid_id);
+                    if (pd) {
+                        if (root.has_color && solid_id)
+                            styled.push_back(emit_step_color(em, buf, solid_id, root.cr, root.cg, root.cb));
+                        nid = em.current_id();
+                        any = true;
+                        ++fs.instances_out;
+                        leaf_pds.push_back(pd);
+                        leaf_paths.push_back(k < root.instance_paths.size() ? root.instance_paths[k] : IfcPath2{});
+                        accum_geom(fs.geom, em.stats());
+                    }
+                }
+            }
+            if (any)
+                ++fs.solids_out;
+            else
+                ++fs.products_skipped;
+            flush(false);
+        }
+    }
+    fs.products_total = fs.solids_in;
+    StepBrepEmitter emtail(nid, nullptr, deflection, angular_deg);
+    emit_step_assembly_tree(emtail, buf, leaf_pds, leaf_paths);
+    if (!world_axes.empty()) {
+        buf += "#14=PRODUCT('model','model','',(#3));\n";
+        buf += "#15=PRODUCT_DEFINITION_FORMATION('','',#14);\n";
+        buf += "#16=PRODUCT_DEFINITION('design','',#15,#4);\n";
+        buf += "#17=PRODUCT_DEFINITION_SHAPE('','',#16);\n";
+        buf += "#18=SHAPE_REPRESENTATION('model',(#13";
+        for (long a : world_axes) {
+            buf += ",#";
+            buf += std::to_string(a);
+        }
+        buf += "),#9);\n";
+        emtail.emit_entity(buf, "SHAPE_DEFINITION_REPRESENTATION(#17,#18)");
+    }
+    step_color_trailer(emtail, buf, styled);
+    buf += "ENDSEC;\nEND-ISO-10303-21;\n";
+    flush(true);
+    std::fclose(fp);
+    return fs;
+}
+
+// NGEOM records -> IFC file. The record-stream sibling of blobs_to_ifc_impl (which takes parallel
+// lists): same emit_solid_ifc + IfcStyledItem + spatial tree, but records are pulled lazily so a
+// generator streams at bounded memory.
+static adacpp::ifc_emit::FileStats stream_ngeom_to_ifc_impl(nb::iterable records, const std::string &out_path,
+                                                            const std::string &schema, double unit_scale,
+                                                            double deflection, double angular_deg) {
+    using namespace adacpp::ifc_emit;
+    using adacpp::ngeom::NgeomRoot;
+    FileStats fs;
+    fs.unit_scale = unit_scale;
+    std::FILE *fp = std::fopen(out_path.c_str(), "wb");
+    if (!fp)
+        return fs;
+    std::string buf;
+    buf.reserve(1 << 22);
+    auto flush = [&](bool force) {
+        if (buf.size() >= (4u << 20) || force) {
+            std::fwrite(buf.data(), 1, buf.size(), fp);
+            buf.clear();
+        }
+    };
+    buf += ifc_header_block(schema, unit_scale);
+    BrepEmitter em(100, nullptr, deflection, angular_deg);
+    std::vector<long> proxies;
+    std::vector<IfcPath> proxy_paths;
+    long sid = 0;
+    for (nb::handle item : records) {
+        NgeomEmitRecord rec = parse_ngeom_record(item);
+        adacpp::ngeom::NgeomDoc doc =
+            adacpp::ngeom::decode(reinterpret_cast<const uint8_t *>(rec.blob.c_str()), rec.blob.size());
+        for (NgeomRoot &root : doc.roots) {
+            ++sid;
+            ++fs.solids_in;
+            apply_record_meta(root, rec);
+            size_t before = proxies.size();
+            // guid seed strided by 1000 per solid (instances use seed+k) — matches blobs_to_ifc.
+            emit_solid_ifc(em, buf, root, sid, (uint64_t) sid * 1000u, proxies, &proxy_paths);
+            if (proxies.size() > before)
+                ++fs.solids_out;
+            else
+                ++fs.products_skipped;
+            fs.instances_out += (long) (proxies.size() - before);
+            flush(false);
+        }
+    }
+    fs.products_total = fs.solids_in;
+    emit_spatial_tree(buf, [&]() { return em.alloc_id(); }, proxies, proxy_paths);
+    buf += "ENDSEC;\nEND-ISO-10303-21;\n";
+    flush(true);
+    std::fclose(fp);
+    fs.geom = em.stats();
+    return fs;
+}
+
+// The shared stats dict for the two NGEOM-record writers (mirrors stream_step_to_step's audit).
+static nb::dict ngeom_emit_stats_dict(const adacpp::ifc_emit::FileStats &fs) {
+    nb::dict d;
+    d["solids_in"] = fs.solids_in;
+    d["solids_out"] = fs.solids_out;
+    d["instances_out"] = fs.instances_out;
+    d["solids_skipped"] = fs.products_skipped;
+    d["unit_scale"] = fs.unit_scale;
+    d["faces_in"] = fs.geom.faces_in;
+    d["faces_out"] = fs.geom.faces_out;
+    d["faces_dropped"] = fs.geom.faces_dropped;
+    d["edges_analytic"] = fs.geom.edges_analytic;
+    d["edges_polyline_approx"] = fs.geom.edges_polyline_approx;
+    d["edges_degenerate"] = fs.geom.edges_degenerate;
+    nb::dict reasons;
+    for (const auto &[k, v] : fs.geom.drop_reasons)
+        reasons[k.c_str()] = v;
+    d["drop_reasons"] = reasons;
+    return d;
+}
+
 void cad_module(nb::module_ &m) {
     // Kernel-agnostic mesh / color / group types live in cad — they're the
     // surface every backend (native OCCT, wasm OCCT, future CGAL) speaks.
@@ -4153,6 +4415,46 @@ void cad_module(nb::module_ &m) {
         "colors (rgba; alpha<0 => none), transforms (per-shape 4x4 world placements), paths (per-shape "
         "instance_paths). Decodes each blob, re-attaches the metadata, and emits IfcAdvancedBrep + "
         "IfcStyledItem + spatial tree — the fully-native Assembly.to_ifc backend. Returns the audit dict.");
+
+    // NGEOM record streams -> STEP / IFC: the ada-object-model export fast path (Genie-XML ->
+    // step/ifc without the per-entity Python writers). Records are consumed lazily from any Python
+    // iterable, one blob decoded + emitted + released at a time (bounded memory).
+    m.def(
+        "stream_ngeom_to_step",
+        [](nb::iterable records, const std::string &out_path, double unit_scale, double deflection,
+           double angular_deg) -> nb::dict {
+            return ngeom_emit_stats_dict(
+                stream_ngeom_to_step_impl(records, out_path, unit_scale, deflection, angular_deg));
+        },
+        "records"_a, "out_path"_a, "unit_scale"_a = 1.0, "deflection"_a = 2.0, "angular_deg"_a = 20.0,
+        "Native AP242 STEP writer from a stream of NGEOM records. Each record is a sequence "
+        "(name, blob[, color_rgba[, transforms[, paths]]]): name (str|None) overrides the blob's root "
+        "id; blob is one NGEOM buffer (adapy serialize_geometries); color_rgba is 4 floats (alpha<0 or "
+        "None => no colour, else a STYLED_ITEM presentation colour); transforms is a list of 16-float "
+        "column-major world placements (None/[] => one identity instance); paths is the per-instance "
+        "assembly path ([(rep_id, name), ...] levels) emitted as a NEXT_ASSEMBLY_USAGE_OCCURRENCE "
+        "tree. Multi-instance B-rep solids with rigid placements are written once as a shared "
+        "prototype + per-placement NAUO/CDSR references (ADACPP_STEP_BAKE_INSTANCES=1 forces the "
+        "all-baked form); everything else is baked per instance. Records may come from a generator — "
+        "they are pulled lazily, so a 100k-solid model streams at bounded memory. unit_scale = metres "
+        "per model unit (sets the header SI length unit). Returns the losslessness audit dict "
+        "(solids_in/out, instances_out, solids_skipped, faces_in/out/dropped, drop_reasons).");
+
+    m.def(
+        "stream_ngeom_to_ifc",
+        [](nb::iterable records, const std::string &out_path, const std::string &schema, double unit_scale,
+           double deflection, double angular_deg) -> nb::dict {
+            return ngeom_emit_stats_dict(
+                stream_ngeom_to_ifc_impl(records, out_path, schema, unit_scale, deflection, angular_deg));
+        },
+        "records"_a, "out_path"_a, "schema"_a = "IFC4X3_ADD2", "unit_scale"_a = 1.0, "deflection"_a = 2.0,
+        "angular_deg"_a = 20.0,
+        "Native IFC writer from a stream of NGEOM records — the record-stream sibling of blobs_to_ifc "
+        "(same record shape as stream_ngeom_to_step). Decodes each blob and emits the analytic IFC "
+        "solid (IfcAdvancedBrep / IfcExtrudedAreaSolid / ...) + IfcStyledItem colour + the "
+        "IfcSpatialZone tree from the record paths; multi-instance solids share geometry via "
+        "IfcMappedItem. Records are pulled lazily (generator-friendly, bounded memory). schema: "
+        "'IFC4X3_ADD2' | 'IFC4'. Returns the losslessness audit dict.");
 
     // Native parallel STEP->STEP (AP242). Re-export the analytic B-rep per solid, instances baked,
     // round-trip-lossless. Returns the same losslessness audit dict.

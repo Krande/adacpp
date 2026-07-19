@@ -310,8 +310,11 @@ inline std::string step_header_block(double unit_scale) {
 // Returns the leaf PRODUCT_DEFINITION id (0 on failure) so the caller can hang a NEXT_ASSEMBLY_USAGE_
 // OCCURRENCE assembly tree off it; treat nonzero as success. `rep_out` (optional) receives the id of
 // the solid's SHAPE_REPRESENTATION — the mapped-instance emitter needs it as the CDSR child rep.
+// `solid_out` (optional) receives the id of the solid geometry item itself (the MANIFOLD_SOLID_BREP /
+// EXTRUDED_AREA_SOLID / ...) — the presentation-colour emitter styles that item.
 inline long emit_solid_step(adacpp::step_emit::StepBrepEmitter &em, std::string &buf,
-                            const adacpp::ngeom::NgeomRoot &root, long sid, long *rep_out = nullptr) {
+                            const adacpp::ngeom::NgeomRoot &root, long sid, long *rep_out = nullptr,
+                            long *solid_out = nullptr) {
     std::string nm = root.id.empty() ? ("solid_" + std::to_string(sid)) : adacpp::ifc_emit::ifc_str(root.id);
     long solid = 0;
     const char *rep_kw = "ADVANCED_BREP_SHAPE_REPRESENTATION";
@@ -340,6 +343,8 @@ inline long emit_solid_step(adacpp::step_emit::StepBrepEmitter &em, std::string 
     }
     if (!solid)
         return 0;
+    if (solid_out)
+        *solid_out = solid;
     long rep = em.emit_entity(buf, std::string(rep_kw) + "('" + nm + "',(#13,#" + std::to_string(solid) + "),#9)");
     if (rep_out)
         *rep_out = rep;
@@ -349,6 +354,36 @@ inline long emit_solid_step(adacpp::step_emit::StepBrepEmitter &em, std::string 
     long pds = em.emit_entity(buf, "PRODUCT_DEFINITION_SHAPE('','',#" + std::to_string(pd) + ")");
     em.emit_entity(buf, "SHAPE_DEFINITION_REPRESENTATION(#" + std::to_string(pds) + ",#" + std::to_string(rep) + ")");
     return pd;
+}
+
+// AP242 presentation colour for one geometry item: the STYLED_ITEM chain (COLOUR_RGB ->
+// FILL_AREA_STYLE_COLOUR -> ... -> PRESENTATION_STYLE_ASSIGNMENT -> STYLED_ITEM), matching adapy's
+// Python ap242_stream writer (_emit_color) so downstream consumers see the same records. Returns the
+// STYLED_ITEM id; the caller collects them for step_color_trailer.
+inline long emit_step_color(adacpp::step_emit::StepBrepEmitter &em, std::string &buf, long item_id, float r, float g,
+                            float b) {
+    using adacpp::ifc_emit::ifc_real;
+    auto ref = [](long id) { return "#" + std::to_string(id); };
+    long col = em.emit_entity(buf, "COLOUR_RGB(''," + ifc_real(r) + "," + ifc_real(g) + "," + ifc_real(b) + ")");
+    long fac = em.emit_entity(buf, "FILL_AREA_STYLE_COLOUR(''," + ref(col) + ")");
+    long fas = em.emit_entity(buf, "FILL_AREA_STYLE('',(" + ref(fac) + "))");
+    long ssfa = em.emit_entity(buf, "SURFACE_STYLE_FILL_AREA(" + ref(fas) + ")");
+    long sss = em.emit_entity(buf, "SURFACE_SIDE_STYLE('',(" + ref(ssfa) + "))");
+    long ssu = em.emit_entity(buf, "SURFACE_STYLE_USAGE(.BOTH.," + ref(sss) + ")");
+    long psa = em.emit_entity(buf, "PRESENTATION_STYLE_ASSIGNMENT((" + ref(ssu) + "))");
+    return em.emit_entity(buf, "STYLED_ITEM('color',(" + ref(psa) + ")," + ref(item_id) + ")");
+}
+
+// The one-per-file presentation trailer over every STYLED_ITEM (context #9). No-op when empty.
+inline void step_color_trailer(adacpp::step_emit::StepBrepEmitter &em, std::string &buf,
+                               const std::vector<long> &styled_ids) {
+    if (styled_ids.empty())
+        return;
+    std::string refs = "(";
+    for (size_t i = 0; i < styled_ids.size(); ++i)
+        refs += (i ? ",#" : "#") + std::to_string(styled_ids[i]);
+    refs += ")";
+    em.emit_entity(buf, "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION(''," + refs + ",#9)");
 }
 
 // ---------------------------------------------------------------------------------------------
