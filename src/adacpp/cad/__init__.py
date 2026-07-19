@@ -111,6 +111,7 @@ meshopt_decode_vertex_buffer = _cad.meshopt_decode_vertex_buffer
 meshopt_encode_index_sequence = _cad.meshopt_encode_index_sequence
 meshopt_encode_vertex_buffer = _cad.meshopt_encode_vertex_buffer
 meshopt_simplify_mesh = _cad.meshopt_simplify_mesh
+ngeom_to_ifc_body_spf = _cad.ngeom_to_ifc_body_spf
 non_manifold_merge = _cad.non_manifold_merge
 obb = _cad.obb
 point_in_solid = _cad.point_in_solid
@@ -231,6 +232,7 @@ __all__ = [
     "meshopt_encode_index_sequence",
     "meshopt_encode_vertex_buffer",
     "meshopt_simplify_mesh",
+    "ngeom_to_ifc_body_spf",
     "non_manifold_merge",
     "obb",
     "point_in_solid",

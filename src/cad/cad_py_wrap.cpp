@@ -4134,6 +4134,43 @@ static adacpp::ifc_emit::FileStats stream_ngeom_to_ifc_impl(nb::iterable records
     return fs;
 }
 
+// One NGEOM blob -> the SPF text of its IFC geometry-body entity graph ONLY (the IfcAdvancedBrep /
+// analytic-solid faces/edges/surfaces lines), numbered from `first_id`. No header/footer, no product
+// or spatial entities, no styling — the caller (adapy's streaming IFC writer) splices the fragment
+// into its own file and hand-authors the TYPED wrapper (IfcShapeRepresentation -> IfcPlate/...)
+// around the returned body item id. This is what lets typed, round-trippable products keep the
+// ~µs/face C++ geometry emit (stream_ngeom_to_ifc's proxy wrapper made every product an
+// IfcBuildingElementProxy). The body-graph emitter is ifc_emit::BrepEmitter::emit_solid — the same
+// machinery emit_solid_ifc wraps — so fragment output is byte-identical to the file writers' bodies.
+//
+// Returns (spf_text, next_id, body_item_id, rep_type):
+//   spf_text     the entity lines, ids first_id..next_id-1 (children before parents)
+//   next_id      the next free entity id (pass to a subsequent call to keep numbering contiguous)
+//   body_item_id id of the top representation item (the IfcAdvancedBrep / IfcExtrudedAreaSolid / ...),
+//                or 0 when the root is unrepresentable OR any face dropped — the caller must then
+//                DISCARD spf_text and take its Python fallback (partial geometry is never a success:
+//                "no geometry left behind")
+//   rep_type     the matching IfcShapeRepresentation.RepresentationType ("AdvancedBrep" /
+//                "SweptSolid" / "CSG" / "AdvancedSweptSolid"); "" when body_item_id is 0
+// The blob must hold exactly one root (adapy serializes one solid_geom() per object); anything else
+// raises. The geometry-body entities are schema-invariant across IFC4/IFC4X3, so no schema parameter.
+static nb::tuple ngeom_to_ifc_body_spf_impl(nb::bytes blob, long first_id, double deflection, double angular_deg) {
+    adacpp::ngeom::NgeomDoc doc = adacpp::ngeom::decode(reinterpret_cast<const uint8_t *>(blob.c_str()), blob.size());
+    if (doc.roots.size() != 1)
+        throw std::runtime_error("ngeom_to_ifc_body_spf: blob must hold exactly one root, got " +
+                                 std::to_string(doc.roots.size()));
+    // BrepEmitter::emit pre-increments, so seed at first_id-1 to number entities from first_id.
+    adacpp::ifc_emit::BrepEmitter em(first_id - 1, nullptr, deflection, angular_deg);
+    std::string buf, rep_type;
+    long body = em.emit_solid(buf, doc.roots[0], rep_type);
+    if (body && em.stats().faces_dropped > 0)
+        body = 0; // strict: a partially-emitted shell is a failure, not a smaller success
+    if (!body)
+        return nb::make_tuple(nb::str(""), first_id, (long) 0, nb::str(""));
+    return nb::make_tuple(nb::str(buf.c_str(), buf.size()), em.current_id() + 1, body,
+                          nb::str(rep_type.c_str(), rep_type.size()));
+}
+
 // The shared stats dict for the two NGEOM-record writers (mirrors stream_step_to_step's audit).
 static nb::dict ngeom_emit_stats_dict(const adacpp::ifc_emit::FileStats &fs) {
     nb::dict d;
@@ -4457,6 +4494,22 @@ void cad_module(nb::module_ &m) {
         "IfcSpatialZone tree from the record paths; multi-instance solids share geometry via "
         "IfcMappedItem. Records are pulled lazily (generator-friendly, bounded memory). schema: "
         "'IFC4X3_ADD2' | 'IFC4'. Returns the losslessness audit dict.");
+
+    m.def(
+        "ngeom_to_ifc_body_spf",
+        [](nb::bytes blob, long first_id, double deflection, double angular_deg) -> nb::tuple {
+            return ngeom_to_ifc_body_spf_impl(blob, first_id, deflection, angular_deg);
+        },
+        "blob"_a, "first_id"_a, "deflection"_a = 2.0, "angular_deg"_a = 20.0,
+        "Emit ONE NGEOM blob's IFC geometry-body entity graph as an SPF text fragment (no "
+        "header/product/spatial entities), numbering entities from first_id. Returns (spf_text, "
+        "next_id, body_item_id, rep_type) where body_item_id is the top representation item (the "
+        "IfcAdvancedBrep / analytic solid) and rep_type the matching "
+        "IfcShapeRepresentation.RepresentationType. body_item_id == 0 (unrepresentable root or any "
+        "dropped face) means: discard spf_text and fall back — a partial body is never returned. "
+        "The blob must hold exactly one root. The fragment is schema-invariant (IFC4 / IFC4X3). "
+        "Used by adapy's streaming IFC writer to keep TYPED products (IfcPlate/IfcBeam wrappers "
+        "hand-authored in Python) while the heavy B-rep body graph is emitted at C++ speed.");
 
     // Native parallel STEP->STEP (AP242). Re-export the analytic B-rep per solid, instances baked,
     // round-trip-lossless. Returns the same losslessness audit dict.

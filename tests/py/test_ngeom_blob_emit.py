@@ -243,6 +243,72 @@ def test_unit_scale_header(blobs, tmp_path):
     assert "IFCSIUNIT(*,.LENGTHUNIT.,.MILLI.,.METRE.)" in out_i.read_text()
 
 
+_IFC_SHELL_HEADER = """ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION((''),'2;1');
+FILE_NAME('','',(''),(''),'test','','');
+FILE_SCHEMA(('IFC4X3_ADD2'));
+ENDSEC;
+DATA;
+#1=IFCCARTESIANPOINT((0.,0.,0.));
+#2=IFCDIRECTION((0.,0.,1.));
+#3=IFCDIRECTION((1.,0.,0.));
+#4=IFCAXIS2PLACEMENT3D(#1,#2,#3);
+#5=IFCDIRECTION((1.,0.));
+#6=IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-5,#4,#5);
+#7=IFCSIUNIT(*,.LENGTHUNIT.,$,.METRE.);
+#8=IFCUNITASSIGNMENT((#7));
+#9=IFCPROJECT('0aaaaaaaaaaaaaaaaaaaaa',$,'frag test',$,$,$,$,(#6),#8);
+#10=IFCAXIS2PLACEMENT3D(#1,$,$);
+#11=IFCLOCALPLACEMENT($,#10);
+"""
+
+
+def test_ifc_body_spf_fragment(blobs, tmp_path):
+    """The body-fragment binding: geometry-only SPF, contiguous ids from first_id, and the
+    returned body item id is the brep a hand-built typed wrapper can reference."""
+    b, m = blobs[0]
+    spf, next_id, body, rep_type = cad.ngeom_to_ifc_body_spf(b, 100)
+    assert body >= 100
+    assert rep_type == "AdvancedBrep"
+    ids = [int(ln.split("=")[0][1:]) for ln in spf.strip().splitlines()]
+    assert ids[0] == 100, "entity numbering must start at first_id"
+    assert ids == sorted(ids) and ids[-1] == next_id - 1, "ids must be contiguous from first_id"
+    assert body in ids
+    # fragment is geometry-only: no header/product/spatial/style entities
+    for kw in ("IfcProject", "IfcShapeRepresentation", "IfcBuildingElementProxy", "IfcStyledItem"):
+        assert kw not in spf
+    assert "IfcAdvancedBrep" in spf
+
+    # splice into a minimal hand-built SPF shell with a typed wrapper -> ifcopenshell parses it
+    ifcopenshell = pytest.importorskip("ifcopenshell")
+    wrap = (
+        f"#{next_id}=IFCSHAPEREPRESENTATION(#6,'Body','{rep_type}',(#{body}));\n"
+        f"#{next_id + 1}=IFCPRODUCTDEFINITIONSHAPE($,$,(#{next_id}));\n"
+        f"#{next_id + 2}=IFCPLATE('1aaaaaaaaaaaaaaaaaaaaa',$,'frag_plate',$,$,#11,#{next_id + 1},$,$);\n"
+    )
+    out = tmp_path / "frag.ifc"
+    out.write_text(_IFC_SHELL_HEADER + spf + wrap + "ENDSEC;\nEND-ISO-10303-21;\n")
+    f = ifcopenshell.open(str(out))
+    (plate,) = f.by_type("IfcPlate")
+    (rep,) = plate.Representation.Representations
+    assert rep.RepresentationType == "AdvancedBrep"
+    assert rep.Items[0].id() == body, "wrapper must reference the returned brep item id"
+    assert rep.Items[0].is_a("IfcAdvancedBrep")
+    assert len(rep.Items[0].Outer.CfsFaces) == 6
+
+
+def test_ifc_body_spf_single_root_contract(tmp_path):
+    """A multi-root blob is rejected (the adapy writer serializes one solid per blob)."""
+    p = tmp_path / "cubes.stp"
+    p.write_text(_two_cube_step())
+    # stream_step_to_ngeom yields ONE buffer holding both roots
+    buf, metas = cad.stream_step_to_ngeom(str(p))
+    assert len(metas) == 2
+    with pytest.raises(RuntimeError, match="exactly one root"):
+        cad.ngeom_to_ifc_body_spf(bytes(buf), 100)
+
+
 def test_short_records_and_name_override(blobs, tmp_path):
     """2-tuples work; a non-empty record name overrides the blob's root id."""
     out = tmp_path / "short.stp"
