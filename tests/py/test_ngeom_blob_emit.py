@@ -74,9 +74,7 @@ class _Spf:
             ([(0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1)], (0, -1, 0), (1, 0, 0)),
             ([(0, 1, 0), (0, 1, 1), (1, 1, 1), (1, 1, 0)], (0, 1, 0), (1, 0, 0)),
         ]
-        fids = [
-            self.plane_face([(p[0] + ox, p[1] + oy, p[2] + oz) for p in poly], n, xd) for poly, n, xd in c
-        ]
+        fids = [self.plane_face([(p[0] + ox, p[1] + oy, p[2] + oz) for p in poly], n, xd) for poly, n, xd in c]
         shell = self.emit("CLOSED_SHELL('',({}))".format(",".join(f"#{i}" for i in fids)))
         brep = self.emit(f"MANIFOLD_SOLID_BREP('{name}',#{shell})")
         absr = self.emit(f"ADVANCED_BREP_SHAPE_REPRESENTATION('{name}',(#13,#{brep}),#9)")
@@ -112,10 +110,7 @@ def blobs(tmp_path):
 
 
 def _records(blobs, color=None, paths=None):
-    return [
-        (m.id or f"solid_{i}", b, color, None, paths[i] if paths else None)
-        for i, (b, m) in enumerate(blobs)
-    ]
+    return [(m.id or f"solid_{i}", b, color, None, paths[i] if paths else None) for i, (b, m) in enumerate(blobs)]
 
 
 def test_step_flat_records(blobs, tmp_path):
