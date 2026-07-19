@@ -3474,9 +3474,13 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
 }
 
 // Native parallel STEP->STEP (AP242). Mirrors the parallel IFC writer: shared StreamIndex, per-worker
-// Resolver, LPT, per-worker lanes, local ids -> atomic-reserve -> renumber. Instances are BAKED
-// (per-instance transform applied to the geometry) — v1 flat parts (no NAUO assembly tree). nth=1 =
-// serial. NO parse_cache_ bounding (per-worker clear_geom_cache per solid). Round-trip-lossless.
+// Resolver, LPT, per-worker lanes, local ids -> atomic-reserve -> renumber. Multi-instance B-rep
+// solids with rigid placements are emitted ONCE as a shared prototype + per-placement NAUO/CDSR/
+// ITEM_DEFINED_TRANSFORMATION references (the AP242 assembly-instancing pattern both native stream
+// readers and OCC consume — see emit_step_mapped_instances); everything else keeps the baked form
+// (per-instance transform applied to the geometry). ADACPP_STEP_BAKE_INSTANCES=1 forces all-baked.
+// nth=1 = serial. NO parse_cache_ bounding (per-worker clear_geom_cache per solid).
+// Round-trip-lossless.
 static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_path, const std::string &out_path,
                                                         double deflection, double angular_deg, int num_threads,
                                                         long max_solids) {
@@ -3505,7 +3509,14 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
             roots[i] = cost[i].second;
     }
     prof.phase("lpt_order");
-    const long K = 13;
+    // Mapped instancing needs a shared assembly-root block: #14..#17 = root PRODUCT chain, #18 =
+    // the world SHAPE_REPRESENTATION (its item list is only known after all lanes ran, so the
+    // record itself is written at assemble time — forward references are legal SPF). Ids <= K are
+    // protected from renumbering, so reserve them only when instancing can actually occur; a flat
+    // source keeps the old K=13 layout byte-for-byte.
+    const bool mapped_on = !step_bake_instances_forced() && master.any_multi_instance();
+    const long K = mapped_on ? 18 : 13;
+    const long ROOT_PD = 16, WORLD_REP = 18, IDENTITY_AXIS = 13;
     std::atomic<long> id_counter{K + 1};
     int nth = num_threads > 0 ? num_threads : (int) adacpp::effective_concurrency();
     if (nth > (int) roots.size())
@@ -3520,6 +3531,8 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
         std::string path, buf;
         adacpp::ifc_emit::EmitStats stats;
         long solids_out = 0;
+        long instances_out = 0;
+        std::vector<long> world_axes; // global ids of per-instance AXIS2s -> the world rep's items
     };
     std::vector<Lane> lanes(nth);
     for (int t = 0; t < nth; ++t) {
@@ -3554,37 +3567,27 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
             solids_in.fetch_add(1, std::memory_order_relaxed);
             prof.solid(root.faces.size());
             ++w_solids;
-            // One baked part per instance (or one identity part when flat).
-            size_t ninst = root.transforms.empty() ? 1 : root.transforms.size();
             bool any = false;
-            for (size_t k = 0; k < ninst; ++k) {
-                double tf[16];
-                const double *tfp = nullptr;
-                if (!root.transforms.empty()) {
-                    // ng:: transforms are column-major glTF; StepBrepEmitter wants row-major.
-                    const std::array<float, 16> &M = root.transforms[k];
-                    tf[0] = M[0];
-                    tf[1] = M[4];
-                    tf[2] = M[8];
-                    tf[3] = M[12];
-                    tf[4] = M[1];
-                    tf[5] = M[5];
-                    tf[6] = M[9];
-                    tf[7] = M[13];
-                    tf[8] = M[2];
-                    tf[9] = M[6];
-                    tf[10] = M[10];
-                    tf[11] = M[14];
-                    tfp = tf;
-                }
+            if (mapped_on && step_mapped_eligible(root)) {
+                // Shared prototype ONCE (identity frame) + one NAUO/CDSR/IDT reference per placement.
                 sb.clear();
-                StepBrepEmitter em(K, tfp, deflection, angular_deg);
-                bool ok = emit_solid_step(em, sb, root, roots[i]);
-                long n = em.current_id() - K;
-                if (ok) {
+                StepBrepEmitter em(K, nullptr, deflection, angular_deg);
+                long rep_id = 0;
+                long pd = emit_solid_step(em, sb, root, roots[i], &rep_id);
+                if (pd) {
+                    std::string nm =
+                        root.id.empty() ? ("solid_" + std::to_string(roots[i])) : adacpp::ifc_emit::ifc_str(root.id);
+                    std::vector<long> axes_local;
+                    emit_step_mapped_instances(em, sb, rep_id, pd, nm, roots[i], root.transforms, ROOT_PD, WORLD_REP,
+                                               IDENTITY_AXIS, axes_local);
+                    long n = em.current_id() - K;
                     long gbase = id_counter.fetch_add(n, std::memory_order_relaxed);
-                    renumber_into(L.buf, sb, gbase - (K + 1), K);
+                    long offset = gbase - (K + 1);
+                    renumber_into(L.buf, sb, offset, K);
+                    for (long a : axes_local)
+                        L.world_axes.push_back(a + offset);
                     any = true;
+                    L.instances_out += (long) root.transforms.size();
                     const auto &s = em.stats();
                     L.stats.faces_in += s.faces_in;
                     L.stats.faces_out += s.faces_out;
@@ -3594,6 +3597,49 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
                     L.stats.edges_degenerate += s.edges_degenerate;
                     for (const auto &[rk, rv] : s.drop_reasons)
                         L.stats.drop_reasons[rk] += rv;
+                }
+            } else {
+                // One baked part per instance (or one identity part when flat).
+                size_t ninst = root.transforms.empty() ? 1 : root.transforms.size();
+                for (size_t k = 0; k < ninst; ++k) {
+                    double tf[16];
+                    const double *tfp = nullptr;
+                    if (!root.transforms.empty()) {
+                        // ng:: transforms are column-major glTF; StepBrepEmitter wants row-major.
+                        const std::array<float, 16> &M = root.transforms[k];
+                        tf[0] = M[0];
+                        tf[1] = M[4];
+                        tf[2] = M[8];
+                        tf[3] = M[12];
+                        tf[4] = M[1];
+                        tf[5] = M[5];
+                        tf[6] = M[9];
+                        tf[7] = M[13];
+                        tf[8] = M[2];
+                        tf[9] = M[6];
+                        tf[10] = M[10];
+                        tf[11] = M[14];
+                        tfp = tf;
+                    }
+                    sb.clear();
+                    StepBrepEmitter em(K, tfp, deflection, angular_deg);
+                    bool ok = emit_solid_step(em, sb, root, roots[i]);
+                    long n = em.current_id() - K;
+                    if (ok) {
+                        long gbase = id_counter.fetch_add(n, std::memory_order_relaxed);
+                        renumber_into(L.buf, sb, gbase - (K + 1), K);
+                        any = true;
+                        ++L.instances_out;
+                        const auto &s = em.stats();
+                        L.stats.faces_in += s.faces_in;
+                        L.stats.faces_out += s.faces_out;
+                        L.stats.faces_dropped += s.faces_dropped;
+                        L.stats.edges_analytic += s.edges_analytic;
+                        L.stats.edges_polyline_approx += s.edges_polyline_approx;
+                        L.stats.edges_degenerate += s.edges_degenerate;
+                        for (const auto &[rk, rv] : s.drop_reasons)
+                            L.stats.drop_reasons[rk] += rv;
+                    }
                 }
             }
             if (any)
@@ -3627,6 +3673,31 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
     }
     std::string hdr = step_header_block(master.unit_scale());
     std::fwrite(hdr.data(), 1, hdr.size(), out_fp);
+    // Shared assembly-root block for mapped instances: root PRODUCT chain (#14..#17) + the world
+    // SHAPE_REPRESENTATION #18 listing every instance AXIS2 among its items (deferred until now
+    // because the item list spans all lanes; statement order is irrelevant in SPF). Skipped when no
+    // solid actually took the mapped path — the unused reserved ids are legal gaps.
+    if (mapped_on) {
+        std::vector<long> all_axes;
+        for (int t = 0; t < nth; ++t)
+            all_axes.insert(all_axes.end(), lanes[t].world_axes.begin(), lanes[t].world_axes.end());
+        if (!all_axes.empty()) {
+            std::string rb;
+            rb += "#14=PRODUCT('model','model','',(#3));\n";
+            rb += "#15=PRODUCT_DEFINITION_FORMATION('','',#14);\n";
+            rb += "#16=PRODUCT_DEFINITION('design','',#15,#4);\n";
+            rb += "#17=PRODUCT_DEFINITION_SHAPE('','',#16);\n";
+            rb += "#18=SHAPE_REPRESENTATION('model',(#13";
+            for (long a : all_axes) {
+                rb += ",#";
+                rb += std::to_string(a);
+            }
+            rb += "),#9);\n";
+            long sdr_id = id_counter.fetch_add(1, std::memory_order_relaxed);
+            rb += "#" + std::to_string(sdr_id) + "=SHAPE_DEFINITION_REPRESENTATION(#17,#18);\n";
+            std::fwrite(rb.data(), 1, rb.size(), out_fp);
+        }
+    }
     std::vector<char> io(1 << 20);
     for (int t = 0; t < nth; ++t) {
         Lane &L = lanes[t];
@@ -3637,6 +3708,7 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
             std::fclose(lf);
         }
         fs.solids_out += L.solids_out;
+        fs.instances_out += L.instances_out;
         fs.geom.faces_in += L.stats.faces_in;
         fs.geom.faces_out += L.stats.faces_out;
         fs.geom.faces_dropped += L.stats.faces_dropped;
@@ -3717,6 +3789,7 @@ static void step_parity_impl(const std::string &in_path, double deflection, doub
     int nth = num_threads > 0 ? num_threads : (int) adacpp::effective_concurrency();
     if (nth > (int) roots.size())
         nth = std::max(1, (int) roots.size());
+    const bool bake_forced = step_bake_instances_forced(); // mirror write_step_file_impl's mode
     std::vector<ParityFormat> ifc_lanes(nth), step_lanes(nth);
     std::atomic<size_t> next{0};
     std::atomic<long> solids_in{0};
@@ -3747,34 +3820,46 @@ static void step_parity_impl(const std::string &in_path, double deflection, doub
             LI.instances += (long) proxies.size();
             accum_geom(LI.geom, emi.stats());
 
-            // ── STEP: one baked part per instance (matches write_step_file_impl) ──
-            size_t ninst = root.transforms.empty() ? 1 : root.transforms.size();
+            // ── STEP: mirror write_step_file_impl — shared prototype + per-placement references
+            // for mapped-eligible solids (geometry counted ONCE, instances = placements), else one
+            // baked part per instance ──
             bool any = false;
-            for (size_t k = 0; k < ninst; ++k) {
-                double tf[16];
-                const double *tfp = nullptr;
-                if (!root.transforms.empty()) {
-                    const std::array<float, 16> &M = root.transforms[k];
-                    tf[0] = M[0];
-                    tf[1] = M[4];
-                    tf[2] = M[8];
-                    tf[3] = M[12];
-                    tf[4] = M[1];
-                    tf[5] = M[5];
-                    tf[6] = M[9];
-                    tf[7] = M[13];
-                    tf[8] = M[2];
-                    tf[9] = M[6];
-                    tf[10] = M[10];
-                    tf[11] = M[14];
-                    tfp = tf;
-                }
+            if (!bake_forced && step_mapped_eligible(root)) {
                 sb.clear();
-                StepBrepEmitter ems(13, tfp, deflection, angular_deg);
+                StepBrepEmitter ems(13, nullptr, deflection, angular_deg);
                 if (emit_solid_step(ems, sb, root, roots[i])) {
                     any = true;
-                    ++LS.instances;
+                    LS.instances += (long) root.transforms.size();
                     accum_geom(LS.geom, ems.stats());
+                }
+            } else {
+                size_t ninst = root.transforms.empty() ? 1 : root.transforms.size();
+                for (size_t k = 0; k < ninst; ++k) {
+                    double tf[16];
+                    const double *tfp = nullptr;
+                    if (!root.transforms.empty()) {
+                        const std::array<float, 16> &M = root.transforms[k];
+                        tf[0] = M[0];
+                        tf[1] = M[4];
+                        tf[2] = M[8];
+                        tf[3] = M[12];
+                        tf[4] = M[1];
+                        tf[5] = M[5];
+                        tf[6] = M[9];
+                        tf[7] = M[13];
+                        tf[8] = M[2];
+                        tf[9] = M[6];
+                        tf[10] = M[10];
+                        tf[11] = M[14];
+                        tfp = tf;
+                    }
+                    sb.clear();
+                    StepBrepEmitter ems(13, tfp, deflection, angular_deg);
+                    if (emit_solid_step(ems, sb, root, roots[i])) {
+                        any = true;
+                        ++LS.instances;
+                        accum_geom(LS.geom, ems.stats());
+                    }
                 }
             }
             if (any)
@@ -4080,6 +4165,7 @@ void cad_module(nb::module_ &m) {
             nb::dict d;
             d["solids_in"] = fs.solids_in;
             d["solids_out"] = fs.solids_out;
+            d["instances_out"] = fs.instances_out;
             d["unit_scale"] = fs.unit_scale;
             d["faces_in"] = fs.geom.faces_in;
             d["faces_out"] = fs.geom.faces_out;
@@ -4096,7 +4182,10 @@ void cad_module(nb::module_ &m) {
         "in_path"_a, "out_path"_a, "deflection"_a = 2.0, "angular_deg"_a = 20.0, "max_solids"_a = 0,
         "num_threads"_a = 0,
         "Native parallel STEP->STEP (AP242): re-export each solid's analytic B-rep as a "
-        "MANIFOLD_SOLID_BREP part (instances baked), no OCC. Returns the losslessness audit dict.");
+        "MANIFOLD_SOLID_BREP part, no OCC. Multi-instance B-rep solids with rigid placements are "
+        "written once as a shared prototype + per-placement NAUO/CDSR references (AP242 assembly "
+        "instancing); other solids are baked per instance. ADACPP_STEP_BAKE_INSTANCES=1 forces the "
+        "all-baked form. Returns the losslessness audit dict (instances_out = placed occurrences).");
 
     // Cross-format parity in ONE parse (the fan-out of stream_step_to_ifc + stream_step_to_step):
     // resolve each root once, run both emitters, count what each format preserves — no file output.

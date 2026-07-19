@@ -703,6 +703,16 @@ public:
         clear_geom_cache();
     }
 
+    // True when at least one solid is placed more than once (CDSR instancing in the source). Lets
+    // the STEP writer decide UP FRONT (before any per-solid resolve) whether the output will carry
+    // the shared assembly-root block that mapped-instance emission hangs its NAUO/CDSR records off.
+    bool any_multi_instance() const {
+        for (const auto &kv : xform_map_)
+            if (kv.second.size() > 1)
+                return true;
+        return false;
+    }
+
     // Copy the already-built, read-only metadata maps from a master resolver so worker threads can
     // resolve+tessellate in parallel without each rebuilding (and re-reading) the metadata. Each
     // worker keeps its OWN per-solid caches; only these resolve-time maps are shared (by copy).
