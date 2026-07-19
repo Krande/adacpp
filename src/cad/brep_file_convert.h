@@ -434,10 +434,9 @@ inline void emit_step_mapped_instances(adacpp::step_emit::StepBrepEmitter &em, s
         long loc = em.emit_entity(buf, "CARTESIAN_POINT('',(" + R(T[12]) + "," + R(T[13]) + "," + R(T[14]) + "))");
         long az = em.emit_entity(buf, "DIRECTION('',(" + R(T[8]) + "," + R(T[9]) + "," + R(T[10]) + "))");
         long ax = em.emit_entity(buf, "DIRECTION('',(" + R(T[0]) + "," + R(T[1]) + "," + R(T[2]) + "))");
-        long axis =
-            em.emit_entity(buf, "AXIS2_PLACEMENT_3D(''," + ref(loc) + "," + ref(az) + "," + ref(ax) + ")");
-        long idt = em.emit_entity(
-            buf, "ITEM_DEFINED_TRANSFORMATION('',''," + ref(identity_axis_id) + "," + ref(axis) + ")");
+        long axis = em.emit_entity(buf, "AXIS2_PLACEMENT_3D(''," + ref(loc) + "," + ref(az) + "," + ref(ax) + ")");
+        long idt =
+            em.emit_entity(buf, "ITEM_DEFINED_TRANSFORMATION('',''," + ref(identity_axis_id) + "," + ref(axis) + ")");
         long rr = em.emit_entity(buf, "(REPRESENTATION_RELATIONSHIP('',''," + ref(rep_id) + "," + ref(world_rep_id) +
                                           ")REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(" + ref(idt) +
                                           ")SHAPE_REPRESENTATION_RELATIONSHIP())");
