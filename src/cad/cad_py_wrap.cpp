@@ -3983,6 +3983,7 @@ static adacpp::ifc_emit::FileStats stream_ngeom_to_step_impl(nb::iterable record
     };
     const bool bake_forced = step_bake_instances_forced();
     std::vector<long> leaf_pds;       // baked leaves (mapped leaves hang under ROOT_PD instead)
+    std::vector<long> leaf_reps;      // parallel: each leaf's SHAPE_REPRESENTATION (CDSR child rep)
     std::vector<IfcPath2> leaf_paths; // parallel: each baked leaf's assembly path
     std::vector<long> styled;         // STYLED_ITEM ids for the presentation trailer
     std::vector<long> world_axes;     // mapped-instance AXIS2 ids -> the world rep's items
@@ -4034,8 +4035,8 @@ static adacpp::ifc_emit::FileStats stream_ngeom_to_step_impl(nb::iterable record
                         tfp = tf;
                     }
                     StepBrepEmitter em(nid, tfp, deflection, angular_deg);
-                    long solid_id = 0;
-                    long pd = emit_solid_step(em, buf, root, sid, nullptr, &solid_id);
+                    long solid_id = 0, rep_id = 0;
+                    long pd = emit_solid_step(em, buf, root, sid, &rep_id, &solid_id);
                     if (pd) {
                         if (root.has_color && solid_id)
                             styled.push_back(emit_step_color(em, buf, solid_id, root.cr, root.cg, root.cb));
@@ -4043,6 +4044,7 @@ static adacpp::ifc_emit::FileStats stream_ngeom_to_step_impl(nb::iterable record
                         any = true;
                         ++fs.instances_out;
                         leaf_pds.push_back(pd);
+                        leaf_reps.push_back(rep_id);
                         leaf_paths.push_back(k < root.instance_paths.size() ? root.instance_paths[k] : IfcPath2{});
                         accum_geom(fs.geom, em.stats());
                     }
@@ -4057,7 +4059,7 @@ static adacpp::ifc_emit::FileStats stream_ngeom_to_step_impl(nb::iterable record
     }
     fs.products_total = fs.solids_in;
     StepBrepEmitter emtail(nid, nullptr, deflection, angular_deg);
-    emit_step_assembly_tree(emtail, buf, leaf_pds, leaf_paths);
+    emit_step_assembly_tree(emtail, buf, leaf_pds, leaf_reps, leaf_paths);
     if (!world_axes.empty()) {
         buf += "#14=PRODUCT('model','model','',(#3));\n";
         buf += "#15=PRODUCT_DEFINITION_FORMATION('','',#14);\n";

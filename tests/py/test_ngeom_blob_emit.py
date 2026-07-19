@@ -149,9 +149,14 @@ def test_step_assembly_paths(blobs, tmp_path):
     st = cad.stream_ngeom_to_step(_records(blobs, paths=paths), str(out))
     assert st["solids_out"] == 2
     data = out.read_text()
-    # ONE shared assembly node 'deck', both leaves hung off it via NAUO
+    # ONE shared assembly node 'deck' (with its own empty SHAPE_REPRESENTATION), both leaves
+    # hung off it via the FULL occurrence record (NAUO + identity IDT + complex-RR + CDSR) —
+    # the pattern OCC's reader needs to find geometry under the shapeless assembly product.
     assert data.count("PRODUCT('deck'") == 1
+    assert data.count("SHAPE_REPRESENTATION('deck'") == 1
     assert data.count("NEXT_ASSEMBLY_USAGE_OCCURRENCE") == 2
+    assert data.count("CONTEXT_DEPENDENT_SHAPE_REPRESENTATION") == 2
+    assert data.count("ITEM_DEFINED_TRANSFORMATION") == 2
 
 
 def test_step_mapped_instances_from_records(blobs, tmp_path):
