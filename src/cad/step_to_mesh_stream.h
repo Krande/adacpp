@@ -153,6 +153,71 @@ inline void bake(const std::array<float, 16> &M, float usc, const float p[3], fl
     out[2] = usc * (M[2] * p[0] + M[6] * p[1] + M[10] * p[2] + M[14]);
 }
 
+// Assemble the final STL/OBJ file from the lane temp files. STL: 80-byte header + facet count +
+// each lane's raw 50-byte facets. OBJ: every lane's welded 'v' file in lane order, then each lane's
+// binary index triples rewritten as 1-based 'f' lines with a running per-lane global vertex base.
+// Lanes must be flush()ed first. Returns the total triangle count, or -1 on I/O error. Shared by
+// stream_step_to_mesh and the NGEOM-record mesh emitter (stream_ngeom_to_mesh).
+inline long assemble_lanes(const std::string &out_path, std::deque<MeshLane> &lanes, MeshFormat fmt) {
+    uint64_t total = 0;
+    for (MeshLane &l : lanes)
+        total += l.tris;
+    std::FILE *out = std::fopen(out_path.c_str(), "wb");
+    if (!out)
+        return -1;
+    auto copy_lane = [&](const std::string &p) {
+        std::FILE *in = std::fopen(p.c_str(), "rb");
+        if (!in)
+            return;
+        std::vector<char> b(1 << 20);
+        size_t n;
+        while ((n = std::fread(b.data(), 1, b.size(), in)) > 0)
+            std::fwrite(b.data(), 1, n, out);
+        std::fclose(in);
+    };
+    if (fmt == MeshFormat::STL) {
+        char header[80] = {0};
+        std::fwrite(header, 1, 80, out);
+        uint32_t cnt = (uint32_t) total;
+        std::fwrite(&cnt, 4, 1, out);
+        for (MeshLane &l : lanes)
+            copy_lane(l.path);
+    } else { // OBJ: concat welded 'v' files, then faces from the binary index lanes (+global base)
+        for (MeshLane &l : lanes)
+            copy_lane(l.path); // .objv vertex files, in lane order
+        std::vector<char> fb;
+        fb.reserve(1 << 20);
+        uint64_t base = 0; // verts written by prior lanes (1-based -> +1 at emit)
+        for (MeshLane &l : lanes) {
+            std::FILE *fin = std::fopen(l.fpath.c_str(), "rb");
+            if (fin) {
+                std::vector<uint32_t> ib(3 << 16);
+                size_t got;
+                while ((got = std::fread(ib.data(), sizeof(uint32_t), ib.size(), fin)) >= 3) {
+                    for (size_t e = 0; e + 2 < got; e += 3) {
+                        char line[64];
+                        int n = std::snprintf(line, sizeof line, "f %llu %llu %llu\n",
+                                              (unsigned long long) (base + ib[e] + 1),
+                                              (unsigned long long) (base + ib[e + 1] + 1),
+                                              (unsigned long long) (base + ib[e + 2] + 1));
+                        fb.insert(fb.end(), line, line + n);
+                    }
+                    if (fb.size() >= (1 << 20)) {
+                        std::fwrite(fb.data(), 1, fb.size(), out);
+                        fb.clear();
+                    }
+                }
+                std::fclose(fin);
+            }
+            base += l.vcount;
+        }
+        if (!fb.empty())
+            std::fwrite(fb.data(), 1, fb.size(), out);
+    }
+    std::fclose(out);
+    return (long) total;
+}
+
 } // namespace meshwrite
 
 // Returns the number of triangles written, or -1 on I/O error.
@@ -307,66 +372,8 @@ inline long stream_step_to_mesh(const std::string &in_path, const std::string &o
         th.join();
     prof.phase("stream(resolve+tess+bake)");
 
-    uint64_t total = 0;
-    for (auto &l : lanes)
-        total += l.tris;
-
     // ── assemble the final file from the lane temp files ──
-    bool ok = false;
-    std::FILE *out = std::fopen(out_path.c_str(), "wb");
-    if (out) {
-        auto copy_lane = [&](const std::string &p) {
-            std::FILE *in = std::fopen(p.c_str(), "rb");
-            if (!in)
-                return;
-            std::vector<char> b(1 << 20);
-            size_t n;
-            while ((n = std::fread(b.data(), 1, b.size(), in)) > 0)
-                std::fwrite(b.data(), 1, n, out);
-            std::fclose(in);
-        };
-        if (fmt == MeshFormat::STL) {
-            char header[80] = {0};
-            std::fwrite(header, 1, 80, out);
-            uint32_t cnt = (uint32_t) total;
-            std::fwrite(&cnt, 4, 1, out);
-            for (auto &l : lanes)
-                copy_lane(l.path);
-        } else { // OBJ: concat welded 'v' files, then faces from the binary index lanes (+global base)
-            for (auto &l : lanes)
-                copy_lane(l.path); // .objv vertex files, in lane order
-            std::vector<char> fb;
-            fb.reserve(1 << 20);
-            uint64_t base = 0; // verts written by prior lanes (1-based -> +1 at emit)
-            for (auto &l : lanes) {
-                std::FILE *fin = std::fopen(l.fpath.c_str(), "rb");
-                if (fin) {
-                    std::vector<uint32_t> ib(3 << 16);
-                    size_t got;
-                    while ((got = std::fread(ib.data(), sizeof(uint32_t), ib.size(), fin)) >= 3) {
-                        for (size_t e = 0; e + 2 < got; e += 3) {
-                            char line[64];
-                            int n = std::snprintf(line, sizeof line, "f %llu %llu %llu\n",
-                                                  (unsigned long long) (base + ib[e] + 1),
-                                                  (unsigned long long) (base + ib[e + 1] + 1),
-                                                  (unsigned long long) (base + ib[e + 2] + 1));
-                            fb.insert(fb.end(), line, line + n);
-                        }
-                        if (fb.size() >= (1 << 20)) {
-                            std::fwrite(fb.data(), 1, fb.size(), out);
-                            fb.clear();
-                        }
-                    }
-                    std::fclose(fin);
-                }
-                base += l.vcount;
-            }
-            if (!fb.empty())
-                std::fwrite(fb.data(), 1, fb.size(), out);
-        }
-        std::fclose(out);
-        ok = true;
-    }
+    long total = meshwrite::assemble_lanes(out_path, lanes, fmt);
     prof.phase("assemble");
 
     lanes.clear(); // remove lane temp files (destructors)
@@ -375,7 +382,7 @@ inline long stream_step_to_mesh(const std::string &in_path, const std::string &o
     prof.note("threads", nthreads);
     if (adacpp::ngeom::tess_dropped_faces() || adacpp::ngeom::tess_suspect_faces())
         std::fprintf(stderr, "[GEOMHEALTH-JSON] %s\n", adacpp::ngeom::tess_geomhealth_json().c_str());
-    return ok ? (long) total : -1;
+    return total;
 }
 
 } // namespace adacpp
