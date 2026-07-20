@@ -39,12 +39,14 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <map>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <deque>
+#include <mutex>
 #include <tuple>
 #include <cstdlib>
 #include <filesystem>
@@ -3937,7 +3939,9 @@ static NgeomEmitRecord parse_ngeom_record(nb::handle item) {
 }
 
 // Attach a record's out-of-band metadata to a decoded root (the blob carries geometry + id only).
-static void apply_record_meta(adacpp::ngeom::NgeomRoot &root, const NgeomEmitRecord &rec) {
+// Template so both record forms share it: NgeomEmitRecord (Python-owned blob, the serial STEP/IFC
+// emitters) and NgeomTessRecord (GIL-free copy, the threaded GLB/mesh tessellation path below).
+template <class Rec> static void apply_record_meta(adacpp::ngeom::NgeomRoot &root, const Rec &rec) {
     if (!rec.name.empty())
         root.id = rec.name;
     if (rec.color[3] >= 0.0f) {
@@ -4132,6 +4136,388 @@ static adacpp::ifc_emit::FileStats stream_ngeom_to_ifc_impl(nb::iterable records
     std::fclose(fp);
     fs.geom = em.stats();
     return fs;
+}
+
+// ---------------------------------------------------------------------------------------------
+// NGEOM-record streams -> GLB / OBJ / STL (the ada-object-model MESH export fast path).
+//
+// The same record front-end as stream_ngeom_to_step/ifc — (name, blob[, color[, transforms[,
+// paths]]]) records pulled lazily from any Python iterable — feeding the back half of the native
+// STEP->GLB / STEP->mesh cores: the libtess2/cdt tessellation tracks, world-transform + unit
+// baking, the merge-by-colour GLB writer with inline EXT_meshopt, and the welded-OBJ / binary-STL
+// lane writers. This replaces adapy's Python tessellation-scene assembly + trimesh writers for
+// ada-object sources (Genie XML): the hull's 137 s xml->obj becomes the same class as the native
+// step->obj leg.
+//
+// Parallel but DETERMINISTIC: the calling thread parses records (it holds the GIL) into a bounded
+// task queue; `num_threads` pure-C++ workers decode + tessellate; each finished record is
+// committed strictly in record order into ONE writer lane (a commit turnstile — the worker owning
+// the next sequence number commits, others wait). Output bytes therefore depend only on the
+// records and the tessellation knobs — never on scheduling or thread count — and a generator
+// input is byte-identical to a list input. Backpressure is structural: at most `qcap` parsed
+// records + one finished mesh per worker are in flight.
+
+struct NgeomTessRecord { // GIL-free copy of one parsed record (workers never touch Python)
+    std::string name;
+    std::string blob;
+    std::array<float, 4> color{0.f, 0.f, 0.f, -1.f};
+    std::vector<std::array<float, 16>> transforms;
+    std::vector<std::vector<std::pair<int, std::string>>> paths;
+};
+
+static NgeomTessRecord own_ngeom_record(nb::handle item) {
+    NgeomEmitRecord r = parse_ngeom_record(item);
+    NgeomTessRecord rec;
+    rec.name = std::move(r.name);
+    rec.blob.assign(r.blob.c_str(), r.blob.size());
+    rec.color = r.color;
+    rec.transforms = std::move(r.transforms);
+    rec.paths = std::move(r.paths);
+    return rec;
+}
+
+struct NgeomTessStats {
+    long solids_in = 0, solids_out = 0, solids_skipped = 0, instances_out = 0;
+    unsigned long long triangles = 0; // world triangles (per-solid tris x instances)
+};
+
+// Decode + tessellate one record into commit-ready GlbSolids: metadata attached, positions and
+// instance translations pre-scaled to metres, per-face colours split into per-colour parts when
+// requested (`split_by_face_colour`, the GLB material path; picking face ranges stay off). Pure
+// C++ — runs on any thread.
+static void ngeom_tess_process(const NgeomTessRecord &rec, const adacpp::ngeom::TessParams &tp, double unit_scale,
+                               bool split_by_face_colour, std::vector<adacpp::glb::GlbSolid> &parts,
+                               NgeomTessStats &st) {
+    using adacpp::glb::GlbSolid;
+    using adacpp::ngeom::NgeomDoc;
+    using adacpp::ngeom::NgeomRoot;
+    using adacpp::ngeom::TessMesh;
+    NgeomDoc doc = adacpp::ngeom::decode(reinterpret_cast<const uint8_t *>(rec.blob.data()), rec.blob.size());
+    for (NgeomRoot &root : doc.roots) {
+        ++st.solids_in;
+        apply_record_meta(root, rec);
+        NgeomDoc one;
+        one.roots.push_back(std::move(root));
+        TessMesh tm = tessellate_doc(one, tp);
+        if (tm.indices.empty()) {
+            ++st.solids_skipped;
+            continue;
+        }
+        const NgeomRoot &rr = one.roots[0];
+        GlbSolid gs;
+        gs.positions = std::move(tm.positions);
+        gs.indices = std::move(tm.indices);
+        gs.face_ranges.reserve(tm.face_ranges.size());
+        for (const auto &fr : tm.face_ranges)
+            gs.face_ranges.push_back({fr.first_index, fr.index_count, fr.face_id, fr.face_seq, fr.has_color, fr.cr,
+                                      fr.cg, fr.cb, fr.ca});
+        gs.color = {rr.cr, rr.cg, rr.cb, rr.ca}; // grey default when !has_color
+        gs.transforms = rr.transforms;
+        gs.id = rr.id.empty() ? rec.name : rr.id;
+        if (!rr.instance_paths.empty() && !rr.instance_paths[0].empty())
+            gs.product_name = rr.instance_paths[0].back().second;
+        gs.instance_paths = rr.instance_paths;
+        if (unit_scale != 1.0) { // model units -> metres (positions + instance translations)
+            const float s = (float) unit_scale;
+            for (float &p : gs.positions)
+                p *= s;
+            for (auto &M : gs.transforms) {
+                M[12] *= s;
+                M[13] *= s;
+                M[14] *= s;
+            }
+        }
+        const size_t ninst = gs.transforms.empty() ? 1 : gs.transforms.size();
+        ++st.solids_out;
+        st.instances_out += (long) ninst;
+        st.triangles += (unsigned long long) (gs.indices.size() / 3) * ninst;
+        if (split_by_face_colour) {
+            for (GlbSolid &part : adacpp::glb::split_solid_by_face_colour(gs)) {
+                part.face_ranges.clear(); // colour split done; picking extras not exposed on this path
+                parts.push_back(std::move(part));
+            }
+        } else {
+            parts.push_back(std::move(gs));
+        }
+    }
+}
+
+// Pump records through `nthreads` tessellation workers, committing each record's parts in record
+// order via `commit` (invoked by exactly one thread at a time). Python is touched only on the
+// calling thread. The first worker/commit error is re-thrown after every thread has joined (the
+// remaining queue still drains so the turnstile never deadlocks).
+static NgeomTessStats
+stream_ngeom_tess_pump(nb::iterable records, const adacpp::ngeom::TessParams &tp, int nthreads, double unit_scale,
+                       bool split_by_face_colour,
+                       const std::function<void(std::vector<adacpp::glb::GlbSolid> &)> &commit) {
+    NgeomTessStats total;
+    if (nthreads <= 1) { // serial — also the no-pthreads (wasm) path
+        for (nb::handle item : records) {
+            NgeomTessRecord rec = own_ngeom_record(item);
+            std::vector<adacpp::glb::GlbSolid> parts;
+            ngeom_tess_process(rec, tp, unit_scale, split_by_face_colour, parts, total);
+            commit(parts);
+        }
+        return total;
+    }
+
+    struct Task {
+        size_t seq = 0;
+        NgeomTessRecord rec;
+    };
+    std::mutex qm; // task queue (bounded)
+    std::condition_variable q_can_push, q_can_pop;
+    std::deque<Task> queue;
+    bool input_done = false;
+    const size_t qcap = (size_t) nthreads * 2 + 2;
+
+    std::mutex cm; // commit turnstile: strictly-ordered single-writer commits
+    std::condition_variable ccv;
+    size_t next_commit = 0;
+
+    std::mutex em;
+    std::string error; // first failure (workers keep draining so the turnstile stays live)
+
+    auto worker = [&]() {
+        int local = 0;
+        for (;;) {
+            Task task;
+            {
+                std::unique_lock<std::mutex> lk(qm);
+                q_can_pop.wait(lk, [&] { return !queue.empty() || input_done; });
+                if (queue.empty())
+                    return;
+                task = std::move(queue.front());
+                queue.pop_front();
+            }
+            q_can_push.notify_one();
+            std::vector<adacpp::glb::GlbSolid> parts;
+            NgeomTessStats st;
+            try {
+                ngeom_tess_process(task.rec, tp, unit_scale, split_by_face_colour, parts, st);
+            } catch (const std::exception &ex) {
+                std::lock_guard<std::mutex> lk(em);
+                if (error.empty())
+                    error = std::string(ex.what()) + " (record '" + task.rec.name + "')";
+                parts.clear();
+            }
+            {
+                std::unique_lock<std::mutex> lk(cm);
+                ccv.wait(lk, [&] { return next_commit == task.seq; });
+                try {
+                    commit(parts);
+                } catch (const std::exception &ex) {
+                    std::lock_guard<std::mutex> elk(em);
+                    if (error.empty())
+                        error = std::string("commit: ") + ex.what();
+                }
+                total.solids_in += st.solids_in;
+                total.solids_out += st.solids_out;
+                total.solids_skipped += st.solids_skipped;
+                total.instances_out += st.instances_out;
+                total.triangles += st.triangles;
+                ++next_commit;
+            }
+            ccv.notify_all();
+            if (++local % 64 == 0)
+                adacpp::mem_trim(); // return per-record churn to the OS
+        }
+    };
+
+    std::vector<std::thread> pool;
+    pool.reserve(nthreads);
+    for (int t = 0; t < nthreads; ++t)
+        pool.emplace_back(worker);
+    auto finish = [&] {
+        {
+            std::lock_guard<std::mutex> lk(qm);
+            input_done = true;
+        }
+        q_can_pop.notify_all();
+        for (std::thread &th : pool)
+            th.join();
+    };
+    try {
+        size_t seq = 0;
+        for (nb::handle item : records) {
+            Task task;
+            task.seq = seq++;
+            task.rec = own_ngeom_record(item);
+            {
+                std::unique_lock<std::mutex> lk(qm);
+                q_can_push.wait(lk, [&] { return queue.size() < qcap; });
+                queue.push_back(std::move(task));
+            }
+            q_can_pop.notify_one();
+        }
+    } catch (...) {
+        finish(); // drain what was queued so every thread joins cleanly, then re-throw
+        throw;
+    }
+    finish();
+    {
+        std::lock_guard<std::mutex> lk(em);
+        if (!error.empty())
+            throw std::runtime_error("stream_ngeom tessellation failed: " + error);
+    }
+    return total;
+}
+
+static adacpp::ngeom::TessParams ngeom_tess_params(const std::string &pipeline, double deflection, double angular_deg,
+                                                   double model_scale, bool pin_boundary, bool capture_face_ranges) {
+    auto track = adacpp::ngeom::parse_track(pipeline);
+    if (!track) // unknown track = error, not a silent fallback (same contract as stream_step_to_glb)
+        throw std::runtime_error("unknown tessellation pipeline: '" + pipeline + "'");
+    adacpp::ngeom::TessParams tp;
+    tp.track = *track;
+    tp.libtess2.pin_boundary = pin_boundary;
+    tp.deflection = deflection;
+    tp.max_angle = angular_deg * 3.14159265358979323846 / 180.0;
+    tp.model_scale = model_scale; // >0 => adaptive per-surface density
+    tp.capture_face_ranges = capture_face_ranges;
+    return tp;
+}
+
+// The GLB/OBJ/STL emit audit dict: walk counters + the per-conversion tessellation-health
+// counters (the same numbers the [GEOMHEALTH-JSON] stderr line carries), so callers can gate on
+// faces_dropped without scraping stderr. Field names match ngeom_emit_stats_dict where shared.
+static nb::dict ngeom_tess_stats_dict(const NgeomTessStats &st, double unit_scale) {
+    nb::dict d;
+    d["solids_in"] = st.solids_in;
+    d["solids_out"] = st.solids_out;
+    d["solids_skipped"] = st.solids_skipped;
+    d["instances_out"] = st.instances_out;
+    d["unit_scale"] = unit_scale;
+    d["triangles"] = st.triangles;
+    d["faces_total"] = adacpp::ngeom::tess_total_faces();
+    d["faces_dropped"] = adacpp::ngeom::tess_dropped_faces();
+    d["faces_suspect"] = adacpp::ngeom::tess_suspect_faces();
+    nb::dict reasons;
+    for (const auto &[k, v] : adacpp::ngeom::tess_dropped_by_surface())
+        reasons[k.c_str()] = v;
+    d["drop_reasons"] = reasons;
+    return d;
+}
+
+// NGEOM records -> GLB file. Record front-end + the stream_step_to_glb back half: one spill lane
+// (ordered commits keep output deterministic), merge-by-colour GLB with the viewer's structure
+// (per-solid draw ranges, assembly paths from the records, inline EXT_meshopt when `meshopt`).
+static nb::dict stream_ngeom_to_glb_impl(nb::iterable records, const std::string &out_path, double deflection,
+                                         double angular_deg, int num_threads, bool meshopt, double model_scale,
+                                         const std::string &pipeline, bool pin_boundary, double unit_scale) {
+    adacpp::prof::StepProfiler prof("stream_ngeom_to_glb");
+    adacpp::tune_malloc_for_streaming();    // bound streaming peak RSS before the pool
+    adacpp::ngeom::reset_tess_face_stats(); // count dropped faces across this conversion (audit health flag)
+    // capture_face_ranges: per-face colours (when a blob carries them) must split into per-colour
+    // materials, matching the STEP core; the picking extras stay off (ranges dropped after split).
+    adacpp::ngeom::TessParams tp = ngeom_tess_params(pipeline, deflection, angular_deg, model_scale, pin_boundary,
+                                                     /*capture_face_ranges=*/true);
+    int nthreads = num_threads > 0 ? num_threads : (int) adacpp::effective_concurrency();
+
+    std::string tmpl = adacpp::temp_template("adacpp_glb");
+    char *dir = ::mkdtemp(tmpl.data());
+    if (!dir)
+        throw std::runtime_error("stream_ngeom_to_glb: cannot create spill dir");
+    const std::string spill = dir;
+    bool ok = false;
+    NgeomTessStats st;
+    try { // lane scoped so its temp files are removed before the rmdir
+        adacpp::glb::GlbSpillWriter lane(spill, 0);
+        st = stream_ngeom_tess_pump(records, tp, nthreads, unit_scale, /*split_by_face_colour=*/true,
+                                    [&](std::vector<adacpp::glb::GlbSolid> &parts) {
+                                        for (adacpp::glb::GlbSolid &part : parts)
+                                            lane.add(part); // spilled/buffered immediately
+                                    });
+        prof.phase("stream(decode+tess+spill)");
+        std::vector<adacpp::glb::GlbSpillWriter *> lane_ptrs{&lane};
+        // Schema-complete ADA_EXT_data (empty design/sim lists) — same default as the STEP core.
+        const std::string ada_ext = adacpp::ada_ext::AdaDesignAndAnalysisExtension{}.to_json();
+        ok = adacpp::glb::write_glb_merged(out_path, lane_ptrs, ada_ext, meshopt);
+        prof.phase(meshopt ? "write_glb_merged(meshopt)" : "write_glb_merged");
+    } catch (...) {
+        ::rmdir(spill.c_str());
+        throw;
+    }
+    ::rmdir(spill.c_str());
+    prof.note("threads", nthreads);
+    if (adacpp::ngeom::tess_dropped_faces() || adacpp::ngeom::tess_suspect_faces())
+        std::fprintf(stderr, "[GEOMHEALTH-JSON] %s\n", adacpp::ngeom::tess_geomhealth_json().c_str());
+    if (!ok)
+        throw std::runtime_error("stream_ngeom_to_glb: GLB write failed");
+    return ngeom_tess_stats_dict(st, unit_scale);
+}
+
+// NGEOM records -> binary STL / welded Wavefront OBJ. Record front-end + the stream_step_to_mesh
+// back half (one MeshLane; each instance's world placement baked at commit; assemble_lanes writes
+// the final file). Ordered commits keep the output byte-deterministic.
+static nb::dict stream_ngeom_to_mesh_impl(nb::iterable records, const std::string &out_path, const std::string &fmt_s,
+                                          double deflection, double angular_deg, int num_threads, double model_scale,
+                                          const std::string &pipeline, bool pin_boundary, double unit_scale) {
+    adacpp::MeshFormat fmt;
+    if (fmt_s == "obj" || fmt_s == "OBJ")
+        fmt = adacpp::MeshFormat::OBJ;
+    else if (fmt_s == "stl" || fmt_s == "STL")
+        fmt = adacpp::MeshFormat::STL;
+    else
+        throw std::runtime_error("stream_ngeom_to_mesh: fmt must be 'obj' or 'stl', got '" + fmt_s + "'");
+    static const std::array<float, 16> kIdentity = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    adacpp::prof::StepProfiler prof("stream_ngeom_to_mesh");
+    adacpp::tune_malloc_for_streaming();
+    adacpp::ngeom::reset_tess_face_stats();
+    adacpp::ngeom::TessParams tp = ngeom_tess_params(pipeline, deflection, angular_deg, model_scale, pin_boundary,
+                                                     /*capture_face_ranges=*/false);
+    int nthreads = num_threads > 0 ? num_threads : (int) adacpp::effective_concurrency();
+
+    std::string tmpl = adacpp::temp_template("adacpp_mesh");
+    char *dir = ::mkdtemp(tmpl.data());
+    if (!dir)
+        throw std::runtime_error("stream_ngeom_to_mesh: cannot create spill dir");
+    const std::string spill = dir;
+    long total = -1;
+    NgeomTessStats st;
+    try {
+        std::deque<adacpp::meshwrite::MeshLane> lanes;
+        lanes.emplace_back(spill, 0, fmt);
+        adacpp::meshwrite::MeshLane &lane = lanes.front();
+        st = stream_ngeom_tess_pump(
+            records, tp, nthreads, unit_scale, /*split_by_face_colour=*/false,
+            [&](std::vector<adacpp::glb::GlbSolid> &parts) {
+                for (adacpp::glb::GlbSolid &part : parts) {
+                    const size_t ninst = part.transforms.empty() ? 1 : part.transforms.size();
+                    for (size_t k = 0; k < ninst; ++k) {
+                        const std::array<float, 16> &M = part.transforms.empty() ? kIdentity : part.transforms[k];
+                        if (fmt == adacpp::MeshFormat::OBJ) {
+                            lane.add_instance(part.positions, part.indices, M, /*usc=*/1.0f); // welded, pre-scaled
+                        } else {
+                            const std::vector<float> &P = part.positions;
+                            const std::vector<uint32_t> &I = part.indices;
+                            for (size_t e = 0; e + 2 < I.size(); e += 3) {
+                                float w0[3], w1[3], w2[3];
+                                adacpp::meshwrite::bake(M, 1.0f, &P[3 * I[e]], w0);
+                                adacpp::meshwrite::bake(M, 1.0f, &P[3 * I[e + 1]], w1);
+                                adacpp::meshwrite::bake(M, 1.0f, &P[3 * I[e + 2]], w2);
+                                lane.facet(w0, w1, w2);
+                            }
+                        }
+                    }
+                }
+            });
+        prof.phase("stream(decode+tess+bake)");
+        lane.flush();
+        total = adacpp::meshwrite::assemble_lanes(out_path, lanes, fmt);
+        prof.phase("assemble");
+        lanes.clear(); // remove lane temp files (destructors) before the rmdir
+    } catch (...) {
+        ::rmdir(spill.c_str());
+        throw;
+    }
+    ::rmdir(spill.c_str());
+    prof.note("threads", nthreads);
+    if (adacpp::ngeom::tess_dropped_faces() || adacpp::ngeom::tess_suspect_faces())
+        std::fprintf(stderr, "[GEOMHEALTH-JSON] %s\n", adacpp::ngeom::tess_geomhealth_json().c_str());
+    if (total < 0)
+        throw std::runtime_error("stream_ngeom_to_mesh: file write failed");
+    return ngeom_tess_stats_dict(st, unit_scale);
 }
 
 // One NGEOM blob -> the SPF text of its IFC geometry-body entity graph ONLY (the IfcAdvancedBrep /
@@ -4494,6 +4880,33 @@ void cad_module(nb::module_ &m) {
         "IfcSpatialZone tree from the record paths; multi-instance solids share geometry via "
         "IfcMappedItem. Records are pulled lazily (generator-friendly, bounded memory). schema: "
         "'IFC4X3_ADD2' | 'IFC4'. Returns the losslessness audit dict.");
+
+    m.def(
+        "stream_ngeom_to_glb", &stream_ngeom_to_glb_impl, "records"_a, "out_path"_a, "deflection"_a = 0.0,
+        "angular_deg"_a = 20.0, "num_threads"_a = 0, "meshopt"_a = true, "model_scale"_a = 0.0,
+        "pipeline"_a = "libtess2", "pin_boundary"_a = true, "unit_scale"_a = 1.0,
+        "Native GLB writer from a stream of NGEOM records (same record shape + lazy pull as "
+        "stream_ngeom_to_step). Decodes each blob, tessellates it on a worker pool (num_threads=0 = "
+        "cgroup-aware auto; pipeline: 'libtess2' default / 'cdt'), bakes each instance's world "
+        "placement + colour and writes the merge-by-colour GLB matching the adapy viewer's structure "
+        "(per-solid draw ranges + assembly paths from the records; meshopt=True bakes "
+        "EXT_meshopt_compression inline). unit_scale = metres per model unit — positions and "
+        "instance translations are scaled so the GLB is always metres. model_scale > 0 enables "
+        "model-relative adaptive tessellation density. Deterministic: output bytes depend only on "
+        "the records and knobs, never on thread count or scheduling. Returns the audit dict "
+        "(solids_in/out/skipped, instances_out, triangles, faces_total/dropped/suspect, "
+        "drop_reasons — the [GEOMHEALTH-JSON] counters).");
+
+    m.def(
+        "stream_ngeom_to_mesh", &stream_ngeom_to_mesh_impl, "records"_a, "out_path"_a, "fmt"_a, "deflection"_a = 0.0,
+        "angular_deg"_a = 20.0, "num_threads"_a = 0, "model_scale"_a = 0.0, "pipeline"_a = "libtess2",
+        "pin_boundary"_a = true, "unit_scale"_a = 1.0,
+        "Native binary-STL / welded-OBJ writer from a stream of NGEOM records (same record shape + "
+        "lazy pull as stream_ngeom_to_step; fmt: 'stl' | 'obj'). Tessellates on a worker pool and "
+        "bakes each instance's world placement straight into the mesh file — no Python scene, no "
+        "whole-model buffer. unit_scale = metres per model unit (output is always metres). "
+        "Deterministic: output bytes depend only on the records and knobs, never on thread count. "
+        "Returns the same audit dict as stream_ngeom_to_glb.");
 
     m.def(
         "ngeom_to_ifc_body_spf",
