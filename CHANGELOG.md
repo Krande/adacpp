@@ -2,6 +2,15 @@
 
 
 
+## v0.18.0 (2026-07-20)
+
+### Feature
+
+* feat: AP242 mapped instancing and closed-B-spline tessellation fixes (#44)
+
+Co-authored-by: Claude Fable 5 &lt;noreply@anthropic.com&gt; ([`1192c30`](https://github.com/Krande/adacpp/commit/1192c307dbcdb57af7ddddd610cf8c000bf78911))
+
+
 ## v0.17.1 (2026-07-18)
 
 ### Fix
