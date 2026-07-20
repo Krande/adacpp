@@ -39,12 +39,14 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <map>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <deque>
+#include <mutex>
 #include <tuple>
 #include <cstdlib>
 #include <filesystem>
@@ -3474,9 +3476,13 @@ static adacpp::ifc_emit::FileStats write_ifc_file_parallel_impl(const std::strin
 }
 
 // Native parallel STEP->STEP (AP242). Mirrors the parallel IFC writer: shared StreamIndex, per-worker
-// Resolver, LPT, per-worker lanes, local ids -> atomic-reserve -> renumber. Instances are BAKED
-// (per-instance transform applied to the geometry) — v1 flat parts (no NAUO assembly tree). nth=1 =
-// serial. NO parse_cache_ bounding (per-worker clear_geom_cache per solid). Round-trip-lossless.
+// Resolver, LPT, per-worker lanes, local ids -> atomic-reserve -> renumber. Multi-instance B-rep
+// solids with rigid placements are emitted ONCE as a shared prototype + per-placement NAUO/CDSR/
+// ITEM_DEFINED_TRANSFORMATION references (the AP242 assembly-instancing pattern both native stream
+// readers and OCC consume — see emit_step_mapped_instances); everything else keeps the baked form
+// (per-instance transform applied to the geometry). ADACPP_STEP_BAKE_INSTANCES=1 forces all-baked.
+// nth=1 = serial. NO parse_cache_ bounding (per-worker clear_geom_cache per solid).
+// Round-trip-lossless.
 static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_path, const std::string &out_path,
                                                         double deflection, double angular_deg, int num_threads,
                                                         long max_solids) {
@@ -3505,7 +3511,14 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
             roots[i] = cost[i].second;
     }
     prof.phase("lpt_order");
-    const long K = 13;
+    // Mapped instancing needs a shared assembly-root block: #14..#17 = root PRODUCT chain, #18 =
+    // the world SHAPE_REPRESENTATION (its item list is only known after all lanes ran, so the
+    // record itself is written at assemble time — forward references are legal SPF). Ids <= K are
+    // protected from renumbering, so reserve them only when instancing can actually occur; a flat
+    // source keeps the old K=13 layout byte-for-byte.
+    const bool mapped_on = !step_bake_instances_forced() && master.any_multi_instance();
+    const long K = mapped_on ? 18 : 13;
+    const long ROOT_PD = 16, WORLD_REP = 18, IDENTITY_AXIS = 13;
     std::atomic<long> id_counter{K + 1};
     int nth = num_threads > 0 ? num_threads : (int) adacpp::effective_concurrency();
     if (nth > (int) roots.size())
@@ -3520,6 +3533,8 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
         std::string path, buf;
         adacpp::ifc_emit::EmitStats stats;
         long solids_out = 0;
+        long instances_out = 0;
+        std::vector<long> world_axes; // global ids of per-instance AXIS2s -> the world rep's items
     };
     std::vector<Lane> lanes(nth);
     for (int t = 0; t < nth; ++t) {
@@ -3554,37 +3569,27 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
             solids_in.fetch_add(1, std::memory_order_relaxed);
             prof.solid(root.faces.size());
             ++w_solids;
-            // One baked part per instance (or one identity part when flat).
-            size_t ninst = root.transforms.empty() ? 1 : root.transforms.size();
             bool any = false;
-            for (size_t k = 0; k < ninst; ++k) {
-                double tf[16];
-                const double *tfp = nullptr;
-                if (!root.transforms.empty()) {
-                    // ng:: transforms are column-major glTF; StepBrepEmitter wants row-major.
-                    const std::array<float, 16> &M = root.transforms[k];
-                    tf[0] = M[0];
-                    tf[1] = M[4];
-                    tf[2] = M[8];
-                    tf[3] = M[12];
-                    tf[4] = M[1];
-                    tf[5] = M[5];
-                    tf[6] = M[9];
-                    tf[7] = M[13];
-                    tf[8] = M[2];
-                    tf[9] = M[6];
-                    tf[10] = M[10];
-                    tf[11] = M[14];
-                    tfp = tf;
-                }
+            if (mapped_on && step_mapped_eligible(root)) {
+                // Shared prototype ONCE (identity frame) + one NAUO/CDSR/IDT reference per placement.
                 sb.clear();
-                StepBrepEmitter em(K, tfp, deflection, angular_deg);
-                bool ok = emit_solid_step(em, sb, root, roots[i]);
-                long n = em.current_id() - K;
-                if (ok) {
+                StepBrepEmitter em(K, nullptr, deflection, angular_deg);
+                long rep_id = 0;
+                long pd = emit_solid_step(em, sb, root, roots[i], &rep_id);
+                if (pd) {
+                    std::string nm =
+                        root.id.empty() ? ("solid_" + std::to_string(roots[i])) : adacpp::ifc_emit::ifc_str(root.id);
+                    std::vector<long> axes_local;
+                    emit_step_mapped_instances(em, sb, rep_id, pd, nm, roots[i], root.transforms, ROOT_PD, WORLD_REP,
+                                               IDENTITY_AXIS, axes_local);
+                    long n = em.current_id() - K;
                     long gbase = id_counter.fetch_add(n, std::memory_order_relaxed);
-                    renumber_into(L.buf, sb, gbase - (K + 1), K);
+                    long offset = gbase - (K + 1);
+                    renumber_into(L.buf, sb, offset, K);
+                    for (long a : axes_local)
+                        L.world_axes.push_back(a + offset);
                     any = true;
+                    L.instances_out += (long) root.transforms.size();
                     const auto &s = em.stats();
                     L.stats.faces_in += s.faces_in;
                     L.stats.faces_out += s.faces_out;
@@ -3594,6 +3599,49 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
                     L.stats.edges_degenerate += s.edges_degenerate;
                     for (const auto &[rk, rv] : s.drop_reasons)
                         L.stats.drop_reasons[rk] += rv;
+                }
+            } else {
+                // One baked part per instance (or one identity part when flat).
+                size_t ninst = root.transforms.empty() ? 1 : root.transforms.size();
+                for (size_t k = 0; k < ninst; ++k) {
+                    double tf[16];
+                    const double *tfp = nullptr;
+                    if (!root.transforms.empty()) {
+                        // ng:: transforms are column-major glTF; StepBrepEmitter wants row-major.
+                        const std::array<float, 16> &M = root.transforms[k];
+                        tf[0] = M[0];
+                        tf[1] = M[4];
+                        tf[2] = M[8];
+                        tf[3] = M[12];
+                        tf[4] = M[1];
+                        tf[5] = M[5];
+                        tf[6] = M[9];
+                        tf[7] = M[13];
+                        tf[8] = M[2];
+                        tf[9] = M[6];
+                        tf[10] = M[10];
+                        tf[11] = M[14];
+                        tfp = tf;
+                    }
+                    sb.clear();
+                    StepBrepEmitter em(K, tfp, deflection, angular_deg);
+                    bool ok = emit_solid_step(em, sb, root, roots[i]);
+                    long n = em.current_id() - K;
+                    if (ok) {
+                        long gbase = id_counter.fetch_add(n, std::memory_order_relaxed);
+                        renumber_into(L.buf, sb, gbase - (K + 1), K);
+                        any = true;
+                        ++L.instances_out;
+                        const auto &s = em.stats();
+                        L.stats.faces_in += s.faces_in;
+                        L.stats.faces_out += s.faces_out;
+                        L.stats.faces_dropped += s.faces_dropped;
+                        L.stats.edges_analytic += s.edges_analytic;
+                        L.stats.edges_polyline_approx += s.edges_polyline_approx;
+                        L.stats.edges_degenerate += s.edges_degenerate;
+                        for (const auto &[rk, rv] : s.drop_reasons)
+                            L.stats.drop_reasons[rk] += rv;
+                    }
                 }
             }
             if (any)
@@ -3627,6 +3675,31 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
     }
     std::string hdr = step_header_block(master.unit_scale());
     std::fwrite(hdr.data(), 1, hdr.size(), out_fp);
+    // Shared assembly-root block for mapped instances: root PRODUCT chain (#14..#17) + the world
+    // SHAPE_REPRESENTATION #18 listing every instance AXIS2 among its items (deferred until now
+    // because the item list spans all lanes; statement order is irrelevant in SPF). Skipped when no
+    // solid actually took the mapped path — the unused reserved ids are legal gaps.
+    if (mapped_on) {
+        std::vector<long> all_axes;
+        for (int t = 0; t < nth; ++t)
+            all_axes.insert(all_axes.end(), lanes[t].world_axes.begin(), lanes[t].world_axes.end());
+        if (!all_axes.empty()) {
+            std::string rb;
+            rb += "#14=PRODUCT('model','model','',(#3));\n";
+            rb += "#15=PRODUCT_DEFINITION_FORMATION('','',#14);\n";
+            rb += "#16=PRODUCT_DEFINITION('design','',#15,#4);\n";
+            rb += "#17=PRODUCT_DEFINITION_SHAPE('','',#16);\n";
+            rb += "#18=SHAPE_REPRESENTATION('model',(#13";
+            for (long a : all_axes) {
+                rb += ",#";
+                rb += std::to_string(a);
+            }
+            rb += "),#9);\n";
+            long sdr_id = id_counter.fetch_add(1, std::memory_order_relaxed);
+            rb += "#" + std::to_string(sdr_id) + "=SHAPE_DEFINITION_REPRESENTATION(#17,#18);\n";
+            std::fwrite(rb.data(), 1, rb.size(), out_fp);
+        }
+    }
     std::vector<char> io(1 << 20);
     for (int t = 0; t < nth; ++t) {
         Lane &L = lanes[t];
@@ -3637,6 +3710,7 @@ static adacpp::ifc_emit::FileStats write_step_file_impl(const std::string &in_pa
             std::fclose(lf);
         }
         fs.solids_out += L.solids_out;
+        fs.instances_out += L.instances_out;
         fs.geom.faces_in += L.stats.faces_in;
         fs.geom.faces_out += L.stats.faces_out;
         fs.geom.faces_dropped += L.stats.faces_dropped;
@@ -3717,6 +3791,7 @@ static void step_parity_impl(const std::string &in_path, double deflection, doub
     int nth = num_threads > 0 ? num_threads : (int) adacpp::effective_concurrency();
     if (nth > (int) roots.size())
         nth = std::max(1, (int) roots.size());
+    const bool bake_forced = step_bake_instances_forced(); // mirror write_step_file_impl's mode
     std::vector<ParityFormat> ifc_lanes(nth), step_lanes(nth);
     std::atomic<size_t> next{0};
     std::atomic<long> solids_in{0};
@@ -3747,34 +3822,46 @@ static void step_parity_impl(const std::string &in_path, double deflection, doub
             LI.instances += (long) proxies.size();
             accum_geom(LI.geom, emi.stats());
 
-            // ── STEP: one baked part per instance (matches write_step_file_impl) ──
-            size_t ninst = root.transforms.empty() ? 1 : root.transforms.size();
+            // ── STEP: mirror write_step_file_impl — shared prototype + per-placement references
+            // for mapped-eligible solids (geometry counted ONCE, instances = placements), else one
+            // baked part per instance ──
             bool any = false;
-            for (size_t k = 0; k < ninst; ++k) {
-                double tf[16];
-                const double *tfp = nullptr;
-                if (!root.transforms.empty()) {
-                    const std::array<float, 16> &M = root.transforms[k];
-                    tf[0] = M[0];
-                    tf[1] = M[4];
-                    tf[2] = M[8];
-                    tf[3] = M[12];
-                    tf[4] = M[1];
-                    tf[5] = M[5];
-                    tf[6] = M[9];
-                    tf[7] = M[13];
-                    tf[8] = M[2];
-                    tf[9] = M[6];
-                    tf[10] = M[10];
-                    tf[11] = M[14];
-                    tfp = tf;
-                }
+            if (!bake_forced && step_mapped_eligible(root)) {
                 sb.clear();
-                StepBrepEmitter ems(13, tfp, deflection, angular_deg);
+                StepBrepEmitter ems(13, nullptr, deflection, angular_deg);
                 if (emit_solid_step(ems, sb, root, roots[i])) {
                     any = true;
-                    ++LS.instances;
+                    LS.instances += (long) root.transforms.size();
                     accum_geom(LS.geom, ems.stats());
+                }
+            } else {
+                size_t ninst = root.transforms.empty() ? 1 : root.transforms.size();
+                for (size_t k = 0; k < ninst; ++k) {
+                    double tf[16];
+                    const double *tfp = nullptr;
+                    if (!root.transforms.empty()) {
+                        const std::array<float, 16> &M = root.transforms[k];
+                        tf[0] = M[0];
+                        tf[1] = M[4];
+                        tf[2] = M[8];
+                        tf[3] = M[12];
+                        tf[4] = M[1];
+                        tf[5] = M[5];
+                        tf[6] = M[9];
+                        tf[7] = M[13];
+                        tf[8] = M[2];
+                        tf[9] = M[6];
+                        tf[10] = M[10];
+                        tf[11] = M[14];
+                        tfp = tf;
+                    }
+                    sb.clear();
+                    StepBrepEmitter ems(13, tfp, deflection, angular_deg);
+                    if (emit_solid_step(ems, sb, root, roots[i])) {
+                        any = true;
+                        ++LS.instances;
+                        accum_geom(LS.geom, ems.stats());
+                    }
                 }
             }
             if (any)
@@ -3804,6 +3891,691 @@ static void step_parity_impl(const std::string &in_path, double deflection, doub
     }
     solids_in_out = solids_in.load();
     total_instances_out = total_instances.load();
+}
+
+// ---------------------------------------------------------------------------------------------
+// NGEOM-blob record streams -> STEP / IFC files (the ada-object-model export fast path).
+//
+// The Python side walks an assembly, serializes each object's solid_geom() to an NGEOM blob
+// (adapy serialize_geometries — the same vocabulary tessellate_stream decodes), and hands the
+// records to these writers one at a time. Records are consumed LAZILY from any Python iterable
+// (list or generator), and each record is decoded + emitted + released before the next is pulled,
+// so a 100k-solid model streams at bounded memory. This replaces the ~ms/face per-entity Python
+// writers (ifcopenshell / ap242_stream) with the ~µs/face C++ emitters for models whose objects
+// all serialize to NGEOM.
+//
+// Record shape (a tuple/sequence; trailing elements optional):
+//   (name, blob [, color_rgba [, transforms [, paths]]])
+//     name        str|None — product name; non-empty overrides the blob's root id
+//     blob        bytes    — one NGEOM buffer (usually one root; all roots are emitted)
+//     color_rgba  4 floats — presentation colour; alpha < 0 (or None) = no colour
+//     transforms  list of 16-float column-major (glTF) world placements; None/[] = one identity
+//     paths       per-instance assembly path: list of [(rep_id, name), ...] levels, parallel to
+//                 transforms (one entry total when transforms is empty)
+struct NgeomEmitRecord {
+    std::string name;
+    nb::bytes blob;
+    std::array<float, 4> color{0.f, 0.f, 0.f, -1.f}; // alpha<0 sentinel => no colour
+    std::vector<std::array<float, 16>> transforms;
+    std::vector<std::vector<std::pair<int, std::string>>> paths;
+};
+
+static NgeomEmitRecord parse_ngeom_record(nb::handle item) {
+    NgeomEmitRecord rec;
+    nb::sequence seq = nb::cast<nb::sequence>(item);
+    size_t n = nb::len(seq);
+    if (n < 2)
+        throw std::runtime_error("NGEOM record needs at least (name, blob)");
+    if (!seq[0].is_none())
+        rec.name = nb::cast<std::string>(seq[0]);
+    rec.blob = nb::cast<nb::bytes>(seq[1]);
+    if (n > 2 && !seq[2].is_none())
+        rec.color = nb::cast<std::array<float, 4>>(seq[2]);
+    if (n > 3 && !seq[3].is_none())
+        rec.transforms = nb::cast<std::vector<std::array<float, 16>>>(seq[3]);
+    if (n > 4 && !seq[4].is_none())
+        rec.paths = nb::cast<std::vector<std::vector<std::pair<int, std::string>>>>(seq[4]);
+    return rec;
+}
+
+// Attach a record's out-of-band metadata to a decoded root (the blob carries geometry + id only).
+// Template so both record forms share it: NgeomEmitRecord (Python-owned blob, the serial STEP/IFC
+// emitters) and NgeomTessRecord (GIL-free copy, the threaded GLB/mesh tessellation path below).
+template <class Rec> static void apply_record_meta(adacpp::ngeom::NgeomRoot &root, const Rec &rec) {
+    if (!rec.name.empty())
+        root.id = rec.name;
+    if (rec.color[3] >= 0.0f) {
+        root.has_color = true;
+        root.cr = rec.color[0];
+        root.cg = rec.color[1];
+        root.cb = rec.color[2];
+        root.ca = rec.color[3];
+    }
+    root.transforms = rec.transforms;
+    root.instance_paths = rec.paths;
+}
+
+// NGEOM records -> AP242 STEP file. Serial (one running id, no renumber pass): decode each blob,
+// emit each root via emit_solid_step — mapped-eligible multi-instance solids as ONE shared
+// prototype + per-placement NAUO/CDSR references (write_step_file_impl's pattern), everything else
+// baked per instance — then the NAUO assembly tree from the record paths, the mapped-instance root
+// block (SPF statement order is irrelevant, so it can trail its references), and the colour trailer.
+static adacpp::ifc_emit::FileStats stream_ngeom_to_step_impl(nb::iterable records, const std::string &out_path,
+                                                             double unit_scale, double deflection, double angular_deg) {
+    using adacpp::ngeom::NgeomRoot;
+    using adacpp::step_emit::StepBrepEmitter;
+    adacpp::ifc_emit::FileStats fs;
+    fs.unit_scale = unit_scale;
+    std::FILE *fp = std::fopen(out_path.c_str(), "wb");
+    if (!fp)
+        return fs;
+    std::string hdr = step_header_block(unit_scale);
+    std::fwrite(hdr.data(), 1, hdr.size(), fp);
+    // Reserve the mapped-instance shared-root ids up front (#14..#17 root PRODUCT chain, #18 world
+    // rep — written at the end, only if some solid actually took the mapped path; unused reserved
+    // ids are legal SPF gaps and keep this writer renumber-free).
+    const long K = 18;
+    const long ROOT_PD = 16, WORLD_REP = 18, IDENTITY_AXIS = 13;
+    long nid = K;
+    std::string buf;
+    buf.reserve(1 << 22);
+    auto flush = [&](bool force) {
+        if (buf.size() >= (4u << 20) || force) {
+            std::fwrite(buf.data(), 1, buf.size(), fp);
+            buf.clear();
+        }
+    };
+    const bool bake_forced = step_bake_instances_forced();
+    std::vector<long> leaf_pds;       // baked leaves (mapped leaves hang under ROOT_PD instead)
+    std::vector<long> leaf_reps;      // parallel: each leaf's SHAPE_REPRESENTATION (CDSR child rep)
+    std::vector<IfcPath2> leaf_paths; // parallel: each baked leaf's assembly path
+    std::vector<long> styled;         // STYLED_ITEM ids for the presentation trailer
+    std::vector<long> world_axes;     // mapped-instance AXIS2 ids -> the world rep's items
+    long sid = 0;
+    for (nb::handle item : records) {
+        NgeomEmitRecord rec = parse_ngeom_record(item);
+        adacpp::ngeom::NgeomDoc doc =
+            adacpp::ngeom::decode(reinterpret_cast<const uint8_t *>(rec.blob.c_str()), rec.blob.size());
+        for (NgeomRoot &root : doc.roots) {
+            ++sid;
+            ++fs.solids_in;
+            apply_record_meta(root, rec);
+            std::string nm = root.id.empty() ? ("solid_" + std::to_string(sid)) : adacpp::ifc_emit::ifc_str(root.id);
+            bool any = false;
+            if (!bake_forced && step_mapped_eligible(root)) {
+                StepBrepEmitter em(nid, nullptr, deflection, angular_deg);
+                long rep_id = 0, solid_id = 0;
+                long pd = emit_solid_step(em, buf, root, sid, &rep_id, &solid_id);
+                if (pd) {
+                    emit_step_mapped_instances(em, buf, rep_id, pd, nm, sid, root.transforms, ROOT_PD, WORLD_REP,
+                                               IDENTITY_AXIS, world_axes);
+                    if (root.has_color && solid_id)
+                        styled.push_back(emit_step_color(em, buf, solid_id, root.cr, root.cg, root.cb));
+                    nid = em.current_id();
+                    any = true;
+                    fs.instances_out += (long) root.transforms.size();
+                    accum_geom(fs.geom, em.stats());
+                }
+            } else {
+                size_t ninst = root.transforms.empty() ? 1 : root.transforms.size();
+                for (size_t k = 0; k < ninst; ++k) {
+                    double tf[16];
+                    const double *tfp = nullptr;
+                    if (!root.transforms.empty()) {
+                        // ng:: transforms are column-major glTF; StepBrepEmitter wants row-major.
+                        const std::array<float, 16> &M = root.transforms[k];
+                        tf[0] = M[0];
+                        tf[1] = M[4];
+                        tf[2] = M[8];
+                        tf[3] = M[12];
+                        tf[4] = M[1];
+                        tf[5] = M[5];
+                        tf[6] = M[9];
+                        tf[7] = M[13];
+                        tf[8] = M[2];
+                        tf[9] = M[6];
+                        tf[10] = M[10];
+                        tf[11] = M[14];
+                        tfp = tf;
+                    }
+                    StepBrepEmitter em(nid, tfp, deflection, angular_deg);
+                    long solid_id = 0, rep_id = 0;
+                    long pd = emit_solid_step(em, buf, root, sid, &rep_id, &solid_id);
+                    if (pd) {
+                        if (root.has_color && solid_id)
+                            styled.push_back(emit_step_color(em, buf, solid_id, root.cr, root.cg, root.cb));
+                        nid = em.current_id();
+                        any = true;
+                        ++fs.instances_out;
+                        leaf_pds.push_back(pd);
+                        leaf_reps.push_back(rep_id);
+                        leaf_paths.push_back(k < root.instance_paths.size() ? root.instance_paths[k] : IfcPath2{});
+                        accum_geom(fs.geom, em.stats());
+                    }
+                }
+            }
+            if (any)
+                ++fs.solids_out;
+            else
+                ++fs.products_skipped;
+            flush(false);
+        }
+    }
+    fs.products_total = fs.solids_in;
+    StepBrepEmitter emtail(nid, nullptr, deflection, angular_deg);
+    emit_step_assembly_tree(emtail, buf, leaf_pds, leaf_reps, leaf_paths);
+    if (!world_axes.empty()) {
+        buf += "#14=PRODUCT('model','model','',(#3));\n";
+        buf += "#15=PRODUCT_DEFINITION_FORMATION('','',#14);\n";
+        buf += "#16=PRODUCT_DEFINITION('design','',#15,#4);\n";
+        buf += "#17=PRODUCT_DEFINITION_SHAPE('','',#16);\n";
+        buf += "#18=SHAPE_REPRESENTATION('model',(#13";
+        for (long a : world_axes) {
+            buf += ",#";
+            buf += std::to_string(a);
+        }
+        buf += "),#9);\n";
+        emtail.emit_entity(buf, "SHAPE_DEFINITION_REPRESENTATION(#17,#18)");
+    }
+    step_color_trailer(emtail, buf, styled);
+    buf += "ENDSEC;\nEND-ISO-10303-21;\n";
+    flush(true);
+    std::fclose(fp);
+    return fs;
+}
+
+// NGEOM records -> IFC file. The record-stream sibling of blobs_to_ifc_impl (which takes parallel
+// lists): same emit_solid_ifc + IfcStyledItem + spatial tree, but records are pulled lazily so a
+// generator streams at bounded memory.
+static adacpp::ifc_emit::FileStats stream_ngeom_to_ifc_impl(nb::iterable records, const std::string &out_path,
+                                                            const std::string &schema, double unit_scale,
+                                                            double deflection, double angular_deg) {
+    using namespace adacpp::ifc_emit;
+    using adacpp::ngeom::NgeomRoot;
+    FileStats fs;
+    fs.unit_scale = unit_scale;
+    std::FILE *fp = std::fopen(out_path.c_str(), "wb");
+    if (!fp)
+        return fs;
+    std::string buf;
+    buf.reserve(1 << 22);
+    auto flush = [&](bool force) {
+        if (buf.size() >= (4u << 20) || force) {
+            std::fwrite(buf.data(), 1, buf.size(), fp);
+            buf.clear();
+        }
+    };
+    buf += ifc_header_block(schema, unit_scale);
+    BrepEmitter em(100, nullptr, deflection, angular_deg);
+    std::vector<long> proxies;
+    std::vector<IfcPath> proxy_paths;
+    long sid = 0;
+    for (nb::handle item : records) {
+        NgeomEmitRecord rec = parse_ngeom_record(item);
+        adacpp::ngeom::NgeomDoc doc =
+            adacpp::ngeom::decode(reinterpret_cast<const uint8_t *>(rec.blob.c_str()), rec.blob.size());
+        for (NgeomRoot &root : doc.roots) {
+            ++sid;
+            ++fs.solids_in;
+            apply_record_meta(root, rec);
+            size_t before = proxies.size();
+            // guid seed strided by 1000 per solid (instances use seed+k) — matches blobs_to_ifc.
+            emit_solid_ifc(em, buf, root, sid, (uint64_t) sid * 1000u, proxies, &proxy_paths);
+            if (proxies.size() > before)
+                ++fs.solids_out;
+            else
+                ++fs.products_skipped;
+            fs.instances_out += (long) (proxies.size() - before);
+            flush(false);
+        }
+    }
+    fs.products_total = fs.solids_in;
+    emit_spatial_tree(buf, [&]() { return em.alloc_id(); }, proxies, proxy_paths);
+    buf += "ENDSEC;\nEND-ISO-10303-21;\n";
+    flush(true);
+    std::fclose(fp);
+    fs.geom = em.stats();
+    return fs;
+}
+
+// ---------------------------------------------------------------------------------------------
+// NGEOM-record streams -> GLB / OBJ / STL (the ada-object-model MESH export fast path).
+//
+// The same record front-end as stream_ngeom_to_step/ifc — (name, blob[, color[, transforms[,
+// paths]]]) records pulled lazily from any Python iterable — feeding the back half of the native
+// STEP->GLB / STEP->mesh cores: the libtess2/cdt tessellation tracks, world-transform + unit
+// baking, the merge-by-colour GLB writer with inline EXT_meshopt, and the welded-OBJ / binary-STL
+// lane writers. This replaces adapy's Python tessellation-scene assembly + trimesh writers for
+// ada-object sources (Genie XML): the hull's 137 s xml->obj becomes the same class as the native
+// step->obj leg.
+//
+// Parallel but DETERMINISTIC: the calling thread parses records (it holds the GIL) into a bounded
+// task queue; `num_threads` pure-C++ workers decode + tessellate; each finished record is
+// committed strictly in record order into ONE writer lane (a commit turnstile — the worker owning
+// the next sequence number commits, others wait). Output bytes therefore depend only on the
+// records and the tessellation knobs — never on scheduling or thread count — and a generator
+// input is byte-identical to a list input. Backpressure is structural: at most `qcap` parsed
+// records + one finished mesh per worker are in flight.
+
+struct NgeomTessRecord { // GIL-free copy of one parsed record (workers never touch Python)
+    std::string name;
+    std::string blob;
+    std::array<float, 4> color{0.f, 0.f, 0.f, -1.f};
+    std::vector<std::array<float, 16>> transforms;
+    std::vector<std::vector<std::pair<int, std::string>>> paths;
+};
+
+static NgeomTessRecord own_ngeom_record(nb::handle item) {
+    NgeomEmitRecord r = parse_ngeom_record(item);
+    NgeomTessRecord rec;
+    rec.name = std::move(r.name);
+    rec.blob.assign(r.blob.c_str(), r.blob.size());
+    rec.color = r.color;
+    rec.transforms = std::move(r.transforms);
+    rec.paths = std::move(r.paths);
+    return rec;
+}
+
+struct NgeomTessStats {
+    long solids_in = 0, solids_out = 0, solids_skipped = 0, instances_out = 0;
+    unsigned long long triangles = 0; // world triangles (per-solid tris x instances)
+};
+
+// Decode + tessellate one record into commit-ready GlbSolids: metadata attached, positions and
+// instance translations pre-scaled to metres, per-face colours split into per-colour parts when
+// requested (`split_by_face_colour`, the GLB material path; picking face ranges stay off). Pure
+// C++ — runs on any thread.
+static void ngeom_tess_process(const NgeomTessRecord &rec, const adacpp::ngeom::TessParams &tp, double unit_scale,
+                               bool split_by_face_colour, std::vector<adacpp::glb::GlbSolid> &parts,
+                               NgeomTessStats &st) {
+    using adacpp::glb::GlbSolid;
+    using adacpp::ngeom::NgeomDoc;
+    using adacpp::ngeom::NgeomRoot;
+    using adacpp::ngeom::TessMesh;
+    NgeomDoc doc = adacpp::ngeom::decode(reinterpret_cast<const uint8_t *>(rec.blob.data()), rec.blob.size());
+    for (NgeomRoot &root : doc.roots) {
+        ++st.solids_in;
+        apply_record_meta(root, rec);
+        NgeomDoc one;
+        one.roots.push_back(std::move(root));
+        TessMesh tm = tessellate_doc(one, tp);
+        if (tm.indices.empty()) {
+            ++st.solids_skipped;
+            continue;
+        }
+        const NgeomRoot &rr = one.roots[0];
+        GlbSolid gs;
+        gs.positions = std::move(tm.positions);
+        gs.indices = std::move(tm.indices);
+        gs.face_ranges.reserve(tm.face_ranges.size());
+        for (const auto &fr : tm.face_ranges)
+            gs.face_ranges.push_back({fr.first_index, fr.index_count, fr.face_id, fr.face_seq, fr.has_color, fr.cr,
+                                      fr.cg, fr.cb, fr.ca});
+        gs.color = {rr.cr, rr.cg, rr.cb, rr.ca}; // grey default when !has_color
+        gs.transforms = rr.transforms;
+        gs.id = rr.id.empty() ? rec.name : rr.id;
+        if (!rr.instance_paths.empty() && !rr.instance_paths[0].empty())
+            gs.product_name = rr.instance_paths[0].back().second;
+        gs.instance_paths = rr.instance_paths;
+        if (unit_scale != 1.0) { // model units -> metres (positions + instance translations)
+            const float s = (float) unit_scale;
+            for (float &p : gs.positions)
+                p *= s;
+            for (auto &M : gs.transforms) {
+                M[12] *= s;
+                M[13] *= s;
+                M[14] *= s;
+            }
+        }
+        const size_t ninst = gs.transforms.empty() ? 1 : gs.transforms.size();
+        ++st.solids_out;
+        st.instances_out += (long) ninst;
+        st.triangles += (unsigned long long) (gs.indices.size() / 3) * ninst;
+        if (split_by_face_colour) {
+            for (GlbSolid &part : adacpp::glb::split_solid_by_face_colour(gs)) {
+                part.face_ranges.clear(); // colour split done; picking extras not exposed on this path
+                parts.push_back(std::move(part));
+            }
+        } else {
+            parts.push_back(std::move(gs));
+        }
+    }
+}
+
+// Pump records through `nthreads` tessellation workers, committing each record's parts in record
+// order via `commit` (invoked by exactly one thread at a time). Python is touched only on the
+// calling thread. The first worker/commit error is re-thrown after every thread has joined (the
+// remaining queue still drains so the turnstile never deadlocks).
+static NgeomTessStats
+stream_ngeom_tess_pump(nb::iterable records, const adacpp::ngeom::TessParams &tp, int nthreads, double unit_scale,
+                       bool split_by_face_colour,
+                       const std::function<void(std::vector<adacpp::glb::GlbSolid> &)> &commit) {
+    NgeomTessStats total;
+    if (nthreads <= 1) { // serial — also the no-pthreads (wasm) path
+        for (nb::handle item : records) {
+            NgeomTessRecord rec = own_ngeom_record(item);
+            std::vector<adacpp::glb::GlbSolid> parts;
+            ngeom_tess_process(rec, tp, unit_scale, split_by_face_colour, parts, total);
+            commit(parts);
+        }
+        return total;
+    }
+
+    struct Task {
+        size_t seq = 0;
+        NgeomTessRecord rec;
+    };
+    std::mutex qm; // task queue (bounded)
+    std::condition_variable q_can_push, q_can_pop;
+    std::deque<Task> queue;
+    bool input_done = false;
+    const size_t qcap = (size_t) nthreads * 2 + 2;
+
+    std::mutex cm; // commit turnstile: strictly-ordered single-writer commits
+    std::condition_variable ccv;
+    size_t next_commit = 0;
+
+    std::mutex em;
+    std::string error; // first failure (workers keep draining so the turnstile stays live)
+
+    auto worker = [&]() {
+        int local = 0;
+        for (;;) {
+            Task task;
+            {
+                std::unique_lock<std::mutex> lk(qm);
+                q_can_pop.wait(lk, [&] { return !queue.empty() || input_done; });
+                if (queue.empty())
+                    return;
+                task = std::move(queue.front());
+                queue.pop_front();
+            }
+            q_can_push.notify_one();
+            std::vector<adacpp::glb::GlbSolid> parts;
+            NgeomTessStats st;
+            try {
+                ngeom_tess_process(task.rec, tp, unit_scale, split_by_face_colour, parts, st);
+            } catch (const std::exception &ex) {
+                std::lock_guard<std::mutex> lk(em);
+                if (error.empty())
+                    error = std::string(ex.what()) + " (record '" + task.rec.name + "')";
+                parts.clear();
+            }
+            {
+                std::unique_lock<std::mutex> lk(cm);
+                ccv.wait(lk, [&] { return next_commit == task.seq; });
+                try {
+                    commit(parts);
+                } catch (const std::exception &ex) {
+                    std::lock_guard<std::mutex> elk(em);
+                    if (error.empty())
+                        error = std::string("commit: ") + ex.what();
+                }
+                total.solids_in += st.solids_in;
+                total.solids_out += st.solids_out;
+                total.solids_skipped += st.solids_skipped;
+                total.instances_out += st.instances_out;
+                total.triangles += st.triangles;
+                ++next_commit;
+            }
+            ccv.notify_all();
+            if (++local % 64 == 0)
+                adacpp::mem_trim(); // return per-record churn to the OS
+        }
+    };
+
+    std::vector<std::thread> pool;
+    pool.reserve(nthreads);
+    for (int t = 0; t < nthreads; ++t)
+        pool.emplace_back(worker);
+    auto finish = [&] {
+        {
+            std::lock_guard<std::mutex> lk(qm);
+            input_done = true;
+        }
+        q_can_pop.notify_all();
+        for (std::thread &th : pool)
+            th.join();
+    };
+    try {
+        size_t seq = 0;
+        for (nb::handle item : records) {
+            Task task;
+            task.seq = seq++;
+            task.rec = own_ngeom_record(item);
+            {
+                std::unique_lock<std::mutex> lk(qm);
+                q_can_push.wait(lk, [&] { return queue.size() < qcap; });
+                queue.push_back(std::move(task));
+            }
+            q_can_pop.notify_one();
+        }
+    } catch (...) {
+        finish(); // drain what was queued so every thread joins cleanly, then re-throw
+        throw;
+    }
+    finish();
+    {
+        std::lock_guard<std::mutex> lk(em);
+        if (!error.empty())
+            throw std::runtime_error("stream_ngeom tessellation failed: " + error);
+    }
+    return total;
+}
+
+static adacpp::ngeom::TessParams ngeom_tess_params(const std::string &pipeline, double deflection, double angular_deg,
+                                                   double model_scale, bool pin_boundary, bool capture_face_ranges) {
+    auto track = adacpp::ngeom::parse_track(pipeline);
+    if (!track) // unknown track = error, not a silent fallback (same contract as stream_step_to_glb)
+        throw std::runtime_error("unknown tessellation pipeline: '" + pipeline + "'");
+    adacpp::ngeom::TessParams tp;
+    tp.track = *track;
+    tp.libtess2.pin_boundary = pin_boundary;
+    tp.deflection = deflection;
+    tp.max_angle = angular_deg * 3.14159265358979323846 / 180.0;
+    tp.model_scale = model_scale; // >0 => adaptive per-surface density
+    tp.capture_face_ranges = capture_face_ranges;
+    return tp;
+}
+
+// The GLB/OBJ/STL emit audit dict: walk counters + the per-conversion tessellation-health
+// counters (the same numbers the [GEOMHEALTH-JSON] stderr line carries), so callers can gate on
+// faces_dropped without scraping stderr. Field names match ngeom_emit_stats_dict where shared.
+static nb::dict ngeom_tess_stats_dict(const NgeomTessStats &st, double unit_scale) {
+    nb::dict d;
+    d["solids_in"] = st.solids_in;
+    d["solids_out"] = st.solids_out;
+    d["solids_skipped"] = st.solids_skipped;
+    d["instances_out"] = st.instances_out;
+    d["unit_scale"] = unit_scale;
+    d["triangles"] = st.triangles;
+    d["faces_total"] = adacpp::ngeom::tess_total_faces();
+    d["faces_dropped"] = adacpp::ngeom::tess_dropped_faces();
+    d["faces_suspect"] = adacpp::ngeom::tess_suspect_faces();
+    nb::dict reasons;
+    for (const auto &[k, v] : adacpp::ngeom::tess_dropped_by_surface())
+        reasons[k.c_str()] = v;
+    d["drop_reasons"] = reasons;
+    return d;
+}
+
+// NGEOM records -> GLB file. Record front-end + the stream_step_to_glb back half: one spill lane
+// (ordered commits keep output deterministic), merge-by-colour GLB with the viewer's structure
+// (per-solid draw ranges, assembly paths from the records, inline EXT_meshopt when `meshopt`).
+static nb::dict stream_ngeom_to_glb_impl(nb::iterable records, const std::string &out_path, double deflection,
+                                         double angular_deg, int num_threads, bool meshopt, double model_scale,
+                                         const std::string &pipeline, bool pin_boundary, double unit_scale) {
+    adacpp::prof::StepProfiler prof("stream_ngeom_to_glb");
+    adacpp::tune_malloc_for_streaming();    // bound streaming peak RSS before the pool
+    adacpp::ngeom::reset_tess_face_stats(); // count dropped faces across this conversion (audit health flag)
+    // capture_face_ranges: per-face colours (when a blob carries them) must split into per-colour
+    // materials, matching the STEP core; the picking extras stay off (ranges dropped after split).
+    adacpp::ngeom::TessParams tp = ngeom_tess_params(pipeline, deflection, angular_deg, model_scale, pin_boundary,
+                                                     /*capture_face_ranges=*/true);
+    int nthreads = num_threads > 0 ? num_threads : (int) adacpp::effective_concurrency();
+
+    std::string tmpl = adacpp::temp_template("adacpp_glb");
+    char *dir = ::mkdtemp(tmpl.data());
+    if (!dir)
+        throw std::runtime_error("stream_ngeom_to_glb: cannot create spill dir");
+    const std::string spill = dir;
+    bool ok = false;
+    NgeomTessStats st;
+    try { // lane scoped so its temp files are removed before the rmdir
+        adacpp::glb::GlbSpillWriter lane(spill, 0);
+        st = stream_ngeom_tess_pump(records, tp, nthreads, unit_scale, /*split_by_face_colour=*/true,
+                                    [&](std::vector<adacpp::glb::GlbSolid> &parts) {
+                                        for (adacpp::glb::GlbSolid &part : parts)
+                                            lane.add(part); // spilled/buffered immediately
+                                    });
+        prof.phase("stream(decode+tess+spill)");
+        std::vector<adacpp::glb::GlbSpillWriter *> lane_ptrs{&lane};
+        // Schema-complete ADA_EXT_data (empty design/sim lists) — same default as the STEP core.
+        const std::string ada_ext = adacpp::ada_ext::AdaDesignAndAnalysisExtension{}.to_json();
+        ok = adacpp::glb::write_glb_merged(out_path, lane_ptrs, ada_ext, meshopt);
+        prof.phase(meshopt ? "write_glb_merged(meshopt)" : "write_glb_merged");
+    } catch (...) {
+        ::rmdir(spill.c_str());
+        throw;
+    }
+    ::rmdir(spill.c_str());
+    prof.note("threads", nthreads);
+    if (adacpp::ngeom::tess_dropped_faces() || adacpp::ngeom::tess_suspect_faces())
+        std::fprintf(stderr, "[GEOMHEALTH-JSON] %s\n", adacpp::ngeom::tess_geomhealth_json().c_str());
+    if (!ok)
+        throw std::runtime_error("stream_ngeom_to_glb: GLB write failed");
+    return ngeom_tess_stats_dict(st, unit_scale);
+}
+
+// NGEOM records -> binary STL / welded Wavefront OBJ. Record front-end + the stream_step_to_mesh
+// back half (one MeshLane; each instance's world placement baked at commit; assemble_lanes writes
+// the final file). Ordered commits keep the output byte-deterministic.
+static nb::dict stream_ngeom_to_mesh_impl(nb::iterable records, const std::string &out_path, const std::string &fmt_s,
+                                          double deflection, double angular_deg, int num_threads, double model_scale,
+                                          const std::string &pipeline, bool pin_boundary, double unit_scale) {
+    adacpp::MeshFormat fmt;
+    if (fmt_s == "obj" || fmt_s == "OBJ")
+        fmt = adacpp::MeshFormat::OBJ;
+    else if (fmt_s == "stl" || fmt_s == "STL")
+        fmt = adacpp::MeshFormat::STL;
+    else
+        throw std::runtime_error("stream_ngeom_to_mesh: fmt must be 'obj' or 'stl', got '" + fmt_s + "'");
+    static const std::array<float, 16> kIdentity = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    adacpp::prof::StepProfiler prof("stream_ngeom_to_mesh");
+    adacpp::tune_malloc_for_streaming();
+    adacpp::ngeom::reset_tess_face_stats();
+    adacpp::ngeom::TessParams tp = ngeom_tess_params(pipeline, deflection, angular_deg, model_scale, pin_boundary,
+                                                     /*capture_face_ranges=*/false);
+    int nthreads = num_threads > 0 ? num_threads : (int) adacpp::effective_concurrency();
+
+    std::string tmpl = adacpp::temp_template("adacpp_mesh");
+    char *dir = ::mkdtemp(tmpl.data());
+    if (!dir)
+        throw std::runtime_error("stream_ngeom_to_mesh: cannot create spill dir");
+    const std::string spill = dir;
+    long total = -1;
+    NgeomTessStats st;
+    try {
+        std::deque<adacpp::meshwrite::MeshLane> lanes;
+        lanes.emplace_back(spill, 0, fmt);
+        adacpp::meshwrite::MeshLane &lane = lanes.front();
+        st = stream_ngeom_tess_pump(
+            records, tp, nthreads, unit_scale, /*split_by_face_colour=*/false,
+            [&](std::vector<adacpp::glb::GlbSolid> &parts) {
+                for (adacpp::glb::GlbSolid &part : parts) {
+                    const size_t ninst = part.transforms.empty() ? 1 : part.transforms.size();
+                    for (size_t k = 0; k < ninst; ++k) {
+                        const std::array<float, 16> &M = part.transforms.empty() ? kIdentity : part.transforms[k];
+                        if (fmt == adacpp::MeshFormat::OBJ) {
+                            lane.add_instance(part.positions, part.indices, M, /*usc=*/1.0f); // welded, pre-scaled
+                        } else {
+                            const std::vector<float> &P = part.positions;
+                            const std::vector<uint32_t> &I = part.indices;
+                            for (size_t e = 0; e + 2 < I.size(); e += 3) {
+                                float w0[3], w1[3], w2[3];
+                                adacpp::meshwrite::bake(M, 1.0f, &P[3 * I[e]], w0);
+                                adacpp::meshwrite::bake(M, 1.0f, &P[3 * I[e + 1]], w1);
+                                adacpp::meshwrite::bake(M, 1.0f, &P[3 * I[e + 2]], w2);
+                                lane.facet(w0, w1, w2);
+                            }
+                        }
+                    }
+                }
+            });
+        prof.phase("stream(decode+tess+bake)");
+        lane.flush();
+        total = adacpp::meshwrite::assemble_lanes(out_path, lanes, fmt);
+        prof.phase("assemble");
+        lanes.clear(); // remove lane temp files (destructors) before the rmdir
+    } catch (...) {
+        ::rmdir(spill.c_str());
+        throw;
+    }
+    ::rmdir(spill.c_str());
+    prof.note("threads", nthreads);
+    if (adacpp::ngeom::tess_dropped_faces() || adacpp::ngeom::tess_suspect_faces())
+        std::fprintf(stderr, "[GEOMHEALTH-JSON] %s\n", adacpp::ngeom::tess_geomhealth_json().c_str());
+    if (total < 0)
+        throw std::runtime_error("stream_ngeom_to_mesh: file write failed");
+    return ngeom_tess_stats_dict(st, unit_scale);
+}
+
+// One NGEOM blob -> the SPF text of its IFC geometry-body entity graph ONLY (the IfcAdvancedBrep /
+// analytic-solid faces/edges/surfaces lines), numbered from `first_id`. No header/footer, no product
+// or spatial entities, no styling — the caller (adapy's streaming IFC writer) splices the fragment
+// into its own file and hand-authors the TYPED wrapper (IfcShapeRepresentation -> IfcPlate/...)
+// around the returned body item id. This is what lets typed, round-trippable products keep the
+// ~µs/face C++ geometry emit (stream_ngeom_to_ifc's proxy wrapper made every product an
+// IfcBuildingElementProxy). The body-graph emitter is ifc_emit::BrepEmitter::emit_solid — the same
+// machinery emit_solid_ifc wraps — so fragment output is byte-identical to the file writers' bodies.
+//
+// Returns (spf_text, next_id, body_item_id, rep_type):
+//   spf_text     the entity lines, ids first_id..next_id-1 (children before parents)
+//   next_id      the next free entity id (pass to a subsequent call to keep numbering contiguous)
+//   body_item_id id of the top representation item (the IfcAdvancedBrep / IfcExtrudedAreaSolid / ...),
+//                or 0 when the root is unrepresentable OR any face dropped — the caller must then
+//                DISCARD spf_text and take its Python fallback (partial geometry is never a success:
+//                "no geometry left behind")
+//   rep_type     the matching IfcShapeRepresentation.RepresentationType ("AdvancedBrep" /
+//                "SweptSolid" / "CSG" / "AdvancedSweptSolid"); "" when body_item_id is 0
+// The blob must hold exactly one root (adapy serializes one solid_geom() per object); anything else
+// raises. The geometry-body entities are schema-invariant across IFC4/IFC4X3, so no schema parameter.
+static nb::tuple ngeom_to_ifc_body_spf_impl(nb::bytes blob, long first_id, double deflection, double angular_deg) {
+    adacpp::ngeom::NgeomDoc doc = adacpp::ngeom::decode(reinterpret_cast<const uint8_t *>(blob.c_str()), blob.size());
+    if (doc.roots.size() != 1)
+        throw std::runtime_error("ngeom_to_ifc_body_spf: blob must hold exactly one root, got " +
+                                 std::to_string(doc.roots.size()));
+    // BrepEmitter::emit pre-increments, so seed at first_id-1 to number entities from first_id.
+    adacpp::ifc_emit::BrepEmitter em(first_id - 1, nullptr, deflection, angular_deg);
+    std::string buf, rep_type;
+    long body = em.emit_solid(buf, doc.roots[0], rep_type);
+    if (body && em.stats().faces_dropped > 0)
+        body = 0; // strict: a partially-emitted shell is a failure, not a smaller success
+    if (!body)
+        return nb::make_tuple(nb::str(""), first_id, (long) 0, nb::str(""));
+    return nb::make_tuple(nb::str(buf.c_str(), buf.size()), em.current_id() + 1, body,
+                          nb::str(rep_type.c_str(), rep_type.size()));
+}
+
+// The shared stats dict for the two NGEOM-record writers (mirrors stream_step_to_step's audit).
+static nb::dict ngeom_emit_stats_dict(const adacpp::ifc_emit::FileStats &fs) {
+    nb::dict d;
+    d["solids_in"] = fs.solids_in;
+    d["solids_out"] = fs.solids_out;
+    d["instances_out"] = fs.instances_out;
+    d["solids_skipped"] = fs.products_skipped;
+    d["unit_scale"] = fs.unit_scale;
+    d["faces_in"] = fs.geom.faces_in;
+    d["faces_out"] = fs.geom.faces_out;
+    d["faces_dropped"] = fs.geom.faces_dropped;
+    d["edges_analytic"] = fs.geom.edges_analytic;
+    d["edges_polyline_approx"] = fs.geom.edges_polyline_approx;
+    d["edges_degenerate"] = fs.geom.edges_degenerate;
+    nb::dict reasons;
+    for (const auto &[k, v] : fs.geom.drop_reasons)
+        reasons[k.c_str()] = v;
+    d["drop_reasons"] = reasons;
+    return d;
 }
 
 void cad_module(nb::module_ &m) {
@@ -4069,6 +4841,89 @@ void cad_module(nb::module_ &m) {
         "instance_paths). Decodes each blob, re-attaches the metadata, and emits IfcAdvancedBrep + "
         "IfcStyledItem + spatial tree — the fully-native Assembly.to_ifc backend. Returns the audit dict.");
 
+    // NGEOM record streams -> STEP / IFC: the ada-object-model export fast path (Genie-XML ->
+    // step/ifc without the per-entity Python writers). Records are consumed lazily from any Python
+    // iterable, one blob decoded + emitted + released at a time (bounded memory).
+    m.def(
+        "stream_ngeom_to_step",
+        [](nb::iterable records, const std::string &out_path, double unit_scale, double deflection,
+           double angular_deg) -> nb::dict {
+            return ngeom_emit_stats_dict(
+                stream_ngeom_to_step_impl(records, out_path, unit_scale, deflection, angular_deg));
+        },
+        "records"_a, "out_path"_a, "unit_scale"_a = 1.0, "deflection"_a = 2.0, "angular_deg"_a = 20.0,
+        "Native AP242 STEP writer from a stream of NGEOM records. Each record is a sequence "
+        "(name, blob[, color_rgba[, transforms[, paths]]]): name (str|None) overrides the blob's root "
+        "id; blob is one NGEOM buffer (adapy serialize_geometries); color_rgba is 4 floats (alpha<0 or "
+        "None => no colour, else a STYLED_ITEM presentation colour); transforms is a list of 16-float "
+        "column-major world placements (None/[] => one identity instance); paths is the per-instance "
+        "assembly path ([(rep_id, name), ...] levels) emitted as a NEXT_ASSEMBLY_USAGE_OCCURRENCE "
+        "tree. Multi-instance B-rep solids with rigid placements are written once as a shared "
+        "prototype + per-placement NAUO/CDSR references (ADACPP_STEP_BAKE_INSTANCES=1 forces the "
+        "all-baked form); everything else is baked per instance. Records may come from a generator — "
+        "they are pulled lazily, so a 100k-solid model streams at bounded memory. unit_scale = metres "
+        "per model unit (sets the header SI length unit). Returns the losslessness audit dict "
+        "(solids_in/out, instances_out, solids_skipped, faces_in/out/dropped, drop_reasons).");
+
+    m.def(
+        "stream_ngeom_to_ifc",
+        [](nb::iterable records, const std::string &out_path, const std::string &schema, double unit_scale,
+           double deflection, double angular_deg) -> nb::dict {
+            return ngeom_emit_stats_dict(
+                stream_ngeom_to_ifc_impl(records, out_path, schema, unit_scale, deflection, angular_deg));
+        },
+        "records"_a, "out_path"_a, "schema"_a = "IFC4X3_ADD2", "unit_scale"_a = 1.0, "deflection"_a = 2.0,
+        "angular_deg"_a = 20.0,
+        "Native IFC writer from a stream of NGEOM records — the record-stream sibling of blobs_to_ifc "
+        "(same record shape as stream_ngeom_to_step). Decodes each blob and emits the analytic IFC "
+        "solid (IfcAdvancedBrep / IfcExtrudedAreaSolid / ...) + IfcStyledItem colour + the "
+        "IfcSpatialZone tree from the record paths; multi-instance solids share geometry via "
+        "IfcMappedItem. Records are pulled lazily (generator-friendly, bounded memory). schema: "
+        "'IFC4X3_ADD2' | 'IFC4'. Returns the losslessness audit dict.");
+
+    m.def(
+        "stream_ngeom_to_glb", &stream_ngeom_to_glb_impl, "records"_a, "out_path"_a, "deflection"_a = 0.0,
+        "angular_deg"_a = 20.0, "num_threads"_a = 0, "meshopt"_a = true, "model_scale"_a = 0.0,
+        "pipeline"_a = "libtess2", "pin_boundary"_a = true, "unit_scale"_a = 1.0,
+        "Native GLB writer from a stream of NGEOM records (same record shape + lazy pull as "
+        "stream_ngeom_to_step). Decodes each blob, tessellates it on a worker pool (num_threads=0 = "
+        "cgroup-aware auto; pipeline: 'libtess2' default / 'cdt'), bakes each instance's world "
+        "placement + colour and writes the merge-by-colour GLB matching the adapy viewer's structure "
+        "(per-solid draw ranges + assembly paths from the records; meshopt=True bakes "
+        "EXT_meshopt_compression inline). unit_scale = metres per model unit — positions and "
+        "instance translations are scaled so the GLB is always metres. model_scale > 0 enables "
+        "model-relative adaptive tessellation density. Deterministic: output bytes depend only on "
+        "the records and knobs, never on thread count or scheduling. Returns the audit dict "
+        "(solids_in/out/skipped, instances_out, triangles, faces_total/dropped/suspect, "
+        "drop_reasons — the [GEOMHEALTH-JSON] counters).");
+
+    m.def(
+        "stream_ngeom_to_mesh", &stream_ngeom_to_mesh_impl, "records"_a, "out_path"_a, "fmt"_a, "deflection"_a = 0.0,
+        "angular_deg"_a = 20.0, "num_threads"_a = 0, "model_scale"_a = 0.0, "pipeline"_a = "libtess2",
+        "pin_boundary"_a = true, "unit_scale"_a = 1.0,
+        "Native binary-STL / welded-OBJ writer from a stream of NGEOM records (same record shape + "
+        "lazy pull as stream_ngeom_to_step; fmt: 'stl' | 'obj'). Tessellates on a worker pool and "
+        "bakes each instance's world placement straight into the mesh file — no Python scene, no "
+        "whole-model buffer. unit_scale = metres per model unit (output is always metres). "
+        "Deterministic: output bytes depend only on the records and knobs, never on thread count. "
+        "Returns the same audit dict as stream_ngeom_to_glb.");
+
+    m.def(
+        "ngeom_to_ifc_body_spf",
+        [](nb::bytes blob, long first_id, double deflection, double angular_deg) -> nb::tuple {
+            return ngeom_to_ifc_body_spf_impl(blob, first_id, deflection, angular_deg);
+        },
+        "blob"_a, "first_id"_a, "deflection"_a = 2.0, "angular_deg"_a = 20.0,
+        "Emit ONE NGEOM blob's IFC geometry-body entity graph as an SPF text fragment (no "
+        "header/product/spatial entities), numbering entities from first_id. Returns (spf_text, "
+        "next_id, body_item_id, rep_type) where body_item_id is the top representation item (the "
+        "IfcAdvancedBrep / analytic solid) and rep_type the matching "
+        "IfcShapeRepresentation.RepresentationType. body_item_id == 0 (unrepresentable root or any "
+        "dropped face) means: discard spf_text and fall back — a partial body is never returned. "
+        "The blob must hold exactly one root. The fragment is schema-invariant (IFC4 / IFC4X3). "
+        "Used by adapy's streaming IFC writer to keep TYPED products (IfcPlate/IfcBeam wrappers "
+        "hand-authored in Python) while the heavy B-rep body graph is emitted at C++ speed.");
+
     // Native parallel STEP->STEP (AP242). Re-export the analytic B-rep per solid, instances baked,
     // round-trip-lossless. Returns the same losslessness audit dict.
     m.def(
@@ -4080,6 +4935,7 @@ void cad_module(nb::module_ &m) {
             nb::dict d;
             d["solids_in"] = fs.solids_in;
             d["solids_out"] = fs.solids_out;
+            d["instances_out"] = fs.instances_out;
             d["unit_scale"] = fs.unit_scale;
             d["faces_in"] = fs.geom.faces_in;
             d["faces_out"] = fs.geom.faces_out;
@@ -4096,7 +4952,10 @@ void cad_module(nb::module_ &m) {
         "in_path"_a, "out_path"_a, "deflection"_a = 2.0, "angular_deg"_a = 20.0, "max_solids"_a = 0,
         "num_threads"_a = 0,
         "Native parallel STEP->STEP (AP242): re-export each solid's analytic B-rep as a "
-        "MANIFOLD_SOLID_BREP part (instances baked), no OCC. Returns the losslessness audit dict.");
+        "MANIFOLD_SOLID_BREP part, no OCC. Multi-instance B-rep solids with rigid placements are "
+        "written once as a shared prototype + per-placement NAUO/CDSR references (AP242 assembly "
+        "instancing); other solids are baked per instance. ADACPP_STEP_BAKE_INSTANCES=1 forces the "
+        "all-baked form. Returns the losslessness audit dict (instances_out = placed occurrences).");
 
     // Cross-format parity in ONE parse (the fan-out of stream_step_to_ifc + stream_step_to_step):
     // resolve each root once, run both emitters, count what each format preserves — no file output.

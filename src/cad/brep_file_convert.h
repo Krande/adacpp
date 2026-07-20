@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <map>
 #include <string>
@@ -307,28 +308,32 @@ inline std::string step_header_block(double unit_scale) {
 // MANIFOLD_SOLID_BREP / EXTRUDED_AREA_SOLID -> (ADVANCED_BREP_)SHAPE_REPRESENTATION (placement #13,
 // context #9) -> PRODUCT chain -> SHAPE_DEFINITION_REPRESENTATION. Returns true if a solid was emitted.
 // Returns the leaf PRODUCT_DEFINITION id (0 on failure) so the caller can hang a NEXT_ASSEMBLY_USAGE_
-// OCCURRENCE assembly tree off it; treat nonzero as success.
+// OCCURRENCE assembly tree off it; treat nonzero as success. `rep_out` (optional) receives the id of
+// the solid's SHAPE_REPRESENTATION — the mapped-instance emitter needs it as the CDSR child rep.
+// `solid_out` (optional) receives the id of the solid geometry item itself (the MANIFOLD_SOLID_BREP /
+// EXTRUDED_AREA_SOLID / ...) — the presentation-colour emitter styles that item.
 inline long emit_solid_step(adacpp::step_emit::StepBrepEmitter &em, std::string &buf,
-                            const adacpp::ngeom::NgeomRoot &root, long sid) {
+                            const adacpp::ngeom::NgeomRoot &root, long sid, long *rep_out = nullptr,
+                            long *solid_out = nullptr) {
     std::string nm = root.id.empty() ? ("solid_" + std::to_string(sid)) : adacpp::ifc_emit::ifc_str(root.id);
     long solid = 0;
     const char *rep_kw = "ADVANCED_BREP_SHAPE_REPRESENTATION";
     if (root.extrusion) {
         bool hollow = root.extrusion->profile && root.extrusion->profile->bounds.size() > 1;
         if (em.tf_rigid() && !hollow) { // rigid, solid profile -> native EXTRUDED_AREA_SOLID
-            solid = em.emit_extrusion(buf, *root.extrusion);
+            solid = em.emit_extrusion(buf, *root.extrusion, nm);
             rep_kw = "SHAPE_REPRESENTATION";
         } else { // scale/shear or hollow profile -> bake to a B-rep (annular caps for voids)
             solid = em.emit_extrusion_baked(buf, *root.extrusion, nm);
         }
     } else if (root.revolve) { // non-rigid revolves are dropped to OCC by the reader -> rigid here
-        solid = em.emit_revolve(buf, *root.revolve);
+        solid = em.emit_revolve(buf, *root.revolve, nm);
         rep_kw = "SHAPE_REPRESENTATION";
     } else if (root.sweep) { // disk/annulus swept along a directrix -> SWEPT_DISK_SOLID
-        solid = em.emit_swept_disk(buf, *root.sweep);
+        solid = em.emit_swept_disk(buf, *root.sweep, nm);
         rep_kw = "SHAPE_REPRESENTATION";
     } else if (root.sphere) { // CSG sphere primitive
-        solid = em.emit_sphere(buf, *root.sphere);
+        solid = em.emit_sphere(buf, *root.sphere, nm);
         rep_kw = "SHAPE_REPRESENTATION";
     } else if (root.boolean) { // CSG tree (BOOLEAN_RESULT), preserved not evaluated
         solid = em.emit_boolean(buf, *root.boolean);
@@ -338,7 +343,11 @@ inline long emit_solid_step(adacpp::step_emit::StepBrepEmitter &em, std::string 
     }
     if (!solid)
         return 0;
+    if (solid_out)
+        *solid_out = solid;
     long rep = em.emit_entity(buf, std::string(rep_kw) + "('" + nm + "',(#13,#" + std::to_string(solid) + "),#9)");
+    if (rep_out)
+        *rep_out = rep;
     long product = em.emit_entity(buf, "PRODUCT('" + nm + "','" + nm + "','',(#3))");
     long pdf = em.emit_entity(buf, "PRODUCT_DEFINITION_FORMATION('','',#" + std::to_string(product) + ")");
     long pd = em.emit_entity(buf, "PRODUCT_DEFINITION('design','',#" + std::to_string(pdf) + ",#4)");
@@ -347,45 +356,205 @@ inline long emit_solid_step(adacpp::step_emit::StepBrepEmitter &em, std::string 
     return pd;
 }
 
-// Emit a NEXT_ASSEMBLY_USAGE_OCCURRENCE assembly tree from per-leaf (product_definition, path): each
-// intermediate path level becomes an assembly PRODUCT_DEFINITION, linked to its children (assemblies or
-// leaf solids) by a NAUO — the STEP counterpart of emit_spatial_tree, so the IFC/STEP hierarchy round-
-// trips. Assembly nodes carry no own shape (grouping only); placements stay baked into the leaf geometry.
+// AP242 presentation colour for one geometry item: the STYLED_ITEM chain (COLOUR_RGB ->
+// FILL_AREA_STYLE_COLOUR -> ... -> PRESENTATION_STYLE_ASSIGNMENT -> STYLED_ITEM), matching adapy's
+// Python ap242_stream writer (_emit_color) so downstream consumers see the same records. Returns the
+// STYLED_ITEM id; the caller collects them for step_color_trailer.
+inline long emit_step_color(adacpp::step_emit::StepBrepEmitter &em, std::string &buf, long item_id, float r, float g,
+                            float b) {
+    using adacpp::ifc_emit::ifc_real;
+    auto ref = [](long id) { return "#" + std::to_string(id); };
+    long col = em.emit_entity(buf, "COLOUR_RGB(''," + ifc_real(r) + "," + ifc_real(g) + "," + ifc_real(b) + ")");
+    long fac = em.emit_entity(buf, "FILL_AREA_STYLE_COLOUR(''," + ref(col) + ")");
+    long fas = em.emit_entity(buf, "FILL_AREA_STYLE('',(" + ref(fac) + "))");
+    long ssfa = em.emit_entity(buf, "SURFACE_STYLE_FILL_AREA(" + ref(fas) + ")");
+    long sss = em.emit_entity(buf, "SURFACE_SIDE_STYLE('',(" + ref(ssfa) + "))");
+    long ssu = em.emit_entity(buf, "SURFACE_STYLE_USAGE(.BOTH.," + ref(sss) + ")");
+    long psa = em.emit_entity(buf, "PRESENTATION_STYLE_ASSIGNMENT((" + ref(ssu) + "))");
+    return em.emit_entity(buf, "STYLED_ITEM('color',(" + ref(psa) + ")," + ref(item_id) + ")");
+}
+
+// The one-per-file presentation trailer over every STYLED_ITEM (context #9). No-op when empty.
+inline void step_color_trailer(adacpp::step_emit::StepBrepEmitter &em, std::string &buf,
+                               const std::vector<long> &styled_ids) {
+    if (styled_ids.empty())
+        return;
+    std::string refs = "(";
+    for (size_t i = 0; i < styled_ids.size(); ++i)
+        refs += (i ? ",#" : "#") + std::to_string(styled_ids[i]);
+    refs += ")";
+    em.emit_entity(buf, "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION(''," + refs + ",#9)");
+}
+
+// ---------------------------------------------------------------------------------------------
+// AP242 mapped (shared-prototype) instancing for the STEP->STEP writer.
+//
+// When a solid is placed N>1 times, the baked form serialises its full B-rep N times — on the Munin
+// crane (20,979 instances over 7,291 unique solids) that is 689k faces / ~1.7 GB where the IFC
+// writer's IfcMappedItem form needs only 300k / ~0.7 GB. The STEP counterpart chosen here is the
+// standard AP242 assembly-instancing pattern (NOT REPRESENTATION_MAP/MAPPED_ITEM), because it is
+// the exact pattern BOTH downstream native readers already parse (adapy stream_reader.py
+// _build_transform_map and the C++ Resolver::build_transform_map — validated against OCC to 1e-9):
+//
+//   prototype geometry  ->  ADVANCED_BREP_SHAPE_REPRESENTATION  (child rep, emitted ONCE, local frame)
+//   per placement k:        AXIS2_PLACEMENT_3D A_k (the world transform)
+//                           ITEM_DEFINED_TRANSFORMATION('','',#13, A_k)     (#13 = identity axis,
+//                               an item of the child rep, so T_edge = inv(I) * M(A_k) = world)
+//                           ( REPRESENTATION_RELATIONSHIP('','',child_rep, WORLD_REP)
+//                             REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(IDT)
+//                             SHAPE_REPRESENTATION_RELATIONSHIP() )
+//                           NEXT_ASSEMBLY_USAGE_OCCURRENCE(ROOT_PD, leaf_pd)
+//                           PRODUCT_DEFINITION_SHAPE('','',NAUO)
+//                           CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(rr_complex, pds_nauo)
+//
+// The readers hang edges directly off the geometry rep when no standalone SRR exists (the
+// "box_comp-style" fallback), so no placement SHAPE_REPRESENTATION per prototype is needed. The
+// shared parent ("world") rep + root product block is emitted once by the caller; A_k axes must be
+// listed among its items for schema validity (OCC and the native readers all accept the file, and
+// third-party consumers expect ITEM_DEFINED_TRANSFORMATION items to belong to the related reps).
+// ---------------------------------------------------------------------------------------------
+
+// Rigidity gate for a per-instance world transform (column-major glTF float[16]): AXIS2_PLACEMENT_3D
+// can only carry a proper rigid motion (orthonormal, det=+1). Scaled / sheared / mirrored instances
+// must stay on the baked path.
+inline bool instance_tf_rigid(const std::array<float, 16> &M) {
+    const double x[3] = {M[0], M[1], M[2]}, y[3] = {M[4], M[5], M[6]}, z[3] = {M[8], M[9], M[10]};
+    auto dot = [](const double *a, const double *b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
+    const double tol = 1e-4;
+    if (std::abs(dot(x, x) - 1.0) > tol || std::abs(dot(y, y) - 1.0) > tol || std::abs(dot(z, z) - 1.0) > tol)
+        return false;
+    if (std::abs(dot(x, y)) > tol || std::abs(dot(y, z)) > tol || std::abs(dot(x, z)) > tol)
+        return false;
+    const double c[3] = {x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]};
+    return dot(c, z) > 0.0; // right-handed (det=+1); AXIS2's y is always z cross x
+}
+
+// True when `root` should be written as ONE shared prototype + per-placement references. Restricted
+// to multi-instance B-REP solids with all-rigid placements: analytic solids (extrusion/revolve/...)
+// are emitted under a plain SHAPE_REPRESENTATION, which adapy's pure-Python stream reader does not
+// classify as a geometry rep (its scanner only maps ADVANCED_BREP_SHAPE_REPRESENTATION items to
+// solids) — those keep the cheap per-instance baked form so no reader loses instances.
+inline bool step_mapped_eligible(const adacpp::ngeom::NgeomRoot &root) {
+    if (root.extrusion || root.revolve || root.sweep || root.sphere || root.boolean)
+        return false;
+    if (root.faces.empty() || root.transforms.size() < 2)
+        return false;
+    for (const auto &T : root.transforms)
+        if (!instance_tf_rigid(T))
+            return false;
+    return true;
+}
+
+// Escape hatch: force the pre-instancing behaviour (every placement fully baked).
+inline bool step_bake_instances_forced() {
+    const char *e = std::getenv("ADACPP_STEP_BAKE_INSTANCES");
+    return e && *e && *e != '0';
+}
+
+// Emit the per-placement reference records for a prototype already written by emit_solid_step
+// (identity transform): one AXIS2 + IDT + complex-RR + NAUO + PDS + CDSR per world transform.
+// `rep_id`/`leaf_pd` are the prototype's rep and PRODUCT_DEFINITION; `root_pd_id`/`world_rep_id`/
+// `identity_axis_id` are the caller's shared assembly-root PD, world rep and identity AXIS2 (#13).
+// `sid` seeds unique NAUO occurrence ids. Each instance's AXIS2 id is appended to `axis_ids_out` so
+// the caller can list them among the world rep's items.
+inline void emit_step_mapped_instances(adacpp::step_emit::StepBrepEmitter &em, std::string &buf, long rep_id,
+                                       long leaf_pd, const std::string &nm, long sid,
+                                       const std::vector<std::array<float, 16>> &transforms, long root_pd_id,
+                                       long world_rep_id, long identity_axis_id, std::vector<long> &axis_ids_out) {
+    using adacpp::ifc_emit::ifc_real;
+    auto R = [](float v) { return ifc_real(v); };
+    auto ref = [](long id) { return "#" + std::to_string(id); };
+    int k = 0;
+    for (const auto &T : transforms) {
+        long loc = em.emit_entity(buf, "CARTESIAN_POINT('',(" + R(T[12]) + "," + R(T[13]) + "," + R(T[14]) + "))");
+        long az = em.emit_entity(buf, "DIRECTION('',(" + R(T[8]) + "," + R(T[9]) + "," + R(T[10]) + "))");
+        long ax = em.emit_entity(buf, "DIRECTION('',(" + R(T[0]) + "," + R(T[1]) + "," + R(T[2]) + "))");
+        long axis = em.emit_entity(buf, "AXIS2_PLACEMENT_3D(''," + ref(loc) + "," + ref(az) + "," + ref(ax) + ")");
+        long idt =
+            em.emit_entity(buf, "ITEM_DEFINED_TRANSFORMATION('',''," + ref(identity_axis_id) + "," + ref(axis) + ")");
+        long rr = em.emit_entity(buf, "(REPRESENTATION_RELATIONSHIP('',''," + ref(rep_id) + "," + ref(world_rep_id) +
+                                          ")REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(" + ref(idt) +
+                                          ")SHAPE_REPRESENTATION_RELATIONSHIP())");
+        std::string occ = "i" + std::to_string(sid) + "_" + std::to_string(k);
+        long nauo = em.emit_entity(buf, "NEXT_ASSEMBLY_USAGE_OCCURRENCE('" + occ + "','" + nm + "',''," +
+                                            ref(root_pd_id) + "," + ref(leaf_pd) + ",$)");
+        long pds = em.emit_entity(buf, "PRODUCT_DEFINITION_SHAPE('',''," + ref(nauo) + ")");
+        em.emit_entity(buf, "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(" + ref(rr) + "," + ref(pds) + ")");
+        axis_ids_out.push_back(axis);
+        ++k;
+    }
+}
+
+// Emit a NEXT_ASSEMBLY_USAGE_OCCURRENCE assembly tree from per-leaf (product_definition, rep,
+// path): each intermediate path level becomes an assembly PRODUCT with its OWN (empty, identity-
+// axis) SHAPE_REPRESENTATION, and every parent->child link is the full AP242 occurrence record —
+// NAUO + PRODUCT_DEFINITION_SHAPE + identity ITEM_DEFINED_TRANSFORMATION + complex
+// REPRESENTATION_RELATIONSHIP(child_rep, parent_rep) + CONTEXT_DEPENDENT_SHAPE_REPRESENTATION —
+// the STEP counterpart of emit_spatial_tree and the exact pattern adapy's ap242_stream writer
+// emits. The CDSR/RR records matter: without them OCC's STEP reader finds no geometry under the
+// (shapeless) assembly products and transfers an empty model; with them both native stream
+// readers ALSO recover the assembly paths. Placements stay baked into the leaf geometry
+// (identity occurrence transforms). `identity_axis_id` is the shared header AXIS2 (#13).
 using IfcPath2 = std::vector<std::pair<int, std::string>>;
 inline void emit_step_assembly_tree(adacpp::step_emit::StepBrepEmitter &em, std::string &buf,
-                                    const std::vector<long> &leaf_pds, const std::vector<IfcPath2> &paths) {
+                                    const std::vector<long> &leaf_pds, const std::vector<long> &leaf_reps,
+                                    const std::vector<IfcPath2> &paths, long identity_axis_id = 13) {
     using adacpp::ifc_emit::ifc_str;
-    std::map<std::vector<int>, long> asm_pd; // rep-id prefix -> assembly PRODUCT_DEFINITION id
-    auto asm_node = [&](const std::vector<int> &prefix, const std::string &name) -> long {
-        auto it = asm_pd.find(prefix);
-        if (it != asm_pd.end())
+    auto ref = [](long id) { return "#" + std::to_string(id); };
+    struct AsmNode {
+        long pd = 0, rep = 0;
+    };
+    std::map<std::vector<int>, AsmNode> asm_nodes; // rep-id prefix -> assembly node
+    bool asm_created = false;                      // set by asm_node when the last call minted a new node
+    auto asm_node = [&](const std::vector<int> &prefix, const std::string &name) -> AsmNode {
+        auto it = asm_nodes.find(prefix);
+        asm_created = it == asm_nodes.end();
+        if (!asm_created)
             return it->second;
         std::string nm = name.empty() ? ("asm_" + std::to_string(prefix.back())) : ifc_str(name);
+        AsmNode n;
+        n.rep = em.emit_entity(buf, "SHAPE_REPRESENTATION('" + nm + "',(" + ref(identity_axis_id) + "),#9)");
         long product = em.emit_entity(buf, "PRODUCT('" + nm + "','" + nm + "','',(#3))");
         long pdf = em.emit_entity(buf, "PRODUCT_DEFINITION_FORMATION('','',#" + std::to_string(product) + ")");
-        long pd = em.emit_entity(buf, "PRODUCT_DEFINITION('design','',#" + std::to_string(pdf) + ",#4)");
-        asm_pd[prefix] = pd;
-        return pd;
+        n.pd = em.emit_entity(buf, "PRODUCT_DEFINITION('design','',#" + std::to_string(pdf) + ",#4)");
+        long pds = em.emit_entity(buf, "PRODUCT_DEFINITION_SHAPE('','',#" + std::to_string(n.pd) + ")");
+        em.emit_entity(buf,
+                       "SHAPE_DEFINITION_REPRESENTATION(#" + std::to_string(pds) + ",#" + std::to_string(n.rep) + ")");
+        asm_nodes[prefix] = n;
+        return n;
     };
-    auto nauo = [&](long parent_pd, long child_pd, const std::string &nm) {
-        em.emit_entity(buf, "NEXT_ASSEMBLY_USAGE_OCCURRENCE('','" + nm + "','',#" + std::to_string(parent_pd) + ",#" +
-                                std::to_string(child_pd) + ",$)");
+    // Full occurrence link (identity placement): NAUO + PDS + IDT + complex-RR + CDSR. A child
+    // with no representation id (defensive; shouldn't happen) gets the bare NAUO only.
+    auto nauo = [&](const AsmNode &parent, long child_pd, long child_rep, const std::string &nm) {
+        long id = em.emit_entity(buf, "NEXT_ASSEMBLY_USAGE_OCCURRENCE('','" + nm + "','',#" +
+                                          std::to_string(parent.pd) + "," + ref(child_pd) + ",$)");
+        if (!child_rep)
+            return;
+        long pds = em.emit_entity(buf, "PRODUCT_DEFINITION_SHAPE('',''," + ref(id) + ")");
+        long idt = em.emit_entity(buf, "ITEM_DEFINED_TRANSFORMATION('',''," + ref(identity_axis_id) + "," +
+                                           ref(identity_axis_id) + ")");
+        long rr = em.emit_entity(buf, "(REPRESENTATION_RELATIONSHIP('',''," + ref(child_rep) + "," + ref(parent.rep) +
+                                          ")REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(" + ref(idt) +
+                                          ")SHAPE_REPRESENTATION_RELATIONSHIP())");
+        em.emit_entity(buf, "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(" + ref(rr) + "," + ref(pds) + ")");
     };
     for (size_t i = 0; i < leaf_pds.size(); ++i) {
         if (!leaf_pds[i])
             continue;
         const IfcPath2 &path = (i < paths.size()) ? paths[i] : IfcPath2{};
-        long parent_pd = 0;
+        AsmNode parent{};
         std::vector<int> prefix;
         for (size_t d = 0; d + 1 < path.size(); ++d) {
             prefix.push_back(path[d].first);
-            long apd = asm_node(prefix, path[d].second);
-            if (parent_pd)
-                nauo(parent_pd, apd, path[d].second);
-            parent_pd = apd;
+            AsmNode node = asm_node(prefix, path[d].second);
+            // Link an assembly to its parent ONCE (on creation) — per-leaf linking duplicated the
+            // assembly-assembly NAUO for every additional leaf sharing the branch.
+            if (parent.pd && asm_created)
+                nauo(parent, node.pd, node.rep, path[d].second);
+            parent = node;
         }
-        if (parent_pd) // hang the leaf solid under its deepest assembly (top-level leaves stay roots)
-            nauo(parent_pd, leaf_pds[i], path.empty() ? "" : path.back().second);
+        if (parent.pd) // hang the leaf solid under its deepest assembly (top-level leaves stay roots)
+            nauo(parent, leaf_pds[i], i < leaf_reps.size() ? leaf_reps[i] : 0, path.empty() ? "" : path.back().second);
     }
 }
 
@@ -425,6 +594,7 @@ inline adacpp::ifc_emit::FileStats write_ifc_to_step_impl(const std::string &in_
         }
     };
     std::vector<long> leaf_pds;       // per emitted solid: its PRODUCT_DEFINITION id (for the NAUO tree)
+    std::vector<long> leaf_reps;      // parallel: its SHAPE_REPRESENTATION id (the CDSR child rep)
     std::vector<IfcPath2> leaf_paths; // parallel: the solid's assembly path
     for (long pid : roots) {
         NgeomRoot root = r.resolve_product(pid);
@@ -456,11 +626,13 @@ inline adacpp::ifc_emit::FileStats write_ifc_to_step_impl(const std::string &in_
                 tfp = tf;
             }
             StepBrepEmitter em(nid, tfp, deflection, angular_deg);
-            long pd = emit_solid_step(em, buf, root, pid);
+            long rep_id = 0;
+            long pd = emit_solid_step(em, buf, root, pid, &rep_id);
             if (pd) {
                 nid = em.current_id();
                 any = true;
                 leaf_pds.push_back(pd);
+                leaf_reps.push_back(rep_id);
                 leaf_paths.push_back(k < root.instance_paths.size() ? root.instance_paths[k] : IfcPath2{});
                 const auto &s = em.stats();
                 fs.geom.faces_in += s.faces_in;
@@ -480,7 +652,7 @@ inline adacpp::ifc_emit::FileStats write_ifc_to_step_impl(const std::string &in_
     prof.phase("resolve+emit");
     // NAUO assembly tree over all emitted leaves (STEP counterpart of the IFC spatial tree).
     StepBrepEmitter emtree(nid, nullptr, deflection, angular_deg);
-    emit_step_assembly_tree(emtree, buf, leaf_pds, leaf_paths);
+    emit_step_assembly_tree(emtree, buf, leaf_pds, leaf_reps, leaf_paths);
     const char *foot = "ENDSEC;\nEND-ISO-10303-21;\n";
     buf += foot;
     flush(true);

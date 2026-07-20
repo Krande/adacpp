@@ -266,8 +266,27 @@ struct OrientedEdgeN {
             // reversals (the align clip above already dropped the out-of-trim interior samples).
             if (pts.size() < 2)
                 return {start, end};
-            if ((pts.front() - start).norm() > (pts.back() - start).norm())
+            // CLOSED edge (start vertex == end vertex, e.g. the full B-spline circle rim of a
+            // closed NURBS tube): the endpoint-distance test below is a tie (front == back ==
+            // start), so a reversed (.F.) closed edge silently kept the curve's NATURAL direction.
+            // Both rim circles of such a tube then wound the SAME way in u, the face's single loop
+            // unwound to |w| = 2, and tessellate_periodic_winding (which requires |w| == 1) dropped
+            // the whole face (audit fe84a414: every STEP dropped-face bucket was this). Direction
+            // cannot come from the endpoints of a closed edge — apply the edge flags exactly as the
+            // circle/ellipse arc path does: reverse iff same_sense XOR orientation (align emitted
+            // the ring a->b, i.e. already same_sense-adjusted, so only the NET flag parity remains).
+            // "Closed" = the edge's own vertices coincide (usually the SAME VERTEX_POINT, so the
+            // distance is exactly 0; 1e-7 x edge length tolerates exporters that write two equal
+            // vertices). A nearly-closed OPEN edge (C-slit) keeps the endpoint-distance test.
+            double _len = 0.0;
+            for (size_t i = 1; i < pts.size(); ++i)
+                _len += (pts[i] - pts[i - 1]).norm();
+            if ((e_start - e_end).norm() <= std::max(1e-7 * _len, 1e-12)) {
+                if (same_sense != orientation)
+                    std::reverse(pts.begin(), pts.end());
+            } else if ((pts.front() - start).norm() > (pts.back() - start).norm()) {
                 std::reverse(pts.begin(), pts.end());
+            }
             pts.front() = start;
             pts.back() = end;
             // Decimate the fixed-density B-spline sample to the chord tolerance (see

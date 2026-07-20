@@ -111,6 +111,7 @@ meshopt_decode_vertex_buffer = _cad.meshopt_decode_vertex_buffer
 meshopt_encode_index_sequence = _cad.meshopt_encode_index_sequence
 meshopt_encode_vertex_buffer = _cad.meshopt_encode_vertex_buffer
 meshopt_simplify_mesh = _cad.meshopt_simplify_mesh
+ngeom_to_ifc_body_spf = _cad.ngeom_to_ifc_body_spf
 non_manifold_merge = _cad.non_manifold_merge
 obb = _cad.obb
 point_in_solid = _cad.point_in_solid
@@ -129,6 +130,10 @@ step_emit_ifc_brep = _cad.step_emit_ifc_brep
 step_parity = _cad.step_parity
 stream_ifc_to_glb = _cad.stream_ifc_to_glb
 stream_ifc_to_step = _cad.stream_ifc_to_step
+stream_ngeom_to_glb = _cad.stream_ngeom_to_glb
+stream_ngeom_to_ifc = _cad.stream_ngeom_to_ifc
+stream_ngeom_to_mesh = _cad.stream_ngeom_to_mesh
+stream_ngeom_to_step = _cad.stream_ngeom_to_step
 stream_step_to_glb = _cad.stream_step_to_glb
 stream_step_to_glb_st = _cad.stream_step_to_glb_st
 stream_step_to_ifc = _cad.stream_step_to_ifc
@@ -229,6 +234,7 @@ __all__ = [
     "meshopt_encode_index_sequence",
     "meshopt_encode_vertex_buffer",
     "meshopt_simplify_mesh",
+    "ngeom_to_ifc_body_spf",
     "non_manifold_merge",
     "obb",
     "point_in_solid",
@@ -247,6 +253,10 @@ __all__ = [
     "step_parity",
     "stream_ifc_to_glb",
     "stream_ifc_to_step",
+    "stream_ngeom_to_glb",
+    "stream_ngeom_to_ifc",
+    "stream_ngeom_to_mesh",
+    "stream_ngeom_to_step",
     "stream_step_to_glb",
     "stream_step_to_glb_st",
     "stream_step_to_ifc",

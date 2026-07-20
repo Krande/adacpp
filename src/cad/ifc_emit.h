@@ -682,6 +682,10 @@ inline std::string ifc_str(const std::string &s) {
 
 struct FileStats {
     long solids_in = 0, solids_out = 0;
+    // Placed occurrences written (baked parts + mapped-instance references). Reported by the
+    // STEP->STEP writer so shared-prototype instancing keeps the audit's placed-instance
+    // semantics even though geometry is serialised once per prototype; 0 elsewhere.
+    long instances_out = 0;
     double unit_scale = 1.0; // metres per file length-unit (declared in the IFC header)
     // IFC->STEP coverage: roots seen vs roots that yielded no resolvable B-rep (non-advanced-brep
     // geometry — extrusion/CSG/tessellated — which the analytic reader can't represent). Non-zero

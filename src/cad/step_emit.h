@@ -67,7 +67,7 @@ public:
     // Emit an extruded-area solid -> EXTRUDED_AREA_SOLID id (0 on failure). The instance transform is
     // baked into the Position (world frame = tf_ o ex.frame); the 2D profile points + the local extrude
     // direction are emitted raw (relative to Position), matching the ng:: extrusion tessellation.
-    long emit_extrusion(std::string &out, const ExtrusionN &ex) {
+    long emit_extrusion(std::string &out, const ExtrusionN &ex, const std::string &name = "") {
         if (!ex.profile || ex.profile->bounds.empty() || !ex.profile->bounds[0].loop)
             return 0;
         const LoopN &lp = *ex.profile->bounds[0].loop;
@@ -87,13 +87,13 @@ public:
         long pos = emit(out, "AXIS2_PLACEMENT_3D('',#" + std::to_string(pt_raw(out, wo)) + ",#" +
                                  std::to_string(dir_raw(out, wz)) + ",#" + std::to_string(dir_raw(out, wx)) + ")");
         long ed = dir_raw(out, ex.direction); // local to Position
-        return emit(out, "EXTRUDED_AREA_SOLID('',#" + std::to_string(prof) + ",#" + std::to_string(pos) + ",#" +
-                             std::to_string(ed) + "," + ifc_real(ex.depth) + ")");
+        return emit(out, "EXTRUDED_AREA_SOLID('" + name + "',#" + std::to_string(prof) + ",#" + std::to_string(pos) +
+                             ",#" + std::to_string(ed) + "," + ifc_real(ex.depth) + ")");
     }
 
     // Emit a revolved-area solid -> REVOLVED_AREA_SOLID id (0 on failure). Instance transform baked into
     // Position (caller ensures it's rigid); the 2D profile + the local revolution Axis emitted raw.
-    long emit_revolve(std::string &out, const RevolveN &rv) {
+    long emit_revolve(std::string &out, const RevolveN &rv, const std::string &name = "") {
         if (!rv.profile || rv.profile->bounds.empty() || !rv.profile->bounds[0].loop)
             return 0;
         const LoopN &lp = *rv.profile->bounds[0].loop;
@@ -114,13 +114,13 @@ public:
                                  std::to_string(dir_raw(out, wz)) + ",#" + std::to_string(dir_raw(out, wx)) + ")");
         long ax = emit(out, "AXIS1_PLACEMENT('',#" + std::to_string(pt_raw(out, rv.axis_origin)) + ",#" +
                                 std::to_string(dir_raw(out, rv.axis_dir)) + ")"); // local to Position
-        return emit(out, "REVOLVED_AREA_SOLID('',#" + std::to_string(prof) + ",#" + std::to_string(pos) + ",#" +
-                             std::to_string(ax) + "," + ifc_real(rv.angle) + ")");
+        return emit(out, "REVOLVED_AREA_SOLID('" + name + "',#" + std::to_string(prof) + ",#" + std::to_string(pos) +
+                             ",#" + std::to_string(ax) + "," + ifc_real(rv.angle) + ")");
     }
 
     // A disk/annulus swept along a directrix -> SWEPT_DISK_SOLID (radius recovered from the circular
     // profile; directrix = origin[] baked to world via frame o tf). Matches the ng:: swept-disk.
-    long emit_swept_disk(std::string &out, const SweepN &sw) {
+    long emit_swept_disk(std::string &out, const SweepN &sw, const std::string &name = "") {
         if (sw.origin.size() < 2 || !sw.profile || sw.profile->bounds.empty() || !sw.profile->bounds[0].loop)
             return 0;
         const LoopN &lp = *sw.profile->bounds[0].loop;
@@ -147,14 +147,14 @@ public:
             dids.push_back(pt_raw(out, tp(sw.frame.to_world(o.x, o.y, o.z))));
         long directrix = emit(out, "POLYLINE(''," + refs(dids) + ")");
         std::string inner_s = inner > 1e-9 ? ifc_real(inner) : "$";
-        return emit(out, "SWEPT_DISK_SOLID('',#" + std::to_string(directrix) + "," + ifc_real(radius) + "," + inner_s +
-                             ",$,$)");
+        return emit(out, "SWEPT_DISK_SOLID('" + name + "',#" + std::to_string(directrix) + "," + ifc_real(radius) +
+                             "," + inner_s + ",$,$)");
     }
     // A sphere -> CSG_SOLID over a SPHERE primitive (centre baked to world).
-    long emit_sphere(std::string &out, const SphereN &sp) {
+    long emit_sphere(std::string &out, const SphereN &sp, const std::string &name = "") {
         long ctr = pt_raw(out, tp(sp.frame.o));
         long sph = emit(out, "SPHERE(''," + ifc_real(sp.radius) + ",#" + std::to_string(ctr) + ")");
-        return emit(out, "CSG_SOLID('',#" + std::to_string(sph) + ")");
+        return emit(out, "CSG_SOLID('" + name + "',#" + std::to_string(sph) + ")");
     }
 
     // Emit a boolean-operand solid -> its STEP id (0 if unrepresentable). Recursive for nested booleans.
