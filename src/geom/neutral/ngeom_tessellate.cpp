@@ -285,6 +285,16 @@ inline Vec3 nan_vec() {
 inline bool is_pinned(const Vec3 &p) {
     return p.x == p.x; // finite (not NaN)
 }
+// A face has "real pins" when at least one boundary vertex sits on a shared edge (a finite pin) —
+// i.e. it borders a neighbour and its seam matters. Isolated faces (all-NaN pins) don't need the
+// boundary-first CDT and keep the cheap grid.
+inline bool has_real_pins(const std::vector<std::vector<Vec3>> &loops) {
+    for (const auto &l : loops)
+        for (const auto &p : l)
+            if (is_pinned(p))
+                return true;
+    return false;
+}
 
 // per-loop UV polyline plus winding bookkeeping
 struct LoopUv {
@@ -2557,6 +2567,19 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
     const std::vector<std::vector<Vec3>> *pins =
         (tp.track == TessTrack::Libtess2 && tp.libtess2.pin_boundary) ? &contours_p3 : nullptr;
     const std::vector<std::vector<Vec3>> *cdt_pins = tp.cdt.pin_boundary ? &contours_p3 : nullptr;
+
+    // cdt_full_patch: a near-full-patch face that shares edges with a neighbour cannot pin on the
+    // UV-grid fast paths below (they tessellate the UV bbox, never the trim loop) — the sole residual
+    // crack source on thickened shells. Route just those faces through the boundary-first CDT so every
+    // boundary vertex is a shared-edge point and the per-solid weld stitches the seam. Gated on
+    // near-full (would-take-grid) + has_real_pins so trimmed/isolated faces keep their normal path.
+    if (tp.track == TessTrack::Libtess2 && tp.libtess2.cdt_full_patch && has_real_pins(contours_p3) &&
+        (full_wrap_bspline(surf, contours).ok || full_domain_bspline(surf, contours).ok)) {
+        diag_set_path("cdt_full_patch");
+        return emit_cdt_region(surf, contours, tp, same_sense, mesh, &contours_p3)
+                   ? nullptr
+                   : "CDT full-patch tessellation produced no triangles";
+    }
 
     {
         Rect r = full_wrap_bspline(surf, contours);

@@ -480,6 +480,10 @@ Mesh tessellate_stream_impl(nb::object buffer, const std::string &pipeline, doub
         tp.max_angle = angular_deg * 3.14159265358979323846 / 180.0;
         tp.threads = threads;         // >1 => parallelise a root's faces (opt-in; default serial)
         tp.model_scale = model_scale; // >0 => adaptive per-surface density (0 => fixed max_angle)
+        // Libtess2 sub-option env knob (mirrors stream_step_to_glb): route shared near-full-patch
+        // faces (thickened-shell caps/walls) through the boundary-first CDT so their seams weld.
+        if (const char *e = std::getenv("ADA_TESS_WT_CDT_FULL_PATCH"))
+            tp.libtess2.cdt_full_patch = std::atoi(e) != 0;
         tm = tessellate_doc(doc, tp);
     } else {
         // ifcopenshell taxonomy kernels: occ | cgal | hybrid.
