@@ -2,6 +2,15 @@
 
 
 
+## v0.19.0 (2026-07-26)
+
+### Feature
+
+* feat: weld thick curved-shell cap-wall seams via boundary-first CDT (#45)
+
+Co-authored-by: Claude Opus 4.8 (1M context) &lt;noreply@anthropic.com&gt; ([`3d321fc`](https://github.com/Krande/adacpp/commit/3d321fc311a45f4685d36bb2e2ad90e410934f6d))
+
+
 ## v0.18.0 (2026-07-20)
 
 ### Feature
