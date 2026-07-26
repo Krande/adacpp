@@ -4379,6 +4379,12 @@ static adacpp::ngeom::TessParams ngeom_tess_params(const std::string &pipeline, 
     tp.max_angle = angular_deg * 3.14159265358979323846 / 180.0;
     tp.model_scale = model_scale; // >0 => adaptive per-surface density
     tp.capture_face_ranges = capture_face_ranges;
+    // Watertight seam-weld opt-in for the record streamer (parity with tessellate_stream_impl):
+    // route shared near-full cap/wall faces of a thick curved shell through boundary-first CDT so
+    // the per-solid weld closes the cap<->wall seam. Env-gated so the caller (adapy converter) can
+    // scope it per-job to shell/gxml sources; default off keeps the crane/plate paths untouched.
+    if (const char *e = std::getenv("ADA_TESS_WT_CDT_FULL_PATCH"))
+        tp.libtess2.cdt_full_patch = std::atoi(e) != 0;
     return tp;
 }
 
