@@ -196,10 +196,9 @@ inline long assemble_lanes(const std::string &out_path, std::deque<MeshLane> &la
                 while ((got = std::fread(ib.data(), sizeof(uint32_t), ib.size(), fin)) >= 3) {
                     for (size_t e = 0; e + 2 < got; e += 3) {
                         char line[64];
-                        int n = std::snprintf(line, sizeof line, "f %llu %llu %llu\n",
-                                              (unsigned long long) (base + ib[e] + 1),
-                                              (unsigned long long) (base + ib[e + 1] + 1),
-                                              (unsigned long long) (base + ib[e + 2] + 1));
+                        int n = std::snprintf(
+                            line, sizeof line, "f %llu %llu %llu\n", (unsigned long long) (base + ib[e] + 1),
+                            (unsigned long long) (base + ib[e + 1] + 1), (unsigned long long) (base + ib[e + 2] + 1));
                         fb.insert(fb.end(), line, line + n);
                     }
                     if (fb.size() >= (1 << 20)) {
