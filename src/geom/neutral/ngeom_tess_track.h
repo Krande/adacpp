@@ -130,6 +130,21 @@ struct Libtess2Opts {
     // Closes 67% of the residual but costs +44% tris and 481 nonmanifold (9 -> 481) because emit
     // over-refines a full patch — reproducing the 2026-07-13 rejection (+48% tris) even with pins.
     bool grid_via_emit = false;
+
+    // Route ONLY the near-full-patch faces that actually share edges with a neighbour (real
+    // boundary pins) through the boundary-first CDT (emit_cdt_region), instead of the UV-grid fast
+    // paths that tessellate the UV bbox and cannot pin. Those grid paths are the sole residual crack
+    // source, and on a thickened shell BOTH the B-spline cap and its ruled side walls take a grid
+    // path, so neither's seam vertices coincide. CDT makes every boundary vertex a shared-edge point,
+    // so the per-solid weld stitches the seam -> 0 open edges on a thickened shell.
+    //
+    // This is the "route these faces to detria" result the annulus note calls "correct but ~3-4x the
+    // grid's per-face cost" — made SELECTIVE (only shared near-full faces, gated on has_real_pins) and
+    // shippable as an opt-in. Unlike grid_via_emit/annulus/conforming_grid it is watertight, not a
+    // grid approximation. OFF by default (the crane keeps the fast grid); enable for shell-heavy
+    // sources (thickened curved plates) where watertightness matters more than the per-face tri cost.
+    // Env: ADA_TESS_WT_CDT_FULL_PATCH=1.
+    bool cdt_full_patch = false;
 };
 
 // Options for the CDT track.

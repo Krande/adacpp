@@ -16,7 +16,13 @@ import pytest
 
 cad = pytest.importorskip("adacpp.cad")
 
-from test_ngeom_blob_emit import _RED, _T_IDENT, _T_SHIFT, _records, _two_cube_step  # noqa: E402
+from test_ngeom_blob_emit import (  # noqa: E402
+    _RED,
+    _T_IDENT,
+    _T_SHIFT,
+    _records,
+    _two_cube_step,
+)
 
 
 @pytest.fixture()

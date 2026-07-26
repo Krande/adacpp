@@ -136,11 +136,51 @@ static void test_face(const char *label, const std::string &path) {
     CHECK(es2.once == 0, "thickened solid is closed (no boundary edges)");
 }
 
+// A thickened curved plate arrives as an analytic ClosedShell: a B-spline top+bottom cap plus a
+// ruled side wall per boundary edge, all sharing edge curves. On the default libtess2 track the caps
+// take the UV-grid fast path, which tessellates the UV bbox and cannot pin its boundary, so the cap
+// and wall sample the shared seam differently -> unwelded boundary edges (a visible crack).
+// cdt_full_patch routes those shared near-full faces through the boundary-first CDT so every boundary
+// vertex is a shared-edge point and the per-solid weld closes the seam -> 0 open edges.
+static void test_thick_shell_seam(const char *path) {
+    std::vector<uint8_t> buf = read_file(path);
+    CHECK(!buf.empty(), "thick-shell fixture loads");
+    if (buf.empty())
+        return;
+    NgeomDoc doc = decode(buf.data(), buf.size());
+    CHECK(!doc.roots.empty(), "thick-shell decoded a root");
+    if (doc.roots.empty())
+        return;
+
+    // Default track (pin on, cdt_full_patch off): the cap grid path can't pin -> seam cracks open.
+    TessParams tp;
+    tp.deflection = 2.0;
+    tp.max_angle = 0.349;
+    EdgeStats base = edge_stats(tessellate_doc(doc, tp));
+    std::printf("  thick_shell   DEFAULT: tris=%d weldV=%d once=%d twice=%d 3+=%d\n", base.tris, base.weld_verts,
+                base.once, base.twice, base.three_plus);
+    CHECK(base.once > 0, "default track leaves the cap<->wall seam open (documents the bug)");
+
+    // cdt_full_patch on: the shared near-full cap/wall faces route to the boundary-first CDT and pin,
+    // so the solid is closed (0 boundary edges) and manifold.
+    TessParams tp2 = tp;
+    tp2.libtess2.cdt_full_patch = true;
+    EdgeStats fixed = edge_stats(tessellate_doc(doc, tp2));
+    std::printf("  thick_shell   CDT_FP:  tris=%d weldV=%d once=%d twice=%d 3+=%d\n", fixed.tris, fixed.weld_verts,
+                fixed.once, fixed.twice, fixed.three_plus);
+    CHECK(fixed.three_plus == 0, "cdt_full_patch thick shell is manifold (no edge shared by 3+)");
+    CHECK(fixed.once == 0, "cdt_full_patch thick shell is closed (0 open/seam edges)");
+}
+
 int main() {
     // Concrete hullskin faces: elev13plate1 is one of the 16 that rendered edge-less in the
     // viewer (irregular 6-7-coedge spline patch); elev14plate7 is a clean 4-coedge control.
     test_face("elev13plate1", "tests/ngeom/fixtures/face_elev13plate1.ngeom");
     test_face("elev14plate7", "tests/ngeom/fixtures/face_elev14plate7.ngeom");
+
+    // A generic thickened curved plate (no client data): cap<->wall seam must close under
+    // cdt_full_patch. Fixture serialized from ada PlateCurved.solid_geom() (a ClosedShell).
+    test_thick_shell_seam("tests/ngeom/fixtures/curved_thick_shell.ngeom");
 
     if (g_fail) {
         std::printf("test_solidify_manifold: %d CHECK(s) failed\n", g_fail);

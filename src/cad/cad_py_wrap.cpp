@@ -480,6 +480,10 @@ Mesh tessellate_stream_impl(nb::object buffer, const std::string &pipeline, doub
         tp.max_angle = angular_deg * 3.14159265358979323846 / 180.0;
         tp.threads = threads;         // >1 => parallelise a root's faces (opt-in; default serial)
         tp.model_scale = model_scale; // >0 => adaptive per-surface density (0 => fixed max_angle)
+        // Libtess2 sub-option env knob (mirrors stream_step_to_glb): route shared near-full-patch
+        // faces (thickened-shell caps/walls) through the boundary-first CDT so their seams weld.
+        if (const char *e = std::getenv("ADA_TESS_WT_CDT_FULL_PATCH"))
+            tp.libtess2.cdt_full_patch = std::atoi(e) != 0;
         tm = tessellate_doc(doc, tp);
     } else {
         // ifcopenshell taxonomy kernels: occ | cgal | hybrid.
@@ -4209,8 +4213,8 @@ static void ngeom_tess_process(const NgeomTessRecord &rec, const adacpp::ngeom::
         gs.indices = std::move(tm.indices);
         gs.face_ranges.reserve(tm.face_ranges.size());
         for (const auto &fr : tm.face_ranges)
-            gs.face_ranges.push_back({fr.first_index, fr.index_count, fr.face_id, fr.face_seq, fr.has_color, fr.cr,
-                                      fr.cg, fr.cb, fr.ca});
+            gs.face_ranges.push_back(
+                {fr.first_index, fr.index_count, fr.face_id, fr.face_seq, fr.has_color, fr.cr, fr.cg, fr.cb, fr.ca});
         gs.color = {rr.cr, rr.cg, rr.cb, rr.ca}; // grey default when !has_color
         gs.transforms = rr.transforms;
         gs.id = rr.id.empty() ? rec.name : rr.id;
@@ -4246,10 +4250,9 @@ static void ngeom_tess_process(const NgeomTessRecord &rec, const adacpp::ngeom::
 // order via `commit` (invoked by exactly one thread at a time). Python is touched only on the
 // calling thread. The first worker/commit error is re-thrown after every thread has joined (the
 // remaining queue still drains so the turnstile never deadlocks).
-static NgeomTessStats
-stream_ngeom_tess_pump(nb::iterable records, const adacpp::ngeom::TessParams &tp, int nthreads, double unit_scale,
-                       bool split_by_face_colour,
-                       const std::function<void(std::vector<adacpp::glb::GlbSolid> &)> &commit) {
+static NgeomTessStats stream_ngeom_tess_pump(nb::iterable records, const adacpp::ngeom::TessParams &tp, int nthreads,
+                                             double unit_scale, bool split_by_face_colour,
+                                             const std::function<void(std::vector<adacpp::glb::GlbSolid> &)> &commit) {
     NgeomTessStats total;
     if (nthreads <= 1) { // serial — also the no-pthreads (wasm) path
         for (nb::handle item : records) {
@@ -4375,6 +4378,12 @@ static adacpp::ngeom::TessParams ngeom_tess_params(const std::string &pipeline, 
     tp.max_angle = angular_deg * 3.14159265358979323846 / 180.0;
     tp.model_scale = model_scale; // >0 => adaptive per-surface density
     tp.capture_face_ranges = capture_face_ranges;
+    // Watertight seam-weld opt-in for the record streamer (parity with tessellate_stream_impl):
+    // route shared near-full cap/wall faces of a thick curved shell through boundary-first CDT so
+    // the per-solid weld closes the cap<->wall seam. Env-gated so the caller (adapy converter) can
+    // scope it per-job to shell/gxml sources; default off keeps the crane/plate paths untouched.
+    if (const char *e = std::getenv("ADA_TESS_WT_CDT_FULL_PATCH"))
+        tp.libtess2.cdt_full_patch = std::atoi(e) != 0;
     return tp;
 }
 
@@ -4881,32 +4890,30 @@ void cad_module(nb::module_ &m) {
         "IfcMappedItem. Records are pulled lazily (generator-friendly, bounded memory). schema: "
         "'IFC4X3_ADD2' | 'IFC4'. Returns the losslessness audit dict.");
 
-    m.def(
-        "stream_ngeom_to_glb", &stream_ngeom_to_glb_impl, "records"_a, "out_path"_a, "deflection"_a = 0.0,
-        "angular_deg"_a = 20.0, "num_threads"_a = 0, "meshopt"_a = true, "model_scale"_a = 0.0,
-        "pipeline"_a = "libtess2", "pin_boundary"_a = true, "unit_scale"_a = 1.0,
-        "Native GLB writer from a stream of NGEOM records (same record shape + lazy pull as "
-        "stream_ngeom_to_step). Decodes each blob, tessellates it on a worker pool (num_threads=0 = "
-        "cgroup-aware auto; pipeline: 'libtess2' default / 'cdt'), bakes each instance's world "
-        "placement + colour and writes the merge-by-colour GLB matching the adapy viewer's structure "
-        "(per-solid draw ranges + assembly paths from the records; meshopt=True bakes "
-        "EXT_meshopt_compression inline). unit_scale = metres per model unit — positions and "
-        "instance translations are scaled so the GLB is always metres. model_scale > 0 enables "
-        "model-relative adaptive tessellation density. Deterministic: output bytes depend only on "
-        "the records and knobs, never on thread count or scheduling. Returns the audit dict "
-        "(solids_in/out/skipped, instances_out, triangles, faces_total/dropped/suspect, "
-        "drop_reasons — the [GEOMHEALTH-JSON] counters).");
+    m.def("stream_ngeom_to_glb", &stream_ngeom_to_glb_impl, "records"_a, "out_path"_a, "deflection"_a = 0.0,
+          "angular_deg"_a = 20.0, "num_threads"_a = 0, "meshopt"_a = true, "model_scale"_a = 0.0,
+          "pipeline"_a = "libtess2", "pin_boundary"_a = true, "unit_scale"_a = 1.0,
+          "Native GLB writer from a stream of NGEOM records (same record shape + lazy pull as "
+          "stream_ngeom_to_step). Decodes each blob, tessellates it on a worker pool (num_threads=0 = "
+          "cgroup-aware auto; pipeline: 'libtess2' default / 'cdt'), bakes each instance's world "
+          "placement + colour and writes the merge-by-colour GLB matching the adapy viewer's structure "
+          "(per-solid draw ranges + assembly paths from the records; meshopt=True bakes "
+          "EXT_meshopt_compression inline). unit_scale = metres per model unit — positions and "
+          "instance translations are scaled so the GLB is always metres. model_scale > 0 enables "
+          "model-relative adaptive tessellation density. Deterministic: output bytes depend only on "
+          "the records and knobs, never on thread count or scheduling. Returns the audit dict "
+          "(solids_in/out/skipped, instances_out, triangles, faces_total/dropped/suspect, "
+          "drop_reasons — the [GEOMHEALTH-JSON] counters).");
 
-    m.def(
-        "stream_ngeom_to_mesh", &stream_ngeom_to_mesh_impl, "records"_a, "out_path"_a, "fmt"_a, "deflection"_a = 0.0,
-        "angular_deg"_a = 20.0, "num_threads"_a = 0, "model_scale"_a = 0.0, "pipeline"_a = "libtess2",
-        "pin_boundary"_a = true, "unit_scale"_a = 1.0,
-        "Native binary-STL / welded-OBJ writer from a stream of NGEOM records (same record shape + "
-        "lazy pull as stream_ngeom_to_step; fmt: 'stl' | 'obj'). Tessellates on a worker pool and "
-        "bakes each instance's world placement straight into the mesh file — no Python scene, no "
-        "whole-model buffer. unit_scale = metres per model unit (output is always metres). "
-        "Deterministic: output bytes depend only on the records and knobs, never on thread count. "
-        "Returns the same audit dict as stream_ngeom_to_glb.");
+    m.def("stream_ngeom_to_mesh", &stream_ngeom_to_mesh_impl, "records"_a, "out_path"_a, "fmt"_a, "deflection"_a = 0.0,
+          "angular_deg"_a = 20.0, "num_threads"_a = 0, "model_scale"_a = 0.0, "pipeline"_a = "libtess2",
+          "pin_boundary"_a = true, "unit_scale"_a = 1.0,
+          "Native binary-STL / welded-OBJ writer from a stream of NGEOM records (same record shape + "
+          "lazy pull as stream_ngeom_to_step; fmt: 'stl' | 'obj'). Tessellates on a worker pool and "
+          "bakes each instance's world placement straight into the mesh file — no Python scene, no "
+          "whole-model buffer. unit_scale = metres per model unit (output is always metres). "
+          "Deterministic: output bytes depend only on the records and knobs, never on thread count. "
+          "Returns the same audit dict as stream_ngeom_to_glb.");
 
     m.def(
         "ngeom_to_ifc_body_spf",
