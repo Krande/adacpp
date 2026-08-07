@@ -2,6 +2,15 @@
 
 
 
+## v0.20.0 (2026-08-07)
+
+### Feature
+
+* feat: native is_planar_face verb for loft face parity (#46)
+
+Co-authored-by: Claude Opus 4.8 &lt;noreply@anthropic.com&gt; ([`2b824f5`](https://github.com/Krande/adacpp/commit/2b824f528c2f5970a2266eecb44b121398394e71))
+
+
 ## v0.19.0 (2026-07-26)
 
 ### Feature
