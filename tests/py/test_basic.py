@@ -629,8 +629,17 @@ def test_cad_is_planar_face_ruled_corner_panels():
     assert planar.count(True) == 2
     assert planar.count(False) == 4
 
-    # Cross-check against the OCC reference is_planar_face on the same loft.
-    assert sorted(planar) == _occ_loft_planar_multiset([bot, top])
+    # Cross-check against the OCC reference is_planar_face on the same loft — only
+    # where pythonocc is installed (the ada-cpp test envs ship no OCC). The native
+    # multiset above stands on its own; this pins parity when both kernels exist.
+    try:
+        import OCC  # noqa: F401
+
+        _have_occ = True
+    except ImportError:
+        _have_occ = False
+    if _have_occ:
+        assert sorted(planar) == _occ_loft_planar_multiset([bot, top])
 
     # face_to_advanced_face on a genuinely-ruled (non-planar) side panel yields a
     # usable ada.geom AdvancedFace: a real B-spline surface with a bounding wire.
