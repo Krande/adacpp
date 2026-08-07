@@ -559,6 +559,99 @@ def test_cad_face_to_advanced_face_roundtrip():
     assert round(adacpp.cad.area(face2), 6) == round(area0, 6)
 
 
+def _occ_loft_planar_multiset(profiles):
+    # Build the SAME ThruSections loft in pythonocc-core and return the sorted
+    # list of GeomLib is_planar answers — the OCC reference is_planar_face runs
+    # face-by-face. adacpp's is_planar_face must reproduce this multiset.
+    from OCC.Core.BRep import BRep_Tool
+    from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_MakeEdge, BRepBuilderAPI_MakeWire
+    from OCC.Core.BRepOffsetAPI import BRepOffsetAPI_ThruSections
+    from OCC.Core.GeomLib import GeomLib_IsPlanarSurface
+    from OCC.Core.gp import gp_Pnt
+    from OCC.Core.TopAbs import TopAbs_FACE
+    from OCC.Core.TopExp import TopExp_Explorer
+    from OCC.Core.TopoDS import topods
+
+    ts = BRepOffsetAPI_ThruSections(True, True)
+    for poly in profiles:
+        wm = BRepBuilderAPI_MakeWire()
+        for i in range(len(poly)):
+            a, b = poly[i], poly[(i + 1) % len(poly)]
+            wm.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(*a), gp_Pnt(*b)).Edge())
+        ts.AddWire(wm.Wire())
+    ts.Build()
+    out = []
+    exp = TopExp_Explorer(ts.Shape(), TopAbs_FACE)
+    while exp.More():
+        surface = BRep_Tool.Surface(topods.Face(exp.Current()))
+        if surface.DynamicType().Name() == "Geom_Plane":
+            out.append(True)
+        else:
+            out.append(bool(GeomLib_IsPlanarSurface(surface, 1e-6).IsPlanar()))
+        exp.Next()
+    return sorted(out)
+
+
+def test_cad_is_planar_face_flat_bspline_taper_panels():
+    # Loft a 2x2 square (z=0) to a 1x1 square (z=1): a frustum. OCC's ThruSections
+    # stores the four flat trapezoidal side panels as Geom_BSplineSurface (not
+    # Geom_Plane), so a surface-*type* check misclassifies them as curved — yet
+    # is_planar_face (GeomLib probe of the actual geometry) must report ALL faces
+    # planar. This is exactly the flat-side/taper-panel case in adapy's loft path.
+    def rect(half, z):
+        return [[-half, -half, z], [half, -half, z], [half, half, z], [-half, half, z]]
+
+    frustum = adacpp.cad.loft_profiles([rect(1.0, 0.0), rect(0.5, 1.0)], True, True)
+    faces = adacpp.cad.faces(frustum)
+    assert len(faces) == 6
+    stypes = [adacpp.cad.face_surface_type(f) for f in faces]
+    # The load-bearing contrast: the flat side panels are stored as B-splines...
+    assert stypes.count("bspline") == 4
+    # ...yet every face — flat bspline panels AND planar caps — reads as planar.
+    assert all(adacpp.cad.is_planar_face(f) for f in faces)
+
+
+def test_cad_is_planar_face_ruled_corner_panels():
+    # Loft a square (z=0) to the same square rotated 45 deg (z=1). The four side
+    # panels now rule between skew edges -> genuinely non-planar B-spline
+    # surfaces; the two end caps stay planar. is_planar_face must split them, and
+    # the multiset must match the OCC reference answer.
+    import math
+
+    bot = [[1, 1, 0], [-1, 1, 0], [-1, -1, 0], [1, -1, 0]]
+    s = math.sqrt(2)
+    top = [[0, s, 1], [-s, 0, 1], [0, -s, 1], [s, 0, 1]]
+    solid = adacpp.cad.loft_profiles([bot, top], True, True)
+    faces = adacpp.cad.faces(solid)
+
+    planar = [adacpp.cad.is_planar_face(f) for f in faces]
+    # Two planar caps, four non-planar ruled side panels.
+    assert planar.count(True) == 2
+    assert planar.count(False) == 4
+
+    # Cross-check against the OCC reference is_planar_face on the same loft — only
+    # where pythonocc is installed (the ada-cpp test envs ship no OCC). The native
+    # multiset above stands on its own; this pins parity when both kernels exist.
+    try:
+        import OCC  # noqa: F401
+
+        _have_occ = True
+    except ImportError:
+        _have_occ = False
+    if _have_occ:
+        assert sorted(planar) == _occ_loft_planar_multiset([bot, top])
+
+    # face_to_advanced_face on a genuinely-ruled (non-planar) side panel yields a
+    # usable ada.geom AdvancedFace: a real B-spline surface with a bounding wire.
+    ruled = next(f for f in faces if not adacpp.cad.is_planar_face(f))
+    assert adacpp.cad.face_surface_type(ruled) == "bspline"
+    data = adacpp.cad.face_to_advanced_face(ruled)
+    assert data.u_degree >= 1 and data.v_degree >= 1
+    assert len(data.poles) >= 2 and len(data.poles[0]) >= 2
+    assert len(data.bounds) >= 1
+    assert len(data.bounds[0]) >= 3
+
+
 def test_cad_read_step_shapes_roundtrip(tmp_path):
     # Write two named/colored boxes, read them back via the OCAF reader.
     b1 = adacpp.cad.build_box([0, 0, 0], [0, 0, 1], [1, 0, 0], 1, 1, 1)
