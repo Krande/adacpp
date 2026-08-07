@@ -109,6 +109,8 @@
 #include <Geom_CylindricalSurface.hxx>
 #include <Geom_ToroidalSurface.hxx>
 #include <Geom_Surface.hxx>
+#include <Geom_Plane.hxx>
+#include <GeomLib_IsPlanarSurface.hxx>
 #include <Geom2d_BSplineCurve.hxx>
 #include <Geom2d_Curve.hxx>
 #include <Geom2d_TrimmedCurve.hxx>
@@ -1414,6 +1416,33 @@ std::string face_surface_type_impl(const ShapeHandle &sh) {
     if (name == "Geom_SurfaceOfRevolution")
         return "revolution";
     return name; // fall back to the raw OCCT class name
+}
+
+// True when the face's surface is geometrically a plane — INCLUDING a
+// Geom_BSplineSurface that happens to be flat. OCC's ThruSections stores even
+// the flat side/taper/cap panels of a loft as B-spline surfaces, so a
+// surface-*type* check (face_surface_type == "plane") would misclassify them as
+// curved. GeomLib_IsPlanarSurface probes the actual geometry (samples the
+// surface, fits a plane) so only the genuinely-ruled corner-transition panels
+// come back non-planar. Mirrors adapy's OccBackend.is_planar_face.
+bool is_planar_face_impl(const ShapeHandle &sh, double tol) {
+    const TopoDS_Shape &s = sh.topods();
+    TopoDS_Face face;
+    if (s.ShapeType() == TopAbs_FACE) {
+        face = TopoDS::Face(s);
+    } else {
+        TopExp_Explorer exp(s, TopAbs_FACE);
+        if (!exp.More())
+            throw std::runtime_error("is_planar_face: shape has no face");
+        face = TopoDS::Face(exp.Current());
+    }
+    Handle(Geom_Surface) surf = BRep_Tool::Surface(face);
+    if (surf.IsNull())
+        return false;
+    // Short-circuit an explicit plane before running the geometric probe.
+    if (Handle(Geom_Plane)::DownCast(surf) || surf->DynamicType()->Name() == std::string("Geom_Plane"))
+        return true;
+    return GeomLib_IsPlanarSurface(surf, tol).IsPlanar();
 }
 
 // Sub-shape lists — boundary crosses once, not per element.
@@ -5248,6 +5277,9 @@ void cad_module(nb::module_ &m) {
           "Topological kind: solid/shell/face/wire/edge/vertex/compound/compsolid.");
     m.def("face_surface_type", &face_surface_type_impl, "shape"_a,
           "Geometric surface kind of a face: plane/cylinder/cone/sphere/torus/bspline/...");
+    m.def("is_planar_face", &is_planar_face_impl, "shape"_a, "tol"_a = 1e-6,
+          "Whether a face's surface is geometrically planar (GeomLib_IsPlanarSurface probe): "
+          "flat B-spline loft panels return True, genuinely-ruled corner panels return False.");
 
     m.def("volume", &volume_impl, "shape"_a, "Solid volume (BRepGProp::VolumeProperties).");
 

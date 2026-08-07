@@ -96,6 +96,7 @@ free_faces = _cad.free_faces
 from_topods_pointer = _cad.from_topods_pointer
 ifc_taxonomy_settings = _cad.ifc_taxonomy_settings
 imprint_planar_faces = _cad.imprint_planar_faces
+is_planar_face = _cad.is_planar_face
 is_valid = _cad.is_valid
 loft_profiles = _cad.loft_profiles
 make_box = _cad.make_box
@@ -219,6 +220,7 @@ __all__ = [
     "glb_diff",
     "ifc_taxonomy_settings",
     "imprint_planar_faces",
+    "is_planar_face",
     "is_valid",
     "loft_profiles",
     "make_box",
