@@ -5,6 +5,11 @@
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <filesystem>
 #include <XCAFDoc_ShapeTool.hxx>
+// OCCT 8.0 pruned a lot of transitive includes; these three used to arrive via the
+// headers above. All exist unchanged in 7.9.3, so they need no version guard.
+#include <NCollection_IndexedDataMap.hxx>
+#include <TCollection_AsciiString.hxx>
+#include <TDF_LabelSequence.hxx>
 
 void stp_to_glb(const std::string &stp_file, const std::string &glb_file, const double linearDeflection = 0.1,
                 const double angularDeflection = 0.5, const bool relativeDeflection = false) {
@@ -39,8 +44,11 @@ void stp_to_glb(const std::string &stp_file, const std::string &glb_file, const 
     // Write to GLB
     RWGltf_CafWriter writer(glb_file.c_str(), true); // true for binary format
 
-    // Additional file information (can be empty if not needed)
-    const TColStd_IndexedDataMapOfStringString file_info;
+    // Additional file information (can be empty if not needed). Spelled as the raw
+    // NCollection template rather than TColStd_IndexedDataMapOfStringString: that alias
+    // is deprecated in OCCT 8.0 and is exactly this type in 7.9.3, so the explicit form
+    // compiles warning-free against both.
+    const NCollection_IndexedDataMap<TCollection_AsciiString, TCollection_AsciiString> file_info;
 
     // Progress indicator (can be null if progress tracking is not needed)
     const Message_ProgressRange progress;

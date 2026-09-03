@@ -5,6 +5,7 @@
 #include <string>
 
 #include "static_param_guard.h"
+#include "../../occt_compat.h"
 
 #include <BRep_Builder.hxx>
 #include <BinXCAFDrivers.hxx>
@@ -157,8 +158,8 @@ void write_shapes_to_step(const std::string &filename, const std::vector<TopoDS_
         }
         writer.export_step(filename, unit, schema);
     } catch (const Standard_Failure &e) {
-        throw std::runtime_error(std::string("OCCT STEP write failed: ") + e.DynamicType()->Name() + ": " +
-                                 e.GetMessageString());
+        throw std::runtime_error(std::string("OCCT STEP write failed: ") + occt_failure_type(e) + ": " +
+                                 occt_failure_message(e));
     }
 }
 
