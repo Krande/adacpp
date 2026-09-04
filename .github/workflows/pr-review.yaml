@@ -1,35 +1,73 @@
 name: Review Pull Request
 
+# Thin wrapper: the logic lives in the `deputy` package
+# (https://github.com/Krande/deputy), which is unit-tested locally rather than
+# debugged by pushing commits and reading Actions logs. This workflow installs
+# deputy and runs pr-review, which checks the PR (conventional title + exactly
+# one release-* label), computes the next version for information, and
+# posts/updates a single sticky comment.
+#
+# Config lives in deputy.toml at the repo root.
+#
+# NOTE — linting is NOT part of deputy. The AibelDevs/action-toolbox review this
+# replaces also ran python-review / py-linting-review checks. Those are gone;
+# the lint gate this repo owns is the `lint` job in pr-tests.yaml, which runs
+# `pixi run lint-check` (isort + black + ruff + clang-format, all in check mode)
+# against the pinned formatter versions in pixi.toml. That is now the only lint
+# gate, and it is a stricter one — it pins its tools, the toolbox review did not.
+#
+# This replaces a call to a reusable workflow referenced by a MOVING ref, from a
+# `pull_request_target` workflow that held `contents: write` and was handed
+# twelve repo secrets (SOURCE_KEY, CONDA_API_TOKEN, PYPI_API_TOKEN, the custom
+# PyPI trio, QUETZ_*, CONTAINER_REGISTRY_*, GITOPS_KEY). Anyone able to push to
+# that ref could have run arbitrary code with this repository's credentials.
+# deputy is pinned to an immutable tag, receives only GITHUB_TOKEN, and does not
+# need `contents: write`.
+#
+# pull_request_target so the job (and GITHUB_TOKEN) can comment and label even
+# on fork PRs. It checks out the BASE ref only and never runs any PR-head code.
+#
+# Pinned to deputy @v0.5.6. 0.5.4 fixed pr-review reading labels from the stale
+# event payload instead of the API, which this workflow's `labeled`/`unlabeled`
+# triggers depend on. 0.5.6 fixed ensure_label crashing with HTTP 422
+# already_exists on every PR in a repo that already carries the release-*
+# labels — which this repo does, so v0.5.5 failed this check unconditionally
+# (Krande/deputy#14).
+
 on:
   pull_request_target:
-    types: [ opened, synchronize, edited, unlabeled ]
-    branches:
-      - main
-      - master
-      - develop
+    types: [opened, synchronize, edited, labeled, unlabeled]
+    branches: [main, develop]
 
 permissions:
+  contents: read
   pull-requests: write
-  contents: write
 
-# Use concurrency to ensure that only one instance of this workflow is running at a time
 concurrency:
-  group: pr-lint-checker-${{ github.sha }}
+  group: pr-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  review:
-    uses: AibelDevs/action-toolbox/.github/workflows/default-tool-pr-review.yaml@main
-    secrets:
-      SOURCE_KEY: ${{ secrets.SOURCE_KEY }}
-      CONDA_API_TOKEN: ${{ secrets.CONDA_API_TOKEN }}
-      PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
-      CUSTOM_PYPI_USERNAME: ${{ secrets.CUSTOM_PYPI_USERNAME }}
-      CUSTOM_PYPI_PASSWORD: ${{ secrets.CUSTOM_PYPI_PASSWORD }}
-      CUSTOM_PYPI_URL: ${{ secrets.CUSTOM_PYPI_URL }}
-      QUETZ_API_KEY: ${{ secrets.QUETZ_API_KEY }}
-      QUETZ_URL: ${{ secrets.QUETZ_URL }}
-      CONTAINER_REGISTRY_URL: ${{ secrets.CONTAINER_REGISTRY_URL }}
-      CONTAINER_REGISTRY_USERNAME: ${{ secrets.CONTAINER_REGISTRY_USERNAME }}
-      CONTAINER_REGISTRY_PASSWORD: ${{ secrets.CONTAINER_REGISTRY_PASSWORD }}
-      GITOPS_KEY: ${{ secrets.GITOPS_KEY }}
+  pr-review:
+    name: Check Pull Request
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout base ref (full history for the version calc)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref }}   # base branch — never the untrusted PR head
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install deputy
+        # deputy pins gitpython<3.1.60 itself from v0.5.2 — do not re-add it here.
+        run: pip install "deputy @ git+https://github.com/Krande/deputy.git@v0.5.6"
+
+      - name: Review the PR (checks + sticky comment); fails if a check fails
+        run: deputy pr-review
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HAS_SOURCE_KEY: ${{ secrets.SOURCE_KEY != '' }}

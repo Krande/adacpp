@@ -1,5 +1,6 @@
 #include "binding_core.h"
 #include "cad/cad_py_wrap.h"
+#include "occt_compat.h"
 
 #include <exception>
 #include <string>
@@ -17,7 +18,7 @@
 
 // Define the modules that will be exposed in python
 NB_MODULE(_ada_cpp_ext_impl, m) {
-    // OCCT's Standard_Failure derives from Standard_Transient, NOT std::exception,
+    // On OCCT 7.9 Standard_Failure derives from Standard_Transient, NOT std::exception,
     // so nanobind's built-in std::exception translator can't convert it: an OCCT
     // throw escaping a binding becomes an untranslatable SystemError
     // ("nanobind::detail::nb_func_error_except(): exception could not be
@@ -28,8 +29,8 @@ NB_MODULE(_ada_cpp_ext_impl, m) {
         try {
             std::rethrow_exception(p);
         } catch (const Standard_Failure &e) {
-            const char *msg = e.GetMessageString();
-            const std::string what = std::string("OCCT ") + e.DynamicType()->Name() + ": " + (msg ? msg : "");
+            const char *msg = occt_failure_message(e);
+            const std::string what = std::string("OCCT ") + occt_failure_type(e) + ": " + (msg ? msg : "");
             PyErr_SetString(PyExc_RuntimeError, what.c_str());
         }
     });

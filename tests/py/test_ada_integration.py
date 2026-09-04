@@ -26,7 +26,7 @@ def beams_model():
     return ada.Assembly() / beams
 
 
-@pytest.mark.skipif(not has_ada, reason="ada is not installed")
+@pytest.mark.skipif(not has_ada, reason="needs ada + pythonocc-core (OCC)")
 def test_ada_integration(beams_model):
     step_writer = OCCStore.get_step_writer()
     shape_iter = OCCStore.shape_iterator(beams_model)
@@ -62,7 +62,7 @@ def test_ada_integration(beams_model):
     assert len(result) > 100_000
 
 
-@pytest.mark.skipif(not has_ada, reason="ada is not installed")
+@pytest.mark.skipif(not has_ada, reason="needs ada + pythonocc-core (OCC)")
 def test_basic_occ_shapes_tessellated():
     """Create 3 boxes in pythonocc-core and move them to adacpp using pointer reference and tesselate the shapes"""
     from adacpp.cadit.occt import TopoDS_Solid

@@ -30,6 +30,9 @@
 #include <Poly_Triangulation.hxx>
 #include <Poly_PolygonOnTriangulation.hxx>
 #include <TColgp_Array1OfPnt.hxx>
+// OCCT 8.0 pruned transitive includes; both headers exist unchanged in 7.9.3.
+#include <TColStd_Array1OfInteger.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopExp.hxx>
