@@ -86,14 +86,21 @@ trimesh = "*"
 pip = "*"
 
 [feature.lint.dependencies]
-black = "==24.4.2"
-isort = "==5.13.2"
-ruff = "==0.4.10"
+black = "==26.5.1"
+# Workaround for an under-constrained conda-forge black package. black 26.5.1
+# imports `pathspec.patterns.gitignore`, which only exists in pathspec 1.x, but
+# its conda recipe declares only `pathspec >=0.9` — so the solver is free to pick
+# 0.12.1 and `black` then dies at import with
+# ModuleNotFoundError: No module named 'pathspec.patterns.gitignore'.
+# Drop this once the black feedstock tightens its pin.
+pathspec = ">=1"
+isort = "==9.0.1"
+ruff = "==0.16.6"
 # Pinned exactly, like black/isort/ruff above. clang-format's output changes between major
 # versions and lint-cpp-check runs `--dry-run --Werror`, so a floating `>=18` meant an unrelated
 # `pixi update` could turn the lint gate red with zero C++ changes — 22 -> 23 was already queued
 # up in conda-forge. Bump this deliberately, in the same commit as the reformat it causes.
-clang-format = "==22.1.8"
+clang-format = "==23.1.0"
 
 [feature.wasm.dependencies]
 nodejs = "*"

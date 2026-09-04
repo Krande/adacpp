@@ -16,7 +16,7 @@ import pytest
 
 cad = pytest.importorskip("adacpp.cad")
 
-from test_ngeom_blob_emit import (  # noqa: E402
+from test_ngeom_blob_emit import (
     _RED,
     _T_IDENT,
     _T_SHIFT,
@@ -42,7 +42,7 @@ def blobs(step_path):
 def _glb_json(path) -> dict:
     data = pathlib.Path(path).read_bytes()
     assert data[:4] == b"glTF", "not a GLB container"
-    (json_len, json_type) = struct.unpack_from("<II", data, 12)
+    json_len, json_type = struct.unpack_from("<II", data, 12)
     assert json_type == 0x4E4F534A  # 'JSON'
     return json.loads(data[20 : 20 + json_len])
 

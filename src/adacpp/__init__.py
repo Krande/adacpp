@@ -12,4 +12,4 @@ if hasattr(_ext, "cadit"):
     from . import cadit, fem, geom, visit
     from .utils import do_this
 
-    __all__ += ["do_this", "cadit", "visit", "fem", "geom"]
+    __all__ += ["cadit", "do_this", "fem", "geom", "visit"]

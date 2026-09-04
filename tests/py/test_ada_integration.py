@@ -20,7 +20,7 @@ except ModuleNotFoundError:
 @pytest.fixture
 def beams_model():
     beams = []
-    for i in range(0, 5):
+    for i in range(5):
         bm = ada.Beam(f"bm{i}", (i, 0, 0), (i + 1, 0, 0), "IPE300")
         beams.append(bm)
     return ada.Assembly() / beams
