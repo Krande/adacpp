@@ -119,6 +119,23 @@ if (EMSCRIPTEN)
     if (TARGET nanobind-static-abi3)
         target_compile_options(nanobind-static-abi3 PRIVATE "-fwasm-exceptions")
     endif ()
+
+    # nanobind 3.0.1's headers call fprintf(stderr, ...) in nb_backend.h, nb_types.h
+    # and ndarray.h without including <cstdio>. glibc and MSVC pull stdio in
+    # transitively, so native builds never notice; emscripten's libc++ does not, and
+    # every translation unit that includes a nanobind header dies with "use of
+    # undeclared identifier 'stderr'". Upstream fixed it after 3.0.1 shipped
+    # (wjakob/nanobind#1423, closed 2026-08-26), so force-include the header until a
+    # release carrying the fix lands on conda-forge — then delete this block.
+    # Applies to both targets for the same reason -fwasm-exceptions does: our code
+    # and nanobind's own sources each include those headers.
+    # COMPILE_LANGUAGE:CXX, not the bare flag: _ada_cpp_ext_impl also compiles C
+    # (third_party/libtess2/Source/*.c) and <cstdio> is C++-only, so an
+    # unconditional -include breaks every C TU with "'cstdio' file not found".
+    target_compile_options(_ada_cpp_ext_impl PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-include;cstdio>")
+    if (TARGET nanobind-static-abi3)
+        target_compile_options(nanobind-static-abi3 PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-include;cstdio>")
+    endif ()
 endif ()
 
 if (EMSCRIPTEN)
@@ -135,6 +152,16 @@ else ()
                 COMMAND "${Python_EXECUTABLE}" -c "import sysconfig; print(sysconfig.get_path('purelib'))"
                 OUTPUT_STRIP_TRAILING_WHITESPACE OUTPUT_VARIABLE PYTHON_SITE_PACKAGES)
     endif()
+
+    # Normalise to CMake path form (forward slashes) before it reaches install().
+    # On Windows both sources of this value carry native backslashes: the preset
+    # sets it from $penv{SP_DIR}, which pixi expands from %CONDA_PREFIX%, and
+    # sysconfig.get_path('purelib') does the same. install() writes the raw string
+    # into CMAKE_ABSOLUTE_DESTINATION_FILES in the generated cmake_install.cmake,
+    # and from CMake 4 that file fails to parse — "C:\AibelProgs\..." is rejected
+    # as an invalid character escape '\A'. CMake 3.30 accepted it, so this only
+    # surfaced on the 4.x bump.
+    file(TO_CMAKE_PATH "${PYTHON_SITE_PACKAGES}" PYTHON_SITE_PACKAGES)
 
     message(STATUS "Python site-packages: ${PYTHON_SITE_PACKAGES}")
 
