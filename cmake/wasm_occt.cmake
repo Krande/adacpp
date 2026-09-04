@@ -29,7 +29,18 @@ include(FetchContent)
 set(WASM_OCCT_PREBUILT_DIR "$ENV{WASM_OCCT_PREBUILT_DIR}"
     CACHE PATH "Prebuilt OCCT-wasm install dir; skip the OCCT ExternalProject build when set")
 
-set(OCCT_GIT_TAG "V7_9_0" CACHE STRING "OCCT git tag to fetch for wasm build")
+# V8_0_0, matching the conda-forge occt the NATIVE build pins in pixi.toml. The
+# two are independent builds — native takes occt from conda-forge, wasm
+# cross-compiles it from source here — so this tag has to be moved by hand and
+# was missed when the native side went to 8.0.0. V8_0_0 exactly, not V8_0_1:
+# ifcopenshell 0.8.5 constrains `occt >=8.0.0,<8.0.1.0a0` natively, and there is
+# no reason for the wasm OCCT to drift off the version the rest of the project
+# is built and tested against.
+#
+# Changing this invalidates the ghcr base image: publish-occt-wasm-base.yaml
+# derives its tag by sed-ing this very line, so the next publish produces
+# V8_0_0-emsdk-<ver> and consumers stop matching the old V7_9_0 image.
+set(OCCT_GIT_TAG "V8_0_0" CACHE STRING "OCCT git tag to fetch for wasm build")
 
 if (WASM_OCCT_PREBUILT_DIR)
     set(OCCT_INSTALL_DIR "${WASM_OCCT_PREBUILT_DIR}")
