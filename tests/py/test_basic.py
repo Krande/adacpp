@@ -263,7 +263,7 @@ def test_cad_loft_profiles_two_squares_is_box():
 
 
 def test_cad_loft_profiles_rejects_single():
-    with pytest.raises(Exception):
+    with pytest.raises(RuntimeError, match="need at least 2 profiles"):
         adacpp.cad.loft_profiles([[[0, 0, 0], [1, 0, 0], [1, 1, 0]]], True, True)
 
 
@@ -734,7 +734,7 @@ def test_cad_make_halfspace_cuts_a_box():
     # Each surface tuple: (type, normal, outer_edges, outer_polyline, inners).
     planar = [s for s in surfs if s[0] == "Plane"]
     assert planar, "expected at least one planar cut face"
-    surface_type, normal, outer_edges, outer_polyline, inners = planar[0]
+    _surface_type, _normal, outer_edges, outer_polyline, _inners = planar[0]
     # The cut face lies on z=0.
     assert all(abs(p[2]) < 1e-6 for p in outer_polyline)
     assert len(outer_polyline) >= 3
@@ -825,7 +825,7 @@ def test_cad_boolean_ops():
     assert tuple(round(v, 6) for v in adacpp.cad.bbox(adacpp.cad.boolean("INTERSECTION", a, b))) == (0, 0, 0, 1, 1, 1)
     # difference is non-empty and bounded by a
     assert adacpp.cad.is_valid(adacpp.cad.boolean("DIFFERENCE", a, b))
-    with pytest.raises(Exception):
+    with pytest.raises(RuntimeError, match="unknown op"):
         adacpp.cad.boolean("NOPE", a, b)
 
 

@@ -238,7 +238,7 @@ gp_Trsf get_product_transform(TopoDS_Shape &shape, const Handle(StepBasic_Produc
     gp_Trsf transform;
 
     // Helper lambda to extract gp_Trsf from Axis2Placement3D
-    auto extract_transform_from_placement = [](const Handle(StepGeom_Axis2Placement3d) & placement) -> gp_Trsf {
+    auto extract_transform_from_placement = [](const Handle(StepGeom_Axis2Placement3d) &placement) -> gp_Trsf {
         gp_Trsf trsf;
         if (!placement.IsNull()) {
             gp_Pnt location(placement->Location()->CoordinatesValue(1), placement->Location()->CoordinatesValue(2),
@@ -407,7 +407,7 @@ Interface_EntityIterator MyTypedExpansions(const Handle(Standard_Transient) & ro
     std::unordered_set<Standard_Integer> visited;
 
     // Helper to enqueue unvisited
-    auto enqueueIfNotVisited = [&](const Handle(Standard_Transient) & ent) {
+    auto enqueueIfNotVisited = [&](const Handle(Standard_Transient) &ent) {
         if (ent.IsNull())
             return;
         // theGraph.Model()->Number(ent) gives 1-based index in the model
@@ -467,7 +467,7 @@ Interface_EntityIterator Get_Associated_SolidModel_BiDirectional(const Handle(St
     std::unordered_set<Standard_Integer> visited; // track visited by their 1-based model index
 
     // Helper to enqueue an entity if not already visited
-    auto enqueueIfNotVisited = [&](const Handle(Standard_Transient) & ent) {
+    auto enqueueIfNotVisited = [&](const Handle(Standard_Transient) &ent) {
         if (!ent.IsNull()) {
             Standard_Integer idx = model->Number(ent);
             if (idx > 0 && visited.find(idx) == visited.end()) {

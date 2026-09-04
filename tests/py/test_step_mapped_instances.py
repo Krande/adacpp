@@ -237,5 +237,5 @@ def test_step_parity_counts_mapped_instances(src):
 
 def test_rotation_math_sanity():
     # the rotated placement really is a 90 deg z-rotation
-    loc, z, x = _PLACEMENTS[2]
+    _loc, z, x = _PLACEMENTS[2]
     assert math.isclose(sum(a * b for a, b in zip(z, x)), 0.0, abs_tol=1e-12)

@@ -28,7 +28,7 @@ import types
 
 import pytest
 
-import adacpp.cad as cad
+from adacpp import cad
 from adacpp._ada_cpp_ext_impl import cad as _cad
 
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -78,7 +78,7 @@ def _optional_names() -> set[str]:
     behaviour — valid anywhere. test_declared_optionals_match_the_cpp pins this against the C++
     guards so the self-declaration cannot drift into a comfortable lie.
     """
-    return set(re.findall(r"^(\w+) = _optional\(", _INSTALLED.read_text(encoding="utf-8"), re.M))
+    return set(re.findall(r"^(\w+) = _optional\(", _INSTALLED.read_text(encoding="utf-8"), re.MULTILINE))
 
 
 def test_every_binding_is_re_exported():
@@ -155,7 +155,7 @@ def test_conditional_bindings_are_not_bound_flat():
         # Matched loosely across newlines: the generator emits the exploded, black-canonical call, and
         # pinning the exact layout here would just re-fight black every time a reason changes length.
         assert re.search(
-            rf"^{re.escape(name)} = _optional\(\s*\"{re.escape(name)}\",", src, re.M
+            rf"^{re.escape(name)} = _optional\(\s*\"{re.escape(name)}\",", src, re.MULTILINE
         ), f"{name} should be bound via _optional()"
 
 
@@ -212,7 +212,11 @@ def _exec_generated_as_wasm():
     assert imp in src, "generated import line changed — this fake-injection is no longer faithful"
     fake = types.SimpleNamespace(**{n: getattr(_cad, n) for n in _PUBLIC - _optional_names()})
     ns: dict = {"_cad": fake}
-    exec(compile(src.replace(imp, ""), "<generated adacpp.cad as wasm>", "exec"), ns)
+    # Hoisted out of the exec() call so the line stays short: black splits a long
+    # exec(...) across lines, which moves a trailing `# noqa` off the `exec` token,
+    # and ruff then strips it as unused and re-reports S102.
+    code = compile(src.replace(imp, ""), "<generated adacpp.cad as wasm>", "exec")
+    exec(code, ns)  # noqa: S102 - executing the generated module under a faked _cad IS this test
     return ns
 
 

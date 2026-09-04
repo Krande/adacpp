@@ -61,6 +61,12 @@ adacpp = "src/adacpp"
 
 [tool.black]
 line-length = 120
+# Same target as isort's py_version and the 3.10 ruff resolves from
+# requires-python. Left unset, black 26 infers a much newer target and warns
+# "Python 3.12 cannot parse code formatted for Python 3.15", which disables its
+# AST-equivalence safety check — the check that proves a reformat did not change
+# the code's meaning. Keep all three tools on one target.
+target-version = ["py310"]
 # build/ holds CMake FetchContent deps (manifold, etc.) and third_party/ is vendored;
 # black already skips build/ via its default exclude, force-exclude keeps third_party out too.
 force-exclude = "(^|/)(build|third_party)/"
@@ -72,7 +78,23 @@ exclude = ["examples/", ".pixi/", "temp/", "node_modules/", "output/", "build/",
 [tool.ruff.lint]
 ignore = ["E741"]
 
+[tool.ruff.lint.isort]
+# adacpp._ada_cpp_ext_impl is the compiled extension: it has no directory under
+# src/, so ruff's src-based first-party detection files it as THIRD-party while
+# plain `adacpp` (which does have src/adacpp/) comes out first-party. isort puts
+# both in first-party. `pixi run lint` is isort THEN ruff --fix, so they undid
+# each other on tests/py/test_cad_api_generated.py every run. Naming the package
+# settles it for both.
+known-first-party = ["adacpp"]
+
 [tool.isort]
 profile = "black"
+# Match the Python that ruff resolves from `requires-python = ">=3.10"` above.
+# Without this isort uses the interpreter it runs under (3.12 in the lint env)
+# and classifies `tomllib` as stdlib, while ruff's import rules target 3.10 and
+# call it third-party. `pixi run lint` is isort THEN ruff --fix, so the two
+# fought over tools/build_wheel.py: isort moved the import up, ruff moved it
+# back, the task was not idempotent, and lint-check could never pass.
+py_version = 310
 skip = [".pixi", "node_modules", "temp", "output", "build", "third_party"]
 skip_glob = ["**/node_modules/**", "**/temp/**", "**/output/**", "**/build/**", "**/third_party/**"]

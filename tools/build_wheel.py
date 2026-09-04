@@ -24,9 +24,10 @@ import argparse
 import base64
 import hashlib
 import sys
-import tomllib
 import zipfile
 from pathlib import Path
+
+import tomllib
 
 # The wheel platform tag must match the target pyodide for micropip to accept
 # it. Pyodide 0.28+/0.29.x (Python 3.13, emscripten 4.0.9) standardise on the

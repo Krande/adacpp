@@ -156,7 +156,7 @@ def test_step_assembly_paths(blobs, tmp_path):
 
 def test_step_mapped_instances_from_records(blobs, tmp_path):
     out = tmp_path / "mapped.stp"
-    b, m = blobs[0]
+    b, _m = blobs[0]
     st = cad.stream_ngeom_to_step([("box", b, None, [_T_IDENT, _T_SHIFT], None)], str(out))
     assert st["solids_in"] == 1
     assert st["solids_out"] == 1
@@ -196,7 +196,7 @@ def test_ifc_flat_records(blobs, tmp_path):
 
 def test_ifc_spatial_tree_and_mapped(blobs, tmp_path):
     out = tmp_path / "tree.ifc"
-    b, m = blobs[0]
+    b, _m = blobs[0]
     st = cad.stream_ngeom_to_ifc(
         [("box", b, None, [_T_IDENT, _T_SHIFT], [[(1, "deck"), (10, "box")], [(1, "deck"), (10, "box")]])],
         str(out),
@@ -262,7 +262,7 @@ DATA;
 def test_ifc_body_spf_fragment(blobs, tmp_path):
     """The body-fragment binding: geometry-only SPF, contiguous ids from first_id, and the
     returned body item id is the brep a hand-built typed wrapper can reference."""
-    b, m = blobs[0]
+    b, _m = blobs[0]
     spf, next_id, body, rep_type = cad.ngeom_to_ifc_body_spf(b, 100)
     assert body >= 100
     assert rep_type == "AdvancedBrep"
