@@ -1,0 +1,31 @@
+# deputy CI config — https://github.com/Krande/deputy
+#
+# The pr-review / tag-on-pr-merge workflows install deputy and call it; the static
+# config lives here so those workflows stay thin. Everything else falls back to
+# deputy's built-in semantic-release defaults, which already match what
+# action_config.toml spelled out by hand for this repo: tag_format "v{version}",
+# angular parser, allowed_tags chore/feat/fix, minor_tags feat, patch_tags
+# fix/perf, main branch, push over origin, upload_to_vcs_release. Nothing is
+# restated here just to agree with a default.
+#
+# action_config.toml is deliberately still present: release-on-new-tag.yaml,
+# manual-dispatch-release.yaml and pre-release-dispatch.yaml still call
+# AibelDevs/action-toolbox and read it. Delete it only when those move too.
+
+[pr_review]
+# Marker for this repo's sticky PR comment; keeps deputy updating one thread
+# instead of posting a new comment on every run.
+marker = "<!-- ADACPP_PR_BOT -->"
+# Release label applied when a PR carries none. deputy's own default is
+# release-skip (no label => no release); release-auto instead lets
+# semantic-release derive the bump from the PR title, so a `fix:` PR cuts a
+# patch and a `feat:` PR cuts a minor with nobody hand-applying a label. An
+# explicit release-skip on a PR still wins. This preserves the behaviour this
+# repo already had — 0.19.0 -> 0.20.0 was cut off an unlabelled `feat:` PR.
+default_label = "release-auto"
+
+[release]
+# Stated explicitly even though it equals deputy's built-in default: which file
+# carries the version is too important to leave implied. conda/recipe.yaml reads
+# the same field via load_from_file(), so this is the single source of truth.
+version_toml = ["pyproject.toml:project.version"]
