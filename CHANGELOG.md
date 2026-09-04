@@ -2,6 +2,21 @@
 
 
 
+## v0.21.0 (2026-09-04)
+
+### Chore
+
+* chore: migrate CI from action-toolbox to deputy (#49)
+
+Co-authored-by: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`43580ee`](https://github.com/Krande/adacpp/commit/43580ee3783423f11778fc83dc220957c3f7e54f))
+
+### Feature
+
+* feat: build against OCCT 8.0.0 (#48)
+
+Co-authored-by: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`fdfeb02`](https://github.com/Krande/adacpp/commit/fdfeb0268d9171afc832c7ba14caee186b73cce8))
+
+
 ## v0.20.0 (2026-08-07)
 
 ### Feature
