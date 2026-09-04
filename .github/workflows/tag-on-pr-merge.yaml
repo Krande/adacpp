@@ -26,7 +26,7 @@ name: Create Tag on PR Merge
 #   * Do not enable "Do not allow bypassing the above settings" in branch
 #     protection, or the deploy-key push is rejected and no tag is created.
 #
-# Pinned to deputy @v0.5.5.
+# Pinned to deputy @v0.5.6 (see pr-review.yaml for what 0.5.6 fixed).
 
 on:
   pull_request_target:
@@ -66,7 +66,7 @@ jobs:
 
       - name: Install deputy
         # deputy pins gitpython<3.1.60 itself from v0.5.2 — do not re-add it here.
-        run: pip install "deputy @ git+https://github.com/Krande/deputy.git@v0.5.5"
+        run: pip install "deputy @ git+https://github.com/Krande/deputy.git@v0.5.6"
 
       - name: Tag + release per the PR's release label
         run: deputy tag-on-merge
