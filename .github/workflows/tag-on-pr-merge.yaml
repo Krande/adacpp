@@ -10,12 +10,13 @@ name: Create Tag on PR Merge
 # (pyproject.toml:project.version); conda/recipe.yaml reads that same field, so
 # the conda package version follows automatically.
 #
-# CRITICAL — the tag is pushed over SSH with the SOURCE_KEY deploy key, NOT the
-# default GITHUB_TOKEN. A GITHUB_TOKEN-pushed tag does not trigger other
-# workflows; a deploy-key push does — so the new tag still fires
-# release-on-new-tag.yaml (on: push tags), which is still on
-# AibelDevs/action-toolbox. Breaking that chain would silently stop every
-# release from being built and published. Wired via
+# The bump commit and tag are pushed over SSH with the SOURCE_KEY deploy key, NOT
+# the default GITHUB_TOKEN. Two reasons: the push has to land on protected main,
+# and a GITHUB_TOKEN-pushed tag does not trigger other workflows whereas a
+# deploy-key push does. Nothing listens for tag pushes today — the workflow that
+# used to, release-on-new-tag.yaml, skipped every one of its publish jobs and was
+# removed with action_config.toml — but keeping the deploy-key push means adding
+# a real tag-triggered publish workflow later just works. Wired via
 # `remote.ignore_token_for_push` in deputy's defaults: semantic-release pushes
 # over the `origin` remote the checkout points at (SSH + SOURCE_KEY) and uses
 # GH_TOKEN only for the Release API call.

@@ -8,9 +8,9 @@
 # fix/perf, main branch, push over origin, upload_to_vcs_release. Nothing is
 # restated here just to agree with a default.
 #
-# action_config.toml is deliberately still present: release-on-new-tag.yaml,
-# manual-dispatch-release.yaml and pre-release-dispatch.yaml still call
-# AibelDevs/action-toolbox and read it. Delete it only when those move too.
+# This replaces action_config.toml, which is deleted. Its three readers
+# (release-on-new-tag / manual-dispatch-release / pre-release-dispatch) went with
+# it — see the commit message for why all three were dead.
 
 [pr_review]
 # Marker for this repo's sticky PR comment; keeps deputy updating one thread
