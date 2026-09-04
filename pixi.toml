@@ -26,8 +26,20 @@ occt = { version = "==8.0.0", build = "*novtk*" }
 # 0.8.5 is the first ifcopenshell built against occt 8.0.0 (its earlier builds
 # pin occt 7.9.3). Keep in lockstep with adapy's OCCT for the shared-ABI bridge.
 ifcopenshell = ">=0.8.5"
-nanobind = "==2.12.0"
-cmake = "==3.30.3"
+# 3.x. The 3.0 release adds optional "split mode" and makes several API breaks,
+# none of which this codebase touches: no NB_TRAMPOLINE (trampoline Size arg
+# deprecated), no gil_scoped_acquire (can now fail, needs .is_valid()), no
+# make_iterator/bind_vector/bind_map, and no computed rv_policy or argument
+# annotations (both are compile-time tags now). The STABLE_ABI path in
+# cmake/build_python.cmake is unchanged — split mode is opt-in via BACKEND_MODULE.
+# NOTE: 3.0.1's headers are missing a <cstdio> include and break the emscripten
+# build; cmake/build_python.cmake force-includes it. See wjakob/nanobind#1423.
+nanobind = "==3.0.1"
+# CMake 4.x. Our own cmake_minimum_required is 3.20, well clear of the <3.5
+# compatibility CMake 4 removed. Note for the wasm path only: rapidjson, fetched
+# by cmake/wasm_occt.cmake, declares a pre-3.5 minimum and needs
+# CMAKE_POLICY_VERSION_MINIMUM if that path is ever built with CMake 4.
+cmake = "==4.4.3"
 numpy = "*"
 # 6.2 required transitively by the ifcopenshell 0.8.5 builds linked against
 # occt 8.0.0 (the occt 7.9.3 builds wanted 6.1.1); matches adapy.
@@ -40,7 +52,7 @@ cli11 = "*"
 # it by accident, as a transitive dep of the ada-py metapackage that
 # feature.test no longer pulls.
 zlib = "*"
-tinygltf = "==2.8.21" # This must be installed in target dir also if you want to compile
+tinygltf = "==2.9.1" # This must be installed in target dir also if you want to compile
 gmsh = "*"
 ninja = "*"
 cxx-compiler = "*"
@@ -100,6 +112,15 @@ cmake = "*"
 # (the old -fexceptions JS-trampoline model fatally traps in STEPCAFControl_Writer).
 emscripten = "==4.0.9"
 pyodide-build = "==0.35.0"
+# pyodide-build shells out to `make` (its xbuildenv install and
+# `pyodide config get python_include_dir` both do). Without it the build fails
+# late and obscurely: PermissionError: [Errno 13] Permission denied: 'make',
+# then an empty -DPython_INCLUDE_DIR= and "Python_INCLUDE_DIR must be set to the
+# pyodide xbuildenv Python.h location" from CMakeLists.txt. CI only works by
+# accident because ubuntu-latest ships make; any leaner image does not. Same
+# reasoning as the `git = "*"` pin in feature.common — make the env
+# self-contained rather than depend on what the runner happens to have.
+make = "*"
 
 [feature.lint.tasks]
 # Format every first-party C++ unit under src/ (no vendored code lives there;
@@ -219,7 +240,11 @@ SP_DIR = "%CONDA_PREFIX%/Lib/site-packages"
 
 [feature.stp2glb.dependencies]
 # Standalone OCC-free STP2GLB CLI build deps ONLY — no occt/cgal/gmsh/ifcopenshell/python-dev.
-cmake = "==3.30.3"
+# CMake 4.x. Our own cmake_minimum_required is 3.20, well clear of the <3.5
+# compatibility CMake 4 removed. Note for the wasm path only: rapidjson, fetched
+# by cmake/wasm_occt.cmake, declares a pre-3.5 minimum and needs
+# CMAKE_POLICY_VERSION_MINIMUM if that path is ever built with CMake 4.
+cmake = "==4.4.3"
 ninja = "*"
 cxx-compiler = "*"
 cli11 = "*"
