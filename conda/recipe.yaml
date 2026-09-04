@@ -33,7 +33,7 @@ requirements:
     # Pin occt/ifcopenshell to the same versions pixi resolves (see pixi.toml):
     # libIfcParse.a references a specific rocksdb ABI, so the whole occt /
     # ifcopenshell / rocksdb trio must match what ifcopenshell was built against.
-    - occt ==7.9.3
+    - occt ==8.0.0
     - ifcopenshell >=0.8.5
     # rocksdb is embedded statically in libIfcParse; we link RocksDB::rocksdb
     # (the static lib) directly, so it must be present at build time. It is only

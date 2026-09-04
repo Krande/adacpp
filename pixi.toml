@@ -20,16 +20,26 @@ rattler-build = "*"
 # 3.13 to match pyodide 0.29.x's host interpreter (its xbuildenv install
 # requires a 3.13 host); also adacpp's target Python under the new ABI.
 python = "==3.13"
-occt = { version = "==7.9.3", build = "*novtk*" }
-# 0.8.5 is the first ifcopenshell built against occt 7.9.3 (0.8.3.post1 pins
-# occt 7.9.0). Keep in lockstep with adapy's OCCT for the shared-ABI bridge.
+# 8.0.0 exactly: the ifcopenshell 0.8.5 builds that carry occt 8 pin
+# `occt >=8.0.0,<8.0.1.0a0`, so 8.0.1 does not co-solve.
+occt = { version = "==8.0.0", build = "*novtk*" }
+# 0.8.5 is the first ifcopenshell built against occt 8.0.0 (its earlier builds
+# pin occt 7.9.3). Keep in lockstep with adapy's OCCT for the shared-ABI bridge.
 ifcopenshell = ">=0.8.5"
 nanobind = "==2.12.0"
 cmake = "==3.30.3"
 numpy = "*"
-# 6.1.1 required transitively by ifcopenshell 0.8.5 (occt 7.9.3); matches adapy.
-cgal-cpp = "==6.1.1"
+# 6.2 required transitively by the ifcopenshell 0.8.5 builds linked against
+# occt 8.0.0 (the occt 7.9.3 builds wanted 6.1.1); matches adapy.
+cgal-cpp = "==6.2"
 cli11 = "*"
+# RocksDBConfig.cmake (find_package(RocksDB) in cmake/deps_ifc.cmake) calls
+# find_dependency(ZLIB), which needs libz.so + zlib.h — the runtime-only
+# `libzlib` that comes in transitively carries neither. conda/recipe.yaml
+# already lists zlib in `host` for the same reason; until now the pixi envs got
+# it by accident, as a transitive dep of the ada-py metapackage that
+# feature.test no longer pulls.
+zlib = "*"
 tinygltf = "==2.8.21" # This must be installed in target dir also if you want to compile
 gmsh = "*"
 ninja = "*"
@@ -46,14 +56,32 @@ libxext-conda-x86_64 = "*"
 
 [feature.test.dependencies]
 pytest = "==8.3.2"
-ada-py = "*"
+# ada-py-core, NOT the ada-py metapackage: ada-py pulls pythonocc-core, which
+# conda-forge still builds only against occt 7.9.3 (`occt ==7.9.3 *novtk*`), so
+# it cannot co-solve with the occt 8.0.0 pin above. The core split carries the
+# importable `ada` package without the OCC binding. Consequence: the OCC parity
+# cross-checks in tests/py (test_ada_integration.py, and the pythonocc arms of
+# test_basic.py) self-skip on the missing `OCC` import — they are guarded by
+# importorskip / ModuleNotFoundError. Restore `ada-py` here the moment
+# pythonocc-core ships an occt-8 build.
+ada-py-core = "*"
+# ada-py-core declares only `python` as a dependency, so every module the `ada`
+# import chain actually reaches has to be named here. `import ada` pulls exactly
+# these two beyond what feature.common already provides (numpy, ifcopenshell):
+# ada.core.vector_transforms -> pyquaternion, and the mesh layer -> trimesh.
+pyquaternion = "*"
+trimesh = "*"
 pip = "*"
 
 [feature.lint.dependencies]
 black = "==24.4.2"
 isort = "==5.13.2"
 ruff = "==0.4.10"
-clang-format = ">=18"
+# Pinned exactly, like black/isort/ruff above. clang-format's output changes between major
+# versions and lint-cpp-check runs `--dry-run --Werror`, so a floating `>=18` meant an unrelated
+# `pixi update` could turn the lint gate red with zero C++ changes — 22 -> 23 was already queued
+# up in conda-forge. Bump this deliberately, in the same commit as the reformat it causes.
+clang-format = "==22.1.8"
 
 [feature.wasm.dependencies]
 nodejs = "*"
