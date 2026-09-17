@@ -81,6 +81,7 @@ build_planar_face = _cad.build_planar_face
 build_revolved_area_solid = _cad.build_revolved_area_solid
 build_sphere = _cad.build_sphere
 build_swept_disk_solid = _cad.build_swept_disk_solid
+build_torus = _cad.build_torus
 build_wire = _cad.build_wire
 center_of_mass = _cad.center_of_mass
 cut_surfaces = _cad.cut_surfaces
@@ -204,6 +205,7 @@ __all__ = [
     "build_revolved_area_solid",
     "build_sphere",
     "build_swept_disk_solid",
+    "build_torus",
     "build_wire",
     "center_of_mass",
     "cut_surfaces",
