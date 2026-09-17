@@ -5370,8 +5370,7 @@ void cad_module(nb::module_ &m) {
           "is_area=False sweeps the outer wire alone (open lateral surface).");
 
     m.def("build_extruded_area_solid_tapered", &build_extruded_area_solid_tapered_impl, "outer_start"_a, "outer_end"_a,
-          "location"_a, "axis"_a, "ref_dir"_a, "depth"_a,
-          "extruded_dir"_a = std::array<double, 3>{0.0, 0.0, 1.0},
+          "location"_a, "axis"_a, "ref_dir"_a, "depth"_a, "extruded_dir"_a = std::array<double, 3>{0.0, 0.0, 1.0},
           "Tapered extruded area solid (tapered beams): loft (ThruSections) between "
           "the start outer profile and the end outer profile, the latter displaced "
           "`depth` along `extruded_dir`, then placed at the Axis2Placement3D frame. "
