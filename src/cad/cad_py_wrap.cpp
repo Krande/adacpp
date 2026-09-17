@@ -132,6 +132,7 @@
 #include <TColStd_Array2OfReal.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCone.hxx>
+#include <BRepPrimAPI_MakeTorus.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakeHalfSpace.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
@@ -2772,17 +2773,39 @@ ShapeHandle build_extruded_area_solid_impl(const std::vector<std::vector<double>
 // Native ExtrudedAreaSolidTapered (tapered beams): port of adapy's
 // make_extruded_area_shape_tapered_from_geom. Loft (BRepOffsetAPI_ThruSections)
 // between the start profile wire (in the XY frame) and the end profile wire
-// translated +Z by depth, then place via the gp_Ax3 change-of-basis. Only the
-// outer wires are lofted — matches OCC, which takes wires()[0] of each profile
-// face (inner voids are not carried through the taper).
+// displaced by `depth` along `extruded_dir`, then place via the gp_Ax3
+// change-of-basis. Only the outer wires are lofted — matches OCC, which takes
+// wires()[0] of each profile face (inner voids are not carried through).
+//
+// THE END PROFILE FOLLOWS `extruded_dir`, and that is what makes an OBLIQUE
+// frustum expressible. This used to translate the end wire along +Z
+// unconditionally, so a solid whose extrusion direction was not its profile
+// normal came out as a RIGHT frustum -- the same shape, silently, with no error
+// anywhere. A truncated cone whose top circle is offset sideways from its base
+// is the ordinary case for it.
+//
+// The second section is DISPLACED, not tilted: both stay parallel to the
+// profile plane, so the placement below keeps the profile's own normal rather
+// than `extruded_dir`.
 ShapeHandle build_extruded_area_solid_tapered_impl(const std::vector<std::vector<double>> &outer_start,
                                                    const std::vector<std::vector<double>> &outer_end,
                                                    std::array<double, 3> loc, std::array<double, 3> axis,
-                                                   std::array<double, 3> ref_dir, double depth) {
+                                                   std::array<double, 3> ref_dir, double depth,
+                                                   std::array<double, 3> extruded_dir) {
+    const double dlen = std::sqrt(extruded_dir[0] * extruded_dir[0] + extruded_dir[1] * extruded_dir[1] +
+                                  extruded_dir[2] * extruded_dir[2]);
+    if (dlen <= 1e-12) {
+        // Refused rather than defaulted to +Z: a zero direction is a solid with
+        // no length, and quietly substituting one would build a shape nobody
+        // asked for.
+        throw std::runtime_error("build_extruded_area_solid_tapered: zero-length extruded_direction");
+    }
+    const std::array<double, 3> offset = {extruded_dir[0] / dlen * depth, extruded_dir[1] / dlen * depth,
+                                          extruded_dir[2] / dlen * depth};
+
     const TopoDS_Wire wire1 = wire_from_edges(outer_start);
     TopoDS_Wire wire2 = wire_from_edges(outer_end);
-    // End profile sits at depth along +Z (identity rotation + Z translation).
-    wire2 = TopoDS::Wire(place_at(wire2, {0.0, 0.0, depth}, {0.0, 0.0, 1.0}, {1.0, 0.0, 0.0}));
+    wire2 = TopoDS::Wire(place_at(wire2, offset, {0.0, 0.0, 1.0}, {1.0, 0.0, 0.0}));
 
     BRepOffsetAPI_ThruSections ts(Standard_True); // is_solid
     ts.AddWire(wire1);
@@ -2792,6 +2815,24 @@ ShapeHandle build_extruded_area_solid_tapered_impl(const std::vector<std::vector
         throw std::runtime_error("build_extruded_area_solid_tapered: ThruSections failed");
     }
     return ShapeHandle(place_at(ts.Shape(), loc, axis, ref_dir));
+}
+
+// A full torus about `axis`, of `major_radius` and `minor_radius`. STEP AP242
+// `torus`; there is no IFC CSG equivalent, which is why the solid carries the
+// STEP attribute names.
+//
+// An Axis1Placement fixes the axis but not a direction in the plane normal to
+// it, and a full revolution does not need one: every starting direction gives
+// the same solid. A PARTIAL sweep does, and that is a RevolvedAreaSolid of a
+// circular profile rather than this.
+//
+// `minor_radius` may equal or exceed `major_radius`; OCC builds the
+// self-intersecting spindle form rather than refusing, and that is the surface
+// STEP describes.
+ShapeHandle build_torus_impl(std::array<double, 3> loc, std::array<double, 3> axis, double major_radius,
+                             double minor_radius) {
+    const gp_Ax2 ax2(gp_Pnt(loc[0], loc[1], loc[2]), gp_Dir(axis[0], axis[1], axis[2]));
+    return ShapeHandle(BRepPrimAPI_MakeTorus(ax2, major_radius, minor_radius).Shape());
 }
 
 // Generic loft: thread a ruled (or smooth) solid/shell through a sequence of
@@ -5317,6 +5358,8 @@ void cad_module(nb::module_ &m) {
 
     m.def("build_cone", &build_cone_impl, "location"_a, "axis"_a, "bottom_radius"_a, "height"_a,
           "Right circular cone (apex radius 0) with base at `location`.");
+    m.def("build_torus", &build_torus_impl, "location"_a, "axis"_a, "major_radius"_a, "minor_radius"_a,
+          "Full torus about `axis`, of `major_radius` and `minor_radius`.");
 
     m.def("build_extruded_area_solid", &build_extruded_area_solid_impl, "outer"_a, "inners"_a, "location"_a, "axis"_a,
           "ref_dir"_a, "depth"_a, "is_area"_a = true,
@@ -5328,9 +5371,12 @@ void cad_module(nb::module_ &m) {
 
     m.def("build_extruded_area_solid_tapered", &build_extruded_area_solid_tapered_impl, "outer_start"_a, "outer_end"_a,
           "location"_a, "axis"_a, "ref_dir"_a, "depth"_a,
+          "extruded_dir"_a = std::array<double, 3>{0.0, 0.0, 1.0},
           "Tapered extruded area solid (tapered beams): loft (ThruSections) between "
-          "the start outer profile and the end outer profile (placed +Z by `depth`), "
-          "then placed at the Axis2Placement3D frame. Edge records as in "
+          "the start outer profile and the end outer profile, the latter displaced "
+          "`depth` along `extruded_dir`, then placed at the Axis2Placement3D frame. "
+          "`extruded_dir` defaults to +Z, which is the right frustum; any other "
+          "direction gives an oblique one. Edge records as in "
           "build_extruded_area_solid; only the outer wires are lofted.");
 
     m.def("loft_profiles", &loft_profiles_impl, "profiles"_a, "ruled"_a = true, "solid"_a = true,
