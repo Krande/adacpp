@@ -2,6 +2,29 @@
 
 
 
+## v0.22.0 (2026-09-17)
+
+### Chore
+
+* chore: bump nanobind to 3.0.1, cmake to 4.4.3, tinygltf to 2.9.1 (#50)
+
+Co-authored-by: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`c09b1a3`](https://github.com/Krande/adacpp/commit/c09b1a3bd277343b2e352918e3a439f6e7f0fd7b))
+
+* chore: bump deputy pin to v0.5.6 (#51)
+
+Co-authored-by: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`cbe2ff1`](https://github.com/Krande/adacpp/commit/cbe2ff11264c840d7498a85510991135038f2133))
+
+### Feature
+
+* feat: Oblique tapered solids, and a torus builder (#53)
+
+Co-authored-by: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`97419cb`](https://github.com/Krande/adacpp/commit/97419cb9b82c39f8dc5ffcb4f1b18bec9ff0dac6))
+
+* feat: wasm OCCT to V8_0_0, lint tooling bumps, setup-pixi 0.10.2 (#52)
+
+Co-authored-by: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`9a70961`](https://github.com/Krande/adacpp/commit/9a709618f5f0771a33bd2cb4a5c028b37e558a11))
+
+
 ## v0.21.0 (2026-09-04)
 
 ### Chore
