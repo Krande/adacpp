@@ -26,7 +26,14 @@ name: Create Tag on PR Merge
 #   * Do not enable "Do not allow bypassing the above settings" in branch
 #     protection, or the deploy-key push is rejected and no tag is created.
 #
-# Pinned to deputy @v0.5.5.
+# Pinned to deputy @v0.8.1, matching pr-review.yaml.
+#
+# It was v0.5.5, and only pr-review got bumped when that version's broken
+# `ensure_label` was found -- so the two workflows in this repo installed
+# different deputies from the same commit. `tag_on_merge` never touches the
+# GitHub client, so it could not hit the 422 and nothing was failing; that is
+# exactly why it sat unnoticed. Two pins for one tool is a thing to keep in
+# step, not a thing to discover later.
 
 on:
   pull_request_target:
@@ -66,7 +73,7 @@ jobs:
 
       - name: Install deputy
         # deputy pins gitpython<3.1.60 itself from v0.5.2 — do not re-add it here.
-        run: pip install "deputy @ git+https://github.com/Krande/deputy.git@v0.5.5"
+        run: pip install "deputy @ git+https://github.com/Krande/deputy.git@v0.8.1"
 
       - name: Tag + release per the PR's release label
         run: deputy tag-on-merge

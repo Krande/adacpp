@@ -27,9 +27,22 @@ name: Review Pull Request
 # pull_request_target so the job (and GITHUB_TOKEN) can comment and label even
 # on fork PRs. It checks out the BASE ref only and never runs any PR-head code.
 #
-# Pinned to deputy @v0.5.5 — 0.5.4 fixed pr-review reading labels from the stale
-# event payload instead of the API, which this workflow's `labeled`/`unlabeled`
-# triggers depend on.
+# Pinned to deputy @v0.8.1 — the `run:` below is the pin; this comment had
+# drifted behind it and said v0.5.5 while v0.8.1 was being installed.
+#
+# v0.5.4 fixed pr-review reading labels from the stale event payload instead of
+# the API, which this workflow's `labeled`/`unlabeled` triggers depend on.
+#
+# v0.5.6 is the one that matters now: v0.5.5 introduced `GitHubError` wrapping
+# in `_request` but left `ensure_label` catching `urllib.error.HTTPError`, so
+# the 422 `already_exists` handler was dead and EVERY pr-review run on this repo
+# failed with
+#
+#     deputy.github.GitHubError: POST .../labels failed: HTTP 422 -- already_exists
+#
+# A label that already exists is the normal case, so this was not intermittent.
+# v0.5.5 is the only affected release: v0.5.3/v0.5.4 predate the wrapping and
+# v0.5.6+ catch the right type.
 
 on:
   pull_request_target:
