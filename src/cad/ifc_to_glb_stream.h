@@ -20,6 +20,7 @@
 #include <filesystem>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include "effective_concurrency.h"
@@ -39,10 +40,24 @@ namespace adacpp {
 // GLB writer (ngeom_glb.h). Neither is a STEP feature — the track vocabulary and per-face region
 // capture live in the ngeom layer, so the only thing that ever made them STEP-only was this
 // function not forwarding them.
+//
+// `include_guids` streams a SUBSET of the file: only products whose IFC GlobalId is in the set.
+// Empty (the default) means every product, so every existing caller is unchanged. The point is to
+// build one branch of a published spatial tree without first slicing a subset file — slicing
+// duplicates the bytes per build and is slower. Contract, and it is deliberately not a filter that
+// shrugs:
+//   * a requested GlobalId that IS a geometry-bearing product is streamed;
+//   * a requested GlobalId that is absent, or present but carries no body (an IfcSpace, a
+//     curve-only alignment axis, a grouping node), matches nothing — that is legal, because a
+//     spatial branch names containers as well as parts, so it is REPORTED on stderr, not fatal;
+//   * a filter that matches NOTHING returns -1. A caller that asked for a subset and got an empty
+//     GLB has a spine that disagrees with the file, and a zero-product GLB written as if all were
+//     well is exactly the silent widen-on-failure this filter exists to prevent.
 inline long stream_ifc_to_glb(const std::string &in_path, const std::string &out_path, double deflection,
                               double angular_deg, bool meshopt, const std::string &spill_dir = "",
                               double model_scale = 0.0, int num_threads = 0, const std::string &pipeline = "",
-                              bool face_regions = false, bool pin_boundary = true) {
+                              bool face_regions = false, bool pin_boundary = true,
+                              const std::vector<std::string> &include_guids = {}) {
     using namespace adacpp::ngeom;
     adacpp::tune_malloc_for_streaming();
     adacpp::ngeom::reset_tess_face_stats(); // count dropped faces (audit health flag)
@@ -53,6 +68,38 @@ inline long stream_ifc_to_glb(const std::string &in_path, const std::string &out
     adacpp::ifc_read::IfcResolver master(idx);
     master.build_metadata();
     std::vector<long> roots = master.proxy_roots();
+    // Subset filter (see the contract above). Done here, before LPT ordering and before any worker
+    // exists, so the whole pipeline downstream — cost model, huge-prefix detection, lane count —
+    // sizes itself to the subset rather than to the file.
+    if (!include_guids.empty()) {
+        const std::unordered_set<std::string> want(include_guids.begin(), include_guids.end());
+        std::unordered_set<std::string> hit;
+        std::vector<long> kept;
+        kept.reserve(roots.size() < want.size() ? roots.size() : want.size());
+        for (long pid : roots) {
+            std::string g = master.product_guid(pid);
+            if (!g.empty() && want.count(g)) {
+                hit.insert(std::move(g));
+                kept.push_back(pid);
+            }
+        }
+        if (hit.size() != want.size()) {
+            // Name them: on a spine/file mismatch the useful question is always *which* one.
+            std::string missing;
+            size_t shown = 0;
+            for (const std::string &g : want)
+                if (!hit.count(g) && shown < 8) {
+                    missing += (shown++ ? ", " : "");
+                    missing += g;
+                }
+            std::fprintf(stderr, "[IFC-SUBSET] %zu of %zu requested GlobalIds matched no body: %s%s\n",
+                         want.size() - hit.size(), want.size(), missing.c_str(),
+                         (want.size() - hit.size()) > 8 ? ", ..." : "");
+        }
+        if (kept.empty())
+            return -1; // asked for a subset, matched nothing — never write an empty GLB as success
+        roots.swap(kept);
+    }
     const double usc = master.unit_scale(); // metres per file length-unit -> bake to metres
 
     // Unknown track => -1, never a silent fallback: a caller asking for a track that doesn't exist
