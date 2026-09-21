@@ -2,6 +2,15 @@
 
 
 
+## v0.25.2 (2026-09-21)
+
+### Fix
+
+* fix(ci): derive the release asset list instead of restating it (#59)
+
+Co-authored-by: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`3709f18`](https://github.com/Krande/adacpp/commit/3709f182a1ef00145718e44826ac6f108a8c2b5e))
+
+
 ## v0.25.1 (2026-09-21)
 
 ### Fix
