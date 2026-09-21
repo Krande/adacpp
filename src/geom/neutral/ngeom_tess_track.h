@@ -1,6 +1,5 @@
 // Selectable tessellation tracks for the NGEOM (OCC-free) path.
 //
-// Spec: dap/plan/v3/spec_tess_tracks_watertight.md.
 //
 // A TRACK is a tessellator. Each track carries its own options struct on TessParams (which is
 // already copied to every internal, so adding fields here costs no signature churn). All option

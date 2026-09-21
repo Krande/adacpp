@@ -9,7 +9,7 @@ name: Review Pull Request
 #
 # Config lives in deputy.toml at the repo root.
 #
-# NOTE — linting is NOT part of deputy. The AibelDevs/action-toolbox review this
+# NOTE — linting is NOT part of deputy. The external review action this
 # replaces also ran python-review / py-linting-review checks. Those are gone;
 # the lint gate this repo owns is the `lint` job in pr-tests.yaml, which runs
 # `pixi run lint-check` (isort + black + ruff + clang-format, all in check mode)

@@ -7,7 +7,6 @@
 # which is what OCC's BRepMesh and truck do. libtess2 is a winding-rule tessellator and takes no
 # Steiner points, which is why it needs a separate UV-grid fast path, and that grid path is the only
 # remaining source of shared-edge cracks. Selection rationale + the full candidate comparison:
-# dap/plan/v3/spec_cdt_library_selection.md.
 #
 # Header-only: exposes DETRIA_INCLUDE_DIR only, no sources to compile.
 set(DETRIA_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/detria)

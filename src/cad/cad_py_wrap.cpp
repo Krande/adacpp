@@ -1513,7 +1513,7 @@ std::vector<std::array<double, 3>> vertex_points_impl(const ShapeHandle &sh) {
 ShapeHandle sew_faces_impl(const std::vector<ShapeHandle> &faces, double tolerance) {
     // BRepBuilderAPI_Sewing's candidate matching is quadratic in the number of
     // free edges, with per-candidate B-spline curve evaluation — a single-body
-    // shell of ~5k spline faces (SESAM hull skin) takes >10 min single-threaded.
+    // shell of ~5k spline faces takes >10 min single-threaded.
     // Sewing only stitches shared edges (connectivity); tessellation, entity
     // counting and B-rep export all work face-per-face. Above the cap, return a
     // plain compound of the faces instead of sewing. ADACPP_SEW_MAX_FACES overrides.
@@ -4499,7 +4499,7 @@ static adacpp::ifc_emit::FileStats stream_ngeom_to_ifc_impl(nb::iterable records
 // STEP->GLB / STEP->mesh cores: the libtess2/cdt tessellation tracks, world-transform + unit
 // baking, the merge-by-colour GLB writer with inline EXT_meshopt, and the welded-OBJ / binary-STL
 // lane writers. This replaces adapy's Python tessellation-scene assembly + trimesh writers for
-// ada-object sources (Genie XML): the hull's 137 s xml->obj becomes the same class as the native
+// ada-object sources (Genie XML): a large model's 137 s xml->obj becomes the same class as the native
 // step->obj leg.
 //
 // Parallel but DETERMINISTIC: the calling thread parses records (it holds the GIL) into a bounded

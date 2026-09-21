@@ -2,15 +2,14 @@
 // decode an NGEOM face -> libtess2 tessellate (open shell) -> thicken into a closed solid ->
 // assert the result is a clean 2-manifold (no edge shared by 3+ triangles, welded by position).
 //
-// Motivation: hullskin elev13 plates rendered with no black outline edges. The frontend computes
+// Motivation: curved plates on a production model rendered with no black outline edges. The frontend
 // edges per draw-range with EdgesGeometry semantics (boundary edges always + dihedral feature
 // edges), and a NON-manifold mesh (edges shared by 3+ triangles) defeats that classification ->
 // the outline vanishes. This test pins the invariant that our tessellate+solidify pipeline emits
 // manifold geometry, on the actual problem faces captured as fixtures.
 //
 // Fixtures (tests/ngeom/fixtures/*.ngeom) are real AdvancedFace buffers serialized from the
-// hullskin model by ada.cadit.ngeom.serialize.serialize_geometries — see
-// dap project_hullskin_nonmanifold_edges for the capture recipe.
+// same model by ada.cadit.ngeom.serialize.serialize_geometries.
 //
 // Build: see tests/ngeom/run.sh (links ngeom_tessellate.cpp + libtess2 objects).
 #include <cstdint>
@@ -126,7 +125,7 @@ static void test_face(const char *label, const std::string &path) {
     CHECK(es.once > 0, "open shell has a boundary loop");
 
     // 2) Solidify (thicken) into a closed solid — the "make it solid" step under test.
-    thicken_mesh(shell, 0.025); // 25 mm, the hullskin plate thickness
+    thicken_mesh(shell, 0.025); // 25 mm, the plate thickness of the captured model
     EdgeStats es2 = edge_stats(shell);
     std::printf("  %-14s SOLID: tris=%d weldV=%d once=%d twice=%d 3+=%d\n", label, es2.tris, es2.weld_verts, es2.once,
                 es2.twice, es2.three_plus);
@@ -173,10 +172,10 @@ static void test_thick_shell_seam(const char *path) {
 }
 
 int main() {
-    // Concrete hullskin faces: elev13plate1 is one of the 16 that rendered edge-less in the
-    // viewer (irregular 6-7-coedge spline patch); elev14plate7 is a clean 4-coedge control.
-    test_face("elev13plate1", "tests/ngeom/fixtures/face_elev13plate1.ngeom");
-    test_face("elev14plate7", "tests/ngeom/fixtures/face_elev14plate7.ngeom");
+    // A concrete captured face: one of the 16 that rendered edge-less in the
+    // viewer (irregular 6-7-coedge spline patch); the second is a clean 4-coedge control.
+    test_face("curved_plate1", "tests/ngeom/fixtures/face_curved_plate1.ngeom");
+    test_face("curved_plate2", "tests/ngeom/fixtures/face_curved_plate2.ngeom");
 
     // A generic thickened curved plate (no client data): cap<->wall seam must close under
     // cdt_full_patch. Fixture serialized from ada PlateCurved.solid_geom() (a ClosedShell).

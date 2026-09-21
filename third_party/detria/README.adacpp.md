@@ -6,7 +6,6 @@ at the bottom of detria.hpp).
 
 Constrained Delaunay triangulation for the `cdt` tessellation track
 (`TessTrack::Cdt`). Selection rationale, the full candidate comparison, and the
-integration design: `dap/plan/v3/spec_cdt_library_selection.md`.
 
 ## Why detria and not artem-ogre/CDT
 
