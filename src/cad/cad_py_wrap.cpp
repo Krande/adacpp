@@ -44,6 +44,8 @@
 #include <map>
 #include <chrono>
 #include <cmath>
+#include <set>
+#include <limits>
 #include <cstdint>
 #include <deque>
 #include <mutex>
@@ -95,6 +97,7 @@
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <ShapeFix_Face.hxx>
 #include <ShapeFix_Shape.hxx>
+#include <GeomAPI_PointsToBSplineSurface.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <Geom2dAPI_ProjectPointOnCurve.hxx>
 #include <Geom_BSplineCurve.hxx>
@@ -1511,7 +1514,7 @@ std::vector<std::array<double, 3>> vertex_points_impl(const ShapeHandle &sh) {
 ShapeHandle sew_faces_impl(const std::vector<ShapeHandle> &faces, double tolerance) {
     // BRepBuilderAPI_Sewing's candidate matching is quadratic in the number of
     // free edges, with per-candidate B-spline curve evaluation — a single-body
-    // shell of ~5k spline faces (SESAM hull skin) takes >10 min single-threaded.
+    // shell of ~5k spline faces takes >10 min single-threaded.
     // Sewing only stitches shared edges (connectivity); tessellation, entity
     // counting and B-rep export all work face-per-face. Above the cap, return a
     // plain compound of the faces instead of sewing. ADACPP_SEW_MAX_FACES overrides.
@@ -1771,6 +1774,282 @@ ImprintResult imprint_planar_faces_impl(const std::vector<std::vector<std::array
                     got.push_back(idx);
         out.curve_sources.push_back(std::move(got));
     }
+    return out;
+}
+
+// Fit a B-spline surface through an (nu x nv) point grid and return it as a
+// bounded face. Approximation first (bounded control net, small output); if its
+// worst node deviation exceeds tol, interpolation instead, which passes through
+// every node at the cost of size. Empty on a degenerate grid, a fit that does
+// not converge, or one that converges too far from the input.
+std::optional<ShapeHandle> fit_bspline_face_from_grid_impl(const std::vector<std::vector<std::array<double, 3>>> &grid,
+                                                           double tol) {
+    const int nu = (int) grid.size();
+    if (nu < 2)
+        return std::nullopt;
+    const int nv = (int) grid[0].size();
+    if (nv < 2)
+        return std::nullopt;
+    for (const auto &row : grid)
+        if ((int) row.size() != nv)
+            return std::nullopt; // ragged: not a grid
+
+    TColgp_Array2OfPnt arr(1, nu, 1, nv);
+    for (int i = 0; i < nu; ++i)
+        for (int j = 0; j < nv; ++j)
+            arr.SetValue(i + 1, j + 1, gp_Pnt(grid[i][j][0], grid[i][j][1], grid[i][j][2]));
+
+    auto worst_deviation = [&](const Handle(Geom_BSplineSurface) &surf) {
+        double worst = 0.0;
+        for (int i = 0; i < nu; ++i)
+            for (int j = 0; j < nv; ++j) {
+                GeomAPI_ProjectPointOnSurf proj(gp_Pnt(grid[i][j][0], grid[i][j][1], grid[i][j][2]), surf);
+                if (proj.NbPoints() == 0)
+                    return std::numeric_limits<double>::infinity();
+                worst = std::max(worst, proj.LowerDistance());
+            }
+        return worst;
+    };
+
+    for (int pass = 0; pass < 2; ++pass) {
+        Handle(Geom_BSplineSurface) surf;
+        try {
+            if (pass == 0) {
+                GeomAPI_PointsToBSplineSurface algo(arr, 3, 8, GeomAbs_C2, std::max(tol, 1e-7));
+                if (algo.IsDone())
+                    surf = algo.Surface();
+            } else {
+                GeomAPI_PointsToBSplineSurface algo(arr);
+                if (algo.IsDone())
+                    surf = algo.Surface();
+            }
+        } catch (const Standard_Failure &) {
+            continue; // a grid the fitter rejects outright
+        }
+        if (surf.IsNull() || worst_deviation(surf) > tol)
+            continue;
+        BRepBuilderAPI_MakeFace mk(surf, 1e-6);
+        if (!mk.IsDone())
+            continue;
+        return ShapeHandle(mk.Face());
+    }
+    return std::nullopt;
+}
+
+// Curved-face imprint. The planar imprint above authors faces from point loops,
+// which cannot describe a curved plate, so this takes faces already built from
+// their surface and pcurves and splits each along the curves touching it.
+// Callers keep the surface-schema marshalling they already do in both directions.
+
+struct CurvedImprintResult {
+    // sub_faces[i] = the faces input face i became. EMPTY means NOT IMPRINTED --
+    // no curve touched it, or the fuse declined -- and the caller must author it
+    // whole. It never means "the face vanished".
+    std::vector<std::vector<ShapeHandle>> sub_faces;
+    // curve_edges[j] = one (sx, sy, sz, ex, ey, ez) per face-bounding edge that
+    // imprint curve j became. Flat rather than a pair-of-points struct so the
+    // binding stays plain numbers.
+    std::vector<std::vector<std::array<double, 6>>> curve_edges;
+    // Why faces came back whole, for the caller to log. Silence here would make
+    // "nothing was imprinted" and "everything failed" look identical.
+    int n_split = 0;
+    int n_errored = 0;
+    int n_invalid = 0;
+};
+
+namespace {
+
+// Axis-aligned bounds of a point list, padded by `m`.
+struct Box6 {
+    double lo[3]{0, 0, 0}, hi[3]{0, 0, 0};
+    bool empty = true;
+};
+
+Box6 box_of_points(const std::vector<std::array<double, 3>> &pts) {
+    Box6 b;
+    for (const auto &p : pts) {
+        for (int c = 0; c < 3; ++c) {
+            if (b.empty || p[c] < b.lo[c])
+                b.lo[c] = p[c];
+            if (b.empty || p[c] > b.hi[c])
+                b.hi[c] = p[c];
+        }
+        b.empty = false;
+    }
+    return b;
+}
+
+bool boxes_overlap(const Box6 &a, const Box6 &b, double m) {
+    if (a.empty || b.empty)
+        return false;
+    for (int c = 0; c < 3; ++c)
+        if (a.lo[c] > b.hi[c] + m || b.lo[c] > a.hi[c] + m)
+            return false;
+    return true;
+}
+
+Box6 box_of_shape(const TopoDS_Shape &s) {
+    Box6 b;
+    Bnd_Box bb;
+    BRepBndLib::Add(s, bb);
+    if (bb.IsVoid())
+        return b;
+    bb.Get(b.lo[0], b.lo[1], b.lo[2], b.hi[0], b.hi[1], b.hi[2]);
+    b.empty = false;
+    return b;
+}
+
+} // namespace
+
+CurvedImprintResult imprint_advanced_faces_impl(const std::vector<ShapeHandle> &faces,
+                                                const std::vector<std::vector<std::array<double, 3>>> &imprint_curves,
+                                                double tolerance) {
+    CurvedImprintResult out;
+    out.sub_faces.resize(faces.size());
+    out.curve_edges.resize(imprint_curves.size());
+    if (faces.empty() || imprint_curves.empty())
+        return out;
+
+    const double tol = tolerance > 0.0 ? tolerance : 1e-12;
+
+    // One edge per segment, not a wire: BOPAlgo's history is per-argument, so
+    // edges give a direct Modified(edge) -> split edges map, which is what
+    // resolves a curve to the edges it became.
+    struct Cutter {
+        std::size_t curve;
+        std::vector<TopoDS_Edge> edges;
+        Box6 box;
+    };
+    std::vector<Cutter> cutters;
+    for (std::size_t j = 0; j < imprint_curves.size(); ++j) {
+        const auto &pts = imprint_curves[j];
+        if (pts.size() < 2)
+            continue;
+        Cutter c;
+        c.curve = j;
+        c.box = box_of_points(pts);
+        for (std::size_t i = 0; i + 1 < pts.size(); ++i) {
+            gp_Pnt a(pts[i][0], pts[i][1], pts[i][2]);
+            gp_Pnt b(pts[i + 1][0], pts[i + 1][1], pts[i + 1][2]);
+            if (a.Distance(b) <= tol)
+                continue; // a zero-length segment would fail the edge build
+            c.edges.push_back(BRepBuilderAPI_MakeEdge(a, b).Edge());
+        }
+        if (!c.edges.empty())
+            cutters.push_back(std::move(c));
+    }
+    if (cutters.empty())
+        return out;
+
+    // Generous enough that a curve grazing a plate edge still pairs with it; the
+    // fuse decides the real answer, this only avoids fusing every face against
+    // every curve.
+    const double margin = std::max(tolerance, 1e-6) * 10.0 + 1e-3;
+
+    for (std::size_t i = 0; i < faces.size(); ++i) {
+        const TopoDS_Shape &shape = faces[i].topods();
+        if (shape.IsNull() || shape.ShapeType() != TopAbs_FACE)
+            continue;
+        const TopoDS_Face face = TopoDS::Face(shape);
+
+        const Box6 fbox = box_of_shape(face);
+        std::vector<const Cutter *> touching;
+        for (const Cutter &c : cutters)
+            if (boxes_overlap(fbox, c.box, margin))
+                touching.push_back(&c);
+        if (touching.empty())
+            continue; // nothing touches this face; author it as-is
+
+        // An invalid face would take the General Fuse down with it rather than
+        // fail, so this check is load-bearing, not defensive.
+        if (!BRepCheck_Analyzer(face).IsValid()) {
+            ++out.n_invalid;
+            continue;
+        }
+
+        TopTools_ListOfShape args;
+        args.Append(face);
+        for (const Cutter *c : touching)
+            for (const TopoDS_Edge &e : c->edges)
+                args.Append(e);
+
+        BOPAlgo_Builder builder;
+        builder.SetArguments(args);
+        if (tolerance > 0.0)
+            builder.SetFuzzyValue(tolerance);
+        builder.Perform();
+        if (builder.HasErrors()) {
+            ++out.n_errored;
+            continue;
+        }
+        const TopoDS_Shape res = builder.Shape();
+
+        std::vector<TopoDS_Face> subs;
+        const TopTools_ListOfShape &mods = builder.Modified(face);
+        if (!mods.IsEmpty()) {
+            for (TopTools_ListOfShape::Iterator it(mods); it.More(); it.Next())
+                subs.push_back(TopoDS::Face(it.Value()));
+        } else if (!builder.IsDeleted(face)) {
+            subs.push_back(face);
+        }
+        // One piece means no curve actually cut it -- it crossed at a point, or
+        // missed. Leave it whole so its authored edge parameters survive intact.
+        if (subs.size() <= 1)
+            continue;
+
+        std::vector<ShapeHandle> converted;
+        bool ok = true;
+        for (const TopoDS_Face &sf : subs) {
+            if (!BRepCheck_Analyzer(sf).IsValid()) {
+                ok = false;
+                break;
+            }
+            converted.emplace_back(sf);
+        }
+        // All or nothing: a face split into pieces one of which is invalid would
+        // export as a plate with a hole in it, which is worse than not splitting.
+        if (!ok)
+            continue;
+        out.sub_faces[i] = std::move(converted);
+        ++out.n_split;
+
+        // Which edges each curve became, keeping only those that bound a face in
+        // the result: a segment that fell outside the plate is not part of it.
+        TopTools_IndexedDataMapOfShapeListOfShape edge_faces;
+        TopExp::MapShapesAndAncestors(res, TopAbs_EDGE, TopAbs_FACE, edge_faces);
+        for (const Cutter *c : touching) {
+            std::set<std::array<long long, 6>> seen;
+            for (const TopoDS_Edge &cutter : c->edges) {
+                std::vector<TopoDS_Shape> result_edges;
+                const TopTools_ListOfShape &cmods = builder.Modified(cutter);
+                if (!cmods.IsEmpty()) {
+                    for (TopTools_ListOfShape::Iterator it(cmods); it.More(); it.Next())
+                        result_edges.push_back(it.Value());
+                } else {
+                    result_edges.push_back(cutter);
+                }
+                for (const TopoDS_Shape &re : result_edges) {
+                    if (!edge_faces.Contains(re) || edge_faces.FindFromKey(re).IsEmpty())
+                        continue;
+                    const TopoDS_Edge e = TopoDS::Edge(re);
+                    const TopoDS_Vertex v0 = TopExp::FirstVertex(e, Standard_True);
+                    const TopoDS_Vertex v1 = TopExp::LastVertex(e, Standard_True);
+                    if (v0.IsNull() || v1.IsNull())
+                        continue;
+                    const gp_Pnt p0 = BRep_Tool::Pnt(v0);
+                    const gp_Pnt p1 = BRep_Tool::Pnt(v1);
+                    // Dedup on rounded endpoints: the same physical edge reaches
+                    // here once per cutter segment that produced it.
+                    auto q = [](double v) { return (long long) std::llround(v * 1e6); };
+                    std::array<long long, 6> key{q(p0.X()), q(p0.Y()), q(p0.Z()), q(p1.X()), q(p1.Y()), q(p1.Z())};
+                    if (!seen.insert(key).second)
+                        continue;
+                    out.curve_edges[c->curve].push_back({p0.X(), p0.Y(), p0.Z(), p1.X(), p1.Y(), p1.Z()});
+                }
+            }
+        }
+    }
+
     return out;
 }
 
@@ -4221,7 +4500,7 @@ static adacpp::ifc_emit::FileStats stream_ngeom_to_ifc_impl(nb::iterable records
 // STEP->GLB / STEP->mesh cores: the libtess2/cdt tessellation tracks, world-transform + unit
 // baking, the merge-by-colour GLB writer with inline EXT_meshopt, and the welded-OBJ / binary-STL
 // lane writers. This replaces adapy's Python tessellation-scene assembly + trimesh writers for
-// ada-object sources (Genie XML): the hull's 137 s xml->obj becomes the same class as the native
+// ada-object sources (Genie XML): a large model's 137 s xml->obj becomes the same class as the native
 // step->obj leg.
 //
 // Parallel but DETERMINISTIC: the calling thread parses records (it holds the GIL) into a bounded
@@ -5530,6 +5809,30 @@ void cad_module(nb::module_ &m) {
           "(e.g. beam axes), returning the merged topology as plain data: welded "
           "vertices, shared edges, per-face loops, and sources mapping each input "
           "outline to the faces it became. Ports adapy OccBackend.imprint_planar_faces.");
+
+    nb::class_<CurvedImprintResult>(m, "CurvedImprint")
+        // Read-only: this is a report, and a caller that could edit it would be
+        // editing a record of what the kernel did.
+        .def_ro("sub_faces", &CurvedImprintResult::sub_faces)
+        .def_ro("curve_edges", &CurvedImprintResult::curve_edges)
+        .def_ro("n_split", &CurvedImprintResult::n_split)
+        .def_ro("n_errored", &CurvedImprintResult::n_errored)
+        .def_ro("n_invalid", &CurvedImprintResult::n_invalid);
+
+    m.def("fit_bspline_face_from_grid", &fit_bspline_face_from_grid_impl, "grid"_a, "tolerance"_a = 1e-6,
+          "Fit a B-spline surface through an (nu x nv) point grid and return it as a bounded "
+          "face. Approximation first, interpolation if that lands further than tolerance from "
+          "the nodes. None on a degenerate grid or a fit that does not converge, so the caller "
+          "can fall back rather than ship a surface that misses its own input.");
+
+    m.def("imprint_advanced_faces", &imprint_advanced_faces_impl, "faces"_a, "imprint_curves"_a, "tolerance"_a = 1e-6,
+          "Split each face along the imprint curves that touch it (General Fuse), returning "
+          "the sub-faces each became and the endpoints of the face-bounding edges each curve "
+          "became. The curved-plate counterpart of imprint_planar_faces: that one authors flat "
+          "faces from point loops, which cannot describe a curved plate, so this takes faces "
+          "already built from their surface and pcurves. "
+          "sub_faces[i] EMPTY means face i was NOT imprinted -- nothing touched it, or the fuse "
+          "declined -- and the caller should author it whole. It never means the face vanished.");
 
     m.def("merge_cells", &merge_cells_impl, "solids"_a, "tolerance"_a = 0.0,
           "Faithful port of topologic Topology::Merge over solids "

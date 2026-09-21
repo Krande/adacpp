@@ -21,10 +21,11 @@ reference for what each argument means.
 | `adacpp_ifc_glb` | **IFC → GLB** (pure-C++ IFC reader → libtess2 → glTF) | `ifcToGlb`, `mountOpfs` |
 | `adacpp_brep_writer` | **STEP → IFC** and **IFC → STEP** (B-rep) | `stepToIfc`, `ifcToStep`, `mountOpfs` |
 | `adacpp_glb_diff` | **GLB diff** (element-level, with removed-element overlay) | `diffGlb` |
+| `adacpp_extrude` | **Prismatic extrusion** (section table + per-instance frames -> vertex/index buffers) | `expandBeamSolids` |
 
 The `*_glb` and `brep_writer` modules are built with `-sWASMFS=1` and expose `mountOpfs(dir)`: call
 it from a **Web Worker** to back file I/O with OPFS so multi-GB inputs stream through `pread`
-(bounded RSS) instead of the wasm heap. `adacpp_glb_diff` is in-heap (no OPFS).
+(bounded RSS) instead of the wasm heap. `adacpp_glb_diff` and `adacpp_extrude` are in-heap (no OPFS).
 
 ## Usage
 
@@ -45,6 +46,32 @@ mod.FS; // emscripten WASMFS handle, if you need to write the input yourself
 const triangles = mod.stepToGlb("/opfs/in.stp", "/opfs/out.glb", "/opfs/spill", 2.0, 20.0, true);
 if (triangles < 0) throw new Error("STEP→GLB failed (I/O error)");
 ```
+
+Prismatic extrusion, via `adacpp_extrude` -- the leanest module here: its core is header-only, so
+it links no tessellator, no mesh compressor and no CAD kernel. Give it a section table and one
+frame per instance and it returns the buffers a renderer uploads:
+
+```ts
+import createAdacppExtrude from "./adacpp_extrude.js";
+
+const m = await createAdacppExtrude({ locateFile: (p) => `/wasm/${p}` });
+
+// sections: outline points in section coordinates, plus the triangle list for ONE sweep --
+// it indexes 2n vertices, [0, n) the start ring and [n, 2n) the end ring, covering caps and walls.
+const out = m.expandBeamSolids(
+  [{ points: Float64Array, triangles: Uint32Array }],
+  { label, section, node0, node1, origin, xvec, yvec, length },  // flat, one entry per instance
+  points,                                                        // Float64Array, 3 per point
+);
+// out.positions Float32Array, out.indices Uint32Array, out.node0/node1 Uint32Array,
+// out.t Float32Array (axial parameter, measured against the node line -- see below),
+// out.rangeLabel / rangeTriStart / rangeTriCount Uint32Array (one row per instance)
+```
+
+The axial parameter is measured against the NODE positions, not the sweep axis. When an instance's
+two ends carry different offsets the sweep frame tilts away from the node line, so the parameter
+varies within a single ring and cannot be stored per section -- which is exactly why this module
+exists rather than shipping the expanded buffers.
 
 STEP ↔ IFC, via `adacpp_brep_writer`:
 

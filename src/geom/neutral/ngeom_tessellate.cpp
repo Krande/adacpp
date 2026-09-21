@@ -446,7 +446,7 @@ Tess2Out run_tess2(const std::vector<std::vector<Uv>> &loops_uv_in, double su, d
     // returns no triangles and the face silently drops (violating "no geom left behind"). Translating
     // to the origin keeps the true extent representable; the offset is added back to the output verts,
     // so the transform is invisible to callers and composes with any su/sv scaling. (measured: cylinder
-    // faces #39996/#40030 on KR_6, v~6e6, dropped -> recovered.)
+    // cylinder faces with v~6e6 on a large assembly, dropped -> recovered.)
     double u0 = INF, v0 = INF;
     for (const auto &lp : loops_uv_in)
         for (const Uv &p : lp) {
@@ -940,8 +940,7 @@ bool emit_uv_region(const Surface &s, const std::vector<std::vector<Uv>> &loops_
 //
 // detria REFUSES to split a constraint edge (it errors instead), which is exactly the invariant
 // pinning needs — a boundary vertex is always a loop vertex, so every boundary vertex can pin.
-// artem-ogre/CDT was rejected precisely because it splits them silently. See
-// dap/plan/v3/spec_cdt_library_selection.md.
+// artem-ogre/CDT was rejected precisely because it splits them silently.
 //
 // Fail-soft: any error returns ok=false and the caller falls back to libtess2 for THIS FACE only.
 std::atomic<uint64_t> g_cdt_fallback_faces{0};
@@ -2445,7 +2444,7 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
     // * same_sense > 0, else the COMPLEMENT. run_tess2's TESS_WINDING_ODD always fills the interior,
     // so a complement-material face — e.g. a spherical gasket whose boundary encircles the hose
     // attachment — came out as the small hose-side cap with the gasket itself missing. Route those to
-    // the complement tessellation. Measured on KR_6: exactly 2 faces flip (the gaskets); every other
+    // the complement tessellation. Measured on a large assembly: exactly 2 faces flip; every other
     // quadric face (1925 of them) is interior-material and unchanged.
     if (auto per_u = surf.u_period();
         per_u && loops_uv.size() == 1 && loops_uv[0].w == 0 && loops_uv[0].uv.size() >= 3) {
@@ -2494,7 +2493,7 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
     // within half a period, so a full wrap DOESN'T fold back — v drifts monotonically past per_v and
     // the UV loop collapses to a near-degenerate vertical sliver. That sliver has ~zero polygon area,
     // so it's misclassified as a slit and tessellated as the WHOLE torus (measured: 118 such faces
-    // produced 57x their true surface area on KR_6). The u-winding case is already handled above;
+    // produced 57x their true surface area on a large assembly). The u-winding case is handled above;
     // this is its v analog. Tessellate the real geometry directly: a grid band over the actual small
     // u-arc x one full minor period.
     if (per_v && !loops_uv.empty()) {
@@ -2510,7 +2509,7 @@ const char *face_to_mesh(const Surface &surf, const std::vector<Loop3> &loops3d,
         // a full v-wrap MUST span >= per_v (you can't traverse the whole minor circle in less), while a
         // non-wrapping single-valued face spans < per_v. So per_v is the exact separatrix. The overshoot
         // beyond per_v is drift from the face's u-caps and SHRINKS as the sampling coarsens — measured
-        // on KR_6 face #42987: 1.216x per_v at 128 boundary pts (fine) but only 1.084x at 83 pts under
+        // on one such face: 1.216x per_v at 128 boundary pts (fine) but only 1.084x at 83 pts under
         // adaptive coarsening. The old 1.1x line was calibrated on fine tessellation (drifters seen
         // >=1.12x) and wrongly dropped the coarsened 1.084x drifter into the periodic-complement branch
         // -> the whole torus tessellated (rogue-donut artifact). Non-winding torus faces top out at
@@ -2703,6 +2702,33 @@ bool boundary_is_degenerate(const FaceSurfaceN &face, const TessParams &tp) {
 }
 
 } // namespace
+
+// Standalone planar triangulation (ngeom_tessellate.h). Same libtess2 call and same shrunk-hole
+// retry the face path uses, minus the surface: the caller's polygon IS the parameter space, so
+// su/sv are 1 and no pins are needed (there is no neighbouring face to stay watertight against).
+PolyTriangulation triangulate_polygon_with_holes(const std::vector<std::vector<std::array<double, 2>>> &loops) {
+    PolyTriangulation out;
+    if (loops.empty() || loops.front().size() < 3)
+        return out;
+    std::vector<std::vector<Uv>> loops_uv;
+    loops_uv.reserve(loops.size());
+    for (const auto &lp : loops)
+        if (lp.size() >= 3)
+            loops_uv.push_back(std::vector<Uv>(lp.begin(), lp.end()));
+
+    Tess2Out t = run_tess2(loops_uv, 1.0, 1.0);
+    // A hole touching (or numerically grazing) the outer boundary makes tess2 fail soft; nudging
+    // holes toward their centroids recovers it. Only meaningful when there IS a hole.
+    if ((!t.ok || t.tris.empty()) && loops_uv.size() > 1)
+        t = tess2_with_shrunk_holes(loops_uv, 1.0, 1.0);
+    if (!t.ok || t.tris.empty())
+        return out;
+
+    out.verts.assign(t.verts.begin(), t.verts.end());
+    out.tris = std::move(t.tris);
+    out.ok = true;
+    return out;
+}
 
 namespace {
 bool tessellate_face_impl(const FaceSurfaceN &face, const TessParams &tp, TessMesh &outm) {
