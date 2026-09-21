@@ -149,7 +149,6 @@ def test_a_fit_that_cannot_meet_the_tolerance_declines():
     n = 6
     grid = [[(i * 0.2, j * 0.2, 1.0 if (i + j) % 2 else -1.0) for j in range(n)] for i in range(n)]
 
-    assert cad.fit_bspline_face_from_grid(grid, 1e-12) is None, (
-        "declining is the point: the caller falls back rather than shipping a surface "
-        "that misses its own input"
-    )
+    assert (
+        cad.fit_bspline_face_from_grid(grid, 1e-12) is None
+    ), "declining is the point: the caller falls back rather than shipping a surface that misses its own input"
