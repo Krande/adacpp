@@ -109,6 +109,7 @@ is_valid = _cad.is_valid
 loft_profiles = _cad.loft_profiles
 make_box = _cad.make_box
 make_cylinder = _cad.make_cylinder
+make_extruded_section = _cad.make_extruded_section
 make_halfspace = _cad.make_halfspace
 make_sphere = _cad.make_sphere
 make_volumes_from_faces = _cad.make_volumes_from_faces
@@ -241,6 +242,7 @@ __all__ = [
     "loft_profiles",
     "make_box",
     "make_cylinder",
+    "make_extruded_section",
     "make_halfspace",
     "make_sphere",
     "make_volumes_from_faces",
