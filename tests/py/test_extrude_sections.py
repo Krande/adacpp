@@ -20,14 +20,14 @@ def _rect(w, h):
 
 def _frames(n, length=1.0, spacing=0.5):
     """n instances swept along +x, stacked in z."""
-    return dict(
-        label=np.arange(n, dtype=np.uint32),
-        section_idx=np.zeros(n, dtype=np.uint32),
-        origin=np.array([[0.0, 0.0, spacing * k] for k in range(n)]),
-        xvec=np.tile(np.array([[1.0, 0.0, 0.0]]), (n, 1)),
-        yvec=np.tile(np.array([[0.0, 1.0, 0.0]]), (n, 1)),
-        length=np.full(n, length),
-    )
+    return {
+        "label": np.arange(n, dtype=np.uint32),
+        "section_idx": np.zeros(n, dtype=np.uint32),
+        "origin": np.array([[0.0, 0.0, spacing * k] for k in range(n)]),
+        "xvec": np.tile(np.array([[1.0, 0.0, 0.0]]), (n, 1)),
+        "yvec": np.tile(np.array([[0.0, 1.0, 0.0]]), (n, 1)),
+        "length": np.full(n, length),
+    }
 
 
 def _volume(positions, indices):
@@ -63,7 +63,7 @@ def test_a_replayed_table_still_has_to_be_in_range():
     points = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]])
     # 3 points -> 6 swept vertices, so 6 is one past the end.
     bad = np.array([[0, 1, 6]], dtype=np.uint32)
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         cad.make_extruded_section(points, bad)
 
 
@@ -84,7 +84,7 @@ def test_sweeping_without_nodes_still_produces_the_solid():
 def test_node_data_is_all_or_nothing():
     sec = cad.build_extruded_section([_rect(0.2, 0.2)])
     f = _frames(1)
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         cad.expand_beam_solids([sec], **f, node0=np.zeros(1, dtype=np.uint32))
 
 
