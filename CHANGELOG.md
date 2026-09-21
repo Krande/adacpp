@@ -2,6 +2,15 @@
 
 
 
+## v0.25.0 (2026-09-21)
+
+### Feature
+
+* feat(cad): replay a stored section table, and sweep without analysis data (#57)
+
+Co-authored-by: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`b7c5887`](https://github.com/Krande/adacpp/commit/b7c588755920a307c33f007b2197d401efad6608))
+
+
 ## v0.24.0 (2026-09-21)
 
 ### Feature
