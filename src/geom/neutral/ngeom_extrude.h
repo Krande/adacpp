@@ -118,9 +118,15 @@ inline BeamSolidMesh expand_beam_solids(const std::vector<ExtrudedSection> &sect
         n_tris += s.triangles.size();
     }
     out.positions.resize(n_verts * 3);
-    out.node0.resize(n_verts);
-    out.node1.resize(n_verts);
-    out.t.resize(n_verts);
+    // No point buffer means nobody asked what each vertex interpolates between, so
+    // none of it is reported -- three arrays per vertex that a caller sweeping
+    // sections for display would carry and never read.
+    const bool with_nodes = !points.empty();
+    if (with_nodes) {
+        out.node0.resize(n_verts);
+        out.node1.resize(n_verts);
+        out.t.resize(n_verts);
+    }
     out.indices.resize(n_tris * 3);
     out.ranges.reserve(beams.size());
 
@@ -178,7 +184,7 @@ inline BeamSolidMesh expand_beam_solids(const std::vector<ExtrudedSection> &sect
         }
         const double axis_sq = ax * ax + ay * ay + az * az;
 
-        for (uint32_t i = 0; i < ring2; ++i) {
+        for (uint32_t i = 0; with_nodes && i < ring2; ++i) {
             const size_t vi = static_cast<size_t>(vertex_offset) + i;
             double tv = 0.0;
             if (axis_sq > 0.0) {
