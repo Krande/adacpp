@@ -2,6 +2,15 @@
 
 
 
+## v0.24.0 (2026-09-21)
+
+### Feature
+
+* feat(ifc): stream_ifc_to_glb(include_guids=...) for subset streaming (#56)
+
+Co-authored-by: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`56a8701`](https://github.com/Krande/adacpp/commit/56a8701dcca68c87744716c143e801d9cf1672cc))
+
+
 ## v0.23.0 (2026-09-21)
 
 ### Chore
