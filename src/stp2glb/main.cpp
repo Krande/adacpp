@@ -64,17 +64,18 @@ int main(int argc, char *argv[]) {
     std::string output;
     double deflection = 2.0;
     double angular_deg = 20.0;
-    int num_threads = 0;                // 0 = all hardware cores (GLB paths)
-    bool meshopt = true;                // EXT_meshopt_compression baked inline by default (GLB paths)
-    bool profile = false;               // env-gated StepProfiler instrumentation (STEP->GLB)
-    bool quiet = false;                 // suppress the param echo + progress; keep errors + the final result line
-    bool face_regions = false;          // bake per-face clickable regions into scenes[0].extras (GLB paths)
-    std::string pipeline;               // tessellation track: "" / libtess2 (default) | cdt (GLB paths)
-    bool pin_boundary = true;           // libtess2 option (GLB paths)
-    double model_scale = 0.0;           // >0 => adaptive per-surface density (GLB paths)
-    std::string spill_dir;              // per-lane GLB spill dir; empty => private auto-removed mkdtemp
-    std::string schema = "IFC4X3_ADD2"; // target IFC schema (STEP->IFC)
-    long max_solids = 0;                // cap on solids/products emitted for STEP<->IFC (0 = no cap)
+    int num_threads = 0;                    // 0 = all hardware cores (GLB paths)
+    bool meshopt = true;                    // EXT_meshopt_compression baked inline by default (GLB paths)
+    bool profile = false;                   // env-gated StepProfiler instrumentation (STEP->GLB)
+    bool quiet = false;                     // suppress the param echo + progress; keep errors + the final result line
+    bool face_regions = false;              // bake per-face clickable regions into scenes[0].extras (GLB paths)
+    std::string pipeline;                   // tessellation track: "" / libtess2 (default) | cdt (GLB paths)
+    bool pin_boundary = true;               // libtess2 option (GLB paths)
+    double model_scale = 0.0;               // >0 => adaptive per-surface density (GLB paths)
+    std::string spill_dir;                  // per-lane GLB spill dir; empty => private auto-removed mkdtemp
+    std::string schema = "IFC4X3_ADD2";     // target IFC schema (STEP->IFC)
+    long max_solids = 0;                    // cap on solids/products emitted for STEP<->IFC (0 = no cap)
+    std::vector<std::string> include_guids; // IFC->GLB subset: GlobalIds to stream; empty => every product
 
     // Positional `adacpp input output`.
     app.add_option("input,-i,--input", input, "Input filepath (.stp/.step/.p21, .ifc)")->required();
@@ -109,6 +110,10 @@ int main(int argc, char *argv[]) {
     app.add_option("--schema", schema, "Target IFC schema for STEP->IFC")
         ->check(CLI::IsMember({"IFC4X3_ADD2", "IFC4"}))
         ->default_val("IFC4X3_ADD2");
+    app.add_option("--include-guid", include_guids,
+                   "IFC->GLB: stream only the product with this IFC GlobalId; repeatable. Empty (default) "
+                   "streams every product. Ids matching no body are reported on stderr; a filter that "
+                   "matches nothing fails the run rather than writing an empty GLB.");
     app.add_option("--max-solids", max_solids, "Cap on solids/products emitted for STEP<->IFC (0 = no cap)")
         ->default_val(0);
     app.add_flag("--quiet", quiet, "Suppress the param echo + progress; keep errors and the final result line");
@@ -167,7 +172,7 @@ int main(int argc, char *argv[]) {
                                                model_scale, face_regions, pipeline, pin_boundary);
         } else if (is(Fmt::Ifc, Fmt::Glb)) {
             count = adacpp::stream_ifc_to_glb(input, output, deflection, angular_deg, meshopt, spill_dir, model_scale,
-                                              num_threads, pipeline, face_regions, pin_boundary);
+                                              num_threads, pipeline, face_regions, pin_boundary, include_guids);
         } else if (is(Fmt::Step, Fmt::Ifc)) {
             brep = true;
             adacpp::ifc_emit::FileStats fs =

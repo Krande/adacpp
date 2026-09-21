@@ -809,10 +809,11 @@ int stream_step_to_glb_impl(const std::string &in_path, const std::string &out_p
 // number of products written, or -1 on error.
 int stream_ifc_to_glb_impl(const std::string &in_path, const std::string &out_path, double deflection,
                            double angular_deg, bool meshopt, double model_scale, int num_threads,
-                           const std::string &pipeline, bool face_regions, bool pin_boundary) {
+                           const std::string &pipeline, bool face_regions, bool pin_boundary,
+                           const std::vector<std::string> &include_guids) {
     return (int) adacpp::stream_ifc_to_glb(in_path, out_path, deflection, angular_deg, meshopt,
                                            /*spill_dir=*/"", model_scale, num_threads, pipeline, face_regions,
-                                           pin_boundary);
+                                           pin_boundary, include_guids);
 }
 
 // Threaded OCC-free STEP -> STL / OBJ (same reader + parallel tessellation as the GLB core, but bakes
@@ -5128,6 +5129,7 @@ void cad_module(nb::module_ &m) {
     m.def("stream_ifc_to_glb", &stream_ifc_to_glb_impl, "in_path"_a, "out_path"_a, "deflection"_a = 0.0,
           "angular_deg"_a = 20.0, "meshopt"_a = true, "model_scale"_a = 0.0, "num_threads"_a = 0,
           "pipeline"_a = "libtess2", "face_regions"_a = false, "pin_boundary"_a = true,
+          "include_guids"_a = std::vector<std::string>{},
           "Native IFC -> GLB file (no ifcopenshell, no OCC): IfcResolver resolves each product's "
           "geometry + presentation colour + spatial-structure path, tessellates, baked to "
           "metres into a merge-by-colour GLB matching the viewer. LPT-ordered across num_threads "
@@ -5137,7 +5139,12 @@ void cad_module(nb::module_ &m) {
           "watertight); face_regions bakes per-face clickable regions into scenes[0].extras; "
           "pin_boundary is a libtess2-track option. Same three knobs as stream_step_to_glb and the "
           "same meanings — both feed the same neutral tessellator and the same GLB writer, so none "
-          "of them was ever STEP-specific.");
+          "of them was ever STEP-specific. include_guids streams only the products whose IFC "
+          "GlobalId is in the sequence ([] = every product, so existing callers are unchanged): it "
+          "builds one branch of a spatial tree without slicing a subset file first. GlobalIds that "
+          "match no body (containers, curve-only axes, ids absent from the file) are reported on "
+          "stderr and skipped; a filter matching NOTHING returns -1 rather than writing an empty "
+          "GLB as if it had succeeded.");
 
     m.def("stream_step_to_mesh", &stream_step_to_mesh_impl, "in_path"_a, "out_path"_a, "fmt"_a, "deflection"_a = 2.0,
           "angular_deg"_a = 20.0, "num_threads"_a = 0, "model_scale"_a = 0.0,
