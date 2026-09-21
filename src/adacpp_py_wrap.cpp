@@ -1,5 +1,6 @@
 #include "binding_core.h"
 #include "cad/cad_py_wrap.h"
+#include "geom/neutral/extrude_py_wrap.h"
 #include "occt_compat.h"
 
 #include <exception>
@@ -37,6 +38,8 @@ NB_MODULE(_ada_cpp_ext_impl, m) {
 
     auto cad_sub_module = m.def_submodule("cad", "Backend-agnostic CAD operations");
     cad_module(cad_sub_module);
+    // OCC-free, so it belongs on the submodule that exists in every build, not the native-only ones.
+    extrude_module(cad_sub_module);
 
 #ifndef __EMSCRIPTEN__
     auto cadit_module = m.def_submodule("cadit", "CAD Interoperability toolkit");

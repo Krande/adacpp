@@ -45,6 +45,9 @@ def _optional(name: str, reason: str):
 
 AdvancedFaceData = _cad.AdvancedFaceData
 Color = _cad.Color
+CurvedImprint = _cad.CurvedImprint
+ExpandedSolids = _cad.ExpandedSolids
+ExtrudedSection = _cad.ExtrudedSection
 GroupReference = _cad.GroupReference
 IfcNgeomStream = _cad.IfcNgeomStream
 ImprintResult = _cad.ImprintResult
@@ -74,6 +77,7 @@ build_cone = _cad.build_cone
 build_cylinder = _cad.build_cylinder
 build_extruded_area_solid = _cad.build_extruded_area_solid
 build_extruded_area_solid_tapered = _cad.build_extruded_area_solid_tapered
+build_extruded_section = _cad.build_extruded_section
 build_face_based_surface_model = _cad.build_face_based_surface_model
 build_filled_face = _cad.build_filled_face
 build_fixed_reference_swept_area_solid = _cad.build_fixed_reference_swept_area_solid
@@ -87,15 +91,18 @@ center_of_mass = _cad.center_of_mass
 cut_surfaces = _cad.cut_surfaces
 distance = _cad.distance
 edges = _cad.edges
+expand_beam_solids = _cad.expand_beam_solids
 extrude_face_along_normal = _cad.extrude_face_along_normal
 face_id = _cad.face_id
 face_plane = _cad.face_plane
 face_surface_type = _cad.face_surface_type
 face_to_advanced_face = _cad.face_to_advanced_face
 faces = _cad.faces
+fit_bspline_face_from_grid = _cad.fit_bspline_face_from_grid
 free_faces = _cad.free_faces
 from_topods_pointer = _cad.from_topods_pointer
 ifc_taxonomy_settings = _cad.ifc_taxonomy_settings
+imprint_advanced_faces = _cad.imprint_advanced_faces
 imprint_planar_faces = _cad.imprint_planar_faces
 is_planar_face = _cad.is_planar_face
 is_valid = _cad.is_valid
@@ -169,6 +176,9 @@ glb_diff = _optional(
 __all__ = [
     "AdvancedFaceData",
     "Color",
+    "CurvedImprint",
+    "ExpandedSolids",
+    "ExtrudedSection",
     "GroupReference",
     "IfcNgeomStream",
     "ImprintResult",
@@ -198,6 +208,7 @@ __all__ = [
     "build_cylinder",
     "build_extruded_area_solid",
     "build_extruded_area_solid_tapered",
+    "build_extruded_section",
     "build_face_based_surface_model",
     "build_filled_face",
     "build_fixed_reference_swept_area_solid",
@@ -211,16 +222,19 @@ __all__ = [
     "cut_surfaces",
     "distance",
     "edges",
+    "expand_beam_solids",
     "extrude_face_along_normal",
     "face_id",
     "face_plane",
     "face_surface_type",
     "face_to_advanced_face",
     "faces",
+    "fit_bspline_face_from_grid",
     "free_faces",
     "from_topods_pointer",
     "glb_diff",
     "ifc_taxonomy_settings",
+    "imprint_advanced_faces",
     "imprint_planar_faces",
     "is_planar_face",
     "is_valid",

@@ -1,6 +1,5 @@
 // NGEOM — neutral geometry math primitives (header-only, no external deps).
-// Part of adacpp's OCC-free neutral geometry layer (see
-// dap/plan/v3/spec_neutral_geometry_schema.md). Deliberately tiny and dependency-free so
+// Part of adacpp's OCC-free neutral geometry layer. Deliberately tiny and dependency-free so
 // it compiles for native and wasm and can be unit-tested standalone.
 #pragma once
 

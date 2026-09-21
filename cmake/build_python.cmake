@@ -158,7 +158,7 @@ else ()
     # sets it from $penv{SP_DIR}, which pixi expands from %CONDA_PREFIX%, and
     # sysconfig.get_path('purelib') does the same. install() writes the raw string
     # into CMAKE_ABSOLUTE_DESTINATION_FILES in the generated cmake_install.cmake,
-    # and from CMake 4 that file fails to parse — "C:\AibelProgs\..." is rejected
+    # and from CMake 4 that file fails to parse — "C:\Some\Path\..." is rejected
     # as an invalid character escape '\A'. CMake 3.30 accepted it, so this only
     # surfaced on the 4.x bump.
     file(TO_CMAKE_PATH "${PYTHON_SITE_PACKAGES}" PYTHON_SITE_PACKAGES)
