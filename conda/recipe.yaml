@@ -72,6 +72,10 @@ tests:
         - occt * *novtk*
         #- ada-py
         - cmake
+        # Listed explicitly so test_symbol_isolation.py's co-load check always runs. Today ifcopenshell
+        # also arrives as a runtime dependency of this package, but that dependency is spurious (its
+        # code is statically linked in); the day it goes, the collision test must not quietly skip.
+        - ifcopenshell
     script:
       - pytest tests/py
 

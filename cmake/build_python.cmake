@@ -47,6 +47,33 @@ nanobind_add_module(_ada_cpp_ext_impl STABLE_ABI ${ADA_CPP_SOURCES} ${ADA_CPP_PY
 # Link libraries to the module
 target_link_libraries(_ada_cpp_ext_impl PRIVATE ${ADA_CPP_LINK_LIBS})
 
+# Native builds: export ONLY the module init symbol, exactly as the wasm build below does.
+#
+# adacpp statically links conda-forge ifcopenshell's libIfcParse.a / libIfcGeom.a (which themselves
+# embed rocksdb). Those archives are compiled with default visibility, so without this every one of
+# their symbols is exported from our .so -- ~950 IfcParse/IfcSchema/IfcGeom symbols on Linux. The
+# conda `ifcopenshell` Python extension exports the same namespaces from its OWN static copy. When
+# both load into one process -- which adapy does whenever the adacpp backend and an IFC write meet --
+# macOS aborts inside ifcopenshell_wrapper.to_string. dyld coalesces exported weak C++ definitions
+# (inline statics, template instantiations, typeinfo) across images, so the two copies end up
+# sharing state they were never built to share. Linux and Windows happen to tolerate it; macOS does
+# not. nanobind already compiles OUR sources with -fvisibility=hidden; the leak is the archives.
+#
+# Nothing else resolves symbols out of this module: Python's import machinery calls PyInit_*, and
+# adapy's only ctypes binding loads a separate library (libstep2glb_capi). So one exported symbol is
+# the whole interface. Windows needs nothing -- a DLL exports only what is marked __declspec(dllexport).
+if (NOT EMSCRIPTEN)
+    if (APPLE)
+        # ld64 mangles C names with a leading underscore.
+        target_link_options(_ada_cpp_ext_impl PRIVATE "LINKER:-exported_symbol,_PyInit__ada_cpp_ext_impl")
+    elseif (UNIX)
+        set(_ADACPP_EXPORT_MAP "${CMAKE_CURRENT_BINARY_DIR}/adacpp_py_exports.map")
+        file(WRITE "${_ADACPP_EXPORT_MAP}" "{\n  global: PyInit__ada_cpp_ext_impl;\n  local: *;\n};\n")
+        target_link_options(_ada_cpp_ext_impl PRIVATE "LINKER:--version-script=${_ADACPP_EXPORT_MAP}")
+        set_property(TARGET _ada_cpp_ext_impl APPEND PROPERTY LINK_DEPENDS "${_ADACPP_EXPORT_MAP}")
+    endif ()
+endif ()
+
 # gzip-compressed IFC/STEP input: enable StreamIndex's zlib inflate ONLY on this target (it links
 # ZLIB::ZLIB via ADA_CPP_LINK_LIBS). Other targets compile gunzip() as the no-op stub, so the
 # minimal STP2GLB CLI / C++ tests need no zlib link. ZLIB_FOUND is set in the top-level CMakeLists.
