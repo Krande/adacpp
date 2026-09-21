@@ -2,6 +2,15 @@
 
 
 
+## v0.25.1 (2026-09-21)
+
+### Fix
+
+* fix(occt): keep the global mesher thread pool usable across fork() (#58)
+
+Co-authored-by: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`68ec39f`](https://github.com/Krande/adacpp/commit/68ec39f651b00334b59b67ab9980b6710ca1ac2f))
+
+
 ## v0.25.0 (2026-09-21)
 
 ### Feature
