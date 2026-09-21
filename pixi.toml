@@ -20,10 +20,12 @@ rattler-build = "*"
 # 3.13 to match pyodide 0.29.x's host interpreter (its xbuildenv install
 # requires a 3.13 host); also adacpp's target Python under the new ABI.
 python = "==3.13"
-# 8.0.0 exactly: the ifcopenshell 0.8.5 builds that carry occt 8 pin
-# `occt >=8.0.0,<8.0.1.0a0`, so 8.0.1 does not co-solve.
-occt = { version = "==8.0.0", build = "*novtk*" }
-# 0.8.5 is the first ifcopenshell built against occt 8.0.0 (its earlier builds
+# 8.0.1 exactly, matching what conda-forge builds ada-cpp against since the occt 8.0.1
+# migration (ada-cpp-feedstock#65). A dev env on 8.0.0 links a DIFFERENT OCCT than the
+# shipped package, and adapy hands gmsh a raw TopoDS_Shape* across that boundary.
+# The old `<8.0.1` note was about ifcopenshell 0.8.5 build _4; _8 co-solves with 8.0.1.
+occt = { version = "==8.0.1", build = "*novtk*" }
+# 0.8.5 is the first ifcopenshell built against occt 8 (its earlier builds
 # pin occt 7.9.3). Keep in lockstep with adapy's OCCT for the shared-ABI bridge.
 ifcopenshell = ">=0.8.5"
 # 3.x. The 3.0 release adds optional "split mode" and makes several API breaks,
@@ -41,9 +43,10 @@ nanobind = "==3.0.1"
 # CMAKE_POLICY_VERSION_MINIMUM if that path is ever built with CMake 4.
 cmake = "==4.4.3"
 numpy = "*"
-# 6.2 required transitively by the ifcopenshell 0.8.5 builds linked against
-# occt 8.0.0 (the occt 7.9.3 builds wanted 6.1.1); matches adapy.
-cgal-cpp = "==6.2"
+# 6.2.* (NOT ==6.2, which pins exactly 6.2.0): the ifcopenshell 0.8.5 builds linked
+# against occt 8.0.1 want cgal-cpp 6.2.1, and ==6.2 excluded it -- which showed up as an
+# unsolvable `common` env on osx-arm64 blaming occt, not cgal. (7.9.3 wanted 6.1.1.)
+cgal-cpp = "6.2.*"
 cli11 = "*"
 # RocksDBConfig.cmake (find_package(RocksDB) in cmake/deps_ifc.cmake) calls
 # find_dependency(ZLIB), which needs libz.so + zlib.h — the runtime-only
@@ -70,7 +73,7 @@ libxext-conda-x86_64 = "*"
 pytest = "==8.3.2"
 # ada-py-core, NOT the ada-py metapackage: ada-py pulls pythonocc-core, which
 # conda-forge still builds only against occt 7.9.3 (`occt ==7.9.3 *novtk*`), so
-# it cannot co-solve with the occt 8.0.0 pin above. The core split carries the
+# it cannot co-solve with the occt 8.0.1 pin above. The core split carries the
 # importable `ada` package without the OCC binding. Consequence: the OCC parity
 # cross-checks in tests/py (test_ada_integration.py, and the pythonocc arms of
 # test_basic.py) self-skip on the missing `OCC` import — they are guarded by

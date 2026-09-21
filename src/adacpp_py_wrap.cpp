@@ -1,5 +1,6 @@
 #include "binding_core.h"
 #include "cad/cad_py_wrap.h"
+#include "cad/occt_fork_safety.h"
 #include "geom/neutral/extrude_py_wrap.h"
 #include "occt_compat.h"
 
@@ -19,6 +20,11 @@
 
 // Define the modules that will be exposed in python
 NB_MODULE(_ada_cpp_ext_impl, m) {
+    // Park OCCT's global mesher thread pool across fork() (see occt_fork_safety.h). Registered at
+    // import so it covers every consumer: adapy's REST worker forks per job AFTER converting, and
+    // without this the child deadlocks in OSD_ThreadPool::WaitIdle() on threads fork() did not copy.
+    adacpp::ensure_fork_safe_occt_threadpool();
+
     // On OCCT 7.9 Standard_Failure derives from Standard_Transient, NOT std::exception,
     // so nanobind's built-in std::exception translator can't convert it: an OCCT
     // throw escaping a binding becomes an untranslatable SystemError
