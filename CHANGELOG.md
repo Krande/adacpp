@@ -2,6 +2,21 @@
 
 
 
+## v0.23.0 (2026-09-21)
+
+### Chore
+
+* chore(ci): put both deputy pins on v0.8.1, and correct the stale one (#54)
+
+Co-authored-by: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`6edcbf0`](https://github.com/Krande/adacpp/commit/6edcbf00f02afd6d95c381690ebb67b3e5e260dc))
+
+### Feature
+
+* feat: prismatic extrusion core, curved-face imprint, grid-fitted B-spline faces (#55)
+
+Co-authored-by: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`e27d83c`](https://github.com/Krande/adacpp/commit/e27d83c6139a7b4306f53b1514d09502aa29ec47))
+
+
 ## v0.22.0 (2026-09-17)
 
 ### Chore
