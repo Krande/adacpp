@@ -1,3 +1,25 @@
+# Prismatic extrusion expansion as a STANDALONE embind wasm module. The leanest of the set: the
+# expander in ngeom_extrude.h is header-only, so this links no libtess2, no meshoptimizer, no
+# manifold and no OCCT — just the arithmetic that turns a section table plus per-instance frames
+# into vertex and index buffers. Section tables are prepared by whatever wrote the artefact; the
+# browser only replays them.
+if (BUILD_EXTRUDE_WASM)
+    add_executable(adacpp_extrude
+            ${CMAKE_SOURCE_DIR}/src/geom/neutral/extrude_wasm.cpp)
+    set_target_properties(adacpp_extrude PROPERTIES OUTPUT_NAME "adacpp_extrude" SUFFIX ".js")
+    target_link_options(adacpp_extrude PRIVATE
+            "-lembind"
+            "-sALLOW_MEMORY_GROWTH=1"
+            "-sMAXIMUM_MEMORY=4294967296"
+            "-sMODULARIZE=1"
+            "-sEXPORT_ES6=1"
+            "-sEXPORT_NAME=createAdacppExtrude"
+            "-sENVIRONMENT=web,worker,node"
+            "--emit-tsd" "adacpp_extrude.d.ts"
+            "-sSTACK_SIZE=1048576")
+    return() # standalone target
+endif ()
+
 # The OCC-free GLB diff (summarise + match + removed overlay) as a STANDALONE embind wasm module —
 # no OCCT, no pyodide, no tinygltf. Reuses the portable diff core (glb_diff_native.h's
 # summarize_glb_buf, RAM-decode path) + meshoptimizer + nlohmann json. Takes two GLB buffers, returns

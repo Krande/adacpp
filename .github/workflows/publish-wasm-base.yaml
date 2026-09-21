@@ -88,6 +88,11 @@ jobs:
         # STEP<->IFC writers (no tessellation). OCC-free -> a quick emcc build.
         run: pixi run -e wasm wbuild-brepwriter
 
+      - name: Build the prismatic-extrusion expander wasm module
+        # Standalone embind module over the header-only expander in ngeom_extrude.h -- no libtess2,
+        # no meshoptimizer, no manifold, no OCCT. The leanest build in this job.
+        run: pixi run -e wasm wbuild-extrude
+
       # Gate the publish on the artifacts actually working. Every step above only COMPILES; this job
       # went straight from "it linked" to pushing to ghcr, where the viewer consumes it. That is how
       # a wheel whose `import adacpp` raised under pyodide became the published artifact — and, later,
@@ -98,8 +103,9 @@ jobs:
           pixi run -e wasm tools-install
           pixi run -e wasm node tools/test_wheel_pyodide.js
           pixi run -e wasm node tools/test_step_glb_wasm.mjs files/flat_plate_abaqus_10x10_m_wColors.stp
+          pixi run -e wasm node tools/test_extrude_wasm.mjs
 
-      - name: Stage /out (wheel + manifest + sha + step-glb + glb-diff + ifc-glb + brep-writer wasm)
+      - name: Stage /out (wheel + manifest + sha + step-glb + glb-diff + ifc-glb + brep-writer + extrude wasm)
         run: |
           mkdir -p out out/wasm
           cp dist/ada_cpp-*.whl out/
@@ -116,15 +122,18 @@ jobs:
           cp build-wasm-brepwriter/wasm_output/adacpp_brep_writer.js out/wasm/
           cp build-wasm-brepwriter/wasm_output/adacpp_brep_writer.wasm out/wasm/
           cp build-wasm-brepwriter/wasm_output/adacpp_brep_writer.d.ts out/wasm/
+          cp build-wasm-extrude/wasm_output/adacpp_extrude.js out/wasm/
+          cp build-wasm-extrude/wasm_output/adacpp_extrude.wasm out/wasm/
+          cp build-wasm-extrude/wasm_output/adacpp_extrude.d.ts out/wasm/
           cp wasm-types/README.md out/wasm/
           cp wasm-types/THIRD_PARTY_LICENSES.txt out/wasm/  # GPL-3.0 notice + permissive-dep attributions
           cd out
           wheel=$(ls ada_cpp-*.whl)
           printf '{"adacpp":"%s"}\n' "$wheel" > manifest.json
           printf '%s\n' "${GITHUB_SHA}" > adacpp.sha
-          echo "Staged $wheel + out/wasm/ (adacpp_step_glb + adacpp_glb_diff + adacpp_ifc_glb + adacpp_brep_writer .js/.wasm/.d.ts)"
+          echo "Staged $wheel + out/wasm/ (adacpp_step_glb + adacpp_glb_diff + adacpp_ifc_glb + adacpp_brep_writer + adacpp_extrude .js/.wasm/.d.ts)"
 
-      # Bundle the four OCC-free wasm modules (.js + .wasm + generated .d.ts + README) into a single
+      # Bundle the OCC-free wasm modules (.js + .wasm + generated .d.ts + README) into a single
       # versioned zip, so a release carries both the individual files (fetch just one module) and a
       # one-download bundle. The .wasm-base image already got the same files staged above.
       - name: Bundle wasm modules for the release

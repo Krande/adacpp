@@ -14,6 +14,7 @@ OPTION(BUILD_STEP_GLB_WASM "Build ONLY the OCC-free STEP->GLB wasm module (embin
 OPTION(BUILD_GLB_DIFF_WASM "Build ONLY the OCC-free GLB-diff wasm module (embind, no OCCT/pyodide/Python)" OFF)
 OPTION(BUILD_IFC_GLB_WASM "Build ONLY the OCC-free IFC->GLB wasm module (embind, no OCCT/pyodide/Python)" OFF)
 OPTION(BUILD_BREP_WRITER_WASM "Build ONLY the OCC-free B-rep writer wasm module (STEP<->IFC, embind, no OCCT/pyodide/Python)" OFF)
+OPTION(BUILD_EXTRUDE_WASM "Build ONLY the prismatic-extrusion expander wasm module (embind, header-only core)" OFF)
 OPTION(BUILD_STP2GLB_STANDALONE "Build ONLY the OCC-free STP2GLB CLI — skip OCCT/CGAL/gmsh/IFC/Python" OFF)
 OPTION(BUILD_PYTHON "Build the project for Python" ON)
 OPTION(BUILD_STP2GLB "Build the STP2GLB executable" ON)
@@ -86,6 +87,7 @@ if (BUILD_WASM)
             # NGEOM OCC-free path (neutral layer is header-only; libtess2 tessellator + the
             # vendored libtess2 C compile for wasm too). Taxonomy path is native-only (ifc).
             src/geom/neutral/ngeom_tessellate.cpp
+            src/geom/neutral/ngeom_extrude.cpp
             src/geom/neutral/ngeom_meshopt.cpp
             src/geom/neutral/ngeom_boolean.cpp
             ${LIBTESS2_SOURCES}
@@ -110,6 +112,7 @@ else ()
             src/visit/TessellateFactory.cpp
             # NGEOM: OCC-free libtess2 path + the taxonomy (ifcopenshell) path
             src/geom/neutral/ngeom_tessellate.cpp
+            src/geom/neutral/ngeom_extrude.cpp
             src/cadit/ifc/ngeom_taxonomy_build.cpp
             src/cadit/ifc/ngeom_taxonomy_kernel.cpp
             src/geom/neutral/ngeom_meshopt.cpp
@@ -137,11 +140,13 @@ if (BUILD_WASM)
     set(ADA_CPP_PY_SOURCES
             src/adacpp_py_wrap.cpp
             src/cad/cad_py_wrap.cpp
+            src/geom/neutral/extrude_py_wrap.cpp
     )
 else ()
     set(ADA_CPP_PY_SOURCES
             src/adacpp_py_wrap.cpp
             src/cad/cad_py_wrap.cpp
+            src/geom/neutral/extrude_py_wrap.cpp
             src/cadit/ifc/ifc_py_wrap.cpp
             src/cadit/occt/occt_py_wrap.cpp
             src/cadit/tinygltf/tiny_py_wrap.cpp
@@ -171,7 +176,8 @@ if (BUILD_WASM)
     # FoundationClasses only; module set widens as features land.
     # Skipped for the OCC-free standalone embind modules (STEP->GLB / IFC->GLB / GLB-diff / B-rep
     # writer) — they need no OCCT, so we avoid the heavy cross-build.
-    if (NOT BUILD_STEP_GLB_WASM AND NOT BUILD_GLB_DIFF_WASM AND NOT BUILD_IFC_GLB_WASM AND NOT BUILD_BREP_WRITER_WASM)
+    if (NOT BUILD_STEP_GLB_WASM AND NOT BUILD_GLB_DIFF_WASM AND NOT BUILD_IFC_GLB_WASM AND NOT BUILD_BREP_WRITER_WASM
+            AND NOT BUILD_EXTRUDE_WASM)
         include(cmake/wasm_occt.cmake)
     endif ()
 endif ()

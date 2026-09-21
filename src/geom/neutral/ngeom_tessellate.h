@@ -8,6 +8,7 @@
 // the algorithm being mirrored.
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -104,5 +105,22 @@ void reset_tess_face_stats();
 
 // Tessellate a whole decoded document (all roots), one TessMesh with a Group per root.
 TessMesh tessellate_doc(const NgeomDoc &doc, const TessParams &tp);
+
+// ---- standalone planar triangulation ---------------------------------------------------------
+// The face pipeline above always arrives through a Surface. Callers holding a plain planar polygon
+// (a swept profile's cap, a cross-section outline) want the same libtess2 machinery — including the
+// shrunk-hole retry — without inventing a surface to hang it on.
+struct PolyTriangulation {
+    // libtess2 may introduce intersection vertices, so this is NOT necessarily the input points.
+    std::vector<std::array<double, 2>> verts;
+    std::vector<std::array<uint32_t, 3>> tris;
+    bool ok = false;
+};
+
+// Triangulate a planar polygon in its own 2D coordinates. loops[0] is the outer boundary; any
+// further loops are holes. Winding is irrelevant — the odd-winding rule classifies nesting, so a
+// hole need not be counter-wound. Retries with shrunk holes when a hole touches the outer
+// boundary, exactly as the face path does.
+PolyTriangulation triangulate_polygon_with_holes(const std::vector<std::vector<std::array<double, 2>>> &loops);
 
 } // namespace adacpp::ngeom

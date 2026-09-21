@@ -51,4 +51,10 @@ g++ -std=c++20 -O2 -Wall -pthread $INC -I src/cadit/step tests/step/test_step_re
     -o "$obj/test_step_reader"
 "$obj/test_step_reader"
 
+# prismatic extrusion: the section builder links the tessellator (it triangulates caps through
+# libtess2); the expander it tests is header-only.
+g++ -std=c++20 -O2 -Wall -pthread $INC tests/ngeom/test_extrude.cpp src/geom/neutral/ngeom_extrude.cpp \
+    $TESS_LINK "$obj"/*.o -o "$obj/test_extrude"
+"$obj/test_extrude"
+
 echo "ngeom: all suites passed"

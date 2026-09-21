@@ -2704,6 +2704,33 @@ bool boundary_is_degenerate(const FaceSurfaceN &face, const TessParams &tp) {
 
 } // namespace
 
+// Standalone planar triangulation (ngeom_tessellate.h). Same libtess2 call and same shrunk-hole
+// retry the face path uses, minus the surface: the caller's polygon IS the parameter space, so
+// su/sv are 1 and no pins are needed (there is no neighbouring face to stay watertight against).
+PolyTriangulation triangulate_polygon_with_holes(const std::vector<std::vector<std::array<double, 2>>> &loops) {
+    PolyTriangulation out;
+    if (loops.empty() || loops.front().size() < 3)
+        return out;
+    std::vector<std::vector<Uv>> loops_uv;
+    loops_uv.reserve(loops.size());
+    for (const auto &lp : loops)
+        if (lp.size() >= 3)
+            loops_uv.push_back(std::vector<Uv>(lp.begin(), lp.end()));
+
+    Tess2Out t = run_tess2(loops_uv, 1.0, 1.0);
+    // A hole touching (or numerically grazing) the outer boundary makes tess2 fail soft; nudging
+    // holes toward their centroids recovers it. Only meaningful when there IS a hole.
+    if ((!t.ok || t.tris.empty()) && loops_uv.size() > 1)
+        t = tess2_with_shrunk_holes(loops_uv, 1.0, 1.0);
+    if (!t.ok || t.tris.empty())
+        return out;
+
+    out.verts.assign(t.verts.begin(), t.verts.end());
+    out.tris = std::move(t.tris);
+    out.ok = true;
+    return out;
+}
+
 namespace {
 bool tessellate_face_impl(const FaceSurfaceN &face, const TessParams &tp, TessMesh &outm) {
     // NOTE: do NOT bail on empty bounds — a closed quadric (full sphere/torus) or B-spline patch
