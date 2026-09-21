@@ -1952,11 +1952,11 @@ CurvedImprintResult imprint_advanced_faces_impl(const std::vector<ShapeHandle> &
         const TopoDS_Face face = TopoDS::Face(shape);
 
         const Box6 fbox = box_of_shape(face);
-        std::vector<const Cutter *> near;
+        std::vector<const Cutter *> touching;
         for (const Cutter &c : cutters)
             if (boxes_overlap(fbox, c.box, margin))
-                near.push_back(&c);
-        if (near.empty())
+                touching.push_back(&c);
+        if (touching.empty())
             continue; // nothing touches this face; author it as-is
 
         // An invalid face would take the General Fuse down with it rather than
@@ -1968,7 +1968,7 @@ CurvedImprintResult imprint_advanced_faces_impl(const std::vector<ShapeHandle> &
 
         TopTools_ListOfShape args;
         args.Append(face);
-        for (const Cutter *c : near)
+        for (const Cutter *c : touching)
             for (const TopoDS_Edge &e : c->edges)
                 args.Append(e);
 
@@ -2016,7 +2016,7 @@ CurvedImprintResult imprint_advanced_faces_impl(const std::vector<ShapeHandle> &
         // the result: a segment that fell outside the plate is not part of it.
         TopTools_IndexedDataMapOfShapeListOfShape edge_faces;
         TopExp::MapShapesAndAncestors(res, TopAbs_EDGE, TopAbs_FACE, edge_faces);
-        for (const Cutter *c : near) {
+        for (const Cutter *c : touching) {
             std::set<std::array<long long, 6>> seen;
             for (const TopoDS_Edge &cutter : c->edges) {
                 std::vector<TopoDS_Shape> result_edges;
