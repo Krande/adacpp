@@ -2,6 +2,15 @@
 
 
 
+## v0.25.3 (2026-09-22)
+
+### Fix
+
+* fix(build): export only PyInit from the native extension (#60)
+
+Co-authored-by: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`3ff38b0`](https://github.com/Krande/adacpp/commit/3ff38b042499b0a0a214e0aff48a2c0b55378177))
+
+
 ## v0.25.2 (2026-09-21)
 
 ### Fix
