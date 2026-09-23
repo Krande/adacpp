@@ -11,21 +11,21 @@
 using namespace adacpp::ngeom;
 
 static int g_fail = 0;
-#define CHECK(cond, msg)                                                 \
-    do {                                                                 \
-        if (!(cond)) {                                                   \
-            std::printf("FAIL: %s  (%s:%d)\n", msg, __FILE__, __LINE__); \
-            ++g_fail;                                                    \
-        }                                                                \
+#define CHECK(cond, msg)                                                                                               \
+    do {                                                                                                               \
+        if (!(cond)) {                                                                                                 \
+            std::printf("FAIL: %s  (%s:%d)\n", msg, __FILE__, __LINE__);                                               \
+            ++g_fail;                                                                                                  \
+        }                                                                                                              \
     } while (0)
-static bool close(double a, double b, double tol) { return std::abs(a - b) <= tol; }
+static bool close(double a, double b, double tol) {
+    return std::abs(a - b) <= tol;
+}
 
 static double total_area(const TessMesh &m) {
     double area = 0;
     for (size_t i = 0; i + 2 < m.indices.size(); i += 3) {
-        auto V = [&](uint32_t k) {
-            return Vec3{m.positions[k * 3], m.positions[k * 3 + 1], m.positions[k * 3 + 2]};
-        };
+        auto V = [&](uint32_t k) { return Vec3{m.positions[k * 3], m.positions[k * 3 + 1], m.positions[k * 3 + 2]}; };
         Vec3 a = V(m.indices[i]), b = V(m.indices[i + 1]), c = V(m.indices[i + 2]);
         area += 0.5 * (b - a).cross(c - a).norm();
     }
@@ -54,9 +54,11 @@ static void test_plane_square_with_hole() {
     // all verts on z=0, normals +z
     bool flat = true, nrm = true;
     for (size_t i = 0; i < m.positions.size(); i += 3)
-        if (!close(m.positions[i + 2], 0.0, 1e-6)) flat = false;
+        if (!close(m.positions[i + 2], 0.0, 1e-6))
+            flat = false;
     for (size_t i = 0; i < m.normals.size(); i += 3)
-        if (!close(m.normals[i + 2], 1.0, 1e-6)) nrm = false;
+        if (!close(m.normals[i + 2], 1.0, 1e-6))
+            nrm = false;
     CHECK(flat, "plane verts on z=0");
     CHECK(nrm, "plane normals +z");
 }
@@ -72,7 +74,8 @@ static void test_plane_same_sense_false_flips_normal() {
     CHECK(tessellate_face(f, tp, m), "flipped plane tessellates");
     bool down = true;
     for (size_t i = 0; i < m.normals.size(); i += 3)
-        if (!close(m.normals[i + 2], -1.0, 1e-6)) down = false;
+        if (!close(m.normals[i + 2], -1.0, 1e-6))
+            down = false;
     CHECK(down, "same_sense=false flips normal to -z");
 }
 
@@ -81,10 +84,14 @@ static void test_cylinder_patch() {
     // boundary of a u in [0,1] rad, v in [0,8] patch, sampled on the surface
     std::vector<Vec3> bnd;
     const int N = 16;
-    for (int i = 0; i <= N; ++i) bnd.push_back(cyl->point(1.0 * i / N, 0.0));        // bottom arc
-    for (int j = 1; j <= N; ++j) bnd.push_back(cyl->point(1.0, 8.0 * j / N));        // right edge
-    for (int i = N - 1; i >= 0; --i) bnd.push_back(cyl->point(1.0 * i / N, 8.0));    // top arc
-    for (int j = N - 1; j >= 1; --j) bnd.push_back(cyl->point(0.0, 8.0 * j / N));    // left edge
+    for (int i = 0; i <= N; ++i)
+        bnd.push_back(cyl->point(1.0 * i / N, 0.0)); // bottom arc
+    for (int j = 1; j <= N; ++j)
+        bnd.push_back(cyl->point(1.0, 8.0 * j / N)); // right edge
+    for (int i = N - 1; i >= 0; --i)
+        bnd.push_back(cyl->point(1.0 * i / N, 8.0)); // top arc
+    for (int j = N - 1; j >= 1; --j)
+        bnd.push_back(cyl->point(0.0, 8.0 * j / N)); // left edge
     FaceSurfaceN f;
     f.surface = cyl;
     f.same_sense = true;
@@ -96,24 +103,31 @@ static void test_cylinder_patch() {
     bool on = true;
     for (size_t i = 0; i < m.positions.size(); i += 3) {
         double rho = std::sqrt(m.positions[i] * m.positions[i] + m.positions[i + 1] * m.positions[i + 1]);
-        if (!close(rho, 5.0, 1e-3)) on = false;
+        if (!close(rho, 5.0, 1e-3))
+            on = false;
     }
     CHECK(on, "cylinder patch verts on radius 5");
-    double analytic = 5.0 * 1.0 * 8.0;  // r * du(rad) * dv
+    double analytic = 5.0 * 1.0 * 8.0; // r * du(rad) * dv
     CHECK(total_area(m) > 0.9 * analytic && total_area(m) < 1.02 * analytic, "cylinder patch area ~ analytic");
 }
 
-static size_t tri_count(const TessMesh &m) { return m.indices.size() / 3; }
+static size_t tri_count(const TessMesh &m) {
+    return m.indices.size() / 3;
+}
 
 static void test_refinement_smooths_curved_face() {
     auto cyl = std::make_shared<CylinderSurface>(Frame::from_axis_ref({0, 0, 0}, {0, 0, 1}, {1, 0, 0}), 5.0);
     // a COARSE boundary so the interior triangulation has long edges for refinement to split
     std::vector<Vec3> bnd;
     const int N = 3;
-    for (int i = 0; i <= N; ++i) bnd.push_back(cyl->point(1.0 * i / N, 0.0));
-    for (int j = 1; j <= N; ++j) bnd.push_back(cyl->point(1.0, 8.0 * j / N));
-    for (int i = N - 1; i >= 0; --i) bnd.push_back(cyl->point(1.0 * i / N, 8.0));
-    for (int j = N - 1; j >= 1; --j) bnd.push_back(cyl->point(0.0, 8.0 * j / N));
+    for (int i = 0; i <= N; ++i)
+        bnd.push_back(cyl->point(1.0 * i / N, 0.0));
+    for (int j = 1; j <= N; ++j)
+        bnd.push_back(cyl->point(1.0, 8.0 * j / N));
+    for (int i = N - 1; i >= 0; --i)
+        bnd.push_back(cyl->point(1.0 * i / N, 8.0));
+    for (int j = N - 1; j >= 1; --j)
+        bnd.push_back(cyl->point(0.0, 8.0 * j / N));
     FaceSurfaceN f;
     f.surface = cyl;
     f.same_sense = true;
@@ -127,12 +141,12 @@ static void test_refinement_smooths_curved_face() {
     // a meaningful "no refinement" baseline.)
     TessMesh coarse;
     TessParams cp;
-    cp.deflection = 5.0;  // very loose chord sag -> few triangles
+    cp.deflection = 5.0; // very loose chord sag -> few triangles
     tessellate_face(f, cp, coarse);
 
     TessMesh fine;
     TessParams fp;
-    fp.deflection = 0.02;  // tight chord sag -> densified
+    fp.deflection = 0.02; // tight chord sag -> densified
     tessellate_face(f, fp, fine);
 
     CHECK(tri_count(fine) > tri_count(coarse), "refinement adds triangles on a curved face");
@@ -141,16 +155,17 @@ static void test_refinement_smooths_curved_face() {
           "refined cylinder area ~ analytic (faceting slightly under)");
     bool on = true;
     for (size_t i = 0; i < fine.positions.size(); i += 3) {
-        double rho = std::sqrt(fine.positions[i] * fine.positions[i] +
-                               fine.positions[i + 1] * fine.positions[i + 1]);
-        if (!close(rho, 5.0, 1e-3)) on = false;
+        double rho = std::sqrt(fine.positions[i] * fine.positions[i] + fine.positions[i + 1] * fine.positions[i + 1]);
+        if (!close(rho, 5.0, 1e-3))
+            on = false;
     }
     CHECK(on, "refined verts still on radius");
 }
 
 static std::shared_ptr<LoopN> circle_loop(const CylinderSurface &c, double v, int n) {
     std::vector<Vec3> pts;
-    for (int i = 0; i < n; ++i) pts.push_back(c.point(TWO_PI * i / n, v));
+    for (int i = 0; i < n; ++i)
+        pts.push_back(c.point(TWO_PI * i / n, v));
     return poly(pts);
 }
 
@@ -167,12 +182,12 @@ static void test_full_cylinder_gridded() {
     tp.deflection = 0.02;
     CHECK(tessellate_face(f, tp, m), "full cylinder tessellates (gridded)");
     double analytic = TWO_PI * 5.0 * 8.0;
-    CHECK(total_area(m) > 0.99 * analytic && total_area(m) < 1.001 * analytic,
-          "full cylinder lateral area ~ 2*pi*r*h");
+    CHECK(total_area(m) > 0.99 * analytic && total_area(m) < 1.001 * analytic, "full cylinder lateral area ~ 2*pi*r*h");
     bool on = true;
     for (size_t i = 0; i < m.positions.size(); i += 3) {
         double rho = std::sqrt(m.positions[i] * m.positions[i] + m.positions[i + 1] * m.positions[i + 1]);
-        if (!close(rho, 5.0, 1e-3)) on = false;
+        if (!close(rho, 5.0, 1e-3))
+            on = false;
     }
     CHECK(on, "full cylinder verts on radius");
 }
@@ -182,8 +197,10 @@ static void test_full_sphere_gridded() {
     // seam meridian loop (u=0): out-and-back -> zero UV area -> gridded path
     std::vector<Vec3> seam;
     const int N = 24;
-    for (int i = 0; i <= N; ++i) seam.push_back(sph->point(0.0, -PI / 2 + PI * i / N));
-    for (int i = N - 1; i >= 1; --i) seam.push_back(sph->point(0.0, -PI / 2 + PI * i / N));
+    for (int i = 0; i <= N; ++i)
+        seam.push_back(sph->point(0.0, -PI / 2 + PI * i / N));
+    for (int i = N - 1; i >= 1; --i)
+        seam.push_back(sph->point(0.0, -PI / 2 + PI * i / N));
     FaceSurfaceN f;
     f.surface = sph;
     f.same_sense = true;
@@ -193,13 +210,13 @@ static void test_full_sphere_gridded() {
     tp.deflection = 0.02;
     CHECK(tessellate_face(f, tp, m), "full sphere tessellates (gridded)");
     double analytic = 4.0 * PI * 25.0;
-    CHECK(total_area(m) > 0.98 * analytic && total_area(m) < 1.001 * analytic,
-          "full sphere area ~ 4*pi*r^2");
+    CHECK(total_area(m) > 0.98 * analytic && total_area(m) < 1.001 * analytic, "full sphere area ~ 4*pi*r^2");
     bool on = true;
     for (size_t i = 0; i < m.positions.size(); i += 3) {
         double rr = std::sqrt(m.positions[i] * m.positions[i] + m.positions[i + 1] * m.positions[i + 1] +
                               m.positions[i + 2] * m.positions[i + 2]);
-        if (!close(rr, 5.0, 2e-2)) on = false;
+        if (!close(rr, 5.0, 2e-2))
+            on = false;
     }
     CHECK(on, "full sphere verts on radius");
 }
@@ -224,7 +241,8 @@ static void test_doc_grouping() {
 
 static std::shared_ptr<LoopN> cone_circle_loop(const ConeSurface &c, double v, int n) {
     std::vector<Vec3> pts;
-    for (int i = 0; i < n; ++i) pts.push_back(c.point(TWO_PI * i / n, v));
+    for (int i = 0; i < n; ++i)
+        pts.push_back(c.point(TWO_PI * i / n, v));
     return poly(pts);
 }
 
@@ -233,14 +251,13 @@ static std::shared_ptr<LoopN> cone_circle_loop(const ConeSurface &c, double v, i
 // (z = v*cos(a), radius = r0 + v*sin(a), apex = -r0/sin(a)) over-sampled cones; the cone SHAPE
 // is identical under both, so we assert the parameterization directly, plus a faithful frustum.
 static void test_cone_axial_v_parameterization() {
-    const double a = PI / 6.0;  // 30 deg
+    const double a = PI / 6.0; // 30 deg
     const double tan_a = std::tan(a), r0 = 5.0;
     auto cone = std::make_shared<ConeSurface>(Frame::from_axis_ref({0, 0, 0}, {0, 0, 1}, {1, 0, 0}), r0, a);
 
     Vec3 p = cone->point(0.0, 8.0);
     CHECK(close(p.z, 8.0, 1e-9), "cone point(u,v).z == v (axial-v, not v*cos(a))");
-    CHECK(close(std::sqrt(p.x * p.x + p.y * p.y), r0 + 8.0 * tan_a, 1e-9),
-          "cone radius_at(v) == r0 + v*tan(a)");
+    CHECK(close(std::sqrt(p.x * p.x + p.y * p.y), r0 + 8.0 * tan_a, 1e-9), "cone radius_at(v) == r0 + v*tan(a)");
     auto caps = cone->v_caps();
     CHECK(caps && close(caps->first, -r0 / tan_a, 1e-6), "cone apex == -r0/tan(a)");
 
@@ -256,14 +273,15 @@ static void test_cone_axial_v_parameterization() {
     CHECK(tessellate_face(f, tp, m), "cone frustum tessellates");
     const double r1 = r0 + 8.0 * tan_a;
     const double slant = std::sqrt((r1 - r0) * (r1 - r0) + 8.0 * 8.0);
-    const double analytic = PI * (r0 + r1) * slant;  // frustum lateral area
+    const double analytic = PI * (r0 + r1) * slant; // frustum lateral area
     CHECK(total_area(m) > 0.99 * analytic && total_area(m) < 1.01 * analytic,
           "cone frustum lateral area ~ pi*(r0+r1)*slant");
     bool on = true;
     for (size_t i = 0; i < m.positions.size(); i += 3) {
         double z = m.positions[i + 2];
         double rho = std::sqrt(m.positions[i] * m.positions[i] + m.positions[i + 1] * m.positions[i + 1]);
-        if (!close(rho, r0 + z * tan_a, 2e-2)) on = false;
+        if (!close(rho, r0 + z * tan_a, 2e-2))
+            on = false;
     }
     CHECK(on, "cone verts satisfy axial-v radius = r0 + z*tan(a)");
 }
@@ -274,7 +292,7 @@ static void test_cone_axial_v_parameterization() {
 // close the winding to the finite v-cap (the apex) and mesh the full cone. This is the trimmed-conical
 // drop class the native path was losing (hundreds of faces per conical-head model).
 static void test_cone_apex_single_loop() {
-    const double a = PI / 6.0;                 // 30 deg
+    const double a = PI / 6.0;                  // 30 deg
     const double tan_a = std::tan(a), r0 = 0.0; // apex at v = 0
     const double vtop = 8.0;
     auto cone = std::make_shared<ConeSurface>(Frame::from_axis_ref({0, 0, 0}, {0, 0, 1}, {1, 0, 0}), r0, a);
@@ -318,7 +336,8 @@ static void test_cone_apex_single_loop() {
         tessellate_face(f, tp, m);
         auto by = tess_dropped_by_surface();
         std::uint64_t sum = 0;
-        for (auto &kv : by) sum += kv.second;
+        for (auto &kv : by)
+            sum += kv.second;
         CHECK(sum == tess_dropped_faces(), "drop_by_surface sums to dropped_faces");
     }
 }
@@ -330,15 +349,15 @@ static void test_cone_apex_single_loop() {
 static void test_bspline_edge_samples_natural_domain() {
     // degree-3 clamped B-spline, 5 control points (curvy) -> unique knots [0,0.5,1] mults [4,1,4]
     std::vector<Vec3> cps = {{0, 0, 0}, {2, 4, 0}, {5, 4, 0}, {8, -2, 0}, {10, 1, 0}};
-    auto bsp = std::make_shared<BSplineCurve>(3, cps, std::vector<double>{0.0, 0.5, 1.0},
-                                              std::vector<int>{4, 1, 4}, std::vector<double>{}, false);
+    auto bsp = std::make_shared<BSplineCurve>(3, cps, std::vector<double>{0.0, 0.5, 1.0}, std::vector<int>{4, 1, 4},
+                                              std::vector<double>{}, false);
     double lo, hi, per;
     bool periodic;
     bsp->range(lo, hi, periodic, per);
 
     OrientedEdgeN e;
     e.geometry = bsp;
-    e.has_params = false;  // exporters often omit trim params; the fix must NOT bail to a chord
+    e.has_params = false; // exporters often omit trim params; the fix must NOT bail to a chord
     e.same_sense = true;
     e.orientation = true;
     e.start = e.e_start = bsp->point(lo);
@@ -350,7 +369,8 @@ static void test_bspline_edge_samples_natural_domain() {
           "B-spline edge endpoints snapped to the topological vertices");
     // the polyline follows the curve, so it is materially longer than the straight start->end chord
     double plen = 0.0;
-    for (size_t i = 1; i < pts.size(); ++i) plen += (pts[i] - pts[i - 1]).norm();
+    for (size_t i = 1; i < pts.size(); ++i)
+        plen += (pts[i] - pts[i - 1]).norm();
     CHECK(plen > 1.2 * (e.end - e.start).norm(), "B-spline edge polyline follows the curve, not a chord");
 }
 
@@ -363,7 +383,7 @@ static void test_bspline_edge_samples_natural_domain() {
 static void test_closed_bspline_edge_reversal_and_tube() {
     const double r = 15.0, h = 3.0, w = std::sqrt(2.0) / 2.0;
     auto circle_cps = [&](double z) {
-        return std::vector<Vec3>{{r, 0, z},  {r, r, z},  {0, r, z},  {-r, r, z}, {-r, 0, z},
+        return std::vector<Vec3>{{r, 0, z},   {r, r, z},  {0, r, z},  {-r, r, z}, {-r, 0, z},
                                  {-r, -r, z}, {0, -r, z}, {r, -r, z}, {r, 0, z}};
     };
     const std::vector<double> cknots = {0, 0.25, 0.5, 0.75, 1.0};
@@ -382,7 +402,8 @@ static void test_closed_bspline_edge_reversal_and_tube() {
     rev.orientation = false;
     auto signed_area_z = [](const std::vector<Vec3> &p) {
         double a = 0;
-        for (size_t i = 0; i + 1 < p.size(); ++i) a += p[i].x * p[i + 1].y - p[i + 1].x * p[i].y;
+        for (size_t i = 0; i + 1 < p.size(); ++i)
+            a += p[i].x * p[i + 1].y - p[i + 1].x * p[i].y;
         return 0.5 * a;
     };
     auto pf = fwd.discretize(0.5, 0.349);

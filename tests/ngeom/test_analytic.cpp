@@ -8,15 +8,17 @@
 using namespace adacpp::ngeom;
 
 static int g_fail = 0;
-#define CHECK(cond, msg)                                          \
-    do {                                                          \
-        if (!(cond)) {                                            \
-            std::printf("FAIL: %s  (%s:%d)\n", msg, __FILE__, __LINE__); \
-            ++g_fail;                                             \
-        }                                                         \
+#define CHECK(cond, msg)                                                                                               \
+    do {                                                                                                               \
+        if (!(cond)) {                                                                                                 \
+            std::printf("FAIL: %s  (%s:%d)\n", msg, __FILE__, __LINE__);                                               \
+            ++g_fail;                                                                                                  \
+        }                                                                                                              \
     } while (0)
 
-static bool close(double a, double b, double tol = 1e-9) { return std::abs(a - b) <= tol; }
+static bool close(double a, double b, double tol = 1e-9) {
+    return std::abs(a - b) <= tol;
+}
 static bool vclose(const Vec3 &a, const Vec3 &b, double tol = 1e-7) {
     return (a - b).norm() <= tol;
 }
@@ -106,7 +108,8 @@ static void test_circle_discretize() {
     bool on = true;
     for (auto &p : fine) {
         double rr = ((p - f.o) - f.z * f.z.dot(p - f.o)).norm();
-        if (!close(rr, 4.0, 1e-6)) on = false;
+        if (!close(rr, 4.0, 1e-6))
+            on = false;
     }
     CHECK(on, "circle points on radius");
 }

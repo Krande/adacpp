@@ -1,6 +1,6 @@
-# Strict, modern C++ formatting for adacpp's first-party sources (src/).
+# Formatting for adacpp's first-party sources: C++ under src/ and tests/, JavaScript under tools/.
 # Vendored code (third_party/) is never formatted by the lint task.
-# Run via: pixi run -e lint lint-cpp   (check-only: lint-cpp-check)
+# Run via: pixi run -e lint lint   (check-only: lint-check, which is what CI runs)
 ---
 Language: Cpp
 BasedOnStyle: LLVM
@@ -43,3 +43,16 @@ AlignTrailingComments: true
 SeparateDefinitionBlocks: Leave
 EmptyLineBeforeAccessModifier: LogicalBlock
 MaxEmptyLinesToKeep: 1
+
+---
+# JavaScript — the wasm test harnesses under tools/. Formatted by the SAME tool as the C++ rather
+# than by adding a node toolchain to the lint environment for five files: the point is that
+# `pixi run lint` covers every language in the repo, and a language whose formatter is too much
+# trouble to install is the one that quietly stays unformatted.
+Language: JavaScript
+BasedOnStyle: LLVM
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 120
+JavaScriptQuotes: Leave
