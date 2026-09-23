@@ -1467,10 +1467,21 @@ std::vector<ShapeHandle> solids_impl(const ShapeHandle &sh) {
     return out;
 }
 
+// Every (unique) edge sub-shape, in first-encounter order. MapShapes keys on
+// TopoDS_Shape::IsSame -- TShape AND Location, orientation-insensitive -- so an
+// edge incident to N faces is reported once, while an edge instanced at several
+// placements (a prism's top rail is its base rail at another Location) stays
+// distinct. A bare TopExp_Explorer here returned the incidences instead: a box
+// came back with 24 entries for its 12 edges, and any consumer collapsing those
+// on a placement-blind identity dropped the located copies outright. Matches
+// pythonocc's TopologyExplorer.edges().
 std::vector<ShapeHandle> edges_impl(const ShapeHandle &sh) {
     std::vector<ShapeHandle> out;
-    for (TopExp_Explorer exp(sh.topods(), TopAbs_EDGE); exp.More(); exp.Next()) {
-        out.emplace_back(exp.Current());
+    TopTools_IndexedMapOfShape emap;
+    TopExp::MapShapes(sh.topods(), TopAbs_EDGE, emap);
+    out.reserve(static_cast<size_t>(emap.Extent()));
+    for (Standard_Integer i = 1; i <= emap.Extent(); ++i) {
+        out.emplace_back(emap(i));
     }
     return out;
 }
@@ -5614,7 +5625,10 @@ void cad_module(nb::module_ &m) {
 
     m.def("solids", &solids_impl, "shape"_a, "List of solid sub-shapes as ShapeHandles.");
 
-    m.def("edges", &edges_impl, "shape"_a, "List of edge sub-shapes as ShapeHandles.");
+    m.def("edges", &edges_impl, "shape"_a,
+          "List of unique edge sub-shapes as ShapeHandles, in first-encounter "
+          "order. An edge incident to several faces is reported once; an edge "
+          "instanced at several placements stays distinct.");
 
     m.def("to_topods_pointer", &to_topods_pointer_impl, "shape"_a,
           "Address of the wrapped OCCT TopoDS_Shape (for ABI-compatible OCCT "
