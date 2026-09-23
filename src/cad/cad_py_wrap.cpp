@@ -719,6 +719,19 @@ public:
         for (float v : mi.placement)
             pl.append(v);
         d["placement"] = pl;
+        nb::list outline;
+        for (const auto &pt : mi.outline)
+            outline.append(nb::make_tuple(pt[0], pt[1]));
+        d["outline"] = outline;
+        if (mi.has_position) {
+            d["origin"] = nb::make_tuple(mi.pos_origin[0], mi.pos_origin[1], mi.pos_origin[2]);
+            d["normal"] = nb::make_tuple(mi.pos_axis[0], mi.pos_axis[1], mi.pos_axis[2]);
+            d["xdir"] = nb::make_tuple(mi.pos_ref[0], mi.pos_ref[1], mi.pos_ref[2]);
+        } else {
+            d["origin"] = nb::none();
+            d["normal"] = nb::none();
+            d["xdir"] = nb::none();
+        }
         return d;
     }
 

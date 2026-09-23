@@ -2,6 +2,13 @@
 
 
 
+## v0.27.0 (2026-09-23)
+
+### Feature
+
+* feat(ifc): the member scan carries the swept area&#39;s outline and plane (#64) ([`e990f1e`](https://github.com/Krande/adacpp/commit/e990f1e39c4eb1917f9dea9b2efd2237808bb0ca))
+
+
 ## v0.26.0 (2026-09-23)
 
 ### Feature
