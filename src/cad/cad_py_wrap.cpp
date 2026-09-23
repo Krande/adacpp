@@ -2096,15 +2096,21 @@ std::vector<ShapeHandle> merge_cells_impl(const std::vector<ShapeHandle> &solids
     return out;
 }
 
-// Orientation-independent topological identity. A face shared by two cells of a
-// non-manifold complex is the SAME underlying TShape referenced twice (with
-// opposite orientation), so it hashes equal here while distinct faces differ —
-// CellsBuilder/MakerVolume never instance one TShape at multiple placements, so
-// the TShape pointer is a stable per-face key. Mirrors adapy OccBackend.face_id;
-// lets the cell-graph extractor detect shared faces by true topological identity
-// instead of geometry.
+// Orientation-independent topological identity, matching TopoDS_Shape::IsSame:
+// TShape AND Location, orientation excluded. A face shared by two cells of a
+// non-manifold complex is the same TShape at the same place referenced twice with
+// opposite orientation, so it hashes equal here, while a LOCATED copy -- a prism's
+// top face is its base face instanced at the extrusion height -- is a different
+// face and hashes differently.
+//
+// This was the bare TShape pointer, on the reasoning that CellsBuilder/MakerVolume
+// never instance one TShape at multiple placements. True of the cell-graph case it
+// was written for, but `face_id` is a general verb: on a prism it gave 5 distinct
+// ids for 6 faces, and adapy's OccBackend.face_id -- which this is supposed to
+// mirror -- has always hashed (TShape, Location). std::hash<TopoDS_Shape> is that
+// pair, so the two backends now answer the verb identically.
 int64_t face_id_impl(const ShapeHandle &h) {
-    return static_cast<int64_t>(reinterpret_cast<uintptr_t>(h.topods().TShape().get()));
+    return static_cast<int64_t>(std::hash<TopoDS_Shape>{}(h.topods()));
 }
 
 // Faces owned by exactly one solid — the outer envelope. Map FACE→SOLID
@@ -5855,9 +5861,10 @@ void cad_module(nb::module_ &m) {
           "shared non-manifold face.");
 
     m.def("face_id", &face_id_impl, "face"_a,
-          "Orientation-independent topological identity of a face (TShape "
-          "pointer). Two cells referencing the same shared non-manifold face "
-          "return the same id; distinct faces differ.");
+          "Orientation-independent topological identity of a sub-shape "
+          "(TShape + Location, matching TopoDS_Shape::IsSame). Two cells "
+          "referencing the same shared non-manifold face return the same id; "
+          "distinct faces, including a located copy of one, differ.");
 
     m.def("free_faces", &free_faces_impl, "solids"_a,
           "Faces owned by exactly one solid — the outer envelope (FACE→SOLID "

@@ -91,3 +91,36 @@ def test_closed_wire_keeps_all_four_of_its_edges():
     assert len(edges) == 4
     corners = {tuple(round(c, 9) for c in p) for e in edges for p in cad.vertex_points(e)}
     assert corners == {(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)}
+
+
+def test_face_id_separates_a_prisms_base_from_its_top():
+    """Identity that ignores placement is not identity.
+
+    ``BRepPrimAPI_MakePrism`` instances the base face at the extrusion height, so base
+    and top are one TShape at two Locations. ``face_id`` keyed on the bare TShape
+    pointer merged them -- 5 distinct ids for a prism's 6 faces -- while adapy's
+    OccBackend.face_id, which this mirrors, has always hashed (TShape, Location).
+    """
+    prism = cad.extrude_face_along_normal(cad.polygon_face(_SQUARE), 0.5)
+    faces = cad.faces(prism)
+
+    assert len(faces) == 6
+    assert len({cad.face_id(f) for f in faces}) == 6
+
+
+def test_face_id_still_matches_a_shared_non_manifold_face():
+    """The case face_id exists for, and the one placement-awareness must not break.
+
+    Two abutting boxes merged into a cell complex share their interface as ONE face,
+    referenced by both cells with opposite orientation. Same TShape, same Location --
+    so it must still hash equal, or the cell-graph extractor stops recognising shared
+    faces and falls back to matching them geometrically.
+    """
+    lo = cad.build_box([0, 0, 0], [0, 0, 1], [1, 0, 0], 1.0, 1.0, 1.0)
+    hi = cad.build_box([0, 0, 1], [0, 0, 1], [1, 0, 0], 1.0, 1.0, 1.0)
+    cells = cad.merge_cells([lo, hi])
+    assert len(cells) == 2, "merge_cells must keep both operands as cells"
+
+    per_cell = [{cad.face_id(f) for f in cad.faces(c)} for c in cells]
+    shared = per_cell[0] & per_cell[1]
+    assert len(shared) == 1, "the interface must be one shared face, by identity"
