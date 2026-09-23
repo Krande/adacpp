@@ -2,6 +2,15 @@
 
 
 
+## v0.28.0 (2026-09-23)
+
+### Feature
+
+* feat(cad): read_step_shapes applies an import-time transform (#65)
+
+Co-authored-by: Claude Opus 5.5 (1M context) &lt;noreply@anthropic.com&gt; ([`5232dea`](https://github.com/Krande/adacpp/commit/5232deae4c6754bc456f4c168ff28fc5db2b00fe))
+
+
 ## v0.27.0 (2026-09-23)
 
 ### Feature
