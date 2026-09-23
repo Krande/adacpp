@@ -2,6 +2,13 @@
 
 
 
+## v0.26.0 (2026-09-23)
+
+### Feature
+
+* feat(ifc): read what a product IS, without tessellating it (#63) ([`fd769fe`](https://github.com/Krande/adacpp/commit/fd769fe4f0141a7c3773d5c5efb0281569b3f000))
+
+
 ## v0.25.5 (2026-09-23)
 
 ### Fix
