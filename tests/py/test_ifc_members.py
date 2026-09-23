@@ -106,3 +106,52 @@ def test_it_yields_one_product_at_a_time(members):
     assert len(remaining) == 5
     with pytest.raises(StopIteration):
         next(scan)
+
+
+# ── the swept area: outline + the plane it is swept from ─────────────────────────────────────
+
+
+def test_a_plate_reports_the_outline_a_plate_actually_is(members):
+    # A plate is an outline, a thickness and a plane. The first two were already here; without the
+    # third and the boundary itself a consumer can name a plate but cannot rebuild one -- there is
+    # no section name that means "this 2 x 2 m rectangle".
+    pl = members["pl1"]
+    assert [tuple(round(v, 6) for v in p) for p in pl["outline"]] == [
+        (0.0, -2.0),
+        (0.0, 0.0),
+        (2.0, 0.0),
+        (2.0, -2.0),
+    ]
+    assert pl["origin"] == pytest.approx((0.0, 0.0, 0.0))
+    assert pl["normal"] == pytest.approx((1.0, 0.0, 0.0))  # the extrusion direction
+    assert pl["xdir"] == pytest.approx((0.0, 0.0, 1.0))  # where the outline's +x points
+
+
+def test_a_catalogue_section_is_synthesised_into_the_same_shape(members):
+    # An IfcIShapeProfileDef states parameters, not points -- the reader turns them into the same
+    # outline the geometry path draws, so a consumer handles one kind of answer rather than two.
+    outline = members["bm1"]["outline"]
+    assert len(outline) == 12  # an I: two flanges, a web, twelve corners
+    xs = [p[0] for p in outline]
+    ys = [p[1] for p in outline]
+    assert max(xs) - min(xs) == pytest.approx(0.11)  # IPE220 depth
+    assert max(ys) - min(ys) == pytest.approx(0.22)  # its width
+
+
+def test_the_swept_plane_follows_the_member(members):
+    # bm2 runs along +Y and bm3 along +Z: the normal is the extrusion direction, so it is how a
+    # consumer knows which way a plate faces or a beam runs without re-deriving it from the axis.
+    assert members["bm2"]["normal"] == pytest.approx((0.0, 1.0, 0.0))
+    assert members["bm3"]["normal"] == pytest.approx((0.0, 0.0, 1.0))
+    diagonal = members["bm4"]["normal"]
+    assert diagonal == pytest.approx((0.7071067811865476, 0.0, 0.7071067811865476))
+
+
+def test_outline_points_are_metres_like_everything_else(members):
+    # The box girder's outer boundary is 0.3 x 0.2 m; a file in millimetres would report the same
+    # numbers, which is the point of normalising once in the reader.
+    outline = members["MyBeam"]["outline"]
+    xs = [p[0] for p in outline]
+    ys = [p[1] for p in outline]
+    assert max(xs) - min(xs) == pytest.approx(0.2)
+    assert max(ys) - min(ys) == pytest.approx(0.3)
