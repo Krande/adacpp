@@ -23,7 +23,7 @@ def members():
     scan = adacpp.cad.IfcMemberScan(IFC)
     assert scan.products_total == 7
     assert scan.unit_scale == 1.0  # the file is in metres
-    return {m["name"]: m for m in scan.members()}
+    return {m["name"]: m for m in scan}
 
 
 def test_every_product_is_reported_with_its_class(members):
@@ -86,8 +86,23 @@ def test_the_placement_is_a_column_major_world_matrix(members):
 
 
 def test_a_scan_is_repeatable(members):
-    # Nothing is consumed by reading: two scans of one file agree, which is what lets a caller ask
-    # for members and geometry independently.
-    again = {m["name"]: m for m in adacpp.cad.IfcMemberScan(IFC).members()}
+    # Nothing in the FILE is consumed by reading: two scans of one file agree, which is what lets a
+    # caller ask for members and geometry independently.
+    again = {m["name"]: m for m in adacpp.cad.IfcMemberScan(IFC)}
     assert again["bm1"]["p2"] == pytest.approx(members["bm1"]["p2"])
     assert again.keys() == members.keys()
+
+
+def test_it_yields_one_product_at_a_time(members):
+    # A scan is a STREAM, like the geometry one: the consumer decides what to keep, so a plant-sized
+    # file never has to exist as one list of members on either side of the boundary.
+    scan = adacpp.cad.IfcMemberScan(IFC)
+    assert iter(scan) is scan
+    first = next(scan)
+    second = next(scan)
+    assert first["id"] != second["id"]
+    # And it ENDS -- a stream that never raised StopIteration would hang every `for` over it.
+    remaining = list(scan)
+    assert len(remaining) == 5
+    with pytest.raises(StopIteration):
+        next(scan)

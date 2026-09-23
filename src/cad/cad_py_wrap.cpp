@@ -687,39 +687,46 @@ public:
     long products_total() const {
         return (long) roots_.size();
     }
-    nb::list members() {
-        nb::list out;
-        for (long pid : roots_) {
-            adacpp::ifc_read::MemberInfo mi = r_->product_member(pid);
-            r_->clear_cache(); // bounded memory across a plant-sized file, as the geometry stream does
-            nb::dict d;
-            d["id"] = mi.id;
-            d["guid"] = mi.guid;
-            d["name"] = mi.name;
-            d["ifc_class"] = mi.ifc_class;
-            d["profile_name"] = mi.profile_name;
-            d["profile_type"] = mi.profile_type;
-            d["depth"] = mi.depth;
-            if (mi.has_axis) {
-                d["p1"] = nb::make_tuple(mi.p1[0], mi.p1[1], mi.p1[2]);
-                d["p2"] = nb::make_tuple(mi.p2[0], mi.p2[1], mi.p2[2]);
-            } else {
-                d["p1"] = nb::none();
-                d["p2"] = nb::none();
-            }
-            nb::list pl;
-            for (float v : mi.placement)
-                pl.append(v);
-            d["placement"] = pl;
-            out.append(d);
+    // ONE product per call, like IfcNgeomStream. The reading was always bounded -- statements are
+    // read through the offset index and the parse cache is dropped between products -- but a
+    // method that returned every member at once made the CONSUMER hold the whole model anyway,
+    // which on a plant is the cost this reader exists to avoid. `list(scan)` still materialises,
+    // explicitly, when a caller wants that.
+    nb::dict next() {
+        if (cursor_ >= roots_.size()) {
+            PyErr_SetNone(PyExc_StopIteration);
+            throw nb::python_error();
         }
-        return out;
+        long pid = roots_[cursor_++];
+        adacpp::ifc_read::MemberInfo mi = r_->product_member(pid);
+        r_->clear_cache(); // statement/surface caches don't grow across products
+        nb::dict d;
+        d["id"] = mi.id;
+        d["guid"] = mi.guid;
+        d["name"] = mi.name;
+        d["ifc_class"] = mi.ifc_class;
+        d["profile_name"] = mi.profile_name;
+        d["profile_type"] = mi.profile_type;
+        d["depth"] = mi.depth;
+        if (mi.has_axis) {
+            d["p1"] = nb::make_tuple(mi.p1[0], mi.p1[1], mi.p1[2]);
+            d["p2"] = nb::make_tuple(mi.p2[0], mi.p2[1], mi.p2[2]);
+        } else {
+            d["p1"] = nb::none();
+            d["p2"] = nb::none();
+        }
+        nb::list pl;
+        for (float v : mi.placement)
+            pl.append(v);
+        d["placement"] = pl;
+        return d;
     }
 
 private:
     std::unique_ptr<adacpp::step::StreamIndex> idx_;
     std::unique_ptr<adacpp::ifc_read::IfcResolver> r_;
     std::vector<long> roots_;
+    size_t cursor_ = 0;
     double unit_scale_ = 1.0;
 };
 
@@ -5554,13 +5561,14 @@ void cad_module(nb::module_ &m) {
     nb::class_<IfcMemberScan>(m, "IfcMemberScan")
         .def(nb::init<const std::string &>(), "path"_a,
              "What an IFC file says its products ARE -- one pass, no tessellation and no "
-             "ifcopenshell. `members()` returns one dict per product: id, guid, name, ifc_class, "
+             "ifcopenshell. ITERATE to get one dict per product: id, guid, name, ifc_class, "
              "the reference axis as p1/p2 (WORLD coordinates in METRES, or None where the file "
              "states none), the swept profile's name and type, the extrusion depth, and the world "
              "placement as a 16-float column-major matrix. This is the half a consumer without a "
              "kernel can use -- a clash check, a quantity take-off, a tree walk -- and it is the "
              "same answer in the browser through the wasm build as on a worker.")
-        .def("members", &IfcMemberScan::members)
+        .def("__iter__", [](nb::object self) { return self; })
+        .def("__next__", &IfcMemberScan::next)
         .def_prop_ro("unit_scale", &IfcMemberScan::unit_scale)
         .def_prop_ro("products_total", &IfcMemberScan::products_total);
 
