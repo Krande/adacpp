@@ -104,6 +104,10 @@ ruff = "==0.16.6"
 # `pixi update` could turn the lint gate red with zero C++ changes — 22 -> 23 was already queued
 # up in conda-forge. Bump this deliberately, in the same commit as the reformat it causes.
 clang-format = "==23.1.0"
+# CMake. Pinned for the same reason as clang-format above: a formatter's output changes between
+# versions, and `lint-cmake-check` is part of the CI gate, so a floating pin means an unrelated
+# `pixi update` can turn the gate red with no build-system change at all.
+gersemi = "==0.24.0"
 
 [feature.wasm.dependencies]
 nodejs = "*"
@@ -136,16 +140,28 @@ make = "*"
 # Format every first-party C++ unit under src/ (no vendored code lives there;
 # third_party/ is excluded by construction). git ls-files keeps it deterministic
 # and cross-platform; clang-format reads the repo-root .clang-format.
-lint-cpp = { cmd = "clang-format -i $(git ls-files 'src/*.cpp' 'src/*.h' 'src/*.hpp')", description = "Format first-party C++ in src/ per .clang-format" }
-lint-cpp-check = { cmd = "clang-format --dry-run --Werror $(git ls-files 'src/*.cpp' 'src/*.h' 'src/*.hpp')", description = "CI gate: fail on any unformatted C++" }
+# FIRST-PARTY C++ IS NOT ONLY src/. The tests under tests/ are ours too, and while the glob said
+# `src/*` they were the one C++ in the repo nobody's formatter ever looked at.
+lint-cpp = { cmd = "clang-format -i $(git ls-files 'src/*.cpp' 'src/*.h' 'src/*.hpp' 'tests/*.cpp' 'tests/*.h' 'tests/*.hpp')", description = "Format first-party C++ (src/, tests/) per .clang-format" }
+lint-cpp-check = { cmd = "clang-format --dry-run --Werror $(git ls-files 'src/*.cpp' 'src/*.h' 'src/*.hpp' 'tests/*.cpp' 'tests/*.h' 'tests/*.hpp')", description = "CI gate: fail on any unformatted C++" }
+# The wasm test harnesses. `--assume-filename` because clang-format maps .js to JavaScript but not
+# .mjs, and an extension it cannot place is formatted as C++ or skipped silently — either way the
+# gate would be reporting on something other than what it reads.
+lint-js = { cmd = "clang-format -i --assume-filename=x.js $(git ls-files 'tools/*.js' 'tools/*.mjs')", description = "Format first-party JavaScript in tools/ per .clang-format" }
+lint-js-check = { cmd = "clang-format --dry-run --Werror --assume-filename=x.js $(git ls-files 'tools/*.js' 'tools/*.mjs')", description = "CI gate: fail on any unformatted JavaScript" }
+# CMake is a language this repo is written in too -- the build IS the thing that decides what ships,
+# and it was the last body of first-party source no formatter read. `git ls-files` keeps vendored
+# CMake (third_party/) out by construction, as it does for the C++.
+lint-cmake = { cmd = "gersemi -i $(git ls-files '*.cmake' '*CMakeLists.txt')", description = "Format first-party CMake" }
+lint-cmake-check = { cmd = "gersemi --check $(git ls-files '*.cmake' '*CMakeLists.txt')", description = "CI gate: fail on any unformatted CMake" }
 # Python is scoped with git ls-files for the same reasons as the C++ above, and one more: `isort .`
 # does not honour .gitignore, and the skip list says "build" — which does not match build-prof/ or
 # build-wasm-*/. So a local run reformatted vendored manifold sources inside those trees. Tracked
 # files are exactly the ones we own.
-lint = { cmd = "isort $(git ls-files '*.py') && black --config pyproject.toml $(git ls-files '*.py') && ruff check --fix $(git ls-files '*.py')", depends-on = ["lint-cpp"], description = "Format + lint Python and C++" }
+lint = { cmd = "isort $(git ls-files '*.py') && black --config pyproject.toml $(git ls-files '*.py') && ruff check --fix $(git ls-files '*.py')", depends-on = ["lint-cpp", "lint-js", "lint-cmake"], description = "Format + lint every first-party language: Python, C++, JavaScript, CMake" }
 # CI gate. `lint` is isort/black/ruff --fix: all three MUTATE and exit 0, so the lint job reformatted
 # the runner's checkout and passed no matter what — it could not fail. Check-mode reports instead.
-lint-check = { cmd = "isort --check-only $(git ls-files '*.py') && black --check --config pyproject.toml $(git ls-files '*.py') && ruff check $(git ls-files '*.py')", depends-on = ["lint-cpp-check"], description = "CI gate: fail on any unformatted/unlinted Python or C++" }
+lint-check = { cmd = "isort --check-only $(git ls-files '*.py') && black --check --config pyproject.toml $(git ls-files '*.py') && ruff check $(git ls-files '*.py')", depends-on = ["lint-cpp-check", "lint-js-check", "lint-cmake-check"], description = "CI gate: fail on any unformatted/unlinted Python, C++, JavaScript or CMake" }
 
 [feature.wasm.tasks]
 clean = { cmd = "rm -rf build-wasm && mkdir -p build-wasm" }

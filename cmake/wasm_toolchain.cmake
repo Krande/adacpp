@@ -22,7 +22,7 @@ set(CMAKE_CXX_FLAGS_DEBUG "" CACHE STRING "CXX flags for debug" FORCE)
 # Conda's compiler activation injects GNU-ld flags via LDFLAGS (--sort-common,
 # --as-needed, -z relro/now, --disable-new-dtags, -rpath) that wasm-ld doesn't
 # recognise. Clear the cmake linker flag variables so they aren't passed to em++.
-set(CMAKE_EXE_LINKER_FLAGS    "" CACHE STRING "exe linker flags"    FORCE)
+set(CMAKE_EXE_LINKER_FLAGS "" CACHE STRING "exe linker flags" FORCE)
 set(CMAKE_SHARED_LINKER_FLAGS "" CACHE STRING "shared linker flags" FORCE)
 set(CMAKE_MODULE_LINKER_FLAGS "" CACHE STRING "module linker flags" FORCE)
 

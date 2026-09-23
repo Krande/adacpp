@@ -667,6 +667,69 @@ private:
 // meta now carries colour (IfcStyledItem -> IfcColourRgb) + the spatial-structure path
 // (IfcRelContainedInSpatialStructure + IfcRelAggregates walk -> instance_paths), alongside
 // geometry/guid/name/placement — so a native reader gets the full tree + colours.
+// What an IFC says its products ARE -- one pass, no tessellation (see ifc_reader's MemberInfo).
+//
+// Separate from IfcNgeomStream on purpose: that one exists to produce geometry and pays for it,
+// while a clash check, a take-off or a tree walk wants the member facts and no triangles. Reading
+// them here costs the handful of entities that state them, which is what makes the same answer
+// affordable in the browser (the wasm build) as on a worker.
+class IfcMemberScan {
+public:
+    explicit IfcMemberScan(const std::string &path) {
+        idx_ = std::make_unique<adacpp::step::StreamIndex>(adacpp::step::StreamIndex::from_file(path));
+        r_ = std::make_unique<adacpp::ifc_read::IfcResolver>(*idx_);
+        roots_ = r_->proxy_roots();
+        unit_scale_ = r_->unit_scale();
+    }
+    double unit_scale() const {
+        return unit_scale_;
+    }
+    long products_total() const {
+        return (long) roots_.size();
+    }
+    // ONE product per call, like IfcNgeomStream. The reading was always bounded -- statements are
+    // read through the offset index and the parse cache is dropped between products -- but a
+    // method that returned every member at once made the CONSUMER hold the whole model anyway,
+    // which on a plant is the cost this reader exists to avoid. `list(scan)` still materialises,
+    // explicitly, when a caller wants that.
+    nb::dict next() {
+        if (cursor_ >= roots_.size()) {
+            PyErr_SetNone(PyExc_StopIteration);
+            throw nb::python_error();
+        }
+        long pid = roots_[cursor_++];
+        adacpp::ifc_read::MemberInfo mi = r_->product_member(pid);
+        r_->clear_cache(); // statement/surface caches don't grow across products
+        nb::dict d;
+        d["id"] = mi.id;
+        d["guid"] = mi.guid;
+        d["name"] = mi.name;
+        d["ifc_class"] = mi.ifc_class;
+        d["profile_name"] = mi.profile_name;
+        d["profile_type"] = mi.profile_type;
+        d["depth"] = mi.depth;
+        if (mi.has_axis) {
+            d["p1"] = nb::make_tuple(mi.p1[0], mi.p1[1], mi.p1[2]);
+            d["p2"] = nb::make_tuple(mi.p2[0], mi.p2[1], mi.p2[2]);
+        } else {
+            d["p1"] = nb::none();
+            d["p2"] = nb::none();
+        }
+        nb::list pl;
+        for (float v : mi.placement)
+            pl.append(v);
+        d["placement"] = pl;
+        return d;
+    }
+
+private:
+    std::unique_ptr<adacpp::step::StreamIndex> idx_;
+    std::unique_ptr<adacpp::ifc_read::IfcResolver> r_;
+    std::vector<long> roots_;
+    size_t cursor_ = 0;
+    double unit_scale_ = 1.0;
+};
+
 class IfcNgeomStream {
 public:
     explicit IfcNgeomStream(const std::string &path) : prof_("ifc_ngeom_stream") {
@@ -5494,6 +5557,20 @@ void cad_module(nb::module_ &m) {
         .def_prop_ro("unit_scale", &IfcNgeomStream::unit_scale)
         .def_prop_ro("products_total", &IfcNgeomStream::products_total)
         .def_prop_ro("products_skipped", &IfcNgeomStream::products_skipped);
+
+    nb::class_<IfcMemberScan>(m, "IfcMemberScan")
+        .def(nb::init<const std::string &>(), "path"_a,
+             "What an IFC file says its products ARE -- one pass, no tessellation and no "
+             "ifcopenshell. ITERATE to get one dict per product: id, guid, name, ifc_class, "
+             "the reference axis as p1/p2 (WORLD coordinates in METRES, or None where the file "
+             "states none), the swept profile's name and type, the extrusion depth, and the world "
+             "placement as a 16-float column-major matrix. This is the half a consumer without a "
+             "kernel can use -- a clash check, a quantity take-off, a tree walk -- and it is the "
+             "same answer in the browser through the wasm build as on a worker.")
+        .def("__iter__", [](nb::object self) { return self; })
+        .def("__next__", &IfcMemberScan::next)
+        .def_prop_ro("unit_scale", &IfcMemberScan::unit_scale)
+        .def_prop_ro("products_total", &IfcMemberScan::products_total);
 
     m.def("_step_index_parity", &step_index_parity_impl, "path"_a,
           "Debug: build the STEP offset index via mmap scan and via the wasm-safe pread scan, returning "

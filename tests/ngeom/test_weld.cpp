@@ -20,14 +20,14 @@ static int g_fail = 0;
 #define CHECK(cond, msg)                                                                                               \
     do {                                                                                                               \
         if (!(cond)) {                                                                                                 \
-            std::printf("FAIL: %s  (%s:%d)\n", msg, __FILE__, __LINE__);                                              \
+            std::printf("FAIL: %s  (%s:%d)\n", msg, __FILE__, __LINE__);                                               \
             ++g_fail;                                                                                                  \
         }                                                                                                              \
     } while (0)
 
 // ---- reference weld: the pre-CSR map-of-vectors implementation, verbatim ---------------------------
-static void reference_weld(std::vector<float> &positions, std::vector<uint32_t> &indices,
-                           std::vector<float> &normals, double crease_deg = 40.0) {
+static void reference_weld(std::vector<float> &positions, std::vector<uint32_t> &indices, std::vector<float> &normals,
+                           double crease_deg = 40.0) {
     const size_t nt = indices.size() / 3;
     const size_t nv = positions.size() / 3;
     if (nt == 0 || nv == 0)
@@ -36,11 +36,15 @@ static void reference_weld(std::vector<float> &positions, std::vector<uint32_t> 
     Vec3 lo{1e300, 1e300, 1e300}, hi{-1e300, -1e300, -1e300};
     for (size_t v = 0; v < nv; ++v) {
         double x = positions[3 * v], y = positions[3 * v + 1], z = positions[3 * v + 2];
-        lo.x = std::min(lo.x, x); lo.y = std::min(lo.y, y); lo.z = std::min(lo.z, z);
-        hi.x = std::max(hi.x, x); hi.y = std::max(hi.y, y); hi.z = std::max(hi.z, z);
+        lo.x = std::min(lo.x, x);
+        lo.y = std::min(lo.y, y);
+        lo.z = std::min(lo.z, z);
+        hi.x = std::max(hi.x, x);
+        hi.y = std::max(hi.y, y);
+        hi.z = std::max(hi.z, z);
     }
-    double diag = std::sqrt((hi.x - lo.x) * (hi.x - lo.x) + (hi.y - lo.y) * (hi.y - lo.y) +
-                            (hi.z - lo.z) * (hi.z - lo.z));
+    double diag =
+        std::sqrt((hi.x - lo.x) * (hi.x - lo.x) + (hi.y - lo.y) * (hi.y - lo.y) + (hi.z - lo.z) * (hi.z - lo.z));
     const double inv = 1.0 / (diag > 0 ? diag * 1e-6 : 1e-9);
     auto qcoord = [&](double c) -> int64_t { return (int64_t) std::llround(c * inv); };
     std::vector<Vec3> fnorm(nt);
@@ -58,7 +62,10 @@ static void reference_weld(std::vector<float> &positions, std::vector<uint32_t> 
     struct KeyHash {
         size_t operator()(const std::array<int64_t, 3> &k) const {
             uint64_t h = 1469598103934665603ull;
-            for (int64_t q : k) { h ^= (uint64_t) q; h *= 1099511628211ull; }
+            for (int64_t q : k) {
+                h ^= (uint64_t) q;
+                h *= 1099511628211ull;
+            }
             return (size_t) h;
         }
     };
@@ -78,7 +85,10 @@ static void reference_weld(std::vector<float> &positions, std::vector<uint32_t> 
             const Vec3 &fn = fnorm[t];
             int found = -1;
             for (size_t cl = 0; cl < cluster_dir.size(); ++cl)
-                if (cluster_dir[cl].dot(fn) >= crease_cos) { found = (int) cl; break; }
+                if (cluster_dir[cl].dot(fn) >= crease_cos) {
+                    found = (int) cl;
+                    break;
+                }
             if (found < 0) {
                 found = (int) cluster_dir.size();
                 cluster_dir.push_back(fn);
@@ -127,8 +137,12 @@ static void add_tri(Mesh &m, Vec3 a, Vec3 b, Vec3 c) {
     Vec3 fn = l > 1e-30 ? Vec3{n.x / l, n.y / l, n.z / l} : Vec3{0, 0, 1};
     for (const Vec3 &p : {a, b, c}) {
         uint32_t base = (uint32_t) (m.pos.size() / 3);
-        m.pos.push_back((float) p.x); m.pos.push_back((float) p.y); m.pos.push_back((float) p.z);
-        m.nrm.push_back((float) fn.x); m.nrm.push_back((float) fn.y); m.nrm.push_back((float) fn.z);
+        m.pos.push_back((float) p.x);
+        m.pos.push_back((float) p.y);
+        m.pos.push_back((float) p.z);
+        m.nrm.push_back((float) fn.x);
+        m.nrm.push_back((float) fn.y);
+        m.nrm.push_back((float) fn.z);
         m.idx.push_back(base);
     }
 }
@@ -168,7 +182,9 @@ static Mesh make_grid(int n, double s) {
 
 // ---- comparison ------------------------------------------------------------------------------------
 
-static bool feq(float a, float b, float eps = 1e-5f) { return std::fabs(a - b) <= eps; }
+static bool feq(float a, float b, float eps = 1e-5f) {
+    return std::fabs(a - b) <= eps;
+}
 
 // Both welds reproduce input triangle t from the same original positions and rewrite indices in place
 // (no triangle reordering), so compare corner-by-corner: welded position must equal the ORIGINAL soup
@@ -227,7 +243,11 @@ static void semantic_checks() {
 
 int main() {
     std::printf("weld_mesh CSR parity + semantics:\n");
-    compare("shared-edge", [] { Mesh m; add_quad(m, {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}); return m; }());
+    compare("shared-edge", [] {
+        Mesh m;
+        add_quad(m, {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0});
+        return m;
+    }());
     compare("box", make_box(2.0));
     compare("grid8", make_grid(8, 3.0));
     compare("grid32", make_grid(32, 10.0)); // 2048 tris, high fan-in, scale stress

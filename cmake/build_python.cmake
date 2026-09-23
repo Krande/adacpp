@@ -1,7 +1,9 @@
 # Detect the installed nanobind package and import it into CMake
 execute_process(
-        COMMAND "${Python_EXECUTABLE}" -m nanobind --cmake_dir
-        OUTPUT_STRIP_TRAILING_WHITESPACE OUTPUT_VARIABLE NB_DIR)
+    COMMAND "${Python_EXECUTABLE}" -m nanobind --cmake_dir
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    OUTPUT_VARIABLE NB_DIR
+)
 
 message(STATUS "NanoBind Cmake directory: " ${NB_DIR})
 list(APPEND CMAKE_PREFIX_PATH "${NB_DIR}")
@@ -9,30 +11,36 @@ list(APPEND CMAKE_PREFIX_PATH "${NB_DIR}")
 # Under the emscripten toolchain, find_package is restricted to CMAKE_FIND_ROOT_PATH.
 # nanobind lives in the host conda env, not the cross-compile sysroot, so allow find
 # to look outside the sysroot for the package config.
-if (EMSCRIPTEN)
+if(EMSCRIPTEN)
     set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)
 
     # Pyodide Python modules are loaded dynamically by the runtime and never link
     # libpython, so find_package(Python COMPONENTS Development) is unavailable.
     # Provide the Python::Module / Python::SABIModule targets nanobind expects, plus
     # Python_SOABI / Python_SOSABI variables that drive the extension suffix.
-    if (NOT TARGET Python::Module)
+    if(NOT TARGET Python::Module)
         add_library(Python::Module INTERFACE IMPORTED)
-        target_include_directories(Python::Module INTERFACE "${Python_INCLUDE_DIR}")
-    endif ()
-    if (NOT TARGET Python::SABIModule)
+        target_include_directories(
+            Python::Module
+            INTERFACE "${Python_INCLUDE_DIR}"
+        )
+    endif()
+    if(NOT TARGET Python::SABIModule)
         add_library(Python::SABIModule INTERFACE IMPORTED)
-        target_include_directories(Python::SABIModule INTERFACE "${Python_INCLUDE_DIR}")
-    endif ()
-    set(Python_SOABI   "cpython-313-wasm32-emscripten")
-    set(Python_SOSABI  "abi3")
+        target_include_directories(
+            Python::SABIModule
+            INTERFACE "${Python_INCLUDE_DIR}"
+        )
+    endif()
+    set(Python_SOABI "cpython-313-wasm32-emscripten")
+    set(Python_SOSABI "abi3")
 
     # The emscripten toolchain pins TARGET_SUPPORTS_SHARED_LIBS=FALSE globally, which
     # silently demotes MODULE targets (what nanobind_add_module produces) to STATIC
     # archives. Pyodide loads .so files that are wasm side modules, so flip the
     # property back on before nanobind_add_module runs.
     set_property(GLOBAL PROPERTY TARGET_SUPPORTS_SHARED_LIBS TRUE)
-endif ()
+endif()
 
 # Import nanobind through CMake's find_package mechanism
 find_package(nanobind CONFIG REQUIRED)
@@ -62,24 +70,39 @@ target_link_libraries(_ada_cpp_ext_impl PRIVATE ${ADA_CPP_LINK_LIBS})
 # Nothing else resolves symbols out of this module: Python's import machinery calls PyInit_*, and
 # adapy's only ctypes binding loads a separate library (libstep2glb_capi). So one exported symbol is
 # the whole interface. Windows needs nothing -- a DLL exports only what is marked __declspec(dllexport).
-if (NOT EMSCRIPTEN)
-    if (APPLE)
+if(NOT EMSCRIPTEN)
+    if(APPLE)
         # ld64 mangles C names with a leading underscore.
-        target_link_options(_ada_cpp_ext_impl PRIVATE "LINKER:-exported_symbol,_PyInit__ada_cpp_ext_impl")
-    elseif (UNIX)
-        set(_ADACPP_EXPORT_MAP "${CMAKE_CURRENT_BINARY_DIR}/adacpp_py_exports.map")
-        file(WRITE "${_ADACPP_EXPORT_MAP}" "{\n  global: PyInit__ada_cpp_ext_impl;\n  local: *;\n};\n")
-        target_link_options(_ada_cpp_ext_impl PRIVATE "LINKER:--version-script=${_ADACPP_EXPORT_MAP}")
-        set_property(TARGET _ada_cpp_ext_impl APPEND PROPERTY LINK_DEPENDS "${_ADACPP_EXPORT_MAP}")
-    endif ()
-endif ()
+        target_link_options(
+            _ada_cpp_ext_impl
+            PRIVATE "LINKER:-exported_symbol,_PyInit__ada_cpp_ext_impl"
+        )
+    elseif(UNIX)
+        set(_ADACPP_EXPORT_MAP
+            "${CMAKE_CURRENT_BINARY_DIR}/adacpp_py_exports.map"
+        )
+        file(
+            WRITE "${_ADACPP_EXPORT_MAP}"
+            "{\n  global: PyInit__ada_cpp_ext_impl;\n  local: *;\n};\n"
+        )
+        target_link_options(
+            _ada_cpp_ext_impl
+            PRIVATE "LINKER:--version-script=${_ADACPP_EXPORT_MAP}"
+        )
+        set_property(
+            TARGET _ada_cpp_ext_impl
+            APPEND
+            PROPERTY LINK_DEPENDS "${_ADACPP_EXPORT_MAP}"
+        )
+    endif()
+endif()
 
 # gzip-compressed IFC/STEP input: enable StreamIndex's zlib inflate ONLY on this target (it links
 # ZLIB::ZLIB via ADA_CPP_LINK_LIBS). Other targets compile gunzip() as the no-op stub, so the
 # minimal STP2GLB CLI / C++ tests need no zlib link. ZLIB_FOUND is set in the top-level CMakeLists.
-if (ZLIB_FOUND)
+if(ZLIB_FOUND)
     target_compile_definitions(_ada_cpp_ext_impl PRIVATE ADACPP_HAVE_ZLIB)
-endif ()
+endif()
 
 # Wasm builds: statically link the OCCT toolkits cross-built by wasm_occt.cmake.
 # The OCCT IMPORTED targets carry their include dir as INTERFACE_INCLUDE_DIRECTORIES,
@@ -97,42 +120,49 @@ endif ()
 #
 # CMake registers WHOLE_ARCHIVE for many platforms but not the emscripten
 # wasm32 target — define it ourselves.
-if (EMSCRIPTEN AND DEFINED WASM_OCCT_TARGETS)
-    set(CMAKE_C_LINK_GROUP_USING_RESCAN "LINKER:--start-group" "LINKER:--end-group")
-    set(CMAKE_C_LINK_GROUP_USING_RESCAN_SUPPORTED TRUE)
-    set(CMAKE_CXX_LINK_GROUP_USING_RESCAN "LINKER:--start-group" "LINKER:--end-group")
-    set(CMAKE_CXX_LINK_GROUP_USING_RESCAN_SUPPORTED TRUE)
-    target_link_libraries(_ada_cpp_ext_impl PRIVATE
-        "$<LINK_GROUP:RESCAN,${WASM_OCCT_TARGETS}>"
+if(EMSCRIPTEN AND DEFINED WASM_OCCT_TARGETS)
+    set(CMAKE_C_LINK_GROUP_USING_RESCAN
+        "LINKER:--start-group"
+        "LINKER:--end-group"
     )
-endif ()
+    set(CMAKE_C_LINK_GROUP_USING_RESCAN_SUPPORTED TRUE)
+    set(CMAKE_CXX_LINK_GROUP_USING_RESCAN
+        "LINKER:--start-group"
+        "LINKER:--end-group"
+    )
+    set(CMAKE_CXX_LINK_GROUP_USING_RESCAN_SUPPORTED TRUE)
+    target_link_libraries(
+        _ada_cpp_ext_impl
+        PRIVATE "$<LINK_GROUP:RESCAN,${WASM_OCCT_TARGETS}>"
+    )
+endif()
 
-if (EMSCRIPTEN)
+if(EMSCRIPTEN)
     # Emscripten + cmake's MODULE target produces an ar archive by default. Pyodide
     # loads .so files that are actually relocatable wasm side modules; force that
     # output here. WASM_BIGINT is required by pyodide (BigInt-aware i64 marshalling).
     # PyInit__ada_cpp_ext_impl must be explicitly retained — wasm-ld --gc-sections
     # would otherwise drop it (it's only reached through the Python C API).
-    set_target_properties(_ada_cpp_ext_impl PROPERTIES
-            SUFFIX ".so"
-            PREFIX "")
-    target_link_options(_ada_cpp_ext_impl PRIVATE
+    set_target_properties(_ada_cpp_ext_impl PROPERTIES SUFFIX ".so" PREFIX "")
+    target_link_options(
+        _ada_cpp_ext_impl
+        PRIVATE
             "-sSIDE_MODULE=2"
             "-sWASM_BIGINT"
             "-fwasm-exceptions"
             "-sSUPPORT_LONGJMP=wasm"
             "-Wl,--export=PyInit__ada_cpp_ext_impl"
             "-Wl,--no-gc-sections"
-            # NO -sEXPORT_ALL=1. adacpp must NOT export its statically-linked OCCT
-            # symbols, or they interpose with the upstream ifcopenshell wheel's own
-            # static OCCT when both load in one pyodide runtime — corrupting OCCT's
-            # Standard_Type RTTI registry (a Geom_Line is misread and
-            # GeomAdaptor_Curve::BSpline() throws). The real isolation comes from
-            # building OCCT with -fvisibility=hidden (see wasm_occt.cmake), which
-            # makes wasm-ld bind adacpp's OCCT refs DIRECTLY (no interposable GOT
-            # imports); EXPORT_ALL would defeat that by re-exporting everything.
-            # --no-gc-sections keeps OCCT functions DEFINED so intra-module vtable
-            # refs resolve (the old EXPORT_ALL was a workaround for gc dropping them).
+        # NO -sEXPORT_ALL=1. adacpp must NOT export its statically-linked OCCT
+        # symbols, or they interpose with the upstream ifcopenshell wheel's own
+        # static OCCT when both load in one pyodide runtime — corrupting OCCT's
+        # Standard_Type RTTI registry (a Geom_Line is misread and
+        # GeomAdaptor_Curve::BSpline() throws). The real isolation comes from
+        # building OCCT with -fvisibility=hidden (see wasm_occt.cmake), which
+        # makes wasm-ld bind adacpp's OCCT refs DIRECTLY (no interposable GOT
+        # imports); EXPORT_ALL would defeat that by re-exporting everything.
+        # --no-gc-sections keeps OCCT functions DEFINED so intra-module vtable
+        # refs resolve (the old EXPORT_ALL was a workaround for gc dropping them).
     )
     # The matching compile flag is required so try/catch in our code (and in
     # nanobind's dispatch) actually emit unwind tables. pyodide 0.29.x/emscripten
@@ -143,9 +173,9 @@ if (EMSCRIPTEN)
     # nanobind's static lib (nanobind-static-abi3) holds the dispatch code that
     # actually converts C++ exceptions into Python ones — without -fwasm-exceptions
     # there it'll pass them through as fatal aborts. Apply the same flag.
-    if (TARGET nanobind-static-abi3)
+    if(TARGET nanobind-static-abi3)
         target_compile_options(nanobind-static-abi3 PRIVATE "-fwasm-exceptions")
-    endif ()
+    endif()
 
     # nanobind 3.0.1's headers call fprintf(stderr, ...) in nb_backend.h, nb_types.h
     # and ndarray.h without including <cstdio>. glibc and MSVC pull stdio in
@@ -159,25 +189,38 @@ if (EMSCRIPTEN)
     # COMPILE_LANGUAGE:CXX, not the bare flag: _ada_cpp_ext_impl also compiles C
     # (third_party/libtess2/Source/*.c) and <cstdio> is C++-only, so an
     # unconditional -include breaks every C TU with "'cstdio' file not found".
-    target_compile_options(_ada_cpp_ext_impl PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-include;cstdio>")
-    if (TARGET nanobind-static-abi3)
-        target_compile_options(nanobind-static-abi3 PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-include;cstdio>")
-    endif ()
-endif ()
+    target_compile_options(
+        _ada_cpp_ext_impl
+        PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-include;cstdio>"
+    )
+    if(TARGET nanobind-static-abi3)
+        target_compile_options(
+            nanobind-static-abi3
+            PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-include;cstdio>"
+        )
+    endif()
+endif()
 
-if (EMSCRIPTEN)
+if(EMSCRIPTEN)
     # Stage the wheel layout into ${CMAKE_INSTALL_PREFIX}/wheel/adacpp/. The
     # build_wheel.py script picks it up from there and builds the .whl.
     install(TARGETS _ada_cpp_ext_impl LIBRARY DESTINATION wheel/adacpp)
-    install(DIRECTORY ${CMAKE_SOURCE_DIR}/src/adacpp/
-            DESTINATION wheel/adacpp
-            FILES_MATCHING PATTERN "*.py")
-else ()
+    install(
+        DIRECTORY ${CMAKE_SOURCE_DIR}/src/adacpp/
+        DESTINATION wheel/adacpp
+        FILES_MATCHING
+        PATTERN "*.py"
+    )
+else()
     # Set Python site-packages directory (can be overridden via -DPYTHON_SITE_PACKAGES)
     if(NOT DEFINED PYTHON_SITE_PACKAGES)
         execute_process(
-                COMMAND "${Python_EXECUTABLE}" -c "import sysconfig; print(sysconfig.get_path('purelib'))"
-                OUTPUT_STRIP_TRAILING_WHITESPACE OUTPUT_VARIABLE PYTHON_SITE_PACKAGES)
+            COMMAND
+                "${Python_EXECUTABLE}" -c
+                "import sysconfig; print(sysconfig.get_path('purelib'))"
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            OUTPUT_VARIABLE PYTHON_SITE_PACKAGES
+        )
     endif()
 
     # Normalise to CMake path form (forward slashes) before it reaches install().
@@ -193,11 +236,16 @@ else ()
     message(STATUS "Python site-packages: ${PYTHON_SITE_PACKAGES}")
 
     # Install the module to site-packages/adacpp
-    install(TARGETS _ada_cpp_ext_impl LIBRARY DESTINATION ${PYTHON_SITE_PACKAGES}/adacpp)
+    install(
+        TARGETS _ada_cpp_ext_impl
+        LIBRARY DESTINATION ${PYTHON_SITE_PACKAGES}/adacpp
+    )
 
     # Install the Python package files
-    install(DIRECTORY ${CMAKE_SOURCE_DIR}/src/adacpp/
-            DESTINATION ${PYTHON_SITE_PACKAGES}/adacpp
-            FILES_MATCHING PATTERN "*.py")
-endif ()
-
+    install(
+        DIRECTORY ${CMAKE_SOURCE_DIR}/src/adacpp/
+        DESTINATION ${PYTHON_SITE_PACKAGES}/adacpp
+        FILES_MATCHING
+        PATTERN "*.py"
+    )
+endif()

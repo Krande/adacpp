@@ -4,28 +4,27 @@
 
 const fs = require("fs");
 const path = require("path");
-const { loadPyodide } = require("pyodide");
+const {loadPyodide} = require("pyodide");
 
 (async () => {
-  const py = await loadPyodide();
+    const py = await loadPyodide();
 
-  const distDir = path.resolve(__dirname, "..", "dist");
-  py.FS.mkdirTree("/dist");
-  for (const f of fs.readdirSync(distDir)) {
-    py.FS.writeFile("/dist/" + f, fs.readFileSync(path.join(distDir, f)));
-  }
+    const distDir = path.resolve(__dirname, "..", "dist");
+    py.FS.mkdirTree("/dist");
+    for (const f of fs.readdirSync(distDir)) {
+        py.FS.writeFile("/dist/" + f, fs.readFileSync(path.join(distDir, f)));
+    }
 
-  // Mount the STEP fixture so read_step_bytes has a real input to parse.
-  const stepFixture = path.resolve(__dirname, "..", "files",
-                                    "flat_plate_abaqus_10x10_m_wColors.stp");
-  py.FS.writeFile("/fixture.stp", fs.readFileSync(stepFixture));
+    // Mount the STEP fixture so read_step_bytes has a real input to parse.
+    const stepFixture = path.resolve(__dirname, "..", "files", "flat_plate_abaqus_10x10_m_wColors.stp");
+    py.FS.writeFile("/fixture.stp", fs.readFileSync(stepFixture));
 
-  await py.loadPackage(["micropip"]);
-  const mp = py.pyimport("micropip");
-  const wheel = fs.readdirSync(distDir).find((f) => f.endsWith(".whl"));
-  await mp.install("emfs:/dist/" + wheel);
+    await py.loadPackage([ "micropip" ]);
+    const mp = py.pyimport("micropip");
+    const wheel = fs.readdirSync(distDir).find((f) => f.endsWith(".whl"));
+    await mp.install("emfs:/dist/" + wheel);
 
-  const r = py.runPython(`
+    const r = py.runPython(`
 import adacpp.cad as cad
 
 # Box: real OCCT mesh, AABB-checked.
@@ -94,8 +93,8 @@ step_glb = bytes(cad.write_glb_bytes(step_handle))
   "step_glb_magic":   step_glb[:4].decode("latin-1"),
 }
 `);
-  console.log(JSON.stringify(r.toJs({ dict_converter: Object.fromEntries }), null, 2));
+    console.log(JSON.stringify(r.toJs({dict_converter : Object.fromEntries}), null, 2));
 })().catch((e) => {
-  console.error(e);
-  process.exit(1);
+    console.error(e);
+    process.exit(1);
 });

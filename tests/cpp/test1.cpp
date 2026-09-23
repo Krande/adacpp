@@ -6,21 +6,13 @@
 #include "../../src/cadit/tinygltf/tiny_helpers.h"
 
 int main(int argc, char *argv[]) {
-    const std::vector<std::vector<float>> box_origins = {
-        {0.0, 0.0, 0.0},
-        {1.0, 1.0, 1.0},
-        {2.0, 2.0, 2.0}
-    };
+    const std::vector<std::vector<float>> box_origins = {{0.0, 0.0, 0.0}, {1.0, 1.0, 1.0}, {2.0, 2.0, 2.0}};
 
-    std::vector<std::vector<float>> box_dims = {
-        {1.0, 1.0, 1.0},
-        {1.0, 1.0, 1.0},
-        {1.0, 1.0, 1.0}
-    };
+    std::vector<std::vector<float>> box_dims = {{1.0, 1.0, 1.0}, {1.0, 1.0, 1.0}, {1.0, 1.0, 1.0}};
     std::string filename = "output.glb";
 
     tinygltf::Model model;
-    std::cout << "Exporting to " << filename <<"\n";
+    std::cout << "Exporting to " << filename << "\n";
 
     // Create a scene
     tinygltf::Scene scene;
@@ -28,8 +20,8 @@ int main(int argc, char *argv[]) {
     model.defaultScene = 0;
 
     for (int i = 0; i < box_origins.size(); i++) {
-        const auto& origin = box_origins[i];
-        const auto& dim = box_dims[i];
+        const auto &origin = box_origins[i];
+        const auto &dim = box_dims[i];
         TopoDS_Solid box = create_box(origin, dim);
         Mesh mesh = tessellate_shape(0, box, true, 1.0, false);
         mesh.color = random_color();

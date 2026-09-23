@@ -43,6 +43,33 @@ inline bool iequals(std::string_view a, const char *b) {
     return n == a.size();
 }
 
+// One member of a structural model, as an IFC file states it -- NOT as geometry.
+//
+// WHY THIS IS NOT THE GEOMETRY PATH. A clash check, a quantity take-off and a tree walk all ask
+// what a product IS (a beam of this section, running from here to there; a plate of this
+// thickness), and none of them needs a triangle. Resolving that through the geometry reader means
+// building the solid first and inferring the member back from it; resolving it here means reading
+// the handful of entities that already say so -- the Axis representation's polyline, the swept
+// area's profile, the extrusion depth -- which is one pass over the products and no tessellation
+// at all. It is also the half a consumer WITHOUT a kernel can use: the same answer in the browser
+// through the wasm build as on a worker.
+//
+// Lengths are in METRES: every value here is multiplied by the file's unit scale, so a consumer
+// never has to ask which units the file was written in.
+struct MemberInfo {
+    int id = 0;                        //!< IFC entity id (#123), for addressing back into the file
+    std::string guid;                  //!< IfcRoot.GlobalId
+    std::string name;                  //!< IfcRoot.Name, may be empty
+    std::string ifc_class;             //!< "IFCBEAM", "IFCPLATE", "IFCCOLUMN", ... as written
+    bool has_axis = false;             //!< whether p1/p2 carry a reference line
+    std::array<double, 3> p1{0, 0, 0}; //!< axis start, WORLD coordinates, metres
+    std::array<double, 3> p2{0, 0, 0}; //!< axis end
+    std::string profile_name;          //!< the swept area's ProfileName ("IPE300"), may be empty
+    std::string profile_type;          //!< "IFCISHAPEPROFILEDEF", "IFCARBITRARYPROFILEDEFWITHVOIDS", ...
+    double depth = 0.0;                //!< extrusion depth: a plate's thickness, a beam's length, metres
+    std::array<float, 16> placement{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}; //!< world matrix
+};
+
 class IfcResolver {
 public:
     explicit IfcResolver(const StreamIndex &idx) : idx_(idx) {}
@@ -97,6 +124,15 @@ public:
             if (iequals(t, k))
                 return true;
         return false;
+    }
+
+    // The same answer, computed once. `unit_scale()` scans the whole index, which is fine to ask a
+    // file once and wrong to ask per product -- `product_member` needs it for every member it
+    // reports.
+    double unit_scale_cached() {
+        if (us_cache_ < 0)
+            us_cache_ = unit_scale();
+        return us_cache_;
     }
 
     // The file's length unit as metres-per-unit, from the first IfcSIUnit(*,.LENGTHUNIT.,prefix,.METRE.).
@@ -506,6 +542,91 @@ public:
             return std::string(p->args[0].s);
         return {};
     }
+
+    // What a product IS, without building what it looks like (see MemberInfo).
+    //
+    // Reads three things off the representations a structural product carries: the Axis
+    // representation (a two-point polyline -- the member's reference line, which is what a joint
+    // is found between), and from the body's IfcExtrudedAreaSolid its swept area's profile and its
+    // depth. A product with no Axis gets one derived from that extrusion instead, because a beam
+    // written without a reference line still runs from its extrusion's origin along its direction
+    // -- and a consumer asking "what meets what" cannot tell the two authoring styles apart.
+    MemberInfo product_member(long pid) {
+        MemberInfo m;
+        const Instance *p = inst(pid);
+        if (!p)
+            return m;
+        m.id = (int) pid;
+        m.ifc_class = p->type;
+        m.guid = product_guid(pid);
+        m.name = name_of(*p);
+        m.placement = object_placement(ref_arg(*p, 5)); // ObjectPlacement = arg 5
+
+        const Instance *pds = inst(ref_arg(*p, 6)); // Representation = arg 6
+        if (!pds || pds->args.size() < 3)
+            return m;
+
+        const double us = unit_scale_cached();
+        auto to_world = [&](const Vec3 &v) {
+            const auto &M = m.placement; // column-major
+            return std::array<double, 3>{
+                (M[0] * v.x + M[4] * v.y + M[8] * v.z + M[12]) * us,
+                (M[1] * v.x + M[5] * v.y + M[9] * v.z + M[13]) * us,
+                (M[2] * v.x + M[6] * v.y + M[10] * v.z + M[14]) * us,
+            };
+        };
+
+        Vec3 ext_o{0, 0, 0}, ext_d{0, 0, 1};
+        bool have_extrusion = false;
+        for (const Value &srref : pds->args[2].items) {
+            const Instance *sr = inst(srref.i);
+            if (!sr || sr->args.size() < 4)
+                continue;
+            std::string_view rid = sr->args[1].kind == adacpp::step::Kind::Str ? sr->args[1].s : std::string_view{};
+            for (const Value &item : sr->args[3].items) {
+                if (!item.is_ref())
+                    continue;
+                const Instance *it = inst(item.i);
+                if (!it)
+                    continue;
+                if (rid == "Axis" && iequals(it->type, "IFCPOLYLINE") && !it->args.empty() && it->args[0].is_list()) {
+                    const auto &pts = it->args[0].items;
+                    if (pts.size() >= 2 && pts.front().is_ref() && pts.back().is_ref()) {
+                        // First and last, not first and second: the reference line of a curved or
+                        // multi-segment member still RUNS between its ends.
+                        m.p1 = to_world(point(pts.front().i));
+                        m.p2 = to_world(point(pts.back().i));
+                        m.has_axis = true;
+                    }
+                } else if (iequals(it->type, "IFCEXTRUDEDAREASOLID") && it->args.size() >= 4) {
+                    const Instance *prof = inst(ref_arg(*it, 0));
+                    if (prof) {
+                        m.profile_type = prof->type;
+                        if (prof->args.size() > 1 && prof->args[1].kind == adacpp::step::Kind::Str)
+                            m.profile_name = std::string(prof->args[1].s);
+                    }
+                    m.depth = it->args[3].as_double() * us;
+                    long pos = ref_arg(*it, 1);
+                    if (pos > 0)
+                        ext_o = axis2(pos).o;
+                    long d = ref_arg(*it, 2);
+                    if (d > 0)
+                        ext_d = dir(d);
+                    have_extrusion = true;
+                }
+            }
+        }
+        if (!m.has_axis && have_extrusion) {
+            const double depth_local = us > 0 ? m.depth / us : m.depth;
+            m.p1 = to_world(ext_o);
+            m.p2 = to_world(Vec3{ext_o.x + ext_d.x * depth_local, ext_o.y + ext_d.y * depth_local,
+                                 ext_o.z + ext_d.z * depth_local});
+            m.has_axis = true;
+        }
+        return m;
+    }
+
+    double us_cache_ = -1.0; //!< see unit_scale_cached()
 
     // Drop the statement/surface caches — called between products by the streaming
     // per-product consumer (IfcNgeomStream) so memory stays bounded on large files.

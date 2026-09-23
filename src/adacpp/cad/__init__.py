@@ -49,6 +49,7 @@ CurvedImprint = _cad.CurvedImprint
 ExpandedSolids = _cad.ExpandedSolids
 ExtrudedSection = _cad.ExtrudedSection
 GroupReference = _cad.GroupReference
+IfcMemberScan = _cad.IfcMemberScan
 IfcNgeomStream = _cad.IfcNgeomStream
 ImprintResult = _cad.ImprintResult
 ImprintedEdge = _cad.ImprintedEdge
@@ -181,6 +182,7 @@ __all__ = [
     "ExpandedSolids",
     "ExtrudedSection",
     "GroupReference",
+    "IfcMemberScan",
     "IfcNgeomStream",
     "ImprintResult",
     "ImprintedEdge",
