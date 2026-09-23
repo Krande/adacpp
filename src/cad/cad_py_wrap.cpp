@@ -1123,6 +1123,29 @@ ShapeHandle read_step_bytes_impl(nb::bytes data) {
     return ShapeHandle(shape);
 }
 
+// A gp_Trsf from the top 3 rows of a 4x4 affine, row-major (12 doubles). gp_Trsf holds
+// only rigid motions times ONE scale factor, and gp_Trsf::SetValues does not check: handed a
+// stretch it quietly turns it into a uniform scale by the cube root of the determinant (x2 in
+// x alone comes back as x1.26 on every axis). So check first -- the 3x3 part M must satisfy
+// M^T M = s^2 I -- and throw std::invalid_argument (ValueError in Python) otherwise.
+gp_Trsf trsf_from_affine12(const std::array<double, 12> &m, const char *who) {
+    const double a[3][3] = {{m[0], m[1], m[2]}, {m[4], m[5], m[6]}, {m[8], m[9], m[10]}};
+    double g[3][3];
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            g[i][j] = a[0][i] * a[0][j] + a[1][i] * a[1][j] + a[2][i] * a[2][j];
+    const double s2 = (g[0][0] + g[1][1] + g[2][2]) / 3.0;
+    bool ok = s2 > 1e-24;
+    for (int i = 0; ok && i < 3; ++i)
+        for (int j = 0; ok && j < 3; ++j)
+            ok = std::abs(g[i][j] - (i == j ? s2 : 0.0)) <= 1e-9 * s2;
+    if (!ok)
+        throw std::invalid_argument(std::string(who) + ": matrix must be a rigid or uniform-scale transform");
+    gp_Trsf trsf;
+    trsf.SetValues(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11]);
+    return trsf;
+}
+
 // Recursively collect simple shapes from an OCAF label tree, applying assembly
 // component locations and reading each label's name + color. Port of adapy's
 // read_step_file_with_names_colors traversal (assembly → components → simple
@@ -1173,7 +1196,17 @@ void collect_step_shapes(const Handle(XCAFDoc_ShapeTool) & st, const Handle(XCAF
 // Read a STEP file (from bytes) via OCAF, returning each shape with its name +
 // color. Port of StepStore + read_step_file_with_names_colors for the adacpp
 // doc backend (STEP import with no pythonocc).
-std::vector<StepShapeData> read_step_shapes_impl(nb::bytes data, const std::string &unit) {
+//
+// `matrix`, when given, is applied to every shape after its assembly locations and the
+// unit conversion (so its translation is in `unit`) -- the import-time scale / translate /
+// rotate adapy's Part.read_step_file offers.
+// Same convention as transform_impl: the top 3 rows of a 4x4 affine, row-major.
+// Rigid and uniform-scale only; gp_Trsf cannot hold anything else.
+std::vector<StepShapeData> read_step_shapes_impl(nb::bytes data, const std::string &unit,
+                                                 const std::optional<std::array<double, 12>> &matrix) {
+    // Validate before reading the file: a bad matrix is caller error, not a bad STEP.
+    const gp_Trsf user_trsf = matrix ? trsf_from_affine12(*matrix, "read_step_shapes") : gp_Trsf();
+
     // Restore the caller's value on exit — "xstep.cascade.unit" is a process-
     // global Interface_Static parameter; leaving it set leaks into later reads.
     const InterfaceStaticCValGuard cascade_unit_guard("xstep.cascade.unit");
@@ -1207,6 +1240,13 @@ std::vector<StepShapeData> read_step_shapes_impl(nb::bytes data, const std::stri
     std::vector<StepShapeData> out;
     for (int i = 1; i <= free_shapes.Length(); ++i) {
         collect_step_shapes(st, ct, free_shapes.Value(i), TopLoc_Location(), out);
+    }
+    if (matrix) {
+        // copy=true: a scaled gp_Trsf cannot live in a TopLoc_Location, so the geometry
+        // itself is rewritten -- the same thing transform_impl does for one shape.
+        for (auto &d : out) {
+            d.shape = ShapeHandle(BRepBuilderAPI_Transform(d.shape.topods(), user_trsf, true).Shape());
+        }
     }
     return out;
 }
@@ -1392,11 +1432,10 @@ ShapeHandle boolean_impl(const std::string &op, const ShapeHandle &a, const Shap
 
 // m = the top 3 rows of a 4x4 affine matrix, row-major (12 doubles). The
 // implicit bottom row is [0,0,0,1] — same convention as gp_Trsf::SetValues and
-// adapy's OccBackend.transform. Lossless for rigid + uniform-scale transforms.
+// adapy's OccBackend.transform. Rigid + uniform-scale only; anything else raises
+// rather than being silently turned into a different transform (see trsf_from_affine12).
 ShapeHandle transform_impl(const ShapeHandle &sh, const std::array<double, 12> &m, bool copy) {
-    gp_Trsf trsf;
-    trsf.SetValues(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11]);
-    return ShapeHandle(BRepBuilderAPI_Transform(sh.topods(), trsf, copy).Shape());
+    return ShapeHandle(BRepBuilderAPI_Transform(sh.topods(), trsf_from_affine12(m, "transform"), copy).Shape());
 }
 
 double distance_impl(const ShapeHandle &a, const ShapeHandle &b) {
@@ -5670,10 +5709,13 @@ void cad_module(nb::module_ &m) {
     m.def("read_step_bytes", &read_step_bytes_impl, "data"_a,
           "Parse a STEP file from a bytes buffer into a ShapeHandle.");
 
-    m.def("read_step_shapes", &read_step_shapes_impl, "data"_a, "unit"_a = "M",
+    m.def("read_step_shapes", &read_step_shapes_impl, "data"_a, "unit"_a = "M", "matrix"_a = nb::none(),
           "Read a STEP file (bytes) via OCAF into a list of StepShapeData (shape + "
           "label name + color), converting the file's length unit to `unit` (default M). "
-          "Backs adapy's StepStore under the adacpp doc backend.");
+          "`matrix` (optional) is applied to every shape after its assembly locations, in `unit`: the "
+          "top 3 rows of a 4x4 affine, 12 row-major doubles, as for `transform`; rigid or "
+          "uniform-scale only (ValueError otherwise). Backs adapy's StepStore under the "
+          "adacpp doc backend.");
 
     m.def("write_glb_bytes", &write_glb_bytes_impl, "shape"_a, "linear_deflection"_a = 0.1,
           "Tessellate a ShapeHandle and write a binary glTF (.glb) into "
@@ -5698,7 +5740,8 @@ void cad_module(nb::module_ &m) {
 
     m.def("transform", &transform_impl, "shape"_a, "matrix"_a, "copy"_a = true,
           "Apply a 4x4 affine transform (top 3 rows, 12 row-major doubles) to "
-          "a shape. copy mirrors BRepBuilderAPI_Transform's copy flag.");
+          "a shape. copy mirrors BRepBuilderAPI_Transform's copy flag. Rigid or uniform-scale "
+          "only: a stretch or shear raises ValueError instead of being silently made uniform.");
 
     m.def("distance", &distance_impl, "a"_a, "b"_a, "Minimal distance between two shapes.");
 
