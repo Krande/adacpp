@@ -26,8 +26,11 @@ include(FetchContent)
 # Reusable prebuilt OCCT-wasm install (the ghcr base image, docker-cp'd onto the
 # runner). Default from the environment so the pixi-driven CI build can opt in
 # without touching CMakePresets.
-set(WASM_OCCT_PREBUILT_DIR "$ENV{WASM_OCCT_PREBUILT_DIR}"
-    CACHE PATH "Prebuilt OCCT-wasm install dir; skip the OCCT ExternalProject build when set")
+set(WASM_OCCT_PREBUILT_DIR
+    "$ENV{WASM_OCCT_PREBUILT_DIR}"
+    CACHE PATH
+    "Prebuilt OCCT-wasm install dir; skip the OCCT ExternalProject build when set"
+)
 
 # V8_0_0, matching the conda-forge occt the NATIVE build pins in pixi.toml. The
 # two are independent builds — native takes occt from conda-forge, wasm
@@ -42,18 +45,18 @@ set(WASM_OCCT_PREBUILT_DIR "$ENV{WASM_OCCT_PREBUILT_DIR}"
 # V8_0_0-emsdk-<ver> and consumers stop matching the old V7_9_0 image.
 set(OCCT_GIT_TAG "V8_0_0" CACHE STRING "OCCT git tag to fetch for wasm build")
 
-if (WASM_OCCT_PREBUILT_DIR)
+if(WASM_OCCT_PREBUILT_DIR)
     set(OCCT_INSTALL_DIR "${WASM_OCCT_PREBUILT_DIR}")
     message(STATUS "Using prebuilt OCCT-wasm install: ${OCCT_INSTALL_DIR}")
-else ()
+else()
     set(OCCT_INSTALL_DIR "${CMAKE_BINARY_DIR}/_deps/occt-install")
-    set(OCCT_SOURCE_DIR  "${CMAKE_BINARY_DIR}/_deps/occt-src")
-    set(OCCT_BUILD_DIR   "${CMAKE_BINARY_DIR}/_deps/occt-build")
-endif ()
+    set(OCCT_SOURCE_DIR "${CMAKE_BINARY_DIR}/_deps/occt-src")
+    set(OCCT_BUILD_DIR "${CMAKE_BINARY_DIR}/_deps/occt-build")
+endif()
 
 # OCCT install layout (on Linux/wasm hosts): include/opencascade/*.hxx, lib/lib*.a
 set(OCCT_INCLUDE_DIR "${OCCT_INSTALL_DIR}/include/opencascade")
-set(OCCT_LIB_DIR     "${OCCT_INSTALL_DIR}/lib")
+set(OCCT_LIB_DIR "${OCCT_INSTALL_DIR}/lib")
 
 # OCCT toolkit list — order matters when statically linking. Listed roughly
 # by dependency layer (callers first, dependencies last) so `--start-group`
@@ -64,19 +67,19 @@ set(OCCT_LIB_DIR     "${OCCT_INSTALL_DIR}/lib")
 # prebuilt paths (the prebuilt install must carry exactly these archives).
 set(_WASM_OCCT_TOOLKITS
     # DataExchange layer — STEP/glTF readers/writers
-    TKDEGLTF      # RWGltf_CafWriter / Reader
-    TKDESTEP      # STEPControl_Reader / Writer + STEPCAFControl_*
-    TKRWMesh      # RWMesh_* base classes used by TKDEGLTF + others
-    TKXSBase      # XS framework shared by STEP/IGES/...
+    TKDEGLTF # RWGltf_CafWriter / Reader
+    TKDESTEP # STEPControl_Reader / Writer + STEPCAFControl_*
+    TKRWMesh # RWMesh_* base classes used by TKDEGLTF + others
+    TKXSBase # XS framework shared by STEP/IGES/...
     # ApplicationFramework layer — TDocStd_Document used by RWGltf_CafWriter
-    TKBinXCAF     # binary persistence for XCAF docs
-    TKXCAF        # eXtended CAF (colors, layers, names on shapes)
-    TKVCAF        # visualization CAF
-    TKBin         # binary persistence base
-    TKBinL        # binary lite persistence
-    TKCAF         # CAF main
-    TKLCAF        # CAF light (TDocStd_Document, TDF_Label, TDataStd_Name)
-    TKCDF         # Component Data Framework — CDM_Document, base of TDocStd
+    TKBinXCAF # binary persistence for XCAF docs
+    TKXCAF # eXtended CAF (colors, layers, names on shapes)
+    TKVCAF # visualization CAF
+    TKBin # binary persistence base
+    TKBinL # binary lite persistence
+    TKCAF # CAF main
+    TKLCAF # CAF light (TDocStd_Document, TDF_Label, TDataStd_Name)
+    TKCDF # Component Data Framework — CDM_Document, base of TDocStd
     # ModelingAlgorithms layer — high-level builders / mesh / boolean
     TKMesh
     TKShHealing
@@ -98,7 +101,7 @@ set(_WASM_OCCT_TOOLKITS
     TKernel
 )
 
-if (NOT WASM_OCCT_PREBUILT_DIR)
+if(NOT WASM_OCCT_PREBUILT_DIR)
     # ---- Build OCCT from source (the ~30-min cross-compile) ----------------
 
     # RapidJSON is required by OCCT's TKDEGLTF (RWGltf_CafWriter / Reader). It's
@@ -111,15 +114,18 @@ if (NOT WASM_OCCT_PREBUILT_DIR)
         # `length = rhs.length` against a `const SizeType length` member, which
         # newer clang (incl. emscripten 3.1.58's clang 19) rejects outright.
         # Pinned to the post-fix master snapshot OCCT's own CI uses.
-        GIT_TAG        24b5e7a8b27f42fa16b96fc70aade9106cf7102f
-        GIT_SHALLOW    TRUE
+        GIT_TAG 24b5e7a8b27f42fa16b96fc70aade9106cf7102f
+        GIT_SHALLOW TRUE
     )
     FetchContent_GetProperties(rapidjson)
-    if (NOT rapidjson_POPULATED)
+    if(NOT rapidjson_POPULATED)
         FetchContent_Populate(rapidjson)
-    endif ()
+    endif()
     set(RAPIDJSON_INCLUDE_DIR "${rapidjson_SOURCE_DIR}/include")
-    message(STATUS "RapidJSON include dir for OCCT-wasm: ${RAPIDJSON_INCLUDE_DIR}")
+    message(
+        STATUS
+        "RapidJSON include dir for OCCT-wasm: ${RAPIDJSON_INCLUDE_DIR}"
+    )
 
     # Forward emscripten + build settings into OCCT's nested CMake configure.
     # CMAKE_TOOLCHAIN_FILE comes from emcmake; we pass it through explicitly so
@@ -129,7 +135,6 @@ if (NOT WASM_OCCT_PREBUILT_DIR)
         -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
         -DCMAKE_INSTALL_PREFIX=${OCCT_INSTALL_DIR}
         -DCMAKE_BUILD_TYPE=Release
-
         # Static archives — linked into the .so wheel module.
         -DBUILD_LIBRARY_TYPE=Static
         -DBUILD_USE_PCH=OFF
@@ -140,7 +145,6 @@ if (NOT WASM_OCCT_PREBUILT_DIR)
         -DBUILD_Inspector=OFF
         -DBUILD_RELEASE_DISABLE_EXCEPTIONS=OFF
         -DBUILD_SOVERSION_NUMBERS=0
-
         # M3 sub-stage: full read/write pipeline.
         # FoundationClasses     → TKernel, TKMath
         # ModelingData          → TKG2d, TKG3d, TKGeomBase, TKBRep
@@ -157,7 +161,6 @@ if (NOT WASM_OCCT_PREBUILT_DIR)
         -DBUILD_MODULE_ApplicationFramework=ON
         -DBUILD_MODULE_Visualization=OFF
         -DBUILD_MODULE_Draw=OFF
-
         # Third-party deps off. RapidJSON comes back at M3 (glTF write), the rest
         # likely never come back — we'll never need VTK/TBB/freetype/draco for
         # adacpp's headless conversion path.
@@ -175,7 +178,6 @@ if (NOT WASM_OCCT_PREBUILT_DIR)
         -DUSE_VTK=OFF
         -DUSE_TK=OFF
         -DUSE_XLIB=OFF
-
         # OCCT throws Standard_Failure & friends extensively, and uses
         # setjmp/longjmp for OSD signal handling. Pyodide 0.28+/emscripten 4.0.9
         # use native WebAssembly exception handling: -fwasm-exceptions (replaces
@@ -194,32 +196,34 @@ if (NOT WASM_OCCT_PREBUILT_DIR)
     )
 
     set(_WASM_OCCT_BYPRODUCTS)
-    foreach (_tk IN LISTS _WASM_OCCT_TOOLKITS)
+    foreach(_tk IN LISTS _WASM_OCCT_TOOLKITS)
         list(APPEND _WASM_OCCT_BYPRODUCTS ${OCCT_LIB_DIR}/lib${_tk}.a)
     endforeach()
 
     ExternalProject_Add(
         occt_external
-        GIT_REPOSITORY  https://github.com/Open-Cascade-SAS/OCCT.git
-        GIT_TAG         ${OCCT_GIT_TAG}
-        GIT_SHALLOW     TRUE
-        GIT_PROGRESS    TRUE
-        SOURCE_DIR      ${OCCT_SOURCE_DIR}
-        BINARY_DIR      ${OCCT_BUILD_DIR}
-        INSTALL_DIR     ${OCCT_INSTALL_DIR}
+        GIT_REPOSITORY https://github.com/Open-Cascade-SAS/OCCT.git
+        GIT_TAG ${OCCT_GIT_TAG}
+        GIT_SHALLOW TRUE
+        GIT_PROGRESS TRUE
+        SOURCE_DIR ${OCCT_SOURCE_DIR}
+        BINARY_DIR ${OCCT_BUILD_DIR}
+        INSTALL_DIR ${OCCT_INSTALL_DIR}
         # Drop OCCT's OCC_CONVERT_SIGNALS define on wasm. It converts OS signals
         # to C++ exceptions via setjmp INSIDE catch blocks — meaningless under
         # wasm (no real signals) and it violates the wasm-EH + wasm-SjLj rule
         # ("no setjmp within a catch"), which makes emscripten emit invalid wasm
         # (CompileError: "br_table: label arity inconsistent") that fails to
         # instantiate. Removing it lets the STEP write path compile to valid wasm.
-        PATCH_COMMAND   sed -i "/add_definitions(-DOCC_CONVERT_SIGNALS)/d" ${OCCT_SOURCE_DIR}/adm/cmake/occt_defs_flags.cmake
-        CMAKE_ARGS      ${_OCCT_CMAKE_ARGS}
+        PATCH_COMMAND
+            sed -i "/add_definitions(-DOCC_CONVERT_SIGNALS)/d"
+            ${OCCT_SOURCE_DIR}/adm/cmake/occt_defs_flags.cmake
+        CMAKE_ARGS ${_OCCT_CMAKE_ARGS}
         BUILD_BYPRODUCTS ${_WASM_OCCT_BYPRODUCTS}
-        USES_TERMINAL_DOWNLOAD  TRUE
+        USES_TERMINAL_DOWNLOAD TRUE
         USES_TERMINAL_CONFIGURE TRUE
-        USES_TERMINAL_BUILD     TRUE
-        USES_TERMINAL_INSTALL   TRUE
+        USES_TERMINAL_BUILD TRUE
+        USES_TERMINAL_INSTALL TRUE
     )
 
     # Make sure the install include dir exists at configure time, even before
@@ -227,7 +231,7 @@ if (NOT WASM_OCCT_PREBUILT_DIR)
     # INTERFACE_INCLUDE_DIRECTORIES emit a configure-time warning. CMake checks
     # include dirs at configure, archives only at link.
     file(MAKE_DIRECTORY ${OCCT_INCLUDE_DIR})
-endif ()
+endif()
 
 # IMPORTED targets: present them as if they were a normal library so callers
 # can `target_link_libraries(_ada_cpp_ext_impl PRIVATE TKBRep TKMath ...)`.
@@ -236,22 +240,30 @@ endif ()
 # install the archives already exist, so no dependency is added.
 set(WASM_OCCT_TARGETS)
 foreach(_tk IN LISTS _WASM_OCCT_TOOLKITS)
-    if (NOT TARGET ${_tk})
+    if(NOT TARGET ${_tk})
         add_library(${_tk} STATIC IMPORTED GLOBAL)
-        set_target_properties(${_tk} PROPERTIES
-            IMPORTED_LOCATION             ${OCCT_LIB_DIR}/lib${_tk}.a
-            INTERFACE_INCLUDE_DIRECTORIES ${OCCT_INCLUDE_DIR}
+        set_target_properties(
+            ${_tk}
+            PROPERTIES
+                IMPORTED_LOCATION ${OCCT_LIB_DIR}/lib${_tk}.a
+                INTERFACE_INCLUDE_DIRECTORIES ${OCCT_INCLUDE_DIR}
         )
-        if (NOT WASM_OCCT_PREBUILT_DIR)
+        if(NOT WASM_OCCT_PREBUILT_DIR)
             add_dependencies(${_tk} occt_external)
-        endif ()
+        endif()
         list(APPEND WASM_OCCT_TARGETS ${_tk})
-    endif ()
+    endif()
 endforeach()
 
-if (WASM_OCCT_PREBUILT_DIR)
-    message(STATUS "OCCT-wasm targets from prebuilt install: ${WASM_OCCT_TARGETS}")
-else ()
-    message(STATUS "OCCT-wasm targets staged (built at compile time): ${WASM_OCCT_TARGETS}")
-endif ()
+if(WASM_OCCT_PREBUILT_DIR)
+    message(
+        STATUS
+        "OCCT-wasm targets from prebuilt install: ${WASM_OCCT_TARGETS}"
+    )
+else()
+    message(
+        STATUS
+        "OCCT-wasm targets staged (built at compile time): ${WASM_OCCT_TARGETS}"
+    )
+endif()
 message(STATUS "OCCT-wasm install dir: ${OCCT_INSTALL_DIR}")

@@ -9,21 +9,23 @@ if(APPLE)
     # Apple's ld64 has no --start-group/--end-group (it errors "ld: unknown option:
     # --start-group"); it resolves circular static-archive deps via its own multi-pass,
     # so just list the libs directly.
-    list(APPEND ADA_CPP_LINK_LIBS
-            geometry_kernel_opencascade
-            geometry_kernel_cgal
-            IfcParse
-            IfcGeom
+    list(
+        APPEND ADA_CPP_LINK_LIBS
+        geometry_kernel_opencascade
+        geometry_kernel_cgal
+        IfcParse
+        IfcGeom
     )
 else()
     # GNU ld / lld need the group to resolve the mutual references in one pass.
-    list(APPEND ADA_CPP_LINK_LIBS
-            -Wl,--start-group
-            geometry_kernel_opencascade
-            geometry_kernel_cgal
-            IfcParse
-            IfcGeom
-            -Wl,--end-group
+    list(
+        APPEND ADA_CPP_LINK_LIBS
+        -Wl,--start-group
+        geometry_kernel_opencascade
+        geometry_kernel_cgal
+        IfcParse
+        IfcGeom
+        -Wl,--end-group
     )
 endif()
 # The CGAL kernel uses CGAL's exact arithmetic -> GMP/MPFR. They are leaf C libs, so they

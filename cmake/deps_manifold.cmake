@@ -27,8 +27,11 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(manifold)
 
-if (EMSCRIPTEN AND TARGET manifold)
+if(EMSCRIPTEN AND TARGET manifold)
     # Every TU in the wasm link must agree on the EH / longjmp model (see wasm_occt.cmake);
     # Manifold's own translation units need the same flags as the adacpp module.
-    target_compile_options(manifold PRIVATE -fwasm-exceptions -sSUPPORT_LONGJMP=wasm)
-endif ()
+    target_compile_options(
+        manifold
+        PRIVATE -fwasm-exceptions -sSUPPORT_LONGJMP=wasm
+    )
+endif()

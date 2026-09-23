@@ -18,6 +18,4 @@ endif()
 
 include_directories(${GMSH_INC})
 
-list(APPEND
-        ADA_CPP_LINK_LIBS
-        ${GMSH_LIB})
+list(APPEND ADA_CPP_LINK_LIBS ${GMSH_LIB})

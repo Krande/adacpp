@@ -9,12 +9,12 @@
 # ADA_CPP_SOURCES directly so they land in both the native and wasm extension modules).
 set(LIBTESS2_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libtess2)
 set(LIBTESS2_SOURCES
-        ${LIBTESS2_DIR}/Source/bucketalloc.c
-        ${LIBTESS2_DIR}/Source/dict.c
-        ${LIBTESS2_DIR}/Source/geom.c
-        ${LIBTESS2_DIR}/Source/mesh.c
-        ${LIBTESS2_DIR}/Source/priorityq.c
-        ${LIBTESS2_DIR}/Source/sweep.c
-        ${LIBTESS2_DIR}/Source/tess.c
+    ${LIBTESS2_DIR}/Source/bucketalloc.c
+    ${LIBTESS2_DIR}/Source/dict.c
+    ${LIBTESS2_DIR}/Source/geom.c
+    ${LIBTESS2_DIR}/Source/mesh.c
+    ${LIBTESS2_DIR}/Source/priorityq.c
+    ${LIBTESS2_DIR}/Source/sweep.c
+    ${LIBTESS2_DIR}/Source/tess.c
 )
 set(LIBTESS2_INCLUDE_DIR ${LIBTESS2_DIR}/Include)
