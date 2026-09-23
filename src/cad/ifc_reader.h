@@ -57,16 +57,16 @@ inline bool iequals(std::string_view a, const char *b) {
 // Lengths are in METRES: every value here is multiplied by the file's unit scale, so a consumer
 // never has to ask which units the file was written in.
 struct MemberInfo {
-    int id = 0;               //!< IFC entity id (#123), for addressing back into the file
-    std::string guid;         //!< IfcRoot.GlobalId
-    std::string name;         //!< IfcRoot.Name, may be empty
-    std::string ifc_class;    //!< "IFCBEAM", "IFCPLATE", "IFCCOLUMN", ... as written
-    bool has_axis = false;    //!< whether p1/p2 carry a reference line
+    int id = 0;                        //!< IFC entity id (#123), for addressing back into the file
+    std::string guid;                  //!< IfcRoot.GlobalId
+    std::string name;                  //!< IfcRoot.Name, may be empty
+    std::string ifc_class;             //!< "IFCBEAM", "IFCPLATE", "IFCCOLUMN", ... as written
+    bool has_axis = false;             //!< whether p1/p2 carry a reference line
     std::array<double, 3> p1{0, 0, 0}; //!< axis start, WORLD coordinates, metres
     std::array<double, 3> p2{0, 0, 0}; //!< axis end
-    std::string profile_name; //!< the swept area's ProfileName ("IPE300"), may be empty
-    std::string profile_type; //!< "IFCISHAPEPROFILEDEF", "IFCARBITRARYPROFILEDEFWITHVOIDS", ...
-    double depth = 0.0;       //!< extrusion depth: a plate's thickness, a beam's length, metres
+    std::string profile_name;          //!< the swept area's ProfileName ("IPE300"), may be empty
+    std::string profile_type;          //!< "IFCISHAPEPROFILEDEF", "IFCARBITRARYPROFILEDEFWITHVOIDS", ...
+    double depth = 0.0;                //!< extrusion depth: a plate's thickness, a beam's length, metres
     std::array<float, 16> placement{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}; //!< world matrix
 };
 
