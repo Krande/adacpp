@@ -68,6 +68,16 @@ struct MemberInfo {
     std::string profile_type;          //!< "IFCISHAPEPROFILEDEF", "IFCARBITRARYPROFILEDEFWITHVOIDS", ...
     double depth = 0.0;                //!< extrusion depth: a plate's thickness, a beam's length, metres
     std::array<float, 16> placement{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}; //!< world matrix
+    //! The swept area's OUTLINE in profile coordinates (metres), for every profile family the
+    //! reader supports -- a catalogue I-section is synthesised from its parameters exactly as an
+    //! arbitrary polyline is read from its points. This is what makes a PLATE reconstructable: a
+    //! plate is its outline, a thickness and a plane, and none of that is expressible as a section
+    //! name. Empty when the product carries no extruded area.
+    std::vector<std::array<double, 2>> outline;
+    bool has_position = false;                 //!< whether the three vectors below carry the swept plane
+    std::array<double, 3> pos_origin{0, 0, 0}; //!< extrusion Position, in the product's LOCAL frame
+    std::array<double, 3> pos_axis{0, 0, 1};   //!< its Z: the extrusion direction / plate normal
+    std::array<double, 3> pos_ref{1, 0, 0};    //!< its X: where the outline's +x points
 };
 
 class IfcResolver {
@@ -607,11 +617,30 @@ public:
                     }
                     m.depth = it->args[3].as_double() * us;
                     long pos = ref_arg(*it, 1);
-                    if (pos > 0)
-                        ext_o = axis2(pos).o;
+                    if (pos > 0) {
+                        Frame pf = axis2(pos);
+                        ext_o = pf.o;
+                        // LOCAL, not world: the world transform is already reported as `placement`,
+                        // and a consumer rebuilding a plate needs the swept plane in the frame its
+                        // outline is expressed in -- multiplying one by the other here would leave
+                        // it no way to take them apart again.
+                        m.pos_origin = {pf.o.x * us, pf.o.y * us, pf.o.z * us};
+                        m.pos_axis = {pf.z.x, pf.z.y, pf.z.z};
+                        m.pos_ref = {pf.x.x, pf.x.y, pf.x.z};
+                        m.has_position = true;
+                    }
                     long d = ref_arg(*it, 2);
                     if (d > 0)
                         ext_d = dir(d);
+                    // The outline, through the SAME profile walk the geometry path uses -- so a
+                    // consumer's plate has the boundary the renderer would have drawn, rather than
+                    // a second interpretation of the same entities.
+                    if (auto pf_face = profile_face(ref_arg(*it, 0))) {
+                        if (!pf_face->bounds.empty() && pf_face->bounds[0].loop && pf_face->bounds[0].loop->is_poly) {
+                            for (const Vec3 &pt : pf_face->bounds[0].loop->polygon)
+                                m.outline.push_back({pt.x * us, pt.y * us});
+                        }
+                    }
                     have_extrusion = true;
                 }
             }
