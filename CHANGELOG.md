@@ -2,6 +2,15 @@
 
 
 
+## v0.25.4 (2026-09-23)
+
+### Fix
+
+* fix(cad): edges() reports each edge once, and keeps located copies apart (#61)
+
+Co-authored-by: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`85277d5`](https://github.com/Krande/adacpp/commit/85277d50c3f571a6edc58235b25780b5840f3a86))
+
+
 ## v0.25.3 (2026-09-22)
 
 ### Fix
