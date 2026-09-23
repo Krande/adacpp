@@ -2,6 +2,15 @@
 
 
 
+## v0.25.5 (2026-09-23)
+
+### Fix
+
+* fix(cad): face_id keys on TShape AND Location, matching IsSame (#62)
+
+Co-authored-by: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`a77d412`](https://github.com/Krande/adacpp/commit/a77d412d6203eb27ae0588b89906a79948a39aeb))
+
+
 ## v0.25.4 (2026-09-23)
 
 ### Fix
