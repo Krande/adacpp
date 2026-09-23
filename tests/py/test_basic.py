@@ -667,6 +667,58 @@ def test_cad_read_step_shapes_roundtrip(tmp_path):
     assert all(adacpp.cad.shape_type(d.shape) in ("solid", "compound", "shell", "face") for d in data)
 
 
+def _two_box_step(tmp_path):
+    b1 = adacpp.cad.build_box([0, 0, 0], [0, 0, 1], [1, 0, 0], 1, 1, 1)
+    b2 = adacpp.cad.build_box([2, 0, 0], [0, 0, 1], [1, 0, 0], 1, 2, 3)
+    out = tmp_path / "two.stp"
+    adacpp.cad.write_step([b1, b2], ["BoxA", "BoxB"], [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], str(out), "m", "AP214")
+    return out.read_bytes()
+
+
+def _by_name(data):
+    return {d.name: d for d in data if d.name in ("BoxA", "BoxB")}
+
+
+def test_cad_read_step_shapes_matrix_scales_and_translates(tmp_path):
+    """Import-time scale + translate, applied to every shape; names and colours survive."""
+    raw = _two_box_step(tmp_path)
+    plain = _by_name(adacpp.cad.read_step_shapes(raw))
+    # scale 2 about the origin, then move +10 in x
+    moved = _by_name(adacpp.cad.read_step_shapes(raw, matrix=[2, 0, 0, 10, 0, 2, 0, 0, 0, 0, 2, 0]))
+
+    assert set(moved) == {"BoxA", "BoxB"}
+    for name, d in moved.items():
+        assert d.has_color and d.color == plain[name].color
+        assert adacpp.cad.volume(d.shape) == pytest.approx(8 * adacpp.cad.volume(plain[name].shape))
+        p = adacpp.cad.bbox(plain[name].shape)
+        expected = [2 * p[0] + 10, 2 * p[1], 2 * p[2], 2 * p[3] + 10, 2 * p[4], 2 * p[5]]
+        assert adacpp.cad.bbox(d.shape) == pytest.approx(expected, abs=1e-9)
+
+
+def test_cad_read_step_shapes_matrix_rotates(tmp_path):
+    """90 degrees about +Z maps (x, y) -> (-y, x)."""
+    raw = _two_box_step(tmp_path)
+    plain = _by_name(adacpp.cad.read_step_shapes(raw))["BoxB"]
+    rot = _by_name(adacpp.cad.read_step_shapes(raw, matrix=[0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0]))["BoxB"]
+
+    p = adacpp.cad.bbox(plain.shape)
+    assert adacpp.cad.bbox(rot.shape) == pytest.approx([-p[4], p[0], p[2], -p[1], p[3], p[5]], abs=1e-9)
+
+
+def test_cad_read_step_shapes_identity_matrix_changes_nothing(tmp_path):
+    raw = _two_box_step(tmp_path)
+    plain = _by_name(adacpp.cad.read_step_shapes(raw))
+    ident = _by_name(adacpp.cad.read_step_shapes(raw, matrix=[1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]))
+    for name in plain:
+        assert adacpp.cad.bbox(ident[name].shape) == pytest.approx(adacpp.cad.bbox(plain[name].shape))
+
+
+def test_cad_read_step_shapes_rejects_a_non_uniform_matrix(tmp_path):
+    """gp_Trsf holds rigid + uniform-scale only; a stretch must fail loudly, before the read."""
+    with pytest.raises(ValueError, match="rigid or uniform-scale"):
+        adacpp.cad.read_step_shapes(_two_box_step(tmp_path), matrix=[2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0])
+
+
 def test_cad_revolved_curve_profile():
     # Revolve a circle wire (r=0.5, centered at x=2 in XY) a quarter turn about
     # the world Z axis through the origin → a curved pipe-elbow surface.
@@ -1018,3 +1070,14 @@ def test_cad_imprint_planar_faces_loops_wind_about_the_normal():
             n[1] += (a[2] - b[2]) * (a[0] + b[0])
             n[2] += (a[0] - b[0]) * (a[1] + b[1])
         assert sum(x * y for x, y in zip(n, f.normal)) > 0
+
+
+def test_cad_transform_rejects_a_stretch_instead_of_making_it_uniform():
+    """gp_Trsf::SetValues quietly turns x2-in-x into x1.26 on every axis (cube root of the
+    determinant). A wrong solid with no error is worse than an error."""
+    box = adacpp.cad.build_box([0, 0, 0], [0, 0, 1], [1, 0, 0], 1, 1, 1)
+    with pytest.raises(ValueError, match="rigid or uniform-scale"):
+        adacpp.cad.transform(box, [2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0])
+    # uniform scale and rotation still pass
+    assert adacpp.cad.volume(adacpp.cad.transform(box, [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0])) == pytest.approx(8.0)
+    assert adacpp.cad.volume(adacpp.cad.transform(box, [0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0])) == pytest.approx(1.0)
