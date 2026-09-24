@@ -155,3 +155,40 @@ def test_outline_points_are_metres_like_everything_else(members):
     ys = [p[1] for p in outline]
     assert max(xs) - min(xs) == pytest.approx(0.2)
     assert max(ys) - min(ys) == pytest.approx(0.3)
+
+
+# ── material: the other half of a quantity ───────────────────────────────────────────────────
+
+
+def test_each_member_reports_the_material_it_is_associated_with(members):
+    # A member's MASS is its section times its length times a density, so a consumer computing
+    # quantities needs this as much as it needs the section. Per MEMBER, not per file: the plate
+    # here is S420 while the beams are S355, and a reader that reported one material for the model
+    # would be wrong about most of it.
+    assert members["pl1"]["material"] == "S420"
+    assert {members[n]["material"] for n in ("bm1", "bm2", "MyBeam")} == {"S355"}
+
+
+def test_the_stated_properties_come_through_with_their_values(members):
+    props = members["bm1"]["material_props"]
+    assert props["MassDensity"] == pytest.approx(7850.0)
+    assert props["YoungModulus"] == pytest.approx(210e9)
+    assert props["PoissonRatio"] == pytest.approx(0.3)
+    assert props["YieldStress"] == pytest.approx(355e6)
+
+
+def test_a_typed_value_is_read_as_its_value_not_its_type(members):
+    # IFCPRESSUREMEASURE(355000000.) is not ONE argument -- Part-21 parses the keyword and the
+    # list as two adjacent ones. Reading NominalValue as args[2] hands back the type name and
+    # never a number, which is exactly how this came out empty on a file stating seven properties
+    # per material.
+    for value in members["bm1"]["material_props"].values():
+        assert not (isinstance(value, str) and value.upper().startswith("IFC"))
+
+
+def test_text_properties_are_kept_rather_than_dropped(members):
+    # Which NAME carries the grade varies by exporter -- this codebase writes "Grade", others
+    # write "StrengthGrade" -- so the reader reports what the file says and lets the consumer map
+    # the names it knows.
+    assert members["bm1"]["material_props"]["Grade"] == "S355"
+    assert members["pl1"]["material_props"]["Grade"] == "S420"

@@ -723,6 +723,13 @@ public:
         for (const auto &pt : mi.outline)
             outline.append(nb::make_tuple(pt[0], pt[1]));
         d["outline"] = outline;
+        d["material"] = mi.material;
+        nb::dict mprops;
+        for (const auto &kv : mi.material_props)
+            mprops[kv.first.c_str()] = kv.second;
+        for (const auto &kv : mi.material_text_props)
+            mprops[kv.first.c_str()] = kv.second;
+        d["material_props"] = mprops;
         if (mi.has_position) {
             d["origin"] = nb::make_tuple(mi.pos_origin[0], mi.pos_origin[1], mi.pos_origin[2]);
             d["normal"] = nb::make_tuple(mi.pos_axis[0], mi.pos_axis[1], mi.pos_axis[2]);
