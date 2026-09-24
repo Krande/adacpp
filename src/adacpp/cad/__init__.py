@@ -99,6 +99,7 @@ face_plane = _cad.face_plane
 face_surface_type = _cad.face_surface_type
 face_to_advanced_face = _cad.face_to_advanced_face
 faces = _cad.faces
+find_beam_joints = _cad.find_beam_joints
 fit_bspline_face_from_grid = _cad.fit_bspline_face_from_grid
 free_faces = _cad.free_faces
 from_topods_pointer = _cad.from_topods_pointer
@@ -129,6 +130,7 @@ point_in_solid = _cad.point_in_solid
 polygon_face = _cad.polygon_face
 read_step_bytes = _cad.read_step_bytes
 read_step_shapes = _cad.read_step_shapes
+scan_ifc_members_to_jsonl = _cad.scan_ifc_members_to_jsonl
 section_with_plane = _cad.section_with_plane
 serialize = _cad.serialize
 serialize_brep = _cad.serialize_brep
@@ -232,6 +234,7 @@ __all__ = [
     "face_surface_type",
     "face_to_advanced_face",
     "faces",
+    "find_beam_joints",
     "fit_bspline_face_from_grid",
     "free_faces",
     "from_topods_pointer",
@@ -263,6 +266,7 @@ __all__ = [
     "polygon_face",
     "read_step_bytes",
     "read_step_shapes",
+    "scan_ifc_members_to_jsonl",
     "section_with_plane",
     "serialize",
     "serialize_brep",

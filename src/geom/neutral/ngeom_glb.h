@@ -23,6 +23,8 @@
 #include <utility>
 #include <vector>
 
+#include "json_write.h"
+
 #include "ngeom_meshopt.h" // EXT_meshopt_compression codecs (vendored meshoptimizer)
 
 namespace adacpp::glb {
@@ -116,34 +118,10 @@ struct MatHeader {
     float lo[3] = {0, 0, 0}, hi[3] = {0, 0, 0};
 };
 
+// Escaping lives in json_write.h, shared with the IFC member scan's JSONL writer.
+using adacpp::jsonw::escape;
 inline std::string json_escape(const std::string &s) {
-    std::string o;
-    o.reserve(s.size() + 2);
-    for (char c : s) {
-        switch (c) {
-        case '"':
-            o += "\\\"";
-            break;
-        case '\\':
-            o += "\\\\";
-            break;
-        case '\n':
-            o += "\\n";
-            break;
-        case '\r':
-            o += "\\r";
-            break;
-        case '\t':
-            o += "\\t";
-            break;
-        default:
-            if ((unsigned char) c < 0x20)
-                o += ' ';
-            else
-                o += c;
-        }
-    }
-    return o;
+    return escape(s);
 }
 
 // Per-solid draw range within a material's merged index buffer (index units), for picking. `path` is

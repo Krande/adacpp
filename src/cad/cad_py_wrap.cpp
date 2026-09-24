@@ -15,6 +15,8 @@
 #include "../geom/neutral/ngeom_profile.h"
 #include "step_to_glb_st.h"      // single-threaded, mmap-free STEP->GLB core (wasm/OPFS + native oracle)
 #include "step_to_glb_stream.h"  // threaded OCC-free STEP->GLB core (shared with the STP2GLB CLI)
+#include "clash_joints.h"        // beam-to-beam joint finding (shared with the wasm embind build)
+#include "ifc_member_scan.h"     // member scan -> JSONL (shared with the wasm embind build)
 #include "ifc_to_glb_stream.h"   // native OCC-free IFC->GLB core (IfcResolver)
 #include "step_to_mesh_stream.h" // threaded OCC-free STEP->STL/OBJ core (parallel, baked, streaming)
 #include "ifc_emit.h"            // native IFC4 advanced-B-rep emitter (Phase 1, native STEP->IFC writer)
@@ -673,6 +675,45 @@ private:
 // while a clash check, a take-off or a tree walk wants the member facts and no triangles. Reading
 // them here costs the handful of entities that state them, which is what makes the same answer
 // affordable in the browser (the wasm build) as on a worker.
+// Beam-to-beam joint finding for adapy. Takes the members as plain tuples rather than reading a
+// file, because adapy has them already and from sources this module cannot read (Sesam XML, a FEM,
+// a compiled procedural model) -- the geometry is the same question whatever produced it.
+static nb::list find_beam_joints_py(const nb::sequence &members, double out_of_plane_tol, double point_tol) {
+    std::vector<adacpp::clash::Member> ms;
+    for (nb::handle h : members) {
+        nb::tuple row = nb::cast<nb::tuple>(h);
+        adacpp::clash::Member m;
+        m.name = nb::cast<std::string>(row[0]);
+        m.guid = nb::cast<std::string>(row[1]);
+        nb::tuple p1 = nb::cast<nb::tuple>(row[2]), p2 = nb::cast<nb::tuple>(row[3]);
+        for (int k = 0; k < 3; ++k) {
+            m.p1[k] = nb::cast<double>(p1[k]);
+            m.p2[k] = nb::cast<double>(p2[k]);
+        }
+        m.reach = nb::cast<double>(row[4]);
+        m.section = nb::cast<std::string>(row[5]);
+        ms.push_back(std::move(m));
+    }
+    const std::vector<adacpp::clash::Joint> joints = adacpp::clash::find_beam_joints(ms, out_of_plane_tol, point_tol);
+
+    nb::list out;
+    for (const adacpp::clash::Joint &j : joints) {
+        nb::dict d;
+        nb::list idx;
+        for (size_t i : j.members)
+            idx.append((long) i);
+        d["members"] = idx;
+        d["centre"] = nb::make_tuple(j.centre[0], j.centre[1], j.centre[2]);
+        const bool has_angle = j.members.size() >= 2;
+        const double angle = has_angle ? adacpp::clash::angle_between(ms[j.members[0]], ms[j.members[1]]) : 0.0;
+        d["angle_deg"] = has_angle ? nb::cast(angle) : nb::none();
+        d["type_key"] = adacpp::clash::type_key_for(ms, j.members, angle, has_angle);
+        d["origin"] = j.origin;
+        out.append(d);
+    }
+    return out;
+}
+
 class IfcMemberScan {
 public:
     explicit IfcMemberScan(const std::string &path) {
@@ -5630,6 +5671,23 @@ void cad_module(nb::module_ &m) {
         .def("__next__", &IfcMemberScan::next)
         .def_prop_ro("unit_scale", &IfcMemberScan::unit_scale)
         .def_prop_ro("products_total", &IfcMemberScan::products_total);
+
+    m.def("find_beam_joints", &find_beam_joints_py, "members"_a,
+          "out_of_plane_tol"_a = adacpp::clash::DEFAULT_OUT_OF_PLANE_TOL,
+          "point_tol"_a = adacpp::clash::DEFAULT_POINT_TOL,
+          "Beam-to-beam JOINTS among `members`, each a tuple (name, guid, p1, p2, reach, section). "
+          "One joint per CONTACT POINT rather than per pair: three beams meeting at a node are one "
+          "joint with three members, which is what a connection spec is written against. Returns a "
+          "list of dicts with the member INDICES, the centre, the angle and the type key. The same "
+          "compiled pass runs in the browser (embind), so a joint found in one place is the same "
+          "joint -- and the same id -- in the other.");
+
+    m.def("scan_ifc_members_to_jsonl", &adacpp::ifc_read::write_members_jsonl, "ifc_path"_a, "out_path"_a,
+          "The same scan as `IfcMemberScan`, written to a file as JSONL -- one JSON object per "
+          "member, after a header line naming the schema and the source's unit scale. Returns the "
+          "number of members written. This is the form the BROWSER gets (embind `scanMembers`), "
+          "exposed here too so the two builds can be held to the same bytes and so a server can "
+          "hand a client a scan it has already done.");
 
     m.def("_step_index_parity", &step_index_parity_impl, "path"_a,
           "Debug: build the STEP offset index via mmap scan and via the wasm-safe pread scan, returning "
