@@ -2,6 +2,15 @@
 
 
 
+## v0.29.0 (2026-09-24)
+
+### Feature
+
+* feat(cad): IfcMemberScan reports each member&#39;s material (#66)
+
+Co-authored-by: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`b7909b0`](https://github.com/Krande/adacpp/commit/b7909b004959315aef460d0281902511dee01fec))
+
+
 ## v0.28.0 (2026-09-23)
 
 ### Feature
