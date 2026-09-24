@@ -15,6 +15,7 @@
 #include "../geom/neutral/ngeom_profile.h"
 #include "step_to_glb_st.h"      // single-threaded, mmap-free STEP->GLB core (wasm/OPFS + native oracle)
 #include "step_to_glb_stream.h"  // threaded OCC-free STEP->GLB core (shared with the STP2GLB CLI)
+#include "ifc_member_scan.h"     // member scan -> JSONL (shared with the wasm embind build)
 #include "ifc_to_glb_stream.h"   // native OCC-free IFC->GLB core (IfcResolver)
 #include "step_to_mesh_stream.h" // threaded OCC-free STEP->STL/OBJ core (parallel, baked, streaming)
 #include "ifc_emit.h"            // native IFC4 advanced-B-rep emitter (Phase 1, native STEP->IFC writer)
@@ -5630,6 +5631,13 @@ void cad_module(nb::module_ &m) {
         .def("__next__", &IfcMemberScan::next)
         .def_prop_ro("unit_scale", &IfcMemberScan::unit_scale)
         .def_prop_ro("products_total", &IfcMemberScan::products_total);
+
+    m.def("scan_ifc_members_to_jsonl", &adacpp::ifc_read::write_members_jsonl, "ifc_path"_a, "out_path"_a,
+          "The same scan as `IfcMemberScan`, written to a file as JSONL -- one JSON object per "
+          "member, after a header line naming the schema and the source's unit scale. Returns the "
+          "number of members written. This is the form the BROWSER gets (embind `scanMembers`), "
+          "exposed here too so the two builds can be held to the same bytes and so a server can "
+          "hand a client a scan it has already done.");
 
     m.def("_step_index_parity", &step_index_parity_impl, "path"_a,
           "Debug: build the STEP offset index via mmap scan and via the wasm-safe pread scan, returning "

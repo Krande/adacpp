@@ -129,6 +129,7 @@ point_in_solid = _cad.point_in_solid
 polygon_face = _cad.polygon_face
 read_step_bytes = _cad.read_step_bytes
 read_step_shapes = _cad.read_step_shapes
+scan_ifc_members_to_jsonl = _cad.scan_ifc_members_to_jsonl
 section_with_plane = _cad.section_with_plane
 serialize = _cad.serialize
 serialize_brep = _cad.serialize_brep
@@ -263,6 +264,7 @@ __all__ = [
     "polygon_face",
     "read_step_bytes",
     "read_step_shapes",
+    "scan_ifc_members_to_jsonl",
     "section_with_plane",
     "serialize",
     "serialize_brep",

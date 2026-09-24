@@ -86,6 +86,12 @@ jobs:
       - name: build + smoke-test the STEP->GLB embind module
         run: pixi run -e wasm test-stepglb-wasm
 
+      # The IFC module's SEMANTIC verb: the member scan a browser clash check and take-off read,
+      # written as JSONL. Builds the same module the ->GLB verb ships in, so wiring this up costs
+      # one node run on top of a build CI would otherwise do only for the geometry half.
+      - name: build + smoke-test the IFC member scan (JSONL) embind module
+        run: pixi run -e wasm test-ifc-member-scan-wasm
+
       # The expander the browser uses to replay prepared section tables. Header-only core, so this
       # is the cheapest module in the set to build and there is no excuse for it to go untested.
       - name: build + smoke-test the extrusion expander embind module

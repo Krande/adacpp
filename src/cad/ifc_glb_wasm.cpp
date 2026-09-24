@@ -5,6 +5,10 @@
 // NO OCCT, NO ifcopenshell, NO nanobind. The IFC counterpart of adacpp_step_glb (cad_wasm.cpp); the
 // two share the neutral-geometry tessellation + GLB stack and differ only in the front-end reader.
 //
+// Two verbs, one reader: `ifcToGlb` tessellates the file and `scanMembers` reports the members it
+// states (sections, axes, outlines, materials) as JSONL -- the semantic half a clash check or a
+// quantity take-off needs, with no tessellation and no server.
+//
 // IO model mirrors the STEP module: both `inPath` and `outPath` live in the emscripten file system.
 // Mount OPFS via WASMFS (build with -sWASMFS) and pass OPFS-backed paths so a large IFC streams
 // through `pread` (bounded RSS) and the GLB is written back to OPFS. `spillDir` is a writable
@@ -19,6 +23,7 @@
 #include <emscripten/bind.h>
 #include <emscripten/wasmfs.h>
 
+#include "ifc_member_scan.h"
 #include "ifc_to_glb_stream.h"
 
 namespace {
@@ -29,6 +34,23 @@ namespace {
 long ifc_to_glb(const std::string &in_path, const std::string &out_path, const std::string &spill_dir,
                 double deflection, double angular_deg, bool meshopt) {
     return adacpp::stream_ifc_to_glb(in_path, out_path, deflection, angular_deg, meshopt, spill_dir);
+}
+
+// Scan the IFC's MEMBERS -- beams and plates, their sections, axes, outlines, placements and
+// materials -- and write them to `out_path` as JSONL (see ifc_member_scan.h for the record shape).
+// Returns the number of members written, or -1 on error.
+//
+// This is the SEMANTIC half of the same file the ->GLB verb tessellates, and the reader is already
+// linked into this module: `ifcToGlb` needs IfcResolver to find the geometry, and the members are
+// what it walks to get there. So a browser gets a clash check for the cost of an embind export
+// rather than a second pipeline -- and, unlike the ->GLB verb, this one never tessellates anything.
+//
+// JSONL through a file rather than objects through embind because a plant has hundreds of thousands
+// of members: one JS object per member would cross the boundary once per member, while a file keeps
+// the scan's streaming property on both sides. Point `out_path` at OPFS and nothing has to fit the
+// wasm heap.
+long ifc_scan_members(const std::string &in_path, const std::string &out_path) {
+    return adacpp::ifc_read::write_members_jsonl(in_path, out_path);
 }
 
 // Mount the browser's Origin Private File System (OPFS) at `mount_point` so the IFC, the GLB and the
@@ -46,5 +68,6 @@ int mount_opfs(const std::string &mount_point) {
 
 EMSCRIPTEN_BINDINGS(adacpp_ifc_glb) {
     emscripten::function("ifcToGlb", &ifc_to_glb);
+    emscripten::function("scanMembers", &ifc_scan_members);
     emscripten::function("mountOpfs", &mount_opfs);
 }
