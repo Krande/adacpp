@@ -2,6 +2,15 @@
 
 
 
+## v0.30.1 (2026-09-24)
+
+### Fix
+
+* fix(clash): a joint&#39;s members come back in a reproducible order (#68)
+
+Co-authored-by: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`d287c59`](https://github.com/Krande/adacpp/commit/d287c595fcf37999fb42d0f000a0f265d4b6247b))
+
+
 ## v0.30.0 (2026-09-24)
 
 ### Feature
