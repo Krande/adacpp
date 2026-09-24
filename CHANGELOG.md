@@ -2,6 +2,15 @@
 
 
 
+## v0.30.0 (2026-09-24)
+
+### Feature
+
+* feat(wasm): the IFC member scan reaches the browser as JSONL (#67)
+
+Co-authored-by: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt; ([`9ed92fe`](https://github.com/Krande/adacpp/commit/9ed92fef94320e83aafbae3d110228900f6bee72))
+
+
 ## v0.29.0 (2026-09-24)
 
 ### Feature
