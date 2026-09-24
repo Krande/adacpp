@@ -203,6 +203,14 @@ inline std::vector<Joint> find_beam_joints(const std::vector<Member> &members,
             continue;
         Joint j;
         j.members = at_node[k];
+        // BY NAME, not by discovery order. A joint of three or more members has no single angle,
+        // and the consumer takes the one between its first two -- so the order the pairs happened
+        // to be walked in would decide the joint's angle bucket, and with it its TYPE KEY. Sorting
+        // makes that choice reproducible: the same model yields the same key on any run, any
+        // platform and either runtime. It is still only one pair's angle, which is a limitation of
+        // the question rather than of the ordering.
+        std::sort(j.members.begin(), j.members.end(),
+                  [&](size_t a, size_t b) { return members[a].name < members[b].name; });
         j.centre = nodes[k];
         joints.push_back(std::move(j));
     }

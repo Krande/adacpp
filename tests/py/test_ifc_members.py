@@ -269,3 +269,27 @@ def test_member_type_comes_from_the_axis():
     vertical = [("c", "", (0, 0, 0), (0, 0, 3), 0.1, "I"), ("g", "", (0, 0, 3), (3, 0, 3), 0.1, "I")]
     key = adacpp.cad.find_beam_joints(vertical)[0]["type_key"]
     assert "COLUMN" in key and "GIRDER" in key
+
+
+def test_a_joints_members_come_back_in_a_reproducible_order():
+    """Member order decides the joint's TYPE KEY, so it cannot be the walk order.
+
+    A joint of three or more members has no single angle, and the classifier takes the one
+    between its FIRST TWO -- so whichever pair happened to be found first would decide the angle
+    bucket and with it the key a panel groups by and a spec matches against. Sorted by name, the
+    same model yields the same key on any run, any platform, and through either binding: the
+    worker's nanobind call and the browser's embind one have to agree, and "whatever order the
+    loop produced" is not something two runtimes can agree on by construction.
+    """
+    ms = [
+        ("zz", "", (5, 0, 0), (5, 5, 0), 0.1, "I"),
+        ("aa", "", (0, 0, 0), (5, 0, 0), 0.1, "I"),
+        ("mm", "", (5, 0, 0), (5, 0, 3), 0.1, "I"),
+    ]
+    joints = adacpp.cad.find_beam_joints(ms)
+    assert len(joints) == 1
+    assert [ms[i][0] for i in joints[0]["members"]] == ["aa", "mm", "zz"]
+
+    # And the key that follows from it is the same however the members were handed in.
+    shuffled = [ms[1], ms[2], ms[0]]
+    assert adacpp.cad.find_beam_joints(shuffled)[0]["type_key"] == joints[0]["type_key"]
