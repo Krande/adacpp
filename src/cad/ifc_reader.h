@@ -78,6 +78,21 @@ struct MemberInfo {
     std::array<double, 3> pos_origin{0, 0, 0}; //!< extrusion Position, in the product's LOCAL frame
     std::array<double, 3> pos_axis{0, 0, 1};   //!< its Z: the extrusion direction / plate normal
     std::array<double, 3> pos_ref{1, 0, 0};    //!< its X: where the outline's +x points
+    //! The material the product is associated with, by name ("S355"), empty where the file
+    //! states none. A member's MASS is its section times its length times this material's
+    //! density, so a consumer computing quantities needs it as much as it needs the section.
+    std::string material;
+    //! What the file says about that material, verbatim: the IfcPropertySingleValue names with
+    //! their numeric values ("MassDensity", "YoungModulus", "PoissonRatio", ...). Reported as the
+    //! file NAMES them rather than mapped to some canonical set here -- the consumer already has
+    //! names for these, and a reader that renamed them would be inventing a second vocabulary for
+    //! the same facts.
+    std::vector<std::pair<std::string, double>> material_props;
+    //! The same, for properties whose value is text (a grade label, a standard reference). Kept
+    //! rather than dropped because which NAME carries the grade varies by exporter -- this
+    //! codebase writes "Grade", others write "StrengthGrade" -- and a reader that picked one
+    //! would silently lose the other.
+    std::vector<std::pair<std::string, std::string>> material_text_props;
 };
 
 class IfcResolver {
@@ -314,6 +329,122 @@ public:
     // RelatingStructure=arg5) puts products in a storey/space; IfcRelAggregates(.., RelatingObject=arg4,
     // RelatedObjects=arg5 list) nests storey->building->site->project (and sub-assemblies). Build both
     // reverse maps once (persistent; clear_cache must not wipe them) so a product can walk up to root.
+    // product -> IfcMaterial, and IfcMaterial -> its property sets. Built once, like the spatial
+    // relations above and for the same reason: both are INVERSE attributes, which a Part-21 file
+    // does not carry, so the only way to answer "what material is this product" is to have walked
+    // the IfcRelAssociatesMaterial and IfcMaterialProperties statements first.
+    void build_material_maps() {
+        if (mat_maps_built_)
+            return;
+        mat_maps_built_ = true;
+        std::string scratch;
+        for (long id : idx_.ids) {
+            std::string_view t = type_of(id, scratch);
+            if (iequals(t, "IFCRELASSOCIATESMATERIAL")) {
+                // (GlobalId, OwnerHistory, Name, Description, RelatedObjects, RelatingMaterial)
+                const Instance *in = inst(id);
+                if (!in || in->args.size() < 6)
+                    continue;
+                long mat = ref_arg(*in, 5);
+                if (mat > 0 && in->args[4].is_list())
+                    for (const Value &e : in->args[4].items)
+                        if (e.is_ref())
+                            material_of_[e.i] = mat;
+            } else if (iequals(t, "IFCMATERIALPROPERTIES") || iequals(t, "IFCEXTENDEDPROPERTIES")) {
+                // IFC4 IfcMaterialProperties(Name, Description, Properties, Material) -- arg 3 is
+                // the material the set belongs to.
+                const Instance *in = inst(id);
+                if (!in || in->args.size() < 4)
+                    continue;
+                long mat = ref_arg(*in, 3);
+                if (mat > 0)
+                    mat_props_[mat].push_back(id);
+            }
+        }
+    }
+
+    // An IfcRelAssociatesMaterial may relate a product to a bare IfcMaterial or to one of the
+    // SET forms (profile set, layer set and its usage, constituent set, list). A member carries
+    // one material in every case this reader reports, so the sets resolve to their first entry --
+    // and a layered plate whose layers differ is a case to answer honestly later rather than to
+    // average into a number nobody can trace.
+    long resolve_material(long id, int depth = 0) {
+        const Instance *in = inst(id);
+        if (!in || depth > 8)
+            return 0;
+        if (iequals(in->type, "IFCMATERIAL"))
+            return id;
+        auto first_ref = [&](int arg) -> long {
+            if (in->args.size() > (size_t) arg && in->args[arg].is_list())
+                for (const Value &e : in->args[arg].items)
+                    if (e.is_ref())
+                        return e.i;
+            return 0;
+        };
+        if (iequals(in->type, "IFCMATERIALPROFILESETUSAGE") || iequals(in->type, "IFCMATERIALLAYERSETUSAGE"))
+            return resolve_material(ref_arg(*in, 0), depth + 1); // ForProfileSet / ForLayerSet
+        if (iequals(in->type, "IFCMATERIALPROFILESET"))
+            return resolve_material(first_ref(2), depth + 1); // MaterialProfiles
+        if (iequals(in->type, "IFCMATERIALPROFILE") || iequals(in->type, "IFCMATERIALLAYER"))
+            return resolve_material(ref_arg(*in, iequals(in->type, "IFCMATERIALPROFILE") ? 2 : 0), depth + 1);
+        if (iequals(in->type, "IFCMATERIALLAYERSET"))
+            return resolve_material(first_ref(0), depth + 1); // MaterialLayers
+        if (iequals(in->type, "IFCMATERIALCONSTITUENTSET"))
+            return resolve_material(first_ref(2), depth + 1); // MaterialConstituents
+        if (iequals(in->type, "IFCMATERIALCONSTITUENT"))
+            return resolve_material(ref_arg(*in, 2), depth + 1);
+        if (iequals(in->type, "IFCMATERIALLIST"))
+            return resolve_material(first_ref(0), depth + 1); // Materials
+        return 0;
+    }
+
+    // Name + stated properties of the product's material. Empty name where the file associates
+    // none, which is a fact about the file and not an error.
+    void fill_material(long pid, MemberInfo &m) {
+        build_material_maps();
+        auto it = material_of_.find(pid);
+        if (it == material_of_.end())
+            return;
+        long mat = resolve_material(it->second);
+        const Instance *mi = inst(mat);
+        if (!mi)
+            return;
+        if (!mi->args.empty() && mi->args[0].kind == adacpp::step::Kind::Str)
+            m.material = std::string(mi->args[0].s);
+        auto props = mat_props_.find(mat);
+        if (props == mat_props_.end())
+            return;
+        for (long set_id : props->second) {
+            const Instance *ps = inst(set_id);
+            if (!ps || ps->args.size() < 3 || !ps->args[2].is_list())
+                continue;
+            for (const Value &pref : ps->args[2].items) {
+                if (!pref.is_ref())
+                    continue;
+                const Instance *pv = inst(pref.i);
+                // IfcPropertySingleValue(Name, Description, NominalValue, Unit)
+                if (!pv || !iequals(pv->type, "IFCPROPERTYSINGLEVALUE") || pv->args.size() < 3)
+                    continue;
+                if (pv->args[0].kind != adacpp::step::Kind::Str)
+                    continue;
+                std::string name(pv->args[0].s);
+                // A TYPED value -- IFCPRESSUREMEASURE(355000000.) -- is not one argument but two
+                // adjacent ones, a keyword and a list (see step_part21.h's own note). Reading
+                // NominalValue as args[2] therefore hands back the type NAME and never a value,
+                // which is how this came out empty on a file that states seven properties per
+                // material.
+                const Value *nv = &pv->args[2];
+                if (nv->kind == adacpp::step::Kind::Keyword && pv->args.size() > 3 && pv->args[3].is_list() &&
+                    !pv->args[3].items.empty())
+                    nv = &pv->args[3].items[0];
+                if (nv->kind == adacpp::step::Kind::Str)
+                    m.material_text_props.emplace_back(std::move(name), std::string(nv->s));
+                else if (numeric(*nv))
+                    m.material_props.emplace_back(std::move(name), nv->as_double());
+            }
+        }
+    }
+
     void build_rel_maps() {
         if (rel_maps_built_)
             return;
@@ -571,6 +702,7 @@ public:
         m.guid = product_guid(pid);
         m.name = name_of(*p);
         m.placement = object_placement(ref_arg(*p, 5)); // ObjectPlacement = arg 5
+        fill_material(pid, m);
 
         const Instance *pds = inst(ref_arg(*p, 6)); // Representation = arg 6
         if (!pds || pds->args.size() < 3)
@@ -656,6 +788,9 @@ public:
     }
 
     double us_cache_ = -1.0; //!< see unit_scale_cached()
+    bool mat_maps_built_ = false;
+    std::unordered_map<long, long> material_of_;            //!< product -> RelatingMaterial
+    std::unordered_map<long, std::vector<long>> mat_props_; //!< IfcMaterial -> property sets
 
     // Drop the statement/surface caches — called between products by the streaming
     // per-product consumer (IfcNgeomStream) so memory stays bounded on large files.
