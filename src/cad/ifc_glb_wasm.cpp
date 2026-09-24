@@ -5,9 +5,11 @@
 // NO OCCT, NO ifcopenshell, NO nanobind. The IFC counterpart of adacpp_step_glb (cad_wasm.cpp); the
 // two share the neutral-geometry tessellation + GLB stack and differ only in the front-end reader.
 //
-// Two verbs, one reader: `ifcToGlb` tessellates the file and `scanMembers` reports the members it
+// Three verbs, one reader: `ifcToGlb` tessellates the file and `scanMembers` reports the members it
 // states (sections, axes, outlines, materials) as JSONL -- the semantic half a clash check or a
-// quantity take-off needs, with no tessellation and no server.
+// quantity take-off needs, with no tessellation and no server; and `clashJoints` runs the whole
+// beam-to-beam joint search over that scan in C++, so an interactive clash check needs no Python
+// runtime in the browser at all.
 //
 // IO model mirrors the STEP module: both `inPath` and `outPath` live in the emscripten file system.
 // Mount OPFS via WASMFS (build with -sWASMFS) and pass OPFS-backed paths so a large IFC streams
@@ -23,6 +25,7 @@
 #include <emscripten/bind.h>
 #include <emscripten/wasmfs.h>
 
+#include "ifc_clash.h"
 #include "ifc_member_scan.h"
 #include "ifc_to_glb_stream.h"
 
@@ -53,6 +56,17 @@ long ifc_scan_members(const std::string &in_path, const std::string &out_path) {
     return adacpp::ifc_read::write_members_jsonl(in_path, out_path);
 }
 
+// A whole clash check -- read the IFC, find the beam-to-beam joints, classify them -- written to
+// `out_path` as JSON. Returns the joint count, or -1 on error.
+//
+// One pass and one language: the members never materialise as JSON on the way, because the reader
+// and the joint finder are both here. This is why the browser does not need a Python runtime for
+// it -- the rules ARE the compiled ones the worker runs, through the same header.
+long ifc_clash_joints(const std::string &in_path, const std::string &out_path, double out_of_plane_tol,
+                      double point_tol) {
+    return adacpp::ifc_read::write_beam_joints_json(in_path, out_path, out_of_plane_tol, point_tol);
+}
+
 // Mount the browser's Origin Private File System (OPFS) at `mount_point` so the IFC, the GLB and the
 // spill lanes live in OPFS — the IFC streams through pread (bounded RSS) instead of the wasm heap.
 // MUST be called from a Web Worker (OPFS sync access handles are worker-only). Returns 0 on success,
@@ -69,5 +83,6 @@ int mount_opfs(const std::string &mount_point) {
 EMSCRIPTEN_BINDINGS(adacpp_ifc_glb) {
     emscripten::function("ifcToGlb", &ifc_to_glb);
     emscripten::function("scanMembers", &ifc_scan_members);
+    emscripten::function("clashJoints", &ifc_clash_joints);
     emscripten::function("mountOpfs", &mount_opfs);
 }

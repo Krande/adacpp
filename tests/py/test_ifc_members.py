@@ -192,3 +192,80 @@ def test_text_properties_are_kept_rather_than_dropped(members):
     # the names it knows.
     assert members["bm1"]["material_props"]["Grade"] == "S355"
     assert members["pl1"]["material_props"]["Grade"] == "S420"
+
+
+# ── joints: the same compiled pass the browser runs ──────────────────────────────────────────
+
+
+def test_beams_meeting_at_one_node_are_one_joint():
+    # Per CONTACT POINT, not per pair. Three beams at a node are ONE joint with three members,
+    # which is what a person sees and what a connection spec is written against; a pairwise
+    # reading would report three joints and detail the same place three times.
+    ms = [
+        ("g0", "", (0, 0, 0), (5, 0, 0), 0.1, "I"),
+        ("g1", "", (5, 0, 0), (5, 5, 0), 0.1, "I"),
+        ("c0", "", (5, 0, 0), (5, 0, 3), 0.1, "I"),
+    ]
+    joints = adacpp.cad.find_beam_joints(ms)
+    assert len(joints) == 1
+    assert sorted(joints[0]["members"]) == [0, 1, 2]
+    assert joints[0]["centre"] == pytest.approx((5.0, 0.0, 0.0))
+    assert joints[0]["type_key"] == "3|BEAM:I:COLUMN+BEAM:I:GIRDER+BEAM:I:GIRDER|perpendicular"
+
+
+def test_a_mid_span_crossing_is_a_joint():
+    # Neither beam's END is near the other; only a box-against-box candidate test finds this pair
+    # at all, and it is as real a joint as one at a shared node.
+    ms = [
+        ("a", "", (-5, 0, 0), (5, 0, 0), 0.1, "I"),
+        ("b", "", (0, -5, 0), (0, 5, 0), 0.1, "I"),
+    ]
+    assert len(adacpp.cad.find_beam_joints(ms)) == 1
+
+
+def test_one_contact_is_one_joint_when_the_members_only_nearly_meet():
+    # The closest point differs per member for a near miss, by up to the out-of-plane tolerance --
+    # far beyond point_tol, so taking one side's point would register the contact twice.
+    ms = [
+        ("a", "", (0, 0, 0), (5, 0, 0), 0.1, "I"),
+        ("b", "", (2.5, -1, 0.05), (2.5, 1, 0.05), 0.1, "I"),
+    ]
+    joints = adacpp.cad.find_beam_joints(ms)
+    assert len(joints) == 1
+    assert joints[0]["centre"] == pytest.approx((2.5, 0.0, 0.025))
+
+
+def test_parallel_members_never_join():
+    ms = [
+        ("a", "", (0, 0, 0), (5, 0, 0), 0.1, "I"),
+        ("b", "", (0, 1, 0), (5, 1, 0), 0.1, "I"),
+    ]
+    assert adacpp.cad.find_beam_joints(ms) == []
+
+
+def test_a_crossing_far_past_a_member_end_is_not_its_joint():
+    # Two non-parallel lines always meet somewhere. Past half a member's own length that meeting
+    # is not this member's joint, or every beam in a frame would join every other.
+    ms = [
+        ("a", "", (0, 0, 0), (1, 0, 0), 0.1, "I"),
+        ("b", "", (8, -1, 0), (8, 1, 0), 0.1, "I"),
+    ]
+    assert adacpp.cad.find_beam_joints(ms) == []
+
+
+def test_the_out_of_plane_tolerance_decides_a_near_miss():
+    def at(dz):
+        return [
+            ("a", "", (0, 0, 0), (5, 0, 0), 0.1, "I"),
+            ("b", "", (2.5, -1, dz), (2.5, 1, dz), 0.1, "I"),
+        ]
+
+    assert len(adacpp.cad.find_beam_joints(at(0.05), out_of_plane_tol=0.1)) == 1
+    assert adacpp.cad.find_beam_joints(at(0.5), out_of_plane_tol=0.1) == []
+
+
+def test_member_type_comes_from_the_axis():
+    # Column / Girder / Brace, as adapy derives them, because a type key names them.
+    vertical = [("c", "", (0, 0, 0), (0, 0, 3), 0.1, "I"), ("g", "", (0, 0, 3), (3, 0, 3), 0.1, "I")]
+    key = adacpp.cad.find_beam_joints(vertical)[0]["type_key"]
+    assert "COLUMN" in key and "GIRDER" in key

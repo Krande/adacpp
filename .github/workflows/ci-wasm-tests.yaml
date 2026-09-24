@@ -92,6 +92,11 @@ jobs:
       - name: build + smoke-test the IFC member scan (JSONL) embind module
         run: pixi run -e wasm test-ifc-member-scan-wasm
 
+      # The browser's clash check: the same compiled beam-to-beam pass adapy calls through
+      # nanobind, reached through embind instead. Reuses the module built just above.
+      - name: build + smoke-test the in-browser clash check
+        run: pixi run -e wasm test-ifc-clash-wasm
+
       # The expander the browser uses to replay prepared section tables. Header-only core, so this
       # is the cheapest module in the set to build and there is no excuse for it to go untested.
       - name: build + smoke-test the extrusion expander embind module

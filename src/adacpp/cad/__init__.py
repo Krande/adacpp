@@ -99,6 +99,7 @@ face_plane = _cad.face_plane
 face_surface_type = _cad.face_surface_type
 face_to_advanced_face = _cad.face_to_advanced_face
 faces = _cad.faces
+find_beam_joints = _cad.find_beam_joints
 fit_bspline_face_from_grid = _cad.fit_bspline_face_from_grid
 free_faces = _cad.free_faces
 from_topods_pointer = _cad.from_topods_pointer
@@ -233,6 +234,7 @@ __all__ = [
     "face_surface_type",
     "face_to_advanced_face",
     "faces",
+    "find_beam_joints",
     "fit_bspline_face_from_grid",
     "free_faces",
     "from_topods_pointer",
