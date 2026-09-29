@@ -2,7 +2,6 @@
 #include "ifcparse/file.h"
 
 #include <iostream>
-#include <sstream>
 
 int read_ifc_file(const std::string &file_name) {
     ifcopenshell::file file(file_name);
@@ -17,14 +16,14 @@ int read_ifc_file(const std::string &file_name) {
 
     std::cout << "Found " << elements.size() << " elements in " << file_name << ":" << std::endl;
 
-    std::ostringstream oss;
+    // Print from plain accessors rather than express::base::to_string(std::ostream&). That call
+    // imbues and restores the stream's std::locale inside libifcopenshell.parse; on macOS a
+    // conda process also has the system libc++ loaded, and a locale created on one runtime and
+    // destroyed on the other aborts with "pointer being freed was not allocated".
     for (const auto &element : elements) {
-        element.to_string(oss);
-        oss << "\n";
-        std::cout << oss.str();
-        oss.str(""); // Clear the contents of the stringstream
-        oss.clear(); // Reset any error flags
+        std::cout << "#" << element.id() << "=" << element.declaration().name() << "\n";
     }
+    std::cout << std::flush;
 
     return 0;
 }
