@@ -113,6 +113,21 @@ def _records(blobs, color=None, paths=None):
     return [(m.id or f"solid_{i}", b, color, None, paths[i] if paths else None) for i, (b, m) in enumerate(blobs)]
 
 
+@pytest.mark.parametrize("pipeline", ["libtess2", "occ", "cgal"])
+def test_blob_tessellates_through_every_pipeline(blobs, pipeline):
+    # occ / cgal drive ifcopenshell's geometry kernels directly (ngeom_taxonomy_kernel.cpp), the
+    # adacpp code most exposed to ifcopenshell's C++ API. A kernel that fails to build a root
+    # yields no triangles rather than raising, so assert on the mesh, not just on no exception.
+    import numpy as np
+
+    b, _m = blobs[1]  # cube_b: the unit cube placed at x=3
+    mesh = cad.tessellate_stream(b, pipeline, 0.0, 20.0, {}, 1, 0.0)
+    assert len(np.asarray(mesh.indices)) // 3 == 12
+    pts = np.asarray(mesh.positions).reshape(-1, 3)
+    np.testing.assert_allclose(pts.min(axis=0), [3.0, 0.0, 0.0], atol=1e-6)
+    np.testing.assert_allclose(pts.max(axis=0), [4.0, 1.0, 1.0], atol=1e-6)
+
+
 def test_step_flat_records(blobs, tmp_path):
     out = tmp_path / "out.stp"
     st = cad.stream_ngeom_to_step(_records(blobs, color=_RED), str(out))
