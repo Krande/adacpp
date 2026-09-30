@@ -14,10 +14,9 @@ jobs:
       - uses: prefix-dev/setup-pixi@v0.10.2
         with:
           pixi-version: latest
-          environments: conda
-          cache: true
+          run-install: false
       - name: build package (no tests)
-        run: pixi run -e conda rattler-build build -r conda/recipe.yaml --experimental --test skip --output-dir output
+        run: pixi exec rattler-build build -r conda/recipe.yaml --experimental --test skip --output-dir output
       - name: diagnose
         run: |
           ls output/osx-64
