@@ -2,6 +2,15 @@
 
 
 
+## v0.31.0 (2026-09-30)
+
+### Feature
+
+* feat: build against ifcopenshell 0.9 (#69)
+
+Co-authored-by: Claude Opus 5.5 &lt;noreply@anthropic.com&gt; ([`4ea8400`](https://github.com/Krande/adacpp/commit/4ea8400686d217a6b5ab5393d0b57120590c1138))
+
+
 ## v0.30.1 (2026-09-24)
 
 ### Fix
