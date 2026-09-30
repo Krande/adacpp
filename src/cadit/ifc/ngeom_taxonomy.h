@@ -1,5 +1,5 @@
 // NGEOM -> IfcOpenShell taxonomy adapter (Part 2). Maps the neutral geometry hub onto
-// ifcopenshell::geometry::taxonomy items so AbstractKernel::convert (OCC / CGAL / hybrid)
+// ifcopenshell taxonomy items so the kernels' convert (OCC / CGAL / hybrid)
 // can run IfcOpenShell's full conversion+healing pipeline on adapy geometry.
 //
 // This path DOES use IfcOpenShell (and hence OCC/CGAL) — that's its purpose. It is a
@@ -14,26 +14,20 @@
 #include "../../geom/neutral/ngeom_tessellate.h" // TessMesh
 #include "../../geom/neutral/ngeom_topology.h"
 
-// Forward-declare the taxonomy shell so callers don't need the heavy ifcopenshell headers.
-namespace ifcopenshell {
-namespace geometry {
-namespace taxonomy {
-struct shell;
-struct extrusion;
-} // namespace taxonomy
-} // namespace geometry
-} // namespace ifcopenshell
+// Forward-declares the taxonomy items (in the namespace of whichever ifcopenshell this builds
+// against) so callers don't need the heavy ifcopenshell headers.
+#include "ifcopenshell_version.h"
 
 namespace adacpp::ngeom {
 
 // Build a taxonomy shell (faces -> loops -> edges + basis surfaces/curves) from neutral
 // faces. Returns nullptr if nothing mappable. Defined in ngeom_taxonomy_build.cpp.
-std::shared_ptr<ifcopenshell::geometry::taxonomy::shell>
+std::shared_ptr<adacpp::ifc::taxonomy::shell>
 to_taxonomy_shell(const std::vector<std::shared_ptr<FaceSurfaceN>> &faces);
 
 // Build an ifcopenshell taxonomy::extrusion (profile face + placement matrix +
 // direction + depth) from a decoded ExtrusionN. Defined in ngeom_taxonomy_build.cpp.
-std::shared_ptr<ifcopenshell::geometry::taxonomy::extrusion> to_taxonomy_extrusion(const ExtrusionN &ex);
+std::shared_ptr<adacpp::ifc::taxonomy::extrusion> to_taxonomy_extrusion(const ExtrusionN &ex);
 
 // Descriptor for one ifcopenshell ConversionSettings option, exposed so
 // Python / the frontend can enumerate + tune the taxonomy kernel settings.

@@ -1,11 +1,12 @@
 """adacpp must not export the symbols of the static libraries it embeds.
 
-adacpp statically links conda-forge ifcopenshell's libIfcParse.a / libIfcGeom.a. The conda
-`ifcopenshell` Python extension carries its OWN static copy of the same code. If adacpp exports its
-copy, the two collide when both load into one process -- and on macOS that aborts inside
+Up to ifcopenshell 0.8 adacpp statically linked libIfcParse.a / libIfcGeom.a, and the conda
+`ifcopenshell` Python extension carried its OWN static copy of the same code. With adacpp exporting its
+copy, the two collided when both loaded into one process -- on macOS that aborted inside
 ifcopenshell_wrapper.to_string (dyld coalesces exported weak C++ definitions across images, so the
-copies share state neither was built to share). adapy hits that whenever the adacpp backend meets an
-IFC write.
+copies shared state neither was built to share). adapy hits that whenever the adacpp backend meets an
+IFC write. From 0.9 both link ifcopenshell's shared libraries, but the co-load stays the scenario to
+guard and the rest of what adacpp embeds statically must still not leak.
 
 Two tests, because the failure is platform-specific:
 

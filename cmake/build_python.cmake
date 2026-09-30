@@ -57,15 +57,14 @@ target_link_libraries(_ada_cpp_ext_impl PRIVATE ${ADA_CPP_LINK_LIBS})
 
 # Native builds: export ONLY the module init symbol, exactly as the wasm build below does.
 #
-# adacpp statically links conda-forge ifcopenshell's libIfcParse.a / libIfcGeom.a (which themselves
-# embed rocksdb). Those archives are compiled with default visibility, so without this every one of
-# their symbols is exported from our .so -- ~950 IfcParse/IfcSchema/IfcGeom symbols on Linux. The
-# conda `ifcopenshell` Python extension exports the same namespaces from its OWN static copy. When
-# both load into one process -- which adapy does whenever the adacpp backend and an IFC write meet --
-# macOS aborts inside ifcopenshell_wrapper.to_string. dyld coalesces exported weak C++ definitions
-# (inline statics, template instantiations, typeinfo) across images, so the two copies end up
-# sharing state they were never built to share. Linux and Windows happen to tolerate it; macOS does
-# not. nanobind already compiles OUR sources with -fvisibility=hidden; the leak is the archives.
+# Up to ifcopenshell 0.8 adacpp statically linked libIfcParse.a / libIfcGeom.a, whose default-visibility
+# symbols (~950 IfcParse/IfcSchema/IfcGeom on Linux) were then re-exported from our .so. The conda
+# `ifcopenshell` Python extension exported the same namespaces from its OWN static copy, and when both
+# loaded into one process macOS aborted inside ifcopenshell_wrapper.to_string: dyld coalesces exported
+# weak C++ definitions (inline statics, template instantiations, typeinfo) across images, so the two
+# copies shared state they were never built to share. From 0.9 both link the same shared libraries,
+# but anything statically linked (OCCT-adjacent helpers, manifold, libtess2, ...) must still not leak,
+# so keep exporting only the init symbol. nanobind already compiles OUR sources with -fvisibility=hidden.
 #
 # Nothing else resolves symbols out of this module: Python's import machinery calls PyInit_*, and
 # adapy's only ctypes binding loads a separate library (libstep2glb_capi). So one exported symbol is
