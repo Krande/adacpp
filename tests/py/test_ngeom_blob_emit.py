@@ -113,7 +113,29 @@ def _records(blobs, color=None, paths=None):
     return [(m.id or f"solid_{i}", b, color, None, paths[i] if paths else None) for i, (b, m) in enumerate(blobs)]
 
 
-@pytest.mark.parametrize("pipeline", ["libtess2", "occ", "cgal"])
+def _ifcopenshell_osx64_09():
+    import platform
+    import sys
+
+    try:
+        import ifcopenshell
+    except ImportError:
+        return False
+    return sys.platform == "darwin" and platform.machine() == "x86_64" and ifcopenshell.version.startswith("0.9")
+
+
+# conda-forge's ifcopenshell 0.9.0 osx-64 build segfaults in its own OpenCASCADE kernel on a plain
+# IfcFacetedBrep box (ifcopenshell.geom.create_shape, no adacpp involved; 0.8.5 and osx-arm64 are
+# fine). The `occ` pipeline drives that kernel and gets no shape back. Not strict: passes again once
+# a fixed ifcopenshell build ships.
+_OCC_OSX64_09 = pytest.mark.xfail(
+    _ifcopenshell_osx64_09(),
+    reason="ifcopenshell 0.9.0 osx-64 OpenCASCADE kernel fails on faceted breps (upstream)",
+    strict=False,
+)
+
+
+@pytest.mark.parametrize("pipeline", ["libtess2", pytest.param("occ", marks=_OCC_OSX64_09), "cgal"])
 def test_blob_tessellates_through_every_pipeline(blobs, pipeline):
     # occ / cgal drive ifcopenshell's geometry kernels directly (ngeom_taxonomy_kernel.cpp), the
     # adacpp code most exposed to ifcopenshell's C++ API. A kernel that fails to build a root
