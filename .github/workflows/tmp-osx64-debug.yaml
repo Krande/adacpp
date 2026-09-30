@@ -48,3 +48,33 @@ jobs:
             done
             python -c "import adacpp.cad as c; print([s for s in c.ifc_taxonomy_settings() if s[\"name\"] in (\"precision\",\"precision-factor\",\"length-unit\",\"no-wire-intersection-check\",\"reorient-shells\")])"
           '
+      - name: ifcopenshell alone (no adacpp)
+        run: |
+          cat > ios.py <<'PY'
+          import ifcopenshell, ifcopenshell.api, ifcopenshell.geom
+          print("ifcopenshell", ifcopenshell.version, flush=True)
+          f = ifcopenshell.api.run("project.create_file", version="IFC4")
+          ctx = f.createIfcGeometricRepresentationContext(None, "Model", 3, 1e-5, f.createIfcAxis2Placement3D(f.createIfcCartesianPoint((0., 0., 0.))), None)
+          P = lambda x, y, z: f.createIfcCartesianPoint((float(x), float(y), float(z)))
+          v = [P(0,0,0), P(1,0,0), P(1,1,0), P(0,1,0), P(0,0,1), P(1,0,1), P(1,1,1), P(0,1,1)]
+          quads = [(0,3,2,1), (4,5,6,7), (0,1,5,4), (1,2,6,5), (2,3,7,6), (3,0,4,7)]
+          faces = [f.createIfcFace([f.createIfcFaceOuterBound(f.createIfcPolyLoop([v[i] for i in q]), True)]) for q in quads]
+          brep = f.createIfcFacetedBrep(f.createIfcClosedShell(faces))
+          for lib in ["opencascade", "cgal"]:
+              s = ifcopenshell.geom.settings()
+              try:
+                  s.set("geometry-library", lib)
+              except Exception as e:
+                  print(lib, "setting failed:", e)
+              try:
+                  sh = ifcopenshell.geom.create_shape(s, brep)
+                  n = len(sh.faces) // 3 if hasattr(sh, "faces") else len(sh.geometry.faces) // 3
+                  print(lib, "triangles:", n, flush=True)
+              except Exception as e:
+                  print(lib, "FAILED:", type(e).__name__, e, flush=True)
+          PY
+          for v in 0.9.0 0.8.5; do
+            echo "=== ifcopenshell $v"
+            pixi exec -c conda-forge --spec "ifcopenshell=$v" --spec python=3.12 -- python ios.py 2>&1 | tail -8
+          done
+
