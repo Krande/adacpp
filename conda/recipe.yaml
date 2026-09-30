@@ -32,10 +32,15 @@ requirements:
     - python
     # Pin occt/ifcopenshell to the same versions pixi resolves (see pixi.toml).
     - occt ==8.0.1
-    # 0.9 is the first release with shared libs + a CMake package (cmake/deps_ifc.cmake).
-    - ifcopenshell >=0.9.0
-    # IfcOpenShellConfig.cmake find_dependency()s these; they are not run deps of
-    # ifcopenshell, so list them for the build. rocksdb comes in as its run dep.
+    # Both lines build (cmake/deps_ifc.cmake); the newest resolves unless pinned.
+    - ifcopenshell >=0.8.5,<0.10
+    # 0.8.x: rocksdb is embedded statically in libIfcParse.a and we link
+    # RocksDB::rocksdb (static) beside it, so keep the rocksdb ABI 0.8.5 was built
+    # against -- rocksdb 11.x corrupts IfcFile at runtime ("Unable to parse").
+    # 0.9 co-solves with the same range.
+    - rocksdb >=10.6.2,<10.7.0a0
+    # 0.9+: IfcOpenShellConfig.cmake find_dependency()s these; they are not run
+    # deps of ifcopenshell, so list them for the build.
     - libxml2-devel
     - nlohmann_json
     # RocksDBConfig.cmake calls find_dependency(ZLIB), which needs zlib.h. The

@@ -9,9 +9,17 @@ common = { features = ["common"], no-default-feature = true }
 wasm = { features = ["wasm", "common"], no-default-feature = true }
 conda = { features = ["conda"], no-default-feature = true }
 test = { features = ["test", "common"], no-default-feature = true }
+# The same test env held on the ifcopenshell 0.8.x line, so the legacy static-link path keeps building.
+test-ifc085 = { features = ["test", "common", "ifc085"], no-default-feature = true }
 # Lean env for the standalone OCC-free STP2GLB CLI — only the build toolchain + CLI11 + git
 # (manifold FetchContent). NO occt/cgal/gmsh/ifcopenshell/python-dev.
 stp2glb = { features = ["stp2glb"], no-default-feature = true }
+
+[feature.ifc085.dependencies]
+ifcopenshell = "0.8.5.*"
+# 0.8.5's libIfcParse.a embeds rocksdb and we link RocksDB::rocksdb statically beside it: keep the
+# rocksdb ABI it was built against (cmake/deps_ifc.cmake).
+rocksdb = ">=10.6.2,<10.7.0a0"
 
 [feature.conda.dependencies]
 rattler-build = "*"
@@ -25,10 +33,11 @@ python = "==3.13"
 # shipped package, and adapy hands gmsh a raw TopoDS_Shape* across that boundary.
 # The old `<8.0.1` note was about ifcopenshell 0.8.5 build _4; _8 co-solves with 8.0.1.
 occt = { version = "==8.0.1", build = "*novtk*" }
-# 0.9 is the first ifcopenshell shipping shared libs + a CMake package, which
-# cmake/deps_ifc.cmake now relies on. Keep in lockstep with adapy's OCCT for the
-# shared-ABI bridge.
-ifcopenshell = ">=0.9.0"
+# Both 0.8.5 (static libIfcParse.a/libIfcGeom.a) and 0.9 (shared libs + CMake package) are
+# supported while 0.9 is new -- see cmake/deps_ifc.cmake and src/cadit/ifc/ifcopenshell_version.h.
+# `test` resolves the newest; `test-ifc085` pins 0.8.5. 0.8.5 is the first ifcopenshell built
+# against occt 8. Keep in lockstep with adapy's OCCT for the shared-ABI bridge.
+ifcopenshell = ">=0.8.5,<0.10"
 # ifcopenshell 0.9's CMake package find_dependency()s these for its IfcXML reader and glTF writer.
 # They are build-time only (headers / CMake configs) and not run deps of the conda package; for
 # LibXml2 conda-forge ships the headers + libxml2.so link name separately from the runtime.

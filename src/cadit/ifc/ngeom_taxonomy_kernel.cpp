@@ -1,16 +1,14 @@
 // NGEOM taxonomy kernel driver (Part 2b): neutral -> taxonomy -> IfcOpenShell OCC kernel
 // -> TopoDS_Shape -> BRepMesh -> Mesh.
 //
-// We call open_cascade_kernel::convert(shell, TopoDS_Shape&) DIRECTLY rather than the
-// high-level abstract_kernel::convert(...)->ConversionResults path: the latter's
+// We call the OCC kernel's convert(shell, TopoDS_Shape&) DIRECTLY rather than the
+// high-level kernel convert(...)->ConversionResults path: the latter's
 // convert_impl(shell) dereferences shell->instance->...->id(), and our taxonomy items are
 // built programmatically (schema-free) so `instance` is null -> segfault. The direct method
 // runs IfcOpenShell's full face/wire conversion + healing and never touches `instance`.
 #include <Eigen/Dense>
-#include <ifcgeom/conversion_settings.h>
-#include <ifcgeom/kernels/cgal/cgal_kernel.h>
-#include <ifcgeom/kernels/opencascade/opencascade_kernel.h>
-#include <ifcgeom/taxonomy.h>
+#define ADACPP_IFCOPENSHELL_KERNELS
+#include "ifcopenshell_version.h"
 
 #include <CGAL/Polygon_mesh_processing/triangulate_faces.h>
 #include <CGAL/number_utils.h>
@@ -38,13 +36,12 @@
 
 #include <cmath>
 #include <memory>
-#include <variant>
 #include <vector>
 
 #include "../../geom/neutral/ngeom_math.h"
 #include "ngeom_taxonomy.h"
 
-namespace geom = ifcopenshell::geom;
+namespace ifc = adacpp::ifc;
 
 namespace adacpp::ngeom {
 
@@ -156,7 +153,7 @@ void append_occ_shape(const TopoDS_Shape &shape, double deflection, TessMesh &ou
 // end cap is the (possibly concave) profile as ONE facet — a naive fan over a concave
 // polygon spills outside it (the beam-end artifacts). PMP::triangulate_faces produces a
 // proper triangulation; after it every facet is a triangle and the loop below is exact.
-void append_cgal_shape(cgal_polyhedron shape, TessMesh &out) {
+void append_cgal_shape(ifc::cgal_shape shape, TessMesh &out) {
     try {
         CGAL::Polygon_mesh_processing::triangulate_faces(shape);
     } catch (...) {
@@ -193,20 +190,20 @@ namespace {
 bool parse_bool(const std::string &s) {
     return s == "1" || s == "true" || s == "True" || s == "TRUE" || s == "on" || s == "yes";
 }
-std::string variant_to_string(const geom::settings::value_variant_t &v) {
-    if (const bool *p = std::get_if<bool>(&v))
+std::string variant_to_string(const ifc::settings::value_variant_t &v) {
+    if (const bool *p = ifc::settings_value_if<bool>(v))
         return *p ? "true" : "false";
-    if (const int *p = std::get_if<int>(&v))
+    if (const int *p = ifc::settings_value_if<int>(v))
         return std::to_string(*p);
-    if (const double *p = std::get_if<double>(&v))
+    if (const double *p = ifc::settings_value_if<double>(v))
         return std::to_string(*p);
-    if (const std::string *p = std::get_if<std::string>(&v))
+    if (const std::string *p = ifc::settings_value_if<std::string>(v))
         return *p;
     return ""; // non-scalar (set/vector/enum) — not exposed as a simple value
 }
 // Apply one (name, string-value) override to the kernel settings, parsing the
 // string per the setting's declared type. Unknown setting / bad value -> skip.
-void apply_setting(geom::settings &s, const std::string &name, const std::string &val) {
+void apply_setting(ifc::settings &s, const std::string &name, const std::string &val) {
     std::string ty;
     try {
         ty = s.get_type(name);
@@ -230,7 +227,7 @@ void apply_setting(geom::settings &s, const std::string &name, const std::string
 
 // --- solid builders (used by revolve + boolean; both bypass ifcopenshell's
 // convert_impl, which derefs a null schema instance on our programmatic items) ---
-TopoDS_Shape revolve_to_occ(geom::open_cascade_kernel &occ, const RevolveN &rv) {
+TopoDS_Shape revolve_to_occ(ifc::occ_kernel &occ, const RevolveN &rv) {
     auto sh = to_taxonomy_shell({rv.profile});
     if (!sh || sh->children.empty())
         return {};
@@ -246,7 +243,7 @@ TopoDS_Shape revolve_to_occ(geom::open_cascade_kernel &occ, const RevolveN &rv) 
 
 // convert(extrusion) returns the profile extruded in LOCAL coords -- ifcopenshell applies the
 // placement matrix downstream (in the ConversionResult flow we bypass), so place it here.
-TopoDS_Shape extrusion_to_occ(geom::open_cascade_kernel &occ, const ExtrusionN &ex) {
+TopoDS_Shape extrusion_to_occ(ifc::occ_kernel &occ, const ExtrusionN &ex) {
     auto et = to_taxonomy_extrusion(ex);
     if (!et)
         return {};
@@ -256,9 +253,9 @@ TopoDS_Shape extrusion_to_occ(geom::open_cascade_kernel &occ, const ExtrusionN &
     return BRepBuilderAPI_Transform(shape, trsf_from_frame(ex.frame), Standard_True).Shape();
 }
 
-TopoDS_Shape build_solid_occ(geom::open_cascade_kernel &occ, const SolidItemN &it);
+TopoDS_Shape build_solid_occ(ifc::occ_kernel &occ, const SolidItemN &it);
 
-TopoDS_Shape boolean_to_occ(geom::open_cascade_kernel &occ, const BooleanN &bn) {
+TopoDS_Shape boolean_to_occ(ifc::occ_kernel &occ, const BooleanN &bn) {
     TopoDS_Shape a = build_solid_occ(occ, bn.a);
     if (a.IsNull())
         return {};
@@ -279,7 +276,7 @@ TopoDS_Shape boolean_to_occ(geom::open_cascade_kernel &occ, const BooleanN &bn) 
     }
 }
 
-TopoDS_Shape build_solid_occ(geom::open_cascade_kernel &occ, const SolidItemN &it) {
+TopoDS_Shape build_solid_occ(ifc::occ_kernel &occ, const SolidItemN &it) {
     if (it.boolean)
         return boolean_to_occ(occ, *it.boolean);
     if (it.revolve)
@@ -297,7 +294,7 @@ TopoDS_Shape build_solid_occ(geom::open_cascade_kernel &occ, const SolidItemN &i
 } // namespace
 
 std::vector<TaxonomySetting> taxonomy_settings_info() {
-    geom::settings s;
+    ifc::settings s;
     std::vector<TaxonomySetting> out;
     for (const std::string &name : s.setting_names()) {
         TaxonomySetting info;
@@ -320,24 +317,24 @@ TessMesh tessellate_via_taxonomy(const NgeomDoc &doc, const std::string &kernel_
                                  const std::vector<std::pair<std::string, std::string>> &overrides) {
     (void) angular_deg; // the kernels mesh from their own settings
     TessMesh mesh;
-    geom::settings settings;
+    ifc::settings settings;
     // Default: skip the wire self-intersection check. A live gdb profile showed
     // ifcopenshell's wire_intersections (recursive 2D curve-curve global
     // optimization) dominating ~2/3 of taxonomy time, and our taxonomy shells
     // come from already-validated solids. Callers can re-enable / tune any
     // ifcopenshell setting via `overrides` (e.g. {"precision", "1e-3"}).
-    settings.get<geom::settings::NoWireIntersectionCheck>().value = true;
+    settings.get<ifc::NoWireIntersectionCheck>().value = true;
     for (const auto &kv : overrides)
         apply_setting(settings, kv.first, kv.second);
     const bool use_cgal = (kernel_name == "cgal");
-    std::unique_ptr<geom::open_cascade_kernel> occ;
-    std::unique_ptr<geom::kernels::cgal_kernel> cgal;
+    std::unique_ptr<ifc::occ_kernel> occ;
+    std::unique_ptr<ifc::cgal_kernel> cgal;
     // OCC kernel is always created: revolve uses it (MakeRevol + profile-face
     // build) even in cgal mode. The cgal kernel is created additionally for the
     // cgal pipeline (faces/extrusions).
-    occ.reset(new geom::open_cascade_kernel(settings));
+    occ.reset(new ifc::occ_kernel(settings));
     if (use_cgal)
-        cgal.reset(new geom::kernels::cgal_kernel(settings));
+        cgal.reset(new ifc::cgal_kernel(settings));
 
     for (const NgeomRoot &root : doc.roots) {
         uint32_t first = (uint32_t) mesh.indices.size();
@@ -350,7 +347,7 @@ TessMesh tessellate_via_taxonomy(const NgeomDoc &doc, const std::string &kernel_
                 if (use_cgal) {
                     size_t vb = mesh.positions.size() / 3;
                     auto ext = to_taxonomy_extrusion(*root.extrusion);
-                    cgal_polyhedron shape;
+                    ifc::cgal_shape shape;
                     if (ext && cgal->convert(ext, shape))
                         append_cgal_shape(shape, mesh);
                     place_positions(mesh, vb, root.extrusion->frame);
@@ -380,7 +377,7 @@ TessMesh tessellate_via_taxonomy(const NgeomDoc &doc, const std::string &kernel_
                     append_occ_shape(shape, deflection, mesh);
             } else if (auto shell = to_taxonomy_shell(root.faces)) {
                 if (use_cgal) {
-                    cgal_polyhedron shape;
+                    ifc::cgal_shape shape;
                     if (cgal->convert(shell, shape))
                         append_cgal_shape(shape, mesh);
                 } else {

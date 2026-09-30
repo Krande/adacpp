@@ -6,7 +6,7 @@
 #include "../../geom/neutral/ngeom_bspline.h"
 #include "ngeom_taxonomy.h"
 
-namespace tax = ifcopenshell::geom::taxonomy;
+namespace tax = adacpp::ifc::taxonomy;
 
 namespace adacpp::ngeom {
 

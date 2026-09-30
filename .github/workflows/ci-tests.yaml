@@ -19,8 +19,14 @@ env:
 jobs:
 
   build_test:
-    name: ada-cpp-test
+    # `test` resolves the newest ifcopenshell; `test-ifc085` holds the 0.8.x line, whose static
+    # link path cmake/deps_ifc.cmake keeps while 0.9 is new. Names stay ada-cpp-test[-ifc085].
+    name: ada-cpp-${{ matrix.env }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [test, test-ifc085]
     defaults:
       run:
         shell: bash -l {0}
@@ -36,13 +42,13 @@ jobs:
       - uses: prefix-dev/setup-pixi@v0.10.2
         with:
           pixi-version: latest
-          environments: test
+          environments: ${{ matrix.env }}
           cache: true
 
       - name: install package
         run: |
-          pixi run install
+          pixi run -e ${{ matrix.env }} install
 
       - name: run tests
         run: |
-          pixi run test
+          pixi run -e ${{ matrix.env }} test
