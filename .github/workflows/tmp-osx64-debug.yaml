@@ -60,7 +60,9 @@ jobs:
           quads = [(0,3,2,1), (4,5,6,7), (0,1,5,4), (1,2,6,5), (2,3,7,6), (3,0,4,7)]
           faces = [f.createIfcFace([f.createIfcFaceOuterBound(f.createIfcPolyLoop([v[i] for i in q]), True)]) for q in quads]
           brep = f.createIfcFacetedBrep(f.createIfcClosedShell(faces))
+          print("brep built", flush=True)
           for lib in ["opencascade", "cgal"]:
+              print("---", lib, flush=True)
               s = ifcopenshell.geom.settings()
               try:
                   s.set("geometry-library", lib)
@@ -75,6 +77,6 @@ jobs:
           PY
           for v in 0.9.0 0.8.5; do
             echo "=== ifcopenshell $v"
-            pixi exec -c conda-forge --spec "ifcopenshell=$v" --spec python=3.12 -- python ios.py 2>&1 | tail -8
+            pixi exec -c conda-forge --spec "ifcopenshell=$v" --spec python=3.12 -- bash -c 'python -X faulthandler ios.py; echo "exit=$?"' 2>&1 | tail -30
           done
 
