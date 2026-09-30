@@ -1,0 +1,51 @@
+# TEMPORARY: why the occ taxonomy pipeline yields nothing on osx-64 + ifcopenshell 0.9. Remove before merge.
+name: tmp-osx64-debug
+on:
+  push:
+    branches: [fix/taxonomy-osx64]
+jobs:
+  debug:
+    runs-on: macos-15-intel
+    defaults:
+      run:
+        shell: bash -l {0}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: prefix-dev/setup-pixi@v0.10.2
+        with:
+          pixi-version: latest
+          environments: conda
+          cache: true
+      - name: build package (no tests)
+        run: pixi run -e conda rattler-build build -r conda/recipe.yaml --experimental --test skip --output-dir output
+      - name: diagnose
+        run: |
+          ls output/osx-64
+          cat > repro.py <<'PY'
+          import sys, tempfile, pathlib
+          sys.path.insert(0, "tests/py")
+          import numpy as np
+          import adacpp.cad as cad
+          from test_ngeom_blob_emit import _two_cube_step
+          d = pathlib.Path(tempfile.mkdtemp()); p = d / "cubes.stp"; p.write_text(_two_cube_step())
+          blobs = [bytes(b) for b, m in cad.StepNgeomStream(str(p))]
+          for pipe in ["libtess2", "occ", "cgal"]:
+              m = cad.tessellate_stream(blobs[1], pipe, 0.0, 20.0, {}, 1, 0.0)
+              print(pipe, len(np.asarray(m.indices)) // 3, flush=True)
+          PY
+          pixi exec -c ./output -c conda-forge --spec ada-cpp --spec "ifcopenshell=0.9.0" --spec python=3.12 --spec numpy --spec pytest -- bash -c '
+            python -c "import ifcopenshell; print(ifcopenshell.version)"
+            ADACPP_TAXONOMY_DEBUG=1 python repro.py
+            echo "--- occ settings sweep"
+            for s in "precision=1e-6" "precision=1e-3" "no-wire-intersection-check=false"; do
+              k=${s%%=*}; v=${s#*=}
+              ADACPP_TAXONOMY_DEBUG=1 python -c "
+          import sys; sys.path.insert(0, \"tests/py\"); import tempfile, pathlib, numpy as np, adacpp.cad as cad
+          from test_ngeom_blob_emit import _two_cube_step
+          d = pathlib.Path(tempfile.mkdtemp()); p = d / \"c.stp\"; p.write_text(_two_cube_step())
+          b = [bytes(x) for x, _ in cad.StepNgeomStream(str(p))][1]
+          m = cad.tessellate_stream(b, \"occ\", 0.0, 20.0, {\"$k\": \"$v\"}, 1, 0.0)
+          print(\"$s\", len(np.asarray(m.indices)) // 3)"
+            done
+            python -c "import adacpp.cad as c; print([s for s in c.ifc_taxonomy_settings() if s[\"name\"] in (\"precision\",\"precision-factor\",\"length-unit\",\"no-wire-intersection-check\",\"reorient-shells\")])"
+          '

@@ -34,7 +34,12 @@
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
 
+#include <Standard_Failure.hxx>
+
 #include <cmath>
+#include <cstdlib>
+#include <iostream>
+#include <string>
 #include <memory>
 #include <vector>
 
@@ -46,6 +51,20 @@ namespace ifc = adacpp::ifc;
 namespace adacpp::ngeom {
 
 namespace {
+
+// ADACPP_TAXONOMY_DEBUG=1: say on stderr why a root produced no triangles. The driver is
+// fail-soft (a root the kernel can't build is skipped), which otherwise leaves no trace.
+bool taxonomy_debug_enabled() {
+    static const bool on = [] {
+        const char *e = std::getenv("ADACPP_TAXONOMY_DEBUG");
+        return e && *e && std::string(e) != "0";
+    }();
+    return on;
+}
+void taxonomy_debug(const std::string &root_id, const std::string &what) {
+    if (taxonomy_debug_enabled())
+        std::cerr << "[adacpp.taxonomy] root '" << root_id << "': " << what << std::endl;
+}
 
 // gp_Trsf placing local coordinates into world via a Frame (columns x/y/z + origin).
 gp_Trsf trsf_from_frame(const Frame &f) {
@@ -384,11 +403,20 @@ TessMesh tessellate_via_taxonomy(const NgeomDoc &doc, const std::string &kernel_
                     TopoDS_Shape shape;
                     if (occ->convert(shell, shape))
                         append_occ_shape(shape, deflection, mesh);
+                    else
+                        taxonomy_debug(root.id, "occ convert(shell) returned false");
                 }
             }
-        } catch (...) {
+        } catch (const Standard_Failure &e) {
             // fail-soft: a root the kernel can't build yields no triangles
+            taxonomy_debug(root.id, std::string("OCCT Standard_Failure: ") + e.what());
+        } catch (const std::exception &e) {
+            taxonomy_debug(root.id, std::string("exception: ") + e.what());
+        } catch (...) {
+            taxonomy_debug(root.id, "unknown exception");
         }
+        if (mesh.indices.size() == first)
+            taxonomy_debug(root.id, "no triangles");
         mesh.groups.push_back({root.id, first, (uint32_t) mesh.indices.size() - first, vfirst,
                                (uint32_t) (mesh.positions.size() / 3) - vfirst});
     }
