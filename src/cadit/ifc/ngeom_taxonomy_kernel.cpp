@@ -415,8 +415,15 @@ TessMesh tessellate_via_taxonomy(const NgeomDoc &doc, const std::string &kernel_
         } catch (...) {
             taxonomy_debug(root.id, "unknown exception");
         }
-        if (mesh.indices.size() == first)
+        if (mesh.indices.size() == first) {
             taxonomy_debug(root.id, "no triangles");
+#if ADACPP_IFCOPENSHELL_09
+            // The kernels report per-face failures to ifcopenshell's logger, not to us. get_log()
+            // hands back a std::string, so no stream crosses into libifcopenshell (see ifcop.cpp).
+            if (taxonomy_debug_enabled())
+                taxonomy_debug(root.id, "ifcopenshell log:\n" + ifcopenshell::logger::root().get_log());
+#endif
+        }
         mesh.groups.push_back({root.id, first, (uint32_t) mesh.indices.size() - first, vfirst,
                                (uint32_t) (mesh.positions.size() / 3) - vfirst});
     }
