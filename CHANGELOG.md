@@ -2,6 +2,15 @@
 
 
 
+## v0.31.1 (2026-09-30)
+
+### Fix
+
+* fix: explain taxonomy failures, expect the osx-64 ifcopenshell 0.9 OCC failure (#70)
+
+Co-authored-by: Claude Opus 5.5 &lt;noreply@anthropic.com&gt; ([`4bae686`](https://github.com/Krande/adacpp/commit/4bae686e4052f570abf17e48940d68babef80997))
+
+
 ## v0.31.0 (2026-09-30)
 
 ### Feature
