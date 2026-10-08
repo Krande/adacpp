@@ -52,3 +52,8 @@ jobs:
       - name: run tests
         run: |
           pixi run -e ${{ matrix.env }} test
+
+      # The FEA kernels' native unit tests: standalone C++, built with the env's compiler ($CXX).
+      - name: FEA kernel unit tests (C++)
+        run: |
+          pixi run -e ${{ matrix.env }} bash tests/fea/run.sh

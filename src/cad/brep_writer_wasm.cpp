@@ -5,15 +5,15 @@
 // NO Python, NO OCCT, NO ifcopenshell, NO nanobind. Shares ONE implementation with the nanobind
 // module via brep_file_convert.h (adacpp::brep_convert::write_ifc_file_impl / write_ifc_to_step_impl).
 //
-// IO mirrors the CAD→GLB modules: both paths live in the emscripten FS. Mount OPFS via WASMFS (build
-// with -sWASMFS) and pass OPFS-backed paths so a large STEP/IFC streams through `pread` (bounded RSS)
-// and the output is written back to OPFS. Single-threaded (the writers are serial), so this links
-// WITHOUT -pthread and runs on any page (no SharedArrayBuffer / cross-origin isolation required).
+// IO mirrors the CAD→GLB modules: both paths live in the emscripten FS (WASMFS). In a worker,
+// `await Module.opfsMount("/opfs")` (src/wasmio/opfs_sync.js) and pass paths under it so a large
+// STEP/IFC streams through `pread` (bounded RSS) and the output is written back to OPFS.
+// Single-threaded (the writers are serial), so this links WITHOUT -pthread and runs on any page (no
+// SharedArrayBuffer / cross-origin isolation required).
 
 #include <string>
 
 #include <emscripten/bind.h>
-#include <emscripten/wasmfs.h>
 
 #include "brep_file_convert.h"
 
@@ -36,19 +36,9 @@ long ifc_to_step(const std::string &in_path, const std::string &out_path, double
     return fs.solids_out;
 }
 
-// Mount the browser's Origin Private File System (OPFS) at `mount_point` (worker-only). Returns 0 on
-// success, non-zero if OPFS is unavailable; the caller falls back to the in-heap WASMFS default.
-int mount_opfs(const std::string &mount_point) {
-    backend_t opfs = wasmfs_create_opfs_backend();
-    if (!opfs)
-        return -1;
-    return wasmfs_create_directory(mount_point.c_str(), 0777, opfs);
-}
-
 } // namespace
 
 EMSCRIPTEN_BINDINGS(adacpp_brep_writer) {
     emscripten::function("stepToIfc", &step_to_ifc);
     emscripten::function("ifcToStep", &ifc_to_step);
-    emscripten::function("mountOpfs", &mount_opfs);
 }

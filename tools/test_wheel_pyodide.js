@@ -214,6 +214,26 @@ def mesh():
         }
     }
 
+    // ---- group 6: the FEA kernels are OCC-free, so the wheel carries them too ----
+    console.log("\n[fea] adacpp.fea combines like the native build");
+    {
+        const py = await fresh(wheel);
+        py.runPython(`
+import adacpp.fea as fea, numpy as np
+
+def combine():
+    x = np.array([1.0 + 2.0**-12, 3.0, -2.5], dtype=np.float32)
+    out = fea.combine_strides([x, x], [1.0 + 2.0**-12, -1.0])
+    # a*a rounds to float32 before the add (no FMA): exactly 2**-12 in the first slot.
+    return {"first": float(out[0]), "want": 2.0**-12, "dtype": str(out.dtype)}
+`);
+        const r = pyjson(py, "fea.combine_strides", "combine()");
+        if (r) {
+            check("fea.combine_strides gives the unfused float32 result", r.first === r.want && r.dtype === "float32",
+                  JSON.stringify(r));
+        }
+    }
+
     console.log(failures === 0 ? "\nPYODIDE WHEEL OK ✓" : `\n${failures} CHECK(S) FAILED ✗`);
     process.exit(failures === 0 ? 0 : 1);
 }

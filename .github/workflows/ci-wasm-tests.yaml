@@ -101,3 +101,19 @@ jobs:
       # is the cheapest module in the set to build and there is no excuse for it to go untested.
       - name: build + smoke-test the extrusion expander embind module
         run: pixi run -e wasm test-extrude-wasm
+
+      # The FEA kernels (load combinations, derived components, envelopes). The node harness checks
+      # every output byte against an exact JS reference, and the same C++ compiled to wasm+SIMD runs
+      # the native unit tests too -- the browser engine must agree with the server to the bit.
+      - name: build + test the FEA kernels embind module
+        run: pixi run -e wasm test-fea-wasm
+
+      # The OPFS mount the browser workers stream through. node has no OPFS, so this runs the backend
+      # against an in-memory stand-in with the same synchronous handle API.
+      - name: test the OPFS sync-access-handle backend (STEP->GLB + FEA modules)
+        run: pixi run -e wasm test-opfs-sync-wasm
+
+      - name: FEA kernel unit tests compiled to wasm (SIMD)
+        # --wasm, not CXX=em++: the wasm env's compiler activation resets CXX to the conda g++, so
+        # that form ran the native build under this step's name.
+        run: pixi run -e wasm bash tests/fea/run.sh --wasm

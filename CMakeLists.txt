@@ -36,6 +36,11 @@ option(
     OFF
 )
 option(
+    BUILD_FEA_WASM
+    "Build ONLY the FEA kernels wasm module (load combinations / derived components / envelopes; embind)"
+    OFF
+)
+option(
     BUILD_STP2GLB_STANDALONE
     "Build ONLY the OCC-free STP2GLB CLI — skip OCCT/CGAL/gmsh/IFC/Python"
     OFF
@@ -109,6 +114,31 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/src/cadit/step
 )
 
+# Format-neutral FEA result kernels (src/fea): OCC-free, compiled into the nanobind module on every
+# target (native + pyodide) and, separately, into the adacpp_fea embind module (wasm_build.cmake).
+# Bit-identical results across engines are part of their contract, so they never get FMA contraction
+# (GCC contracts by default outside ISO mode) and never -ffast-math; MSVC's /fp:precise default
+# does not contract.
+set(FEA_SOURCES
+    src/fea/fea_arrays.cpp
+    src/fea/superpose.cpp
+    src/fea/derive.cpp
+    src/fea/artefact_io.cpp
+    src/fea/envelope.cpp
+    src/fea/field_ops.cpp
+)
+if(MSVC)
+    set_source_files_properties(
+        ${FEA_SOURCES}
+        PROPERTIES COMPILE_OPTIONS "/fp:precise"
+    )
+else()
+    set_source_files_properties(
+        ${FEA_SOURCES}
+        PROPERTIES COMPILE_OPTIONS "-ffp-contract=off;-fno-fast-math"
+    )
+endif()
+
 # Create a list called ADA_CPP_SOURCES of all cpp files inside the src dir
 if(BUILD_WASM)
     # Wasm builds now link the cross-built OCCT toolkits (see wasm_occt.cmake), so
@@ -130,6 +160,7 @@ if(BUILD_WASM)
         src/geom/neutral/ngeom_extrude.cpp
         src/geom/neutral/ngeom_meshopt.cpp
         src/geom/neutral/ngeom_boolean.cpp
+        ${FEA_SOURCES}
         ${LIBTESS2_SOURCES}
         ${MESHOPT_SOURCES}
     )
@@ -157,6 +188,7 @@ else()
         src/cadit/ifc/ngeom_taxonomy_kernel.cpp
         src/geom/neutral/ngeom_meshopt.cpp
         src/geom/neutral/ngeom_boolean.cpp
+        ${FEA_SOURCES}
         ${LIBTESS2_SOURCES}
         ${MESHOPT_SOURCES}
     )
@@ -181,12 +213,14 @@ if(BUILD_WASM)
         src/adacpp_py_wrap.cpp
         src/cad/cad_py_wrap.cpp
         src/geom/neutral/extrude_py_wrap.cpp
+        src/fea/fea_py_wrap.cpp
     )
 else()
     set(ADA_CPP_PY_SOURCES
         src/adacpp_py_wrap.cpp
         src/cad/cad_py_wrap.cpp
         src/geom/neutral/extrude_py_wrap.cpp
+        src/fea/fea_py_wrap.cpp
         src/cadit/ifc/ifc_py_wrap.cpp
         src/cadit/occt/occt_py_wrap.cpp
         src/cadit/tinygltf/tiny_py_wrap.cpp
@@ -222,6 +256,7 @@ if(BUILD_WASM)
         AND NOT BUILD_IFC_GLB_WASM
         AND NOT BUILD_BREP_WRITER_WASM
         AND NOT BUILD_EXTRUDE_WASM
+        AND NOT BUILD_FEA_WASM
     )
         include(cmake/wasm_occt.cmake)
     endif()

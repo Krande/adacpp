@@ -1,3 +1,88 @@
+# File I/O for the single-threaded embind modules: WASMFS (in-heap by default, which is what node
+# runs) plus an OPFS mount whose files are FileSystemSyncAccessHandles (src/wasmio). emscripten's own
+# OPFS backend needs -pthread (SharedArrayBuffer, so a cross-origin-isolated page) or JSPI; without
+# either its mount reports success and every file operation on it traps. This backend does its I/O
+# synchronously from the worker instead. The JS API (opfsMount / opfsOpen / ...) is exported next to
+# FS, so it also lands in the generated .d.ts.
+function(adacpp_wasm_fs target)
+    target_sources(
+        ${target}
+        PRIVATE ${CMAKE_SOURCE_DIR}/src/wasmio/opfs_sync_backend.cpp
+    )
+    # WASMFS's backend classes are internal headers of the emscripten tree (pinned: 4.0.9).
+    target_include_directories(
+        ${target}
+        PRIVATE ${EMSCRIPTEN_ROOT_PATH}/system/lib/wasmfs
+    )
+    set(_js ${CMAKE_SOURCE_DIR}/src/wasmio/opfs_sync.js)
+    target_link_options(
+        ${target}
+        PRIVATE
+            "-sWASMFS=1"
+            "-sFORCE_FILESYSTEM=1"
+            "--js-library=${_js}"
+            "-sEXPORTED_RUNTIME_METHODS=['FS','opfsMount','opfsOpen','opfsDetach','opfsReserve','opfsSettle','mountOpfs']"
+            # WASMFS's FS.writeFile appends to an existing file; this one replaces it.
+            "--post-js=${CMAKE_SOURCE_DIR}/src/wasmio/fs_writefile.js"
+    )
+    set_property(
+        TARGET ${target}
+        APPEND
+        PROPERTY
+            LINK_DEPENDS ${_js} ${CMAKE_SOURCE_DIR}/src/wasmio/fs_writefile.js
+    )
+endfunction()
+
+# The format-neutral FEA kernels (load-combination superposition, derived components, envelopes,
+# AFBL/AFEL writer) as a STANDALONE embind wasm module. No OCCT, no tessellator, no manifold -- just
+# src/fea, which the nanobind module compiles too, so browser and server write the same bytes.
+#
+# The numerics flags are part of the contract, not tuning: -ffp-contract=off forbids fusing a*b+c into
+# one FMA (a different rounding), and there is deliberately no -ffast-math and no -mrelaxed-simd, so
+# every op is a single IEEE-754 op and the results are bit-identical to the native build. -msimd128 is
+# safe on that score: f32x4 mul/add round exactly like their scalar forms. The optimisation level is
+# not set here: it comes from the Release flags in cmake/wasm_toolchain.cmake, like every other module.
+if(BUILD_FEA_WASM)
+    add_executable(
+        adacpp_fea
+        ${CMAKE_SOURCE_DIR}/src/fea/fea_wasm.cpp
+        ${CMAKE_SOURCE_DIR}/src/fea/fea_arrays.cpp
+        ${CMAKE_SOURCE_DIR}/src/fea/superpose.cpp
+        ${CMAKE_SOURCE_DIR}/src/fea/derive.cpp
+        ${CMAKE_SOURCE_DIR}/src/fea/artefact_io.cpp
+        ${CMAKE_SOURCE_DIR}/src/fea/envelope.cpp
+        ${CMAKE_SOURCE_DIR}/src/fea/field_ops.cpp
+    )
+    # nlohmann json.hpp (the JSON arguments) lives in the (wasm) conda env include.
+    target_include_directories(adacpp_fea PRIVATE $ENV{CONDA_PREFIX}/include)
+    # try/catch (JSON parse + kernel errors -> {"ok":false}) needs real EH; same model as glb_diff.
+    target_compile_options(
+        adacpp_fea
+        PRIVATE -msimd128 -ffp-contract=off -fwasm-exceptions
+    )
+    set_target_properties(
+        adacpp_fea
+        PROPERTIES OUTPUT_NAME "adacpp_fea" SUFFIX ".js"
+    )
+    target_link_options(
+        adacpp_fea
+        PRIVATE
+            "-lembind"
+            "-fwasm-exceptions"
+            "-sALLOW_MEMORY_GROWTH=1"
+            "-sMAXIMUM_MEMORY=4294967296"
+            "-sMODULARIZE=1"
+            "-sEXPORT_ES6=1"
+            "-sEXPORT_NAME=createAdacppFea"
+            "-sENVIRONMENT=web,worker,node"
+            "--emit-tsd"
+            "adacpp_fea.d.ts"
+            "-sSTACK_SIZE=1048576"
+    )
+    adacpp_wasm_fs(adacpp_fea)
+    return() # standalone target
+endif()
+
 # Prismatic extrusion expansion as a STANDALONE embind wasm module. The leanest of the set: the
 # expander in ngeom_extrude.h is header-only, so this links no libtess2, no meshoptimizer, no
 # manifold and no OCCT — just the arithmetic that turns a section table plus per-instance frames
@@ -91,9 +176,6 @@ if(BUILD_STEP_GLB_WASM)
         adacpp_step_glb
         PRIVATE
             "-lembind"
-            "-sWASMFS=1" # WASMFS + OPFS backend (file-backed pread, not heap)
-            "-sFORCE_FILESYSTEM=1"
-            "-sEXPORTED_RUNTIME_METHODS=['FS']" # JS-side FS for OPFS mount + node smoke test
             "-sALLOW_MEMORY_GROWTH=1"
             "-sMODULARIZE=1"
             "-sEXPORT_ES6=1"
@@ -103,6 +185,7 @@ if(BUILD_STEP_GLB_WASM)
             "adacpp_step_glb.d.ts"
             "-sSTACK_SIZE=1048576"
     )
+    adacpp_wasm_fs(adacpp_step_glb)
     return() # standalone target; skip the legacy WASM_UTILS stub below
 endif()
 
@@ -129,9 +212,6 @@ if(BUILD_IFC_GLB_WASM)
         adacpp_ifc_glb
         PRIVATE
             "-lembind"
-            "-sWASMFS=1" # WASMFS + OPFS backend (file-backed pread, not heap)
-            "-sFORCE_FILESYSTEM=1"
-            "-sEXPORTED_RUNTIME_METHODS=['FS']" # JS-side FS for OPFS mount + node smoke test
             "-sALLOW_MEMORY_GROWTH=1"
             "-sMODULARIZE=1"
             "-sEXPORT_ES6=1"
@@ -141,6 +221,7 @@ if(BUILD_IFC_GLB_WASM)
             "adacpp_ifc_glb.d.ts"
             "-sSTACK_SIZE=1048576"
     )
+    adacpp_wasm_fs(adacpp_ifc_glb)
     return() # standalone target; skip the legacy WASM_UTILS stub below
 endif()
 
@@ -161,9 +242,6 @@ if(BUILD_BREP_WRITER_WASM)
         adacpp_brep_writer
         PRIVATE
             "-lembind"
-            "-sWASMFS=1" # WASMFS + OPFS backend (file-backed pread, not heap)
-            "-sFORCE_FILESYSTEM=1"
-            "-sEXPORTED_RUNTIME_METHODS=['FS']" # JS-side FS for OPFS mount + node smoke test
             "-sALLOW_MEMORY_GROWTH=1"
             "-sMODULARIZE=1"
             "-sEXPORT_ES6=1"
@@ -173,6 +251,7 @@ if(BUILD_BREP_WRITER_WASM)
             "adacpp_brep_writer.d.ts"
             "-sSTACK_SIZE=1048576"
     )
+    adacpp_wasm_fs(adacpp_brep_writer)
     return() # standalone target; skip the legacy WASM_UTILS stub below
 endif()
 
