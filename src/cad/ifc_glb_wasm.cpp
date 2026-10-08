@@ -27,6 +27,9 @@
 #include "ifc_clash.h"
 #include "ifc_member_scan.h"
 #include "ifc_to_glb_stream.h"
+#if defined(ADACPP_WASM_SHARDS)
+#include "ifc_glb_shard.h"
+#endif
 
 namespace {
 
@@ -35,8 +38,24 @@ namespace {
 // the IFC file's unit scale (viewer default), like the native/nanobind path.
 long ifc_to_glb(const std::string &in_path, const std::string &out_path, const std::string &spill_dir,
                 double deflection, double angular_deg, bool meshopt) {
+#if defined(__EMSCRIPTEN_PTHREADS__)
+    // Pin ONE thread: the auto count (navigator.hardwareConcurrency) could exceed the pthread pool,
+    // and a blocked caller can't grow it. ifcToGlbThreads is the threaded verb.
+    return adacpp::stream_ifc_to_glb(in_path, out_path, deflection, angular_deg, meshopt, spill_dir, 0.0, 1);
+#else
     return adacpp::stream_ifc_to_glb(in_path, out_path, deflection, angular_deg, meshopt, spill_dir);
+#endif
 }
+
+#if defined(__EMSCRIPTEN_PTHREADS__)
+// The pthread tier (ADACPP_WASM_PTHREADS builds; cross-origin-isolated page, called off the main
+// thread, `threads` <= PTHREAD_POOL_SIZE -- see stepToGlbThreads).
+long ifc_to_glb_threads(const std::string &in_path, const std::string &out_path, const std::string &spill_dir,
+                        double deflection, double angular_deg, bool meshopt, int threads) {
+    return adacpp::stream_ifc_to_glb(in_path, out_path, deflection, angular_deg, meshopt, spill_dir, 0.0,
+                                     threads < 1 ? 1 : threads);
+}
+#endif
 
 // Scan the IFC's MEMBERS -- beams and plates, their sections, axes, outlines, placements and
 // materials -- and write them to `out_path` as JSONL (see ifc_member_scan.h for the record shape).
@@ -72,4 +91,16 @@ EMSCRIPTEN_BINDINGS(adacpp_ifc_glb) {
     emscripten::function("ifcToGlb", &ifc_to_glb);
     emscripten::function("scanMembers", &ifc_scan_members);
     emscripten::function("clashJoints", &ifc_clash_joints);
+#if defined(__EMSCRIPTEN_PTHREADS__)
+    emscripten::function("ifcToGlbThreads", &ifc_to_glb_threads);
+#endif
+#if defined(ADACPP_WASM_SHARDS)
+    // N-worker fallback (no SharedArrayBuffer): see ifc_glb_shard.h for the protocol.
+    emscripten::class_<adacpp::IfcGlbShard>("IfcGlbShard")
+        .constructor<const std::string &, double, double>()
+        .function("rootCount", &adacpp::IfcGlbShard::root_count)
+        .function("process", &adacpp::IfcGlbShard::process)
+        .function("persist", &adacpp::IfcGlbShard::persist);
+    emscripten::function("mergeGlbLanes", &adacpp::merge_ifc_glb_lanes);
+#endif
 }

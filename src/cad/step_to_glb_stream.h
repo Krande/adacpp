@@ -62,7 +62,12 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
 
     // File-backed offset index: mmap to scan (freed-behind), then pread each statement on demand so
     // the file lives in the OS page cache, not process RSS.
+#if defined(__EMSCRIPTEN_PTHREADS__)
+    // wasm mmap copies the whole file into the (shared) heap; pread keeps it in the file system.
+    adacpp::step::StreamIndex idx = adacpp::step::StreamIndex::from_file_pread(in_path);
+#else
     adacpp::step::StreamIndex idx = adacpp::step::StreamIndex::from_file(in_path);
+#endif
     if (!idx.ok())
         return -1;
     prof.phase("scan_index");

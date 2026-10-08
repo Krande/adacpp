@@ -35,6 +35,51 @@
 
 namespace adacpp {
 
+// Resolve one product, tessellate it, bake it to metres and add it to `lane`. Returns true when the
+// product produced triangles. The per-product body of stream_ifc_to_glb, shared with the sharded
+// browser path (ifc_glb_shard.h) so both write the same solids.
+inline bool ifc_bake_product(adacpp::ifc_read::IfcResolver &r, long pid, const ngeom::TessParams &tpp, double usc,
+                             adacpp::glb::GlbSpillWriter &lane) {
+    using namespace adacpp::ngeom;
+    NgeomRoot root = r.resolve_product(pid);
+    r.clear_cache(); // bounded memory: statement/surface caches don't grow across products
+    NgeomDoc one;
+    one.roots.push_back(std::move(root));
+    TessMesh tm = tessellate_doc(one, tpp);
+    if (tm.indices.empty())
+        return false;
+    if (tm.mesh_type == MeshType::LINES)
+        return false; // curve-only body (alignment axis); GlbSolid is triangles-only
+    const NgeomRoot &rr = one.roots[0];
+    adacpp::glb::GlbSolid gs;
+    gs.positions = std::move(tm.positions);
+    gs.indices = std::move(tm.indices);
+    // Carry per-face clickable regions (relative to this product's index buffer) when captured --
+    // mirrors stream_step_to_glb. Capturing them in TessParams is not enough: the writer reads them
+    // off GlbSolid, so without this the flag would cost the serial face path and emit nothing.
+    gs.face_ranges.reserve(tm.face_ranges.size());
+    for (const auto &fr : tm.face_ranges)
+        gs.face_ranges.push_back({fr.first_index, fr.index_count, fr.face_id, fr.face_seq});
+    gs.color = {rr.cr, rr.cg, rr.cb, rr.ca}; // grey default when !has_color
+    gs.transforms = rr.transforms;
+    gs.id = rr.id;
+    if (!rr.instance_paths.empty() && !rr.instance_paths[0].empty())
+        gs.product_name = rr.instance_paths[0].back().second;
+    gs.instance_paths = rr.instance_paths;
+    if (usc != 1.0) {
+        const float s = (float) usc;
+        for (float &p : gs.positions)
+            p *= s;
+        for (auto &M : gs.transforms) {
+            M[12] *= s;
+            M[13] *= s;
+            M[14] *= s;
+        }
+    }
+    lane.add(gs);
+    return true;
+}
+
 // `pipeline` / `face_regions` / `pin_boundary` mean exactly what they do on stream_step_to_glb, and
 // for the same reason: both converters feed the SAME neutral tessellator (TessParams) and the SAME
 // GLB writer (ngeom_glb.h). Neither is a STEP feature — the track vocabulary and per-face region
@@ -61,7 +106,12 @@ inline long stream_ifc_to_glb(const std::string &in_path, const std::string &out
     using namespace adacpp::ngeom;
     adacpp::tune_malloc_for_streaming();
     adacpp::ngeom::reset_tess_face_stats(); // count dropped faces (audit health flag)
+#if defined(__EMSCRIPTEN_PTHREADS__)
+    // wasm mmap copies the whole file into the (shared) heap; pread keeps it in the file system.
+    adacpp::step::StreamIndex idx = adacpp::step::StreamIndex::from_file_pread(in_path);
+#else
     adacpp::step::StreamIndex idx = adacpp::step::StreamIndex::from_file(in_path);
+#endif
     if (!idx.ok())
         return -1;
     // Master resolver: build the expensive read-only metadata once (workers share it, never rebuild).
@@ -172,44 +222,8 @@ inline long stream_ifc_to_glb(const std::string &in_path, const std::string &out
         // bake to metres + spill. Shared by the huge-prefix phase and the worker pool.
         auto process = [&](adacpp::ifc_read::IfcResolver &r, adacpp::glb::GlbSpillWriter &lane, size_t i,
                            const TessParams &tpp) {
-            NgeomRoot root = r.resolve_product(roots[i]);
-            r.clear_cache(); // bounded memory: statement/surface caches don't grow across products
-            NgeomDoc one;
-            one.roots.push_back(std::move(root));
-            TessMesh tm = tessellate_doc(one, tpp);
-            if (tm.indices.empty())
-                return;
-            if (tm.mesh_type == MeshType::LINES)
-                return; // curve-only body (alignment axis); GlbSolid is triangles-only
-            const NgeomRoot &rr = one.roots[0];
-            adacpp::glb::GlbSolid gs;
-            gs.positions = std::move(tm.positions);
-            gs.indices = std::move(tm.indices);
-            // Carry per-face clickable regions (relative to this product's index buffer) when
-            // captured — mirrors stream_step_to_glb. Capturing them in TessParams is not enough:
-            // the writer reads them off GlbSolid, so without this the flag would cost the serial
-            // face path and emit nothing.
-            gs.face_ranges.reserve(tm.face_ranges.size());
-            for (const auto &fr : tm.face_ranges)
-                gs.face_ranges.push_back({fr.first_index, fr.index_count, fr.face_id, fr.face_seq});
-            gs.color = {rr.cr, rr.cg, rr.cb, rr.ca}; // grey default when !has_color
-            gs.transforms = rr.transforms;
-            gs.id = rr.id;
-            if (!rr.instance_paths.empty() && !rr.instance_paths[0].empty())
-                gs.product_name = rr.instance_paths[0].back().second;
-            gs.instance_paths = rr.instance_paths;
-            if (usc != 1.0) {
-                const float s = (float) usc;
-                for (float &p : gs.positions)
-                    p *= s;
-                for (auto &M : gs.transforms) {
-                    M[12] *= s;
-                    M[13] *= s;
-                    M[14] *= s;
-                }
-            }
-            lane.add(gs);
-            nwritten.fetch_add(1, std::memory_order_relaxed);
+            if (ifc_bake_product(r, roots[i], tpp, usc, lane))
+                nwritten.fetch_add(1, std::memory_order_relaxed);
         };
 
         // Phase A — the huge prefix, one product at a time with every thread on its faces.

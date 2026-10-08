@@ -19,6 +19,12 @@
 #include <emscripten/bind.h>
 
 #include "step_to_glb_st.h"
+#if defined(ADACPP_WASM_SHARDS)
+#include "step_glb_shard.h"
+#endif
+#if defined(__EMSCRIPTEN_PTHREADS__)
+#include "step_to_glb_stream.h"
+#endif
 
 namespace {
 
@@ -29,8 +35,32 @@ long step_to_glb(const std::string &in_path, const std::string &out_path, const 
     return adacpp::step_to_glb_single(in_path, out_path, spill_dir, deflection, angular_deg, meshopt);
 }
 
+#if defined(__EMSCRIPTEN_PTHREADS__)
+// The pthread tier (ADACPP_WASM_PTHREADS builds only; needs a cross-origin-isolated page): the native
+// server's threaded converter, `threads` workers sharing ONE wasm memory. Must be called off the
+// browser main thread (it blocks in join), and `threads` must not exceed the module's
+// PTHREAD_POOL_SIZE -- a pool worker can only be spawned by returning to the event loop, which a
+// blocked caller never does. Returns the solids written, or -1 on error.
+long step_to_glb_threads(const std::string &in_path, const std::string &out_path, const std::string &spill_dir,
+                         double deflection, double angular_deg, bool meshopt, int threads) {
+    return adacpp::stream_step_to_glb(in_path, out_path, deflection, angular_deg, threads, meshopt, spill_dir);
+}
+#endif
+
 } // namespace
 
 EMSCRIPTEN_BINDINGS(adacpp_step_glb) {
     emscripten::function("stepToGlb", &step_to_glb);
+#if defined(__EMSCRIPTEN_PTHREADS__)
+    emscripten::function("stepToGlbThreads", &step_to_glb_threads);
+#endif
+#if defined(ADACPP_WASM_SHARDS)
+    // N-worker fallback (no SharedArrayBuffer): see step_glb_shard.h for the protocol.
+    emscripten::class_<adacpp::StepGlbShard>("StepGlbShard")
+        .constructor<const std::string &, double, double>()
+        .function("rootCount", &adacpp::StepGlbShard::root_count)
+        .function("process", &adacpp::StepGlbShard::process)
+        .function("persist", &adacpp::StepGlbShard::persist);
+    emscripten::function("mergeGlbLanes", &adacpp::merge_step_glb_lanes);
+#endif
 }

@@ -45,6 +45,16 @@ option(
     "Build ONLY the OCC-free STP2GLB CLI — skip OCCT/CGAL/gmsh/IFC/Python"
     OFF
 )
+option(
+    ADACPP_WASM_PTHREADS
+    "STEP/IFC->GLB wasm modules: build the pthread tier (-pthread; SharedArrayBuffer, so the page must be cross-origin isolated). Adds stepToGlbThreads / ifcToGlbThreads."
+    OFF
+)
+option(
+    ADACPP_WASM_SHARDS
+    "STEP/IFC->GLB wasm modules: export the N-worker shard API (StepGlbShard / IfcGlbShard + mergeGlbLanes), the multi-core path without SharedArrayBuffer"
+    OFF
+)
 option(BUILD_PYTHON "Build the project for Python" ON)
 option(BUILD_STP2GLB "Build the STP2GLB executable" ON)
 option(BUILD_STP2GLB_TESTING "Build the testing tree." OFF)
@@ -137,6 +147,17 @@ else()
         ${FEA_SOURCES}
         PROPERTIES COMPILE_OPTIONS "-ffp-contract=off;-fno-fast-math"
     )
+endif()
+
+# The opt-in wasm tiers. -pthread must reach EVERY object linked into a shared-memory module (manifold,
+# libtess2, meshoptimizer included -- wasm-ld refuses objects built without atomics/bulk-memory), so it
+# is a global compile + link option, set before any dependency is added.
+if(BUILD_WASM AND ADACPP_WASM_PTHREADS)
+    add_compile_options(-pthread)
+    add_link_options(-pthread)
+endif()
+if(BUILD_WASM AND ADACPP_WASM_SHARDS)
+    add_compile_definitions(ADACPP_WASM_SHARDS)
 endif()
 
 # Create a list called ADA_CPP_SOURCES of all cpp files inside the src dir

@@ -33,6 +33,33 @@ function(adacpp_wasm_fs target)
     )
 endfunction()
 
+# ADACPP_WASM_PTHREADS: the STEP/IFC->GLB modules as the pthread tier, shipped NEXT TO the default
+# single-threaded modules under a `_mt` name (the page loads one or the other: `crossOriginIsolated` ->
+# _mt, else the default). One shared memory for every thread, so the 4 GB wasm32 ceiling is for the
+# whole conversion; the pool is pre-spawned (a converter blocked in join cannot grow it), sized by
+# `Module.pthreadPoolSize` or the browser's core count.
+set(ADACPP_WASM_PTHREADS_MALLOC
+    "mimalloc"
+    CACHE STRING
+    "malloc for the pthread tier (mimalloc | dlmalloc)"
+)
+function(adacpp_wasm_pthread_tier target)
+    if(NOT ADACPP_WASM_PTHREADS)
+        return()
+    endif()
+    get_target_property(_name ${target} OUTPUT_NAME)
+    set_target_properties(${target} PROPERTIES OUTPUT_NAME "${_name}_mt")
+    target_link_options(
+        ${target}
+        PRIVATE
+            "-sMAXIMUM_MEMORY=4294967296"
+            "-sPTHREAD_POOL_SIZE=Module.pthreadPoolSize||Math.min((globalThis.navigator&&navigator.hardwareConcurrency)||4,16)"
+            # dlmalloc (the default) takes one global lock; libtess2 allocates per edge/vertex, so
+            # with it the threads queue on malloc and 8 threads run SLOWER than 4.
+            "-sMALLOC=${ADACPP_WASM_PTHREADS_MALLOC}"
+    )
+endfunction()
+
 # The format-neutral FEA kernels (load-combination superposition, derived components, envelopes,
 # AFBL/AFEL writer) as a STANDALONE embind wasm module. No OCCT, no tessellator, no manifold -- just
 # src/fea, which the nanobind module compiles too, so browser and server write the same bytes.
@@ -186,6 +213,7 @@ if(BUILD_STEP_GLB_WASM)
             "-sSTACK_SIZE=1048576"
     )
     adacpp_wasm_fs(adacpp_step_glb)
+    adacpp_wasm_pthread_tier(adacpp_step_glb)
     return() # standalone target; skip the legacy WASM_UTILS stub below
 endif()
 
@@ -222,6 +250,7 @@ if(BUILD_IFC_GLB_WASM)
             "-sSTACK_SIZE=1048576"
     )
     adacpp_wasm_fs(adacpp_ifc_glb)
+    adacpp_wasm_pthread_tier(adacpp_ifc_glb)
     return() # standalone target; skip the legacy WASM_UTILS stub below
 endif()
 

@@ -18,6 +18,7 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -751,6 +752,107 @@ public:
         return mats_;
     }
 
+    // Hand a finished lane to ANOTHER process (or wasm instance): spill every material to its files,
+    // then write a manifest (`<dir>/glb_l<lane>.lane`) with what write_glb_merged needs besides the
+    // bytes -- colours, counts, bounds and the per-solid parts. The files are kept (the destructor
+    // leaves them) for `load_persisted`, whose writer owns and removes them. This is how independent
+    // workers that share no memory (browser Web Workers, each with its own wasm heap, writing to a
+    // shared OPFS directory) split one conversion and still produce the one GLB a single lane would.
+    bool persist() {
+        for (auto &[k, m] : mats_)
+            if (!m.spilled)
+                spill(m, k);
+        flush();
+        std::ofstream f(manifest_path(dir_, lane_), std::ios::binary);
+        auto u32 = [&](uint32_t v) { f.write(reinterpret_cast<const char *>(&v), 4); };
+        auto str = [&](const std::string &s) {
+            u32((uint32_t) s.size());
+            f.write(s.data(), (std::streamsize) s.size());
+        };
+        u32((uint32_t) mats_.size());
+        for (const auto &[k, m] : mats_) {
+            f.write(reinterpret_cast<const char *>(k.data()), sizeof(int) * 4);
+            f.write(reinterpret_cast<const char *>(m.color.data()), sizeof(float) * 4);
+            u32(m.vert_count);
+            u32(m.index_count);
+            u32(m.idx_max);
+            f.write(reinterpret_cast<const char *>(m.lo), sizeof m.lo);
+            f.write(reinterpret_cast<const char *>(m.hi), sizeof m.hi);
+            str(m.pos_path);
+            str(m.idx_path);
+            u32((uint32_t) m.parts.size());
+            for (const auto &p : m.parts) {
+                str(p.id);
+                u32(p.index_count);
+                u32((uint32_t) p.path.size());
+                for (const auto &[rid, name] : p.path) {
+                    u32((uint32_t) rid);
+                    str(name);
+                }
+                u32((uint32_t) p.faces.size());
+                f.write(reinterpret_cast<const char *>(p.faces.data()),
+                        (std::streamsize) (p.faces.size() * sizeof(FaceSub)));
+            }
+        }
+        keep_files_ = true;
+        return (bool) f;
+    }
+    // The other half of persist(): rebuild a lane from its manifest, every material already spilled.
+    // Returns false (and leaves *this empty) when the manifest is missing or truncated.
+    bool load_persisted() {
+        std::ifstream f(manifest_path(dir_, lane_), std::ios::binary);
+        if (!f)
+            return false;
+        auto u32 = [&]() {
+            uint32_t v = 0;
+            f.read(reinterpret_cast<char *>(&v), 4);
+            return v;
+        };
+        auto str = [&]() {
+            std::string s(u32(), '\0');
+            f.read(s.data(), (std::streamsize) s.size());
+            return s;
+        };
+        uint32_t nm = u32();
+        for (uint32_t i = 0; i < nm && f; ++i) {
+            std::array<int, 4> k{};
+            f.read(reinterpret_cast<char *>(k.data()), sizeof(int) * 4);
+            MatLane &m = mats_[k];
+            f.read(reinterpret_cast<char *>(m.color.data()), sizeof(float) * 4);
+            m.vert_count = u32();
+            m.index_count = u32();
+            m.idx_max = u32();
+            f.read(reinterpret_cast<char *>(m.lo), sizeof m.lo);
+            f.read(reinterpret_cast<char *>(m.hi), sizeof m.hi);
+            m.pos_path = str();
+            m.idx_path = str();
+            m.spilled = true;
+            uint32_t np = u32();
+            m.parts.resize(np);
+            for (auto &p : m.parts) {
+                p.id = str();
+                p.index_count = u32();
+                p.path.resize(u32());
+                for (auto &[rid, name] : p.path) {
+                    rid = (int) u32();
+                    name = str();
+                }
+                p.faces.resize(u32());
+                f.read(reinterpret_cast<char *>(p.faces.data()), (std::streamsize) (p.faces.size() * sizeof(FaceSub)));
+            }
+        }
+        if (!f) {
+            mats_.clear();
+            return false;
+        }
+        f.close();
+        std::remove(manifest_path(dir_, lane_).c_str());
+        return true;
+    }
+    static std::string manifest_path(const std::string &dir, int lane) {
+        return dir + "/glb_l" + std::to_string(lane) + ".lane";
+    }
+
 private:
     // Append bytes to a material's pos/idx — into the RAM buffer, or the spill file once spilled. The
     // threshold bounds the LANE's total in-RAM bytes (across all its materials), not one material's, so
@@ -789,6 +891,8 @@ private:
         m.spilled = true;
     }
     void remove_files() {
+        if (keep_files_)
+            return; // persisted: the loading lane owns (and removes) them
         for (auto &[k, m] : mats_) {
             if (!m.spilled)
                 continue;
@@ -804,6 +908,7 @@ private:
     int lane_;
     size_t threshold_;
     size_t buffered_ = 0; // total in-RAM buffer bytes across all not-yet-spilled materials in this lane
+    bool keep_files_ = false; // set by persist(): the files outlive this writer
     std::map<std::array<int, 4>, MatLane> mats_;
 };
 
@@ -938,6 +1043,25 @@ inline bool write_glb_merged(const std::string &path, const std::vector<GlbSpill
             out.write(z, pad4(pos_bytes));
         }
     });
+}
+
+// Merge lanes that other workers persisted (GlbSpillWriter::persist) into `lane_dir` -- lanes
+// 0..nlanes-1, skipping any without a manifest (a worker that got no work). Returns the number of
+// lanes merged, or -1 when the GLB could not be written. The lane files are removed afterwards.
+inline long merge_persisted_lanes(const std::string &lane_dir, int nlanes, const std::string &out_path,
+                                  const std::string &ada_ext, bool meshopt) {
+    std::vector<std::unique_ptr<GlbSpillWriter>> lanes;
+    std::vector<GlbSpillWriter *> ptrs;
+    for (int l = 0; l < nlanes; ++l) {
+        auto w = std::make_unique<GlbSpillWriter>(lane_dir, l);
+        if (!w->load_persisted())
+            continue;
+        ptrs.push_back(w.get());
+        lanes.push_back(std::move(w));
+    }
+    if (!write_glb_merged(out_path, ptrs, ada_ext, meshopt))
+        return -1;
+    return (long) ptrs.size();
 }
 
 } // namespace adacpp::glb
