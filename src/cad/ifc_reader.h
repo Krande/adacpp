@@ -113,6 +113,8 @@ public:
             if (iequals(type_of(id, scratch), "IFCPRODUCTDEFINITIONSHAPE"))
                 pds.insert(id);
         std::vector<long> roots;
+        std::string stmt_scratch;
+        Instance probe;
         for (long id : idx_.ids) {
             if (openings_.count(id))
                 continue; // an IfcOpeningElement — subtracted from its host, not a standalone product
@@ -121,11 +123,70 @@ public:
                 roots.push_back(id);
                 continue;
             }
-            const Instance *in = inst(id);
-            if (in && in->args.size() > 6 && in->args[6].is_ref() && pds.count(in->args[6].i))
+            if (t.empty() || is_never_product_type(t))
+                continue; // complex instance, or a geometry/topology entity: not an IfcProduct
+            // Parse into a scratch Instance, NOT inst(): the cache would keep every statement this scan
+            // touches -- on a 1 GB IFC that held ~9 GB of parsed geometry after the loop, freed only
+            // product by product during the stream.
+            std::string_view stmt = idx_.statement_bytes(id, stmt_scratch);
+            if (stmt.empty())
+                continue;
+            probe = Instance{}; // views into stmt_scratch (or the in-memory source), used right here
+            if (adacpp::step::parse_statement(stmt, probe) && probe.args.size() > 6 && probe.args[6].is_ref() &&
+                pds.count(probe.args[6].i))
                 roots.push_back(id);
         }
         return roots;
+    }
+
+    // Entity types that are never an IfcProduct and make up the bulk of a large file (points, loops,
+    // faces, directions, placements...): the product scan skips them without parsing.
+    static bool is_never_product_type(std::string_view t) {
+        static const char *kinds[] = {"IFCCARTESIANPOINT",
+                                      "IFCPOLYLOOP",
+                                      "IFCFACEOUTERBOUND",
+                                      "IFCFACEBOUND",
+                                      "IFCFACE",
+                                      "IFCDIRECTION",
+                                      "IFCAXIS2PLACEMENT3D",
+                                      "IFCAXIS2PLACEMENT2D",
+                                      "IFCLOCALPLACEMENT",
+                                      "IFCCARTESIANPOINTLIST3D",
+                                      "IFCCARTESIANPOINTLIST2D",
+                                      "IFCTRIANGULATEDFACESET",
+                                      "IFCPOLYGONALFACESET",
+                                      "IFCINDEXEDPOLYGONALFACE",
+                                      "IFCADVANCEDFACE",
+                                      "IFCORIENTEDEDGE",
+                                      "IFCEDGECURVE",
+                                      "IFCEDGELOOP",
+                                      "IFCVERTEXPOINT",
+                                      "IFCLINE",
+                                      "IFCVECTOR",
+                                      "IFCPOLYLINE",
+                                      "IFCCIRCLE",
+                                      "IFCPLANE",
+                                      "IFCBSPLINESURFACEWITHKNOTS",
+                                      "IFCBSPLINECURVEWITHKNOTS",
+                                      "IFCCLOSEDSHELL",
+                                      "IFCOPENSHELL",
+                                      "IFCFACETEDBREP",
+                                      "IFCADVANCEDBREP",
+                                      "IFCSTYLEDITEM",
+                                      "IFCPRESENTATIONSTYLEASSIGNMENT",
+                                      "IFCSURFACESTYLE",
+                                      "IFCSHAPEREPRESENTATION",
+                                      "IFCPRODUCTDEFINITIONSHAPE",
+                                      "IFCPROPERTYSINGLEVALUE",
+                                      "IFCRELDEFINESBYPROPERTIES",
+                                      "IFCPROPERTYSET",
+                                      "IFCMAPPEDITEM",
+                                      "IFCCARTESIANTRANSFORMATIONOPERATOR3D",
+                                      "IFCREPRESENTATIONMAP"};
+        for (const char *k : kinds)
+            if (iequals(t, k))
+                return true;
+        return false;
     }
 
     // The geometry-bearing IfcElement subtypes (cheap type-name test — avoids parsing every entity on
@@ -830,6 +891,29 @@ public:
         rel_maps_built_ = m.rel_maps_built_;
         angle_scale_ = m.angle_scale_;
     }
+    // The same maps through a file (see the STEP Resolver's save_metadata): for workers that share no
+    // memory with the master.
+    void save_metadata(adacpp::step::binio::Out &o) const {
+        o.map(colour_map_);
+        o.pod(colour_map_built_);
+        o.map(contained_of_);
+        o.map(parent_of_);
+        o.map(voids_);
+        o.set(openings_);
+        o.pod(rel_maps_built_);
+        o.pod(angle_scale_);
+    }
+    bool load_metadata(adacpp::step::binio::In &in) {
+        in.map(colour_map_);
+        in.pod(colour_map_built_);
+        in.map(contained_of_);
+        in.map(parent_of_);
+        in.map(voids_);
+        in.set(openings_);
+        in.pod(rel_maps_built_);
+        in.pod(angle_scale_);
+        return (bool) in;
+    }
 
     // Cheap LPT cost proxy for a product: the face count of its body representation's brep items
     // (a few index derefs down product -> IfcProductDefinitionShape -> IfcShapeRepresentation ->
@@ -916,7 +1000,17 @@ private:
     }
     // Cheap type token of #id without a full parse.
     std::string_view type_of(long id, std::string &scratch) {
-        std::string_view s = idx_.statement_bytes(id, scratch);
+        // The type token sits in the first few dozen bytes: read a short prefix, and fall back to the
+        // whole statement only when the token runs off its end. The metadata, product and unit scans
+        // call this for EVERY statement of the file.
+        std::string_view s = idx_.statement_prefix(id, 128, scratch);
+        std::string_view t = type_token(s);
+        if (t.empty() ? s.find('=') != std::string_view::npos : (size_t) (t.data() - s.data()) + t.size() < s.size())
+            return t; // a complex instance (no token), or a token the prefix ends after
+        s = idx_.statement_bytes(id, scratch);
+        return type_token(s);
+    }
+    static std::string_view type_token(std::string_view s) {
         size_t eq = s.find('=');
         if (eq == std::string_view::npos)
             return {};

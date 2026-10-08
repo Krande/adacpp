@@ -40,6 +40,7 @@
 #include "ngeom_bspline.h"  // BSplineCurve / BSplineSurface / expand_knots
 #include "ngeom_sweep.h"    // make_swept_disk (shared with the IFC reader)
 #include "ngeom_topology.h" // pulls ngeom_curves.h / ngeom_surfaces.h / ngeom_math.h
+#include "step_binio.h"
 #include "step_part21.h"
 
 namespace adacpp::step {
@@ -298,13 +299,70 @@ public:
         return pread_statement(off, scratch);
     }
 
+    // The first bytes of the statement for `id` -- at least `n` when the statement is that long, and
+    // possibly the whole statement or a little past its end (callers parse only the head, e.g. the
+    // entity type). In file mode this is ONE small pread: a type scan over every statement of a big
+    // file must not read a full statement (let alone a fixed read window) per id.
+    std::string_view statement_prefix(long id, size_t n, std::string &scratch) const {
+        auto lo = std::lower_bound(ids.begin(), ids.end(), id);
+        if (lo == ids.end() || *lo != id)
+            return {};
+        size_t off = offs[lo - ids.begin()];
+        if (fd_ < 0)
+            return buf_.substr(off, std::min(n, buf_.size() - off));
+        scratch.resize(std::min(n, fsize_ - off));
+        ssize_t r = ::pread(fd_, scratch.data(), scratch.size(), (off_t) off);
+        scratch.resize(r > 0 ? (size_t) r : 0);
+        return scratch;
+    }
+
+    // Persist the offset index + type lists (file-backed mode only) so another process or wasm
+    // instance can open the same source with from_saved() instead of scanning it again: N browser
+    // workers then pay ONE scan, not N. Returns false for an in-memory index or a write error.
+    bool save(binio::Out &o) const {
+        if (fd_ < 0)
+            return false;
+        o.u64(fsize_);
+        o.vec(ids);
+        o.vec(offs);
+        for (const std::vector<long> *v :
+             {&lists.roots, &lists.styled, &lists.absr, &lists.srr, &lists.cdsr, &lists.sdr, &lists.nauo, &lists.units})
+            o.vec(*v);
+        return (bool) o;
+    }
+    // Open `path` for per-statement pread with the index save() wrote, not a scan. Not ok() when the
+    // file is missing or no longer the size the index was built for.
+    static StreamIndex from_saved(const std::string &path, binio::In &in) {
+        StreamIndex si;
+        const size_t fsize = (size_t) in.u64();
+        in.vec(si.ids);
+        in.vec(si.offs);
+        for (std::vector<long> *v : {&si.lists.roots, &si.lists.styled, &si.lists.absr, &si.lists.srr, &si.lists.cdsr,
+                                     &si.lists.sdr, &si.lists.nauo, &si.lists.units})
+            in.vec(*v);
+        if (!in)
+            return StreamIndex();
+        si.fd_ = ::open(path.c_str(), O_RDONLY);
+        struct stat st;
+        if (si.fd_ >= 0 && (::fstat(si.fd_, &st) != 0 || (size_t) st.st_size != fsize)) {
+            ::close(si.fd_);
+            si.fd_ = -1;
+        }
+        si.fsize_ = fsize;
+        return si;
+    }
+
 private:
     StreamIndex() = default;
 
     // pread the statement at `off` into `scratch`, growing the read until the terminating ';' is
     // contained (so the string/comment scan runs over one contiguous buffer — no cross-read state).
     std::string_view pread_statement(size_t off, std::string &scratch) const {
-        size_t chunk = 1u << 16;
+        // Start small and double: almost every statement is under 512 bytes, and a fixed 64 KiB first
+        // read made each statement cost a 64 KiB copy -- per statement, so a walk over a big file read
+        // its size times ~600 (2.4 MB IFC: 15.7 GB logical). On wasm every byte of that is a memcpy out
+        // of the file system.
+        size_t chunk = 512;
         while (true) {
             size_t want = std::min(chunk, fsize_ - off);
             scratch.resize(want);
@@ -724,10 +782,47 @@ public:
         unit_scale_ = src.unit_scale_;
         angle_scale_ = src.angle_scale_;
     }
+    // The same maps through a file, for a worker that shares no memory with the master (a browser
+    // Web Worker): save_metadata on the master, load_metadata instead of build_metadata.
+    void save_metadata(binio::Out &o) const {
+        o.map(colour_map_);
+        o.map(xform_map_);
+        o.map(path_map_);
+        o.map(name_of_rep_);
+        o.pod(unit_scale_);
+        o.pod(angle_scale_);
+    }
+    bool load_metadata(binio::In &in) {
+        in.map(colour_map_);
+        in.map(xform_map_);
+        in.map(path_map_);
+        in.map(name_of_rep_);
+        in.pod(unit_scale_);
+        in.pod(angle_scale_);
+        return (bool) in;
+    }
+
+    // Build only faces [lo, hi) of the next resolve_root's B-rep (counted across all its shells, in
+    // file order). The sharded browser path splits ONE huge solid across workers this way: each worker
+    // resolves and tessellates its own face slice and never parses the rest. resolve_root resets the
+    // count; root_faces_seen() then reports the root's total face count -- so a window of [0, 0)
+    // costs only the shell statements and returns the root's colour/transforms/paths, no faces.
+    void set_face_window(size_t lo, size_t hi) {
+        face_lo_ = lo;
+        face_hi_ = hi;
+    }
+    void clear_face_window() {
+        face_lo_ = 0;
+        face_hi_ = (size_t) -1;
+    }
+    size_t root_faces_seen() const {
+        return face_seen_;
+    }
 
     // Resolve one root solid -> NgeomRoot (geometry + colour + per-instance transforms + paths).
     ng::NgeomRoot resolve_root(long sid) {
         ng::NgeomRoot root;
+        face_seen_ = 0;
         const Instance *in = inst(sid);
         if (!in || in->args.size() < 2)
             return root;
@@ -997,6 +1092,7 @@ private:
     // native PARALLEL IFC writer obviated it for the DEFAULT ifc path only; full removal awaits native
     // parallel writers for those other paths too.
     bool bound_parse_cache_ = false;
+    size_t face_lo_ = 0, face_hi_ = (size_t) -1, face_seen_ = 0; // set_face_window
     double unit_scale_ = 1.0;
     double angle_scale_ = 1.0; // radians per the file's plane-angle unit (1.0 = radians; ~0.01745 = degrees)
     std::unordered_map<long, std::shared_ptr<ng::Surface>> surf_cache_;
@@ -1594,6 +1690,21 @@ private:
         if (in->type != "CLOSED_SHELL" && in->type != "OPEN_SHELL")
             return;
         if (in->args.size() > 1 && in->args[1].kind == Kind::List) {
+            if (face_lo_ != 0 || face_hi_ != (size_t) -1) {
+                // Face window (set_face_window): build only the faces whose running index falls in it.
+                std::vector<long> face_ids;
+                for (const Value &fr : in->args[1].items)
+                    if (fr.is_ref())
+                        face_ids.push_back(fr.i);
+                for (long fid : face_ids) {
+                    const size_t k = face_seen_++;
+                    if (k >= face_lo_ && k < face_hi_)
+                        if (auto fp = face(fid))
+                            out.push_back(fp);
+                }
+                return;
+            }
+            face_seen_ += in->args[1].items.size();
             if (!bound_parse_cache_) {
                 // Default (incl. the multi-threaded mesh/glb path): unchanged.
                 for (const Value &fr : in->args[1].items)

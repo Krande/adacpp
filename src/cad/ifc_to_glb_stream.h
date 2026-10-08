@@ -29,6 +29,7 @@
 
 #include "../geom/neutral/ada_ext_schema.h"
 #include "../geom/neutral/ngeom_glb.h"
+#include "../geom/neutral/ngeom_profile.h"
 #include "../geom/neutral/ngeom_tessellate.h"
 #include "ifc_reader.h"
 #include "step_reader.h" // StreamIndex
@@ -39,13 +40,23 @@ namespace adacpp {
 // product produced triangles. The per-product body of stream_ifc_to_glb, shared with the sharded
 // browser path (ifc_glb_shard.h) so both write the same solids.
 inline bool ifc_bake_product(adacpp::ifc_read::IfcResolver &r, long pid, const ngeom::TessParams &tpp, double usc,
-                             adacpp::glb::GlbSpillWriter &lane) {
+                             adacpp::glb::GlbSpillWriter &lane, adacpp::prof::StepProfiler *prof = nullptr) {
     using namespace adacpp::ngeom;
     NgeomRoot root = r.resolve_product(pid);
     r.clear_cache(); // bounded memory: statement/surface caches don't grow across products
+    const size_t nfaces = root.faces.size();
     NgeomDoc one;
     one.roots.push_back(std::move(root));
+    const bool timed = prof && prof->timing();
+    std::chrono::steady_clock::time_point t0;
+    if (timed)
+        t0 = std::chrono::steady_clock::now();
     TessMesh tm = tessellate_doc(one, tpp);
+    if (timed)
+        prof->solid_timed(pid, 0, nfaces, tm.indices.size() / 3,
+                          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    if (prof)
+        prof->solid(tm.indices.size() / 3);
     if (tm.indices.empty())
         return false;
     if (tm.mesh_type == MeshType::LINES)
@@ -105,7 +116,8 @@ inline long stream_ifc_to_glb(const std::string &in_path, const std::string &out
                               const std::vector<std::string> &include_guids = {}) {
     using namespace adacpp::ngeom;
     adacpp::tune_malloc_for_streaming();
-    adacpp::ngeom::reset_tess_face_stats(); // count dropped faces (audit health flag)
+    adacpp::ngeom::reset_tess_face_stats();               // count dropped faces (audit health flag)
+    adacpp::prof::StepProfiler prof("stream_ifc_to_glb"); // ADACPP_STEP_PROFILE, same report as STEP's
 #if defined(__EMSCRIPTEN_PTHREADS__)
     // wasm mmap copies the whole file into the (shared) heap; pread keeps it in the file system.
     adacpp::step::StreamIndex idx = adacpp::step::StreamIndex::from_file_pread(in_path);
@@ -114,10 +126,13 @@ inline long stream_ifc_to_glb(const std::string &in_path, const std::string &out
 #endif
     if (!idx.ok())
         return -1;
+    prof.phase("scan_index");
     // Master resolver: build the expensive read-only metadata once (workers share it, never rebuild).
     adacpp::ifc_read::IfcResolver master(idx);
     master.build_metadata();
+    prof.phase("metadata");
     std::vector<long> roots = master.proxy_roots();
+    prof.phase("proxy_roots");
     // Subset filter (see the contract above). Done here, before LPT ordering and before any worker
     // exists, so the whole pipeline downstream — cost model, huge-prefix detection, lane count —
     // sizes itself to the subset rather than to the file.
@@ -190,6 +205,7 @@ inline long stream_ifc_to_glb(const std::string &in_path, const std::string &out
         const size_t fair_share = total / (size_t) nthreads;
         while (n_huge < cost.size() && cost[n_huge].first >= HUGE_FACES && cost[n_huge].first >= fair_share)
             ++n_huge;
+        prof.phase("lpt_order");
     }
 
     // Spill dir: private mkdtemp (auto-removed) unless the caller supplied one.
@@ -222,7 +238,7 @@ inline long stream_ifc_to_glb(const std::string &in_path, const std::string &out
         // bake to metres + spill. Shared by the huge-prefix phase and the worker pool.
         auto process = [&](adacpp::ifc_read::IfcResolver &r, adacpp::glb::GlbSpillWriter &lane, size_t i,
                            const TessParams &tpp) {
-            if (ifc_bake_product(r, roots[i], tpp, usc, lane))
+            if (ifc_bake_product(r, roots[i], tpp, usc, lane, &prof))
                 nwritten.fetch_add(1, std::memory_order_relaxed);
         };
 
@@ -263,12 +279,14 @@ inline long stream_ifc_to_glb(const std::string &in_path, const std::string &out
         worker(0);
         for (std::thread &th : pool)
             th.join();
+        prof.phase("stream(resolve+tess+spill)");
 
         std::vector<adacpp::glb::GlbSpillWriter *> lane_ptrs;
         for (adacpp::glb::GlbSpillWriter &l : lanes)
             lane_ptrs.push_back(&l);
         const std::string ada_ext = adacpp::ada_ext::AdaDesignAndAnalysisExtension{}.to_json();
         ok = adacpp::glb::write_glb_merged(out_path, lane_ptrs, ada_ext, meshopt);
+        prof.phase(meshopt ? "write_glb_merged(meshopt)" : "write_glb_merged");
     }
     if (remove_after)
         ::rmdir(spill.c_str());

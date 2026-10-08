@@ -58,8 +58,14 @@ EMSCRIPTEN_BINDINGS(adacpp_step_glb) {
     // N-worker fallback (no SharedArrayBuffer): see step_glb_shard.h for the protocol.
     emscripten::class_<adacpp::StepGlbShard>("StepGlbShard")
         .constructor<const std::string &, double, double>()
+        .constructor<const std::string &, const std::string &, double, double>()
+        .class_function("prepare", &adacpp::StepGlbShard::prepare)
         .function("rootCount", &adacpp::StepGlbShard::root_count)
         .function("process", &adacpp::StepGlbShard::process)
+        .function("hugeCount", &adacpp::StepGlbShard::huge_count)
+        .function("hugeFaces", &adacpp::StepGlbShard::huge_faces)
+        .function("processHuge", &adacpp::StepGlbShard::process_huge)
+        .function("assembleHuge", &adacpp::StepGlbShard::assemble_huge)
         .function("persist", &adacpp::StepGlbShard::persist);
     emscripten::function("mergeGlbLanes", &adacpp::merge_step_glb_lanes);
 #endif

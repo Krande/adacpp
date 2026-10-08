@@ -98,6 +98,8 @@ EMSCRIPTEN_BINDINGS(adacpp_ifc_glb) {
     // N-worker fallback (no SharedArrayBuffer): see ifc_glb_shard.h for the protocol.
     emscripten::class_<adacpp::IfcGlbShard>("IfcGlbShard")
         .constructor<const std::string &, double, double>()
+        .constructor<const std::string &, const std::string &, double, double>()
+        .class_function("prepare", &adacpp::IfcGlbShard::prepare)
         .function("rootCount", &adacpp::IfcGlbShard::root_count)
         .function("process", &adacpp::IfcGlbShard::process)
         .function("persist", &adacpp::IfcGlbShard::persist);
