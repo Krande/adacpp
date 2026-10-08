@@ -22,8 +22,15 @@ function(adacpp_wasm_fs target)
             "-sFORCE_FILESYSTEM=1"
             "--js-library=${_js}"
             "-sEXPORTED_RUNTIME_METHODS=['FS','opfsMount','opfsOpen','opfsDetach','opfsReserve','opfsSettle','mountOpfs']"
+            # WASMFS's FS.writeFile appends to an existing file; this one replaces it.
+            "--post-js=${CMAKE_SOURCE_DIR}/src/wasmio/fs_writefile.js"
     )
-    set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS ${_js})
+    set_property(
+        TARGET ${target}
+        APPEND
+        PROPERTY
+            LINK_DEPENDS ${_js} ${CMAKE_SOURCE_DIR}/src/wasmio/fs_writefile.js
+    )
 endfunction()
 
 # The format-neutral FEA kernels (load-combination superposition, derived components, envelopes,

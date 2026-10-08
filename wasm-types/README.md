@@ -54,6 +54,9 @@ await mod.opfsDetach("/opfs/out.glb");   // flush + close; the OPFS file stays, 
   is visible to the module immediately. A file written by the browser's own OPFS API is visible only
   after `opfsOpen`. Sync access handles are exclusive: while a file is attached, nothing else can
   open it; `opfsDetach` releases it, `FS.unlink` deletes it.
+- `mod.FS.writeFile` replaces an existing file and throws an `ErrnoError` on failure. (emscripten
+  4.0.9's WASMFS version appended to an existing file and returned 0 on failure; these modules
+  override it.)
 - `mountOpfs(dir)` is kept for old callers: it cannot mount (the setup is async), so it returns `0`
   only after `await opfsMount(dir)` and `-1` otherwise. Builds before this one returned `0` from
   `mountOpfs` and then trapped (`RuntimeError: unreachable`) on the first file operation on the

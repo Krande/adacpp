@@ -167,6 +167,14 @@ check("opfsMount with an OPFS root", M.mountOpfs("/opfs") === 0);
 check("orphaned scratch pool swept, live one kept", !pool.children.has("dead") && pool.children.has("live"));
 liveHandle.close();
 
+// FS.writeFile replaces an existing file (WASMFS's own appended to it), in-heap and on the mount
+for (const p of ["/w.txt", "/opfs/w.txt"]) {
+    FS.writeFile(p, "a much longer first content");
+    FS.writeFile(p, enc.encode("second"));
+    check(`FS.writeFile replaces ${p}`, dec.decode(FS.readFile(p)) === "second");
+    FS.unlink(p);
+}
+
 // scratch files: plain POSIX semantics through the module's FS
 FS.writeFile("/opfs/t.bin", enc.encode("hello opfs"));
 check("scratch write/read", dec.decode(FS.readFile("/opfs/t.bin")) === "hello opfs");
