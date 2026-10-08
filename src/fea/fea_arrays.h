@@ -53,7 +53,7 @@ StepStats compute_step_stats(const float *values, std::size_t rows, std::size_t 
 // Fold `other` into `acc` (ranges over several steps; used for the two-step envelope blob).
 void merge_step_stats(StepStats &acc, const StepStats &other);
 
-// Shortest round-trip decimal for a double (std::to_chars). JSON-safe: non-finite values print as
+// Shortest round-trip decimal for a double (shortest %g that reads back exactly). JSON-safe: non-finite values print as
 // null. Shared by the WASM stats JSON so both engines report the same text.
 std::string format_double(double v);
 

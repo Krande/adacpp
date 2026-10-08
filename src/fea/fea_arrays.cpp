@@ -1,7 +1,8 @@
 #include "fea_arrays.h"
 
-#include <charconv>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 
 namespace adacpp::fea {
@@ -95,9 +96,17 @@ void merge_step_stats(StepStats &acc, const StepStats &o) {
 std::string format_double(double v) {
     if (!std::isfinite(v))
         return "null";
+    // The shortest "%.*g" that reads back as the same double. Not std::to_chars: its floating-point
+    // overloads are unavailable below macOS 13.4, the deployment target conda-forge builds for. The
+    // text only feeds the stats JSON, which callers parse back to numbers, so what matters is that
+    // the value round-trips exactly -- which this guarantees (17 significant digits always do).
     char buf[64];
-    auto res = std::to_chars(buf, buf + sizeof(buf), v);
-    return std::string(buf, res.ptr);
+    for (int precision = 1; precision <= 17; ++precision) {
+        std::snprintf(buf, sizeof(buf), "%.*g", precision, v);
+        if (std::strtod(buf, nullptr) == v)
+            break;
+    }
+    return std::string(buf);
 }
 
 std::string step_stats_json(const StepStats &s) {
