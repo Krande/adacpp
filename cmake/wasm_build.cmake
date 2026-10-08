@@ -5,8 +5,8 @@
 # The numerics flags are part of the contract, not tuning: -ffp-contract=off forbids fusing a*b+c into
 # one FMA (a different rounding), and there is deliberately no -ffast-math and no -mrelaxed-simd, so
 # every op is a single IEEE-754 op and the results are bit-identical to the native build. -msimd128 is
-# safe on that score: f32x4 mul/add round exactly like their scalar forms. Set explicitly because the
-# wasm toolchain clears CMAKE_CXX_FLAGS* (and the wbuild-* tasks pass no CMAKE_BUILD_TYPE).
+# safe on that score: f32x4 mul/add round exactly like their scalar forms. The optimisation level is
+# not set here: it comes from the Release flags in cmake/wasm_toolchain.cmake, like every other module.
 if(BUILD_FEA_WASM)
     add_executable(
         adacpp_fea
@@ -23,15 +23,12 @@ if(BUILD_FEA_WASM)
     # try/catch (JSON parse + kernel errors -> {"ok":false}) needs real EH; same model as glb_diff.
     target_compile_options(
         adacpp_fea
-        PRIVATE -O3 -msimd128 -ffp-contract=off -fwasm-exceptions
+        PRIVATE -msimd128 -ffp-contract=off -fwasm-exceptions
     )
     set_target_properties(
         adacpp_fea
         PROPERTIES OUTPUT_NAME "adacpp_fea" SUFFIX ".js"
     )
-    # No -O at LINK time: that runs binaryen's wasm-opt, and the locked binaryen (117) is older than
-    # emscripten 4.0.9 expects (123) and rejects its flags (--no-stack-ir). The compile-time -O3 is
-    # where the kernels get optimised; wasm-opt would only shave size.
     target_link_options(
         adacpp_fea
         PRIVATE
@@ -45,9 +42,6 @@ if(BUILD_FEA_WASM)
             "-sMODULARIZE=1"
             "-sEXPORT_ES6=1"
             "-sEXPORT_NAME=createAdacppFea"
-            # A link without -O defaults to ASSERTIONS=1, which links the debug libc/wasmfs variants
-            # into the hot read path. The kernels report errors through their JSON result instead.
-            "-sASSERTIONS=0"
             "-sENVIRONMENT=web,worker,node"
             "--emit-tsd"
             "adacpp_fea.d.ts"

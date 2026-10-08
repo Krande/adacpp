@@ -109,4 +109,6 @@ jobs:
         run: pixi run -e wasm test-fea-wasm
 
       - name: FEA kernel unit tests compiled to wasm (SIMD)
-        run: CXX=em++ pixi run -e wasm bash tests/fea/run.sh
+        # --wasm, not CXX=em++: the wasm env's compiler activation resets CXX to the conda g++, so
+        # that form ran the native build under this step's name.
+        run: pixi run -e wasm bash tests/fea/run.sh --wasm
