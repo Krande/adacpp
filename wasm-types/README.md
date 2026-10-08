@@ -22,9 +22,10 @@ reference for what each argument means.
 | `adacpp_brep_writer` | **STEP → IFC** and **IFC → STEP** (B-rep) | `stepToIfc`, `ifcToStep`, `mountOpfs` |
 | `adacpp_glb_diff` | **GLB diff** (element-level, with removed-element overlay) | `diffGlb` |
 | `adacpp_extrude` | **Prismatic extrusion** (section table + per-instance frames -> vertex/index buffers) | `expandBeamSolids` |
+| `adacpp_fea` | **FEA results**: load combinations, derived components and envelopes over baked AFBL/AFEL strides | `combineField`, `envelopeField`, `readBlobHeader`, `mountOpfs`, `version` |
 
-The `*_glb` and `brep_writer` modules are built with `-sWASMFS=1` and expose `mountOpfs(dir)`: call
-it from a **Web Worker** to back file I/O with OPFS so multi-GB inputs stream through `pread`
+The `*_glb`, `brep_writer` and `fea` modules are built with `-sWASMFS=1` and expose `mountOpfs(dir)`:
+call it from a **Web Worker** to back file I/O with OPFS so multi-GB inputs stream through `pread`
 (bounded RSS) instead of the wasm heap. `adacpp_glb_diff` and `adacpp_extrude` are in-heap (no OPFS).
 
 ## Usage
@@ -82,3 +83,46 @@ const mod = await createAdacppBrepWriter({ locateFile: (p) => `/wasm/${p}` });
 const solids   = mod.stepToIfc("/in.stp", "/out.ifc", "IFC4X3_ADD2", 2.0, 20.0, 0); // > 0 = ok
 const products = mod.ifcToStep("/in.ifc", "/out.stp", 2.0, 20.0, 0);                // > 0 = ok
 ```
+
+FEA load combinations, via `adacpp_fea` -- the same C++ the server's Python module (`adacpp.fea`)
+runs, so a combination materialised in the browser is byte-identical to one the server writes. Inputs
+are baked field blobs (AFBL nodal / AFEL per element type: a 1 KB header, then float32
+`[steps x rows x components]`); each verb reads one stride per term and writes a new blob. Every verb
+returns a JSON string, `{"ok": true, ...}` or `{"ok": false, "error": "..."}`; nothing throws.
+
+```ts
+import createAdacppFea from "./adacpp_fea.js";
+
+const fea = await createAdacppFea({ locateFile: (p) => `/wasm/${p}` });
+fea.mountOpfs("/opfs"); // in a Web Worker; 0 = success
+
+// A combination = sum(factor * stored case), float32, terms in file order. One path + step per term
+// (the same base blob repeated is the usual case); factors as a Float32Array (exact float32).
+const base = "/opfs/base/fea.G-STRESS.QUAD4.elements.bin";
+const stats = JSON.parse(fea.combineField(
+  JSON.stringify([base, base]),           // inPathsJson
+  [12, 3],                                 // stepIdx: one per term, or a single number for all
+  new Float32Array([1.2, 1.1]),            // factors
+  "/opfs/cases/101-abcd1234/fea.G-STRESS.QUAD4.elements.bin",
+  // Non-linear components are re-derived from the combined linear ones (columns by index):
+  JSON.stringify([{ op: "plane_von_mises", args: [0, 1, 2], out: [3] }]),
+));
+// stats.steps[0].scalar_range_per_component[c] = [min, max]; stats.timing_ms = {read, combine, ...}
+
+// A field that is entirely derived gets its own layout: P-STRESS from the combined G-STRESS.
+fea.combineField(JSON.stringify([base, base]), [12, 3], new Float32Array([1.2, 1.1]), "/opfs/cases/.../p.bin",
+  JSON.stringify({ name: "P-STRESS", n_components: 2,
+                   ops: [{ op: "plane_principal", args: [0, 1, 2], out: [0, 1] }] }));
+
+// Envelope over materialised cases: a 2-step blob (0 = max, 1 = min) + uint16 governing case indices
+// as an AFGV sidecar: 16-byte header ("AFGV", uint32 version 1, uint32 n_cases, uint32 0), then
+// little-endian uint16 [2 x rows x components], same step order.
+fea.envelopeField(JSON.stringify(casePaths), 0, "/opfs/envelopes/G-STRESS.bin", "/opfs/envelopes/G-STRESS.gov");
+```
+
+Derivation ops: `copy`, `plane_von_mises` (3 args), `plane_principal` (3 args -> P1, P2),
+`plane_principal_1` / `plane_principal_2` (P1 or P2 alone), `magnitude` (1-7 args), `magnitude3`,
+`shell_decompose` (bottom SIGXX/SIGYY/TAUXY + top -> SIGMX, SIGMY, SIGBX, SIGBY, TAUMXY, TAUBXY,
+MVONMISES). The single-output names are the ones a lazy-case manifest's `derived_components` uses,
+so each entry maps onto one op: `{op, args: <component indices>, out: [<its column>]}`. An `out`
+entry of `-1` drops that output.

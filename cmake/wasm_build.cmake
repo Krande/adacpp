@@ -1,3 +1,61 @@
+# The format-neutral FEA kernels (load-combination superposition, derived components, envelopes,
+# AFBL/AFEL writer) as a STANDALONE embind wasm module. No OCCT, no tessellator, no manifold -- just
+# src/fea, which the nanobind module compiles too, so browser and server write the same bytes.
+#
+# The numerics flags are part of the contract, not tuning: -ffp-contract=off forbids fusing a*b+c into
+# one FMA (a different rounding), and there is deliberately no -ffast-math and no -mrelaxed-simd, so
+# every op is a single IEEE-754 op and the results are bit-identical to the native build. -msimd128 is
+# safe on that score: f32x4 mul/add round exactly like their scalar forms. Set explicitly because the
+# wasm toolchain clears CMAKE_CXX_FLAGS* (and the wbuild-* tasks pass no CMAKE_BUILD_TYPE).
+if(BUILD_FEA_WASM)
+    add_executable(
+        adacpp_fea
+        ${CMAKE_SOURCE_DIR}/src/fea/fea_wasm.cpp
+        ${CMAKE_SOURCE_DIR}/src/fea/fea_arrays.cpp
+        ${CMAKE_SOURCE_DIR}/src/fea/superpose.cpp
+        ${CMAKE_SOURCE_DIR}/src/fea/derive.cpp
+        ${CMAKE_SOURCE_DIR}/src/fea/artefact_io.cpp
+        ${CMAKE_SOURCE_DIR}/src/fea/envelope.cpp
+        ${CMAKE_SOURCE_DIR}/src/fea/field_ops.cpp
+    )
+    # nlohmann json.hpp (the JSON arguments) lives in the (wasm) conda env include.
+    target_include_directories(adacpp_fea PRIVATE $ENV{CONDA_PREFIX}/include)
+    # try/catch (JSON parse + kernel errors -> {"ok":false}) needs real EH; same model as glb_diff.
+    target_compile_options(
+        adacpp_fea
+        PRIVATE -O3 -msimd128 -ffp-contract=off -fwasm-exceptions
+    )
+    set_target_properties(
+        adacpp_fea
+        PROPERTIES OUTPUT_NAME "adacpp_fea" SUFFIX ".js"
+    )
+    # No -O at LINK time: that runs binaryen's wasm-opt, and the locked binaryen (117) is older than
+    # emscripten 4.0.9 expects (123) and rejects its flags (--no-stack-ir). The compile-time -O3 is
+    # where the kernels get optimised; wasm-opt would only shave size.
+    target_link_options(
+        adacpp_fea
+        PRIVATE
+            "-lembind"
+            "-fwasm-exceptions"
+            "-sWASMFS=1" # WASMFS + OPFS backend (file-backed pread, not heap)
+            "-sFORCE_FILESYSTEM=1"
+            "-sEXPORTED_RUNTIME_METHODS=['FS']" # JS-side FS for OPFS mount + node smoke test
+            "-sALLOW_MEMORY_GROWTH=1"
+            "-sMAXIMUM_MEMORY=4294967296"
+            "-sMODULARIZE=1"
+            "-sEXPORT_ES6=1"
+            "-sEXPORT_NAME=createAdacppFea"
+            # A link without -O defaults to ASSERTIONS=1, which links the debug libc/wasmfs variants
+            # into the hot read path. The kernels report errors through their JSON result instead.
+            "-sASSERTIONS=0"
+            "-sENVIRONMENT=web,worker,node"
+            "--emit-tsd"
+            "adacpp_fea.d.ts"
+            "-sSTACK_SIZE=1048576"
+    )
+    return() # standalone target
+endif()
+
 # Prismatic extrusion expansion as a STANDALONE embind wasm module. The leanest of the set: the
 # expander in ngeom_extrude.h is header-only, so this links no libtess2, no meshoptimizer, no
 # manifold and no OCCT — just the arithmetic that turns a section table plus per-instance frames

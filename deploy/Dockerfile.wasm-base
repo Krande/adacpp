@@ -17,6 +17,10 @@
 #   wasm/adacpp_glb_diff.{js,wasm}     no-pyodide GLB-diff embind module (viewer in-browser diff utility)
 #   wasm/adacpp_ifc_glb.{js,wasm}      no-pyodide IFC->GLB embind module (viewer in-browser convert)
 #   wasm/adacpp_brep_writer.{js,wasm}  no-pyodide STEP<->IFC B-rep writer embind module
+#   wasm/adacpp_extrude.{js,wasm}      prismatic-extrusion expander embind module
+#   wasm/adacpp_fea.{js,wasm}          FEA kernels embind module (load combinations, derived
+#                                      components, envelopes over AFBL/AFEL strides; WASMFS + OPFS)
+#   wasm/*.d.ts                        emscripten-generated types for each module
 #
 # busybox (not scratch) so `docker create` + `docker cp` work for consumers
 # that extract /out/ without a running command.

@@ -1,8 +1,8 @@
 from . import _ada_cpp_ext_impl as _ext
-from . import cad
+from . import cad, fea
 
 __doc__ = "A module with drop-in replacement functions for ada-py written in c++ to improve performance."
-__all__ = ["cad"]
+__all__ = ["cad", "fea"]
 
 # Native (non-wasm) builds register the OCCT/CGAL/gmsh/IfcOpenShell-backed
 # submodules. The wasm/pyodide build only ships the kernel-agnostic ``cad``
