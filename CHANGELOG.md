@@ -2,6 +2,15 @@
 
 
 
+## v0.32.0 (2026-10-08)
+
+### Feature
+
+* feat: FEA result kernels (wasm + Python), optimised wasm builds, a thread-free OPFS mount (#71)
+
+Co-authored-by: Claude Opus 5.5 &lt;noreply@anthropic.com&gt; ([`07d5b25`](https://github.com/Krande/adacpp/commit/07d5b250683e99379e552bb90121d058d37979d1))
+
+
 ## v0.31.1 (2026-09-30)
 
 ### Fix
