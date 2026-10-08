@@ -1,3 +1,31 @@
+# File I/O for the single-threaded embind modules: WASMFS (in-heap by default, which is what node
+# runs) plus an OPFS mount whose files are FileSystemSyncAccessHandles (src/wasmio). emscripten's own
+# OPFS backend needs -pthread (SharedArrayBuffer, so a cross-origin-isolated page) or JSPI; without
+# either its mount reports success and every file operation on it traps. This backend does its I/O
+# synchronously from the worker instead. The JS API (opfsMount / opfsOpen / ...) is exported next to
+# FS, so it also lands in the generated .d.ts.
+function(adacpp_wasm_fs target)
+    target_sources(
+        ${target}
+        PRIVATE ${CMAKE_SOURCE_DIR}/src/wasmio/opfs_sync_backend.cpp
+    )
+    # WASMFS's backend classes are internal headers of the emscripten tree (pinned: 4.0.9).
+    target_include_directories(
+        ${target}
+        PRIVATE ${EMSCRIPTEN_ROOT_PATH}/system/lib/wasmfs
+    )
+    set(_js ${CMAKE_SOURCE_DIR}/src/wasmio/opfs_sync.js)
+    target_link_options(
+        ${target}
+        PRIVATE
+            "-sWASMFS=1"
+            "-sFORCE_FILESYSTEM=1"
+            "--js-library=${_js}"
+            "-sEXPORTED_RUNTIME_METHODS=['FS','opfsMount','opfsOpen','opfsDetach','opfsReserve','opfsSettle','mountOpfs']"
+    )
+    set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS ${_js})
+endfunction()
+
 # The format-neutral FEA kernels (load-combination superposition, derived components, envelopes,
 # AFBL/AFEL writer) as a STANDALONE embind wasm module. No OCCT, no tessellator, no manifold -- just
 # src/fea, which the nanobind module compiles too, so browser and server write the same bytes.
@@ -34,9 +62,6 @@ if(BUILD_FEA_WASM)
         PRIVATE
             "-lembind"
             "-fwasm-exceptions"
-            "-sWASMFS=1" # WASMFS + OPFS backend (file-backed pread, not heap)
-            "-sFORCE_FILESYSTEM=1"
-            "-sEXPORTED_RUNTIME_METHODS=['FS']" # JS-side FS for OPFS mount + node smoke test
             "-sALLOW_MEMORY_GROWTH=1"
             "-sMAXIMUM_MEMORY=4294967296"
             "-sMODULARIZE=1"
@@ -47,6 +72,7 @@ if(BUILD_FEA_WASM)
             "adacpp_fea.d.ts"
             "-sSTACK_SIZE=1048576"
     )
+    adacpp_wasm_fs(adacpp_fea)
     return() # standalone target
 endif()
 
@@ -143,9 +169,6 @@ if(BUILD_STEP_GLB_WASM)
         adacpp_step_glb
         PRIVATE
             "-lembind"
-            "-sWASMFS=1" # WASMFS + OPFS backend (file-backed pread, not heap)
-            "-sFORCE_FILESYSTEM=1"
-            "-sEXPORTED_RUNTIME_METHODS=['FS']" # JS-side FS for OPFS mount + node smoke test
             "-sALLOW_MEMORY_GROWTH=1"
             "-sMODULARIZE=1"
             "-sEXPORT_ES6=1"
@@ -155,6 +178,7 @@ if(BUILD_STEP_GLB_WASM)
             "adacpp_step_glb.d.ts"
             "-sSTACK_SIZE=1048576"
     )
+    adacpp_wasm_fs(adacpp_step_glb)
     return() # standalone target; skip the legacy WASM_UTILS stub below
 endif()
 
@@ -181,9 +205,6 @@ if(BUILD_IFC_GLB_WASM)
         adacpp_ifc_glb
         PRIVATE
             "-lembind"
-            "-sWASMFS=1" # WASMFS + OPFS backend (file-backed pread, not heap)
-            "-sFORCE_FILESYSTEM=1"
-            "-sEXPORTED_RUNTIME_METHODS=['FS']" # JS-side FS for OPFS mount + node smoke test
             "-sALLOW_MEMORY_GROWTH=1"
             "-sMODULARIZE=1"
             "-sEXPORT_ES6=1"
@@ -193,6 +214,7 @@ if(BUILD_IFC_GLB_WASM)
             "adacpp_ifc_glb.d.ts"
             "-sSTACK_SIZE=1048576"
     )
+    adacpp_wasm_fs(adacpp_ifc_glb)
     return() # standalone target; skip the legacy WASM_UTILS stub below
 endif()
 
@@ -213,9 +235,6 @@ if(BUILD_BREP_WRITER_WASM)
         adacpp_brep_writer
         PRIVATE
             "-lembind"
-            "-sWASMFS=1" # WASMFS + OPFS backend (file-backed pread, not heap)
-            "-sFORCE_FILESYSTEM=1"
-            "-sEXPORTED_RUNTIME_METHODS=['FS']" # JS-side FS for OPFS mount + node smoke test
             "-sALLOW_MEMORY_GROWTH=1"
             "-sMODULARIZE=1"
             "-sEXPORT_ES6=1"
@@ -225,6 +244,7 @@ if(BUILD_BREP_WRITER_WASM)
             "adacpp_brep_writer.d.ts"
             "-sSTACK_SIZE=1048576"
     )
+    adacpp_wasm_fs(adacpp_brep_writer)
     return() # standalone target; skip the legacy WASM_UTILS stub below
 endif()
 

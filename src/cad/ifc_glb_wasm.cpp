@@ -12,10 +12,10 @@
 // runtime in the browser at all.
 //
 // IO model mirrors the STEP module: both `inPath` and `outPath` live in the emscripten file system.
-// Mount OPFS via WASMFS (build with -sWASMFS) and pass OPFS-backed paths so a large IFC streams
-// through `pread` (bounded RSS) and the GLB is written back to OPFS. `spillDir` is a writable
-// directory (OPFS or MEMFS) for the per-material spill lanes; pass an explicit one (the C++ default
-// mkdtemp("/tmp/...") isn't reliable under WASMFS).
+// In a worker, `await Module.opfsMount("/opfs")` (src/wasmio/opfs_sync.js) and pass paths under it so
+// a large IFC streams through `pread` (bounded RSS) and the GLB is written back to OPFS. `spillDir` is
+// a writable directory (under the OPFS mount, or in-heap) for the per-material spill lanes; pass an
+// explicit one (the C++ default mkdtemp("/tmp/...") isn't reliable under WASMFS).
 //
 // Single-threaded (stream_ifc_to_glb uses threads=1), so this links WITHOUT -pthread and runs on any
 // page (no SharedArrayBuffer / cross-origin isolation required).
@@ -23,7 +23,6 @@
 #include <string>
 
 #include <emscripten/bind.h>
-#include <emscripten/wasmfs.h>
 
 #include "ifc_clash.h"
 #include "ifc_member_scan.h"
@@ -67,22 +66,10 @@ long ifc_clash_joints(const std::string &in_path, const std::string &out_path, d
     return adacpp::ifc_read::write_beam_joints_json(in_path, out_path, out_of_plane_tol, point_tol);
 }
 
-// Mount the browser's Origin Private File System (OPFS) at `mount_point` so the IFC, the GLB and the
-// spill lanes live in OPFS — the IFC streams through pread (bounded RSS) instead of the wasm heap.
-// MUST be called from a Web Worker (OPFS sync access handles are worker-only). Returns 0 on success,
-// non-zero if OPFS is unavailable; the caller then falls back to the in-heap WASMFS default.
-int mount_opfs(const std::string &mount_point) {
-    backend_t opfs = wasmfs_create_opfs_backend();
-    if (!opfs)
-        return -1;
-    return wasmfs_create_directory(mount_point.c_str(), 0777, opfs);
-}
-
 } // namespace
 
 EMSCRIPTEN_BINDINGS(adacpp_ifc_glb) {
     emscripten::function("ifcToGlb", &ifc_to_glb);
     emscripten::function("scanMembers", &ifc_scan_members);
     emscripten::function("clashJoints", &ifc_clash_joints);
-    emscripten::function("mountOpfs", &mount_opfs);
 }

@@ -5,9 +5,10 @@
 // Every verb calls the SAME C++ the nanobind module exposes (field_ops.h), so a case materialised here
 // and one materialised on the server are the same bytes.
 //
-// IO: all paths live in the emscripten FS. Build with -sWASMFS, call mountOpfs(dir) from a Web Worker
-// and pass OPFS-backed paths: strides are read one at a time with pread (bounded RSS, whatever the blob
-// size) and the result is written straight back to OPFS. Single-threaded (no SharedArrayBuffer needed).
+// IO: all paths live in the emscripten FS (WASMFS). In a Web Worker, `await Module.opfsMount("/opfs")`
+// and `await Module.opfsOpen(path)` the blobs (src/wasmio/opfs_sync.js), then pass paths under the
+// mount: strides are read one at a time with pread (bounded RSS, whatever the blob size) and the result
+// is written straight back to OPFS. Single-threaded (no SharedArrayBuffer needed).
 //
 // Errors never throw into JS: every verb returns a JSON string, {"ok":true,...} or
 // {"ok":false,"error":"..."}.
@@ -18,7 +19,6 @@
 
 #include <emscripten/bind.h>
 #include <emscripten/val.h>
-#include <emscripten/wasmfs.h>
 
 #include <nlohmann/json.hpp>
 
@@ -134,15 +134,6 @@ std::string read_blob_header(const std::string &path) {
     }
 }
 
-// Mount the browser's Origin Private File System (OPFS) at `mount_point` (worker-only). Returns 0 on
-// success, non-zero if OPFS is unavailable; the caller falls back to the in-heap WASMFS default.
-int mount_opfs(const std::string &mount_point) {
-    backend_t opfs = wasmfs_create_opfs_backend();
-    if (!opfs)
-        return -1;
-    return wasmfs_create_directory(mount_point.c_str(), 0777, opfs);
-}
-
 std::string version() {
     return "adacpp_fea/1";
 }
@@ -153,6 +144,5 @@ EMSCRIPTEN_BINDINGS(adacpp_fea) {
     emscripten::function("combineField", &combine_field);
     emscripten::function("envelopeField", &envelope_field);
     emscripten::function("readBlobHeader", &read_blob_header);
-    emscripten::function("mountOpfs", &mount_opfs);
     emscripten::function("version", &version);
 }

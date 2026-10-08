@@ -10,23 +10,54 @@ These files are attached to each adacpp GitHub release (individually and as
 `ghcr.io/krande/adacpp-wasm-base:<version>` base image under `/out/wasm/`.
 
 The `.d.ts` next to each `.js` is **generated at build time** by emscripten (`--emit-tsd`) directly
-from the `EMSCRIPTEN_BINDINGS` in `src/cad/*_wasm.cpp`, so it can never drift from the actual
-exports. embind carries no parameter names, so the generated types use positional names
+from the `EMSCRIPTEN_BINDINGS` in `src/cad/*_wasm.cpp` (and the OPFS API's JSDoc in
+`src/wasmio/opfs_sync.js`), so it can never drift from the actual exports. embind carries no parameter names, so the generated types use positional names
 (`_0, _1, …`) and no doc comments — the tables and the usage examples below are the human-readable
 reference for what each argument means.
 
 | Module (`.js` + `.wasm` + `.d.ts`) | Conversion | Entry points |
 | --- | --- | --- |
-| `adacpp_step_glb` | **STEP → GLB** (Part-21 tokenizer → libtess2 / `cdt` tessellator → glTF) | `stepToGlb`, `mountOpfs` |
-| `adacpp_ifc_glb` | **IFC → GLB** (pure-C++ IFC reader → libtess2 → glTF) | `ifcToGlb`, `mountOpfs` |
-| `adacpp_brep_writer` | **STEP → IFC** and **IFC → STEP** (B-rep) | `stepToIfc`, `ifcToStep`, `mountOpfs` |
+| `adacpp_step_glb` | **STEP → GLB** (Part-21 tokenizer → libtess2 / `cdt` tessellator → glTF) | `stepToGlb` + [OPFS](#opfs) |
+| `adacpp_ifc_glb` | **IFC → GLB** (pure-C++ IFC reader → libtess2 → glTF) | `ifcToGlb`, `scanMembers`, `clashJoints` + [OPFS](#opfs) |
+| `adacpp_brep_writer` | **STEP → IFC** and **IFC → STEP** (B-rep) | `stepToIfc`, `ifcToStep` + [OPFS](#opfs) |
 | `adacpp_glb_diff` | **GLB diff** (element-level, with removed-element overlay) | `diffGlb` |
 | `adacpp_extrude` | **Prismatic extrusion** (section table + per-instance frames -> vertex/index buffers) | `expandBeamSolids` |
-| `adacpp_fea` | **FEA results**: load combinations, derived components and envelopes over baked AFBL/AFEL strides | `combineField`, `envelopeField`, `readBlobHeader`, `mountOpfs`, `version` |
+| `adacpp_fea` | **FEA results**: load combinations, derived components and envelopes over baked AFBL/AFEL strides | `combineField`, `envelopeField`, `readBlobHeader`, `version` + [OPFS](#opfs) |
 
-The `*_glb`, `brep_writer` and `fea` modules are built with `-sWASMFS=1` and expose `mountOpfs(dir)`:
-call it from a **Web Worker** to back file I/O with OPFS so multi-GB inputs stream through `pread`
-(bounded RSS) instead of the wasm heap. `adacpp_glb_diff` and `adacpp_extrude` are in-heap (no OPFS).
+The `*_glb`, `brep_writer` and `fea` modules do their file I/O through emscripten's WASMFS (`mod.FS`):
+in-heap by default, and on an OPFS mount in a **dedicated Web Worker**, so multi-GB inputs stream
+through `pread` (bounded RSS) instead of the wasm heap. `adacpp_glb_diff` and `adacpp_extrude` are
+in-heap only.
+
+## OPFS
+
+```ts
+// In a dedicated Web Worker (FileSystemSyncAccessHandle exists nowhere else).
+await mod.opfsMount("/opfs");            // rejects with the reason if this browser cannot back it
+await mod.opfsOpen("/opfs/in.stp");      // a file already in OPFS (written by the browser API)
+await mod.opfsOpen("/opfs/out.glb", { create: true }); // an output that must outlive the module
+mod.stepToGlb("/opfs/in.stp", "/opfs/out.glb", "/opfs/spill", 2.0, 20.0, true);
+await mod.opfsDetach("/opfs/out.glb");   // flush + close; the OPFS file stays, unlocked
+```
+
+- Every byte of I/O is a synchronous `FileSystemSyncAccessHandle` call straight between the OPFS file
+  and the wasm heap buffer of the `read`/`write`: no threads, no `SharedArrayBuffer`, no COOP/COEP, no
+  JSPI. Chromium 108+, Firefox 111+, Safari 16.4+ (any browser with synchronous sync access handles).
+- Files the module creates under the mount without an `opfsOpen` -- spill lanes, an output you
+  only read back through `mod.FS` -- are backed by anonymous **scratch** files from a pool kept in
+  `<OPFS root>/.adacpp-scratch/`. They live in OPFS, not the heap, but are not reachable by name
+  through the browser's OPFS API, and are discarded on unlink (or swept by the next `opfsMount` once
+  their worker is gone). The pool holds `scratch` idle files (`opfsMount(dir, { scratch: 32 })`, the
+  default) and refills after each call; `await mod.opfsReserve(n)` raises it ahead of a call that
+  creates many files. A call that runs out gets `EIO` from `open`.
+- Writing through `mod.FS` onto the mount (e.g. streaming a `fetch` body in with `FS.open`/`FS.write`)
+  is visible to the module immediately. A file written by the browser's own OPFS API is visible only
+  after `opfsOpen`. Sync access handles are exclusive: while a file is attached, nothing else can
+  open it; `opfsDetach` releases it, `FS.unlink` deletes it.
+- `mountOpfs(dir)` is kept for old callers: it cannot mount (the setup is async), so it returns `0`
+  only after `await opfsMount(dir)` and `-1` otherwise. Builds before this one returned `0` from
+  `mountOpfs` and then trapped (`RuntimeError: unreachable`) on the first file operation on the
+  mount: emscripten's own OPFS backend needs `-pthread` or JSPI.
 
 ## Usage
 
@@ -39,8 +70,8 @@ const mod = await createAdacppStepGlb({
   locateFile: (path) => `/wasm/${path}`, // resolve adacpp_step_glb.wasm
 });
 
-// In a Web Worker: back I/O with OPFS (0 = success).
-mod.mountOpfs("/opfs");
+// In a dedicated Web Worker: back I/O with OPFS (see OPFS above).
+await mod.opfsMount("/opfs");
 mod.FS; // emscripten WASMFS handle, if you need to write the input yourself
 
 // deflection=2.0, angularDeg=20.0 are the adapy production defaults; meshopt=true compresses.
@@ -94,7 +125,9 @@ returns a JSON string, `{"ok": true, ...}` or `{"ok": false, "error": "..."}`; n
 import createAdacppFea from "./adacpp_fea.js";
 
 const fea = await createAdacppFea({ locateFile: (p) => `/wasm/${p}` });
-fea.mountOpfs("/opfs"); // in a Web Worker; 0 = success
+await fea.opfsMount("/opfs"); // in a dedicated Web Worker
+await fea.opfsOpen("/opfs/base/fea.G-STRESS.QUAD4.elements.bin"); // blobs already in OPFS
+// outputs that must persist by name: opfsOpen(path, { create: true }) them first, opfsDetach after
 
 // A combination = sum(factor * stored case), float32, terms in file order. One path + step per term
 // (the same base blob repeated is the usual case); factors as a Float32Array (exact float32).
