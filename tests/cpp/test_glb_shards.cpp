@@ -3,7 +3,7 @@
 // directory. Pins that the sharded conversion writes what the single-worker path writes (triangles for
 // STEP, products for IFC), that a missing or corrupt index opens as root_count() == -1, and gives the
 // sanitizer builds (ASan/LSan) the whole protocol to check -- including the huge-root face split, which
-// the generated model (tools/gen_faceted_fixtures.py) takes.
+// the generated model (tests/fixtures/gen_faceted_fixtures.py) takes.
 //
 // usage: test_glb_shards <model.stp|model.ifc> <work_dir> [N]
 

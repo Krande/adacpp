@@ -57,7 +57,7 @@ if(Python3_Interpreter_FOUND)
         NAME glb_shards_fixtures
         COMMAND
             ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_faceted_fixtures.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/gen_faceted_fixtures.py
             ${GLB_SHARD_FIXTURES}
     )
     set_tests_properties(

@@ -4,7 +4,7 @@ A root bigger than one thread's fair share is resolved and tessellated by face s
 thread, joined in face order and welded once (huge_root_tess.h). Its output must not depend on the
 thread count: the same triangles and vertices per mesh as a 1-thread conversion, which takes no
 phase A at all. The fixture is a generated faceted model -- one 2560-face sphere among six boxes --
-in STEP and IFC (tools/gen_faceted_fixtures.py).
+in STEP and IFC (tests/fixtures/gen_faceted_fixtures.py).
 """
 
 import importlib.util
@@ -17,7 +17,7 @@ import pytest
 
 import adacpp.cad
 
-_GEN = pathlib.Path(__file__).parents[2] / "tools" / "gen_faceted_fixtures.py"
+_GEN = pathlib.Path(__file__).parents[1] / "fixtures" / "gen_faceted_fixtures.py"
 _spec = importlib.util.spec_from_file_location("gen_faceted_fixtures", _GEN)
 gen = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(gen)

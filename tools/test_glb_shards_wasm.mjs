@@ -13,7 +13,7 @@
 //      the job directory, the merge on one worker -- writes the same GLB and leaves nothing behind.
 //
 // Usage: node tools/test_glb_shards_wasm.mjs <adacpp_step_glb.js | adacpp_ifc_glb.js> <model> [N]
-//   (model: tools/gen_faceted_fixtures.py writes one with a 2560-face root that takes the face split)
+//   (model: tests/fixtures/gen_faceted_fixtures.py writes one with a 2560-face root that takes the face split)
 
 import {readFileSync} from "node:fs";
 import {pathToFileURL} from "node:url";

@@ -7,7 +7,7 @@ and tessellated by face slices) and the browser shards' face split -- only run o
 (MANIFOLD_SOLID_BREP / FACE_SURFACE / POLY_LOOP / PLANE) and as an IFC4 (IfcBuildingElementProxy /
 IfcFacetedBrep / IfcFace / IfcPolyLoop). No dependencies.
 
-    python tools/gen_faceted_fixtures.py <out_dir> [nu nv nboxes]
+    python tests/fixtures/gen_faceted_fixtures.py <out_dir> [nu nv nboxes]
 """
 
 from __future__ import annotations
