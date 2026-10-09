@@ -2,6 +2,15 @@
 
 
 
+## v0.33.0 (2026-10-09)
+
+### Feature
+
+* feat: one STEP/IFC-&gt;GLB conversion across N browser workers, faster IFC reading, parallel huge roots (#72)
+
+Co-authored-by: Claude Opus 5.5 &lt;noreply@anthropic.com&gt; ([`73b2beb`](https://github.com/Krande/adacpp/commit/73b2beb45a8cda7630f1a49ac44734d2df0f440d))
+
+
 ## v0.32.0 (2026-10-08)
 
 ### Feature
