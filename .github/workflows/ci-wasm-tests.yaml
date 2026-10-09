@@ -113,6 +113,12 @@ jobs:
       - name: test the OPFS sync-access-handle backend (STEP->GLB + FEA modules)
         run: pixi run -e wasm test-opfs-sync-wasm
 
+      # The browser's multi-core conversion: one STEP/IFC->GLB split across N module instances, each
+      # with its own memory, through the files a shared OPFS directory would hold. Reuses the STEP and
+      # IFC modules built above.
+      - name: test the sharded STEP/IFC->GLB verbs (N workers, face split, no memory growth)
+        run: pixi run -e wasm test-glb-shards-wasm
+
       - name: FEA kernel unit tests compiled to wasm (SIMD)
         # --wasm, not CXX=em++: the wasm env's compiler activation resets CXX to the conda g++, so
         # that form ran the native build under this step's name.

@@ -61,7 +61,12 @@ addToLibrary({
     if (!S.refill) {
       S.refill = (async () => {
         try {
-          while (S.free.length < S.target) await adacppOpfsAddScratch();
+          // Up to 32 at a time: each is two OPFS round trips, and a shard worker reserves hundreds.
+          while (S.free.length < S.target) {
+            var batch = [];
+            for (var i = Math.min(32, S.target - S.free.length); i > 0; i--) batch.push(adacppOpfsAddScratch());
+            await Promise.all(batch);
+          }
         } finally {
           S.refill = null;
         }
@@ -106,10 +111,14 @@ addToLibrary({
         S.free.push(id);
         return;
       }
-      f.handle.flush();
-      f.handle.close();
+      if (!f.readOnly) f.handle.flush(); // a read-only handle has nothing to flush (and may throw)
     } catch (e) {
       err(`adacpp OPFS: releasing ${f.path || f.name}: ${e}`);
+    }
+    try {
+      f.handle.close();
+    } catch (e) {
+      err(`adacpp OPFS: closing ${f.path || f.name}: ${e}`);
     }
     S.files[id] = null;
     S.byPath.delete(f.path);
@@ -207,9 +216,15 @@ addToLibrary({
     }
     var pool = await root.getDirectoryHandle('.adacpp-scratch', {create: true});
     // Sweep pools left behind by workers that are gone. A live module's pool holds sync access
-    // handles, which locks its files against removal, so this only deletes orphans.
+    // handles, which locks its files against removal, so this only deletes orphans -- except in the
+    // moment between a pool's creation and its first handle: several workers mounting at once would
+    // delete each other's new pools. So a pool younger than two minutes (its name starts with its
+    // creation time) is left alone; an orphan that young is swept by a later mount.
     if (pool.entries) {
+      var now = Date.now();
       for await (var [name] of pool.entries()) {
+        var born = parseInt(String(name).split('-')[0], 36);
+        if (born > 0 && now - born < 120000) continue;
         await pool.removeEntry(name, {recursive: true}).catch(() => {});
       }
     }
@@ -241,7 +256,10 @@ addToLibrary({
   // Back `path` (under the mount) with the OPFS file of the same name, so the module reads it -- or,
   // with options.create, writes it -- in place. Files written by the browser's own OPFS API are only
   // visible to the module after this. A path that is already attached is left as it is.
-  $opfsOpen__docs: '/** @param {string} path @param {{create: (boolean|undefined)}=} options @return {Promise<void>} */',
+  // options.readOnly opens a SHARED read-only handle (`mode: "read-only"`), so several workers -- each
+  // its own module -- can read one file at once; a sync access handle is otherwise exclusive. Where the
+  // browser has no such mode, this rejects (NoModificationAllowedError) while another handle is open.
+  $opfsOpen__docs: '/** @param {string} path @param {{create: (boolean|undefined), readOnly: (boolean|undefined)}=} options @return {Promise<void>} */',
   $opfsOpen__deps: ['$adacppOpfs', '$adacppOpfsSplit', '$FS'],
   $opfsOpen: async (path, options) => {
     var S = adacppOpfs;
@@ -249,13 +267,15 @@ addToLibrary({
     var {path: p, parts} = adacppOpfsSplit(path);
     if (S.byPath.has(p)) return;
     var create = !!options.create;
+    var readOnly = !!options.readOnly;
+    if (create && readOnly) throw new Error(`opfsOpen(${p}): create and readOnly exclude each other`);
     var dir = S.root;
     for (var i = 0; i < parts.length - 1; i++) dir = await dir.getDirectoryHandle(parts[i], {create});
     var name = parts[parts.length - 1];
     var fh = await dir.getFileHandle(name, {create});
-    var handle = await fh.createSyncAccessHandle();
+    var handle = await fh.createSyncAccessHandle(readOnly ? {mode: 'read-only'} : undefined);
     var id = S.files.length;
-    S.files.push({handle, kind: 'named', dir, name, path: p, detach: false});
+    S.files.push({handle, kind: 'named', dir, name, path: p, detach: false, readOnly});
     // A file the module created at this path in the meantime (scratch-backed) gives way to the named one.
     try { FS.unlink(p); } catch (_) {}
     S.pending = id;

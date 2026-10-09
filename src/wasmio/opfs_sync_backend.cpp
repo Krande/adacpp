@@ -60,14 +60,18 @@ using wasmfs::MemorySymlink;
 using fs_backend_t = wasmfs::backend_t; // not the C API's opaque ::backend_t
 
 // One OPFS file. Every sync-access-handle call costs on the order of 100 us whatever its size (measured
-// in Chromium), and the readers here make many small reads -- the STEP reader fetches 64 KiB per
-// statement lookup, the IFC reader 4-16 KiB at a time -- while the writers emit 1-4 KiB stdio chunks.
-// So reads go through a small LRU block cache and sequential writes are coalesced; both are bounded
-// (4 MiB + 1 MiB per open file) and dropped when the last descriptor closes. The sync access handle is
-// exclusive, so nothing else can change the file underneath the cached size and blocks.
+// in Chromium), and the readers here make many small reads -- a statement at a time, scattered over the
+// file as a solid's entities are -- while the writers emit 1-4 KiB stdio chunks. So reads go through
+// an LRU block cache and sequential writes are coalesced; both are bounded (32 MiB + 1 MiB per open
+// file) and dropped when the last descriptor closes. The cache is sized for SEVERAL workers reading one
+// large model at once: Chromium serves every worker's handle reads from one browser-process thread, so
+// misses queue behind each other -- a 415 MB STEP on 4 workers converted in 41 s with a 4 MiB cache and
+// in 17 s with this one (8 workers: 10 s; 64 MiB gains nothing more). Nothing else writes the file
+// while it is open (an exclusive handle, or read-only handles that all only read), so the cached size
+// and blocks stay valid.
 class OpfsSyncFile : public DataFile {
     static constexpr size_t kBlock = 256 * 1024;
-    static constexpr size_t kBlocks = 16;
+    static constexpr size_t kBlocks = 128;
     static constexpr size_t kWriteBuf = 1024 * 1024;
 
     struct Block {

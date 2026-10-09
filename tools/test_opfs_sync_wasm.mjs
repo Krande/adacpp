@@ -13,6 +13,8 @@ import {createHash} from "node:crypto";
 import {readFileSync} from "node:fs";
 import {pathToFileURL} from "node:url";
 
+import {calls, DirHandle} from "./opfs_memory.mjs";
+
 const [modPath, fixture] = process.argv.slice(2);
 if (!modPath) {
     console.error("usage: node test_opfs_sync_wasm.mjs <module.js> [fixture]");
@@ -28,117 +30,7 @@ const check = (name, cond, detail) => {
 const domError = (name, msg) => Object.assign(new Error(msg), {name});
 const sha = (u8) => createHash("sha256").update(u8).digest("hex").slice(0, 16);
 
-// --- in-memory OPFS ------------------------------------------------------------------------------
-
-const calls = {
-    read : 0,
-    write : 0
-};
-
-class MemFile {
-    constructor() {
-        this.bytes = new Uint8Array(0);
-        this.size = 0;
-        this.locked = false;
-    }
-    ensure(n) {
-        if (n > this.bytes.length) {
-            const b = new Uint8Array(Math.max(n, this.bytes.length * 2));
-            b.set(this.bytes.subarray(0, this.size));
-            this.bytes = b;
-        }
-    }
-}
-
-class SyncHandle {
-    constructor(file) {
-        this.file = file;
-        this.open = true;
-    }
-    live() {
-        if (!this.open)
-            throw domError("InvalidStateError", "handle closed");
-        return this.file;
-    }
-    read(view, {at = 0} = {}) {
-        calls.read++;
-        const f = this.live();
-        const n = Math.max(0, Math.min(view.byteLength, f.size - at));
-        view.set(f.bytes.subarray(at, at + n));
-        return n;
-    }
-    write(view, {at = 0} = {}) {
-        calls.write++;
-        const f = this.live();
-        f.ensure(at + view.byteLength);
-        if (at > f.size)
-            f.bytes.fill(0, f.size, at);
-        f.bytes.set(view, at);
-        f.size = Math.max(f.size, at + view.byteLength);
-        return view.byteLength;
-    }
-    getSize() { return this.live().size; }
-    truncate(n) {
-        const f = this.live();
-        f.ensure(n);
-        if (n > f.size)
-            f.bytes.fill(0, f.size, n);
-        f.size = n;
-    }
-    flush() { this.live(); }
-    close() {
-        if (this.open)
-            this.file.locked = false;
-        this.open = false;
-    }
-}
-
-class FileHandle {
-    constructor(file) { this.file = file; }
-    async createSyncAccessHandle() {
-        if (this.file.locked)
-            throw domError("NoModificationAllowedError", "file is locked by another access handle");
-        this.file.locked = true;
-        return new SyncHandle(this.file);
-    }
-}
-
-class DirHandle {
-    constructor() { this.children = new Map(); }
-    async getDirectoryHandle(name, {create = false} = {}) {
-        let c = this.children.get(name);
-        if (!c && create)
-            this.children.set(name, (c = new DirHandle()));
-        if (!(c instanceof DirHandle))
-            throw domError(c ? "TypeMismatchError" : "NotFoundError", name);
-        return c;
-    }
-    async getFileHandle(name, {create = false} = {}) {
-        let c = this.children.get(name);
-        if (!c && create)
-            this.children.set(name, (c = new MemFile()));
-        if (!(c instanceof MemFile))
-            throw domError(c ? "TypeMismatchError" : "NotFoundError", name);
-        return new FileHandle(c);
-    }
-    locked() {
-        for (const c of this.children.values())
-            if (c instanceof MemFile ? c.locked : c.locked())
-                return true;
-        return false;
-    }
-    async removeEntry(name, {recursive = false} = {}) {
-        const c = this.children.get(name);
-        if (!c)
-            throw domError("NotFoundError", name);
-        if (c instanceof DirHandle && c.children.size && !recursive)
-            throw domError("InvalidModificationError", name);
-        if (c instanceof MemFile ? c.locked : c.locked())
-            throw domError("NoModificationAllowedError", name);
-        this.children.delete(name);
-    }
-    async * entries() { yield* this.children.entries(); }
-}
+// --- in-memory OPFS: tools/opfs_memory.mjs -------------------------------------------------------
 
 // --- the test ------------------------------------------------------------------------------------
 
@@ -161,10 +53,14 @@ const pool = await root.getDirectoryHandle(".adacpp-scratch", {create : true});
 await (await pool.getDirectoryHandle("dead", {create : true})).getFileHandle("s0", {create : true});
 const live = await pool.getDirectoryHandle("live", {create : true});
 const liveHandle = await (await live.getFileHandle("s0", {create : true})).createSyncAccessHandle();
+// a pool just created by another worker that is mounting at the same moment (no handle open yet)
+const youngName = Date.now().toString(36) + "-other";
+await (await pool.getDirectoryHandle(youngName, {create : true})).getFileHandle("s0", {create : true});
 
 await M.opfsMount("/opfs", {root, scratch : 4});
 check("opfsMount with an OPFS root", M.mountOpfs("/opfs") === 0);
 check("orphaned scratch pool swept, live one kept", !pool.children.has("dead") && pool.children.has("live"));
+check("a pool another worker is creating right now is kept", pool.children.has(youngName));
 liveHandle.close();
 
 // FS.writeFile replaces an existing file (WASMFS's own appended to it), in-heap and on the mount
@@ -236,6 +132,39 @@ FS.unlink("/opfs/dir/named.bin");
 await M.opfsSettle();
 check("FS.unlink of a named file removes it from OPFS",
       !(await root.getDirectoryHandle("dir")).children.has("named.bin"));
+
+// shared read-only handles: two modules (two workers) read one OPFS file at once; a writer is refused
+// while they hold it, and a read-only attach refuses writes
+await M.opfsOpen("/opfs/shared.bin", {create : true});
+FS.writeFile("/opfs/shared.bin", enc.encode("read by many"));
+await M.opfsDetach("/opfs/shared.bin");
+const M2 = await createMod();
+await M2.opfsMount("/opfs", {root, scratch : 2});
+await M.opfsOpen("/opfs/shared.bin", {readOnly : true});
+threw = null;
+await M2.opfsOpen("/opfs/shared.bin", {readOnly : true}).catch((e) => (threw = e));
+check("two modules open one file read-only at once", !threw, threw && threw.message);
+check("both read it", dec.decode(FS.readFile("/opfs/shared.bin")) === "read by many" &&
+                          dec.decode(M2.FS.readFile("/opfs/shared.bin")) === "read by many");
+threw = null;
+await (await root.getFileHandle("shared.bin")).createSyncAccessHandle().catch((e) => (threw = e));
+check("a writer is refused while readers hold the file", threw && threw.name === "NoModificationAllowedError");
+let wrote = true;
+try {
+    const ws = FS.open("/opfs/shared.bin", "r+");
+    FS.write(ws, enc.encode("X"), 0, 1, 0);
+    FS.close(ws);
+} catch (_) {
+    wrote = false;
+}
+check("a read-only attach refuses writes", !wrote && dec.decode(FS.readFile("/opfs/shared.bin")) === "read by many");
+threw = null;
+await M.opfsOpen("/opfs/x.bin", {create : true, readOnly : true}).catch((e) => (threw = e));
+check("create + readOnly is rejected", !!threw);
+await M.opfsDetach("/opfs/shared.bin");
+await M2.opfsDetach("/opfs/shared.bin");
+const sharedFile = root.children.get("shared.bin");
+check("detaching both leaves the file, unlocked", sharedFile && sharedFile.readers === 0 && !sharedFile.locked);
 
 // pool exhaustion: an errno, then usable again once the pool is refilled
 threw = null;

@@ -276,6 +276,12 @@ public:
                 }
                 if (!rows.empty())
                     j += ",\"slowest_solids\":[" + rows + "]";
+                // Summed tessellate_doc time over every solid: with the threads' busy time it splits
+                // the stream phase into tessellation vs resolve (parse) + bake + spill.
+                double tess_ms = 0;
+                for (const SolidTime &ts : timed_)
+                    tess_ms += ts.ms;
+                j += ",\"tess_ms_total\":" + fmt_num(tess_ms);
                 // LPT accuracy signals for continuous tuning: does the cost estimate rank-predict the
                 // actual tessellation time and the per-solid memory proxy (tris)?
                 j += ",\"spearman_est_ms\":" + fmt_num(spearman([](const SolidTime &s) { return (double) s.est; },

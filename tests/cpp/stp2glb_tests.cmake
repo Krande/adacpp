@@ -35,3 +35,45 @@ set_tests_properties(
     ifc_glb_cli_include_guid_no_match
     PROPERTIES WILL_FAIL TRUE
 )
+
+# The sharded STEP/IFC -> GLB protocol (the browser's N-worker verbs) run natively: N shard objects in
+# one process sharing a directory, against a generated model whose big root takes the huge-root face
+# split. Natively so the sanitizer builds see the whole protocol; the wasm build runs the same checks
+# per mesh in tools/test_glb_shards_wasm.mjs.
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_executable(
+        test_glb_shards
+        tests/cpp/test_glb_shards.cpp
+        src/geom/neutral/ngeom_tessellate.cpp
+        src/geom/neutral/ngeom_boolean.cpp
+        src/geom/neutral/ngeom_meshopt.cpp
+        ${LIBTESS2_SOURCES}
+        ${MESHOPT_SOURCES}
+    )
+    target_link_libraries(test_glb_shards PRIVATE manifold Threads::Threads)
+    set(GLB_SHARD_FIXTURES ${CMAKE_CURRENT_BINARY_DIR}/glb_shard_fixtures)
+    add_test(
+        NAME glb_shards_fixtures
+        COMMAND
+            ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_faceted_fixtures.py
+            ${GLB_SHARD_FIXTURES}
+    )
+    set_tests_properties(
+        glb_shards_fixtures
+        PROPERTIES FIXTURES_SETUP glb_shard_models
+    )
+    foreach(ext stp ifc)
+        add_test(
+            NAME glb_shards_${ext}
+            COMMAND
+                test_glb_shards ${GLB_SHARD_FIXTURES}/faceted_huge.${ext}
+                ${CMAKE_CURRENT_BINARY_DIR}/glb_shards_${ext} 3
+        )
+        set_tests_properties(
+            glb_shards_${ext}
+            PROPERTIES FIXTURES_REQUIRED glb_shard_models
+        )
+    endforeach()
+endif()

@@ -209,6 +209,10 @@ test-fea-wasm = { cmd = "node tools/test_fea_wasm.mjs", description = "Test the 
 # the mount's failure mode in a browser (report success, then trap on first use) is invisible to the
 # in-heap tests above.
 test-opfs-sync-wasm = { cmd = "node tools/test_opfs_sync_wasm.mjs build-wasm-stepglb/wasm_output/adacpp_step_glb.js files/flat_plate_abaqus_10x10_m_wColors.stp && node tools/test_opfs_sync_wasm.mjs build-wasm-fea/wasm_output/adacpp_fea.js", description = "Test the OPFS sync-access-handle WASMFS backend in node against an in-memory OPFS", depends-on = ["wbuild-stepglb", "wbuild-fea"] }
+# One conversion split across N module instances (the browser's N workers, no SharedArrayBuffer): the
+# merged GLB must carry the single-worker meshes, a bad index must fail cleanly, and repeated runs must
+# not grow memory. The generated model has a 2560-face root, so the huge-root face split runs too.
+test-glb-shards-wasm = { cmd = "python tools/gen_faceted_fixtures.py build-fixtures && node tools/test_glb_shards_wasm.mjs build-wasm-stepglb/wasm_output/adacpp_step_glb.js build-fixtures/faceted_huge.stp && node tools/test_glb_shards_wasm.mjs build-wasm-ifcglb/wasm_output/adacpp_ifc_glb.js build-fixtures/faceted_huge.ifc", description = "Test the sharded STEP/IFC->GLB verbs (N instances, huge-root face split, bad index, no memory growth) in node", depends-on = ["wbuild-stepglb", "wbuild-ifcglb"] }
 serve = { cmd = "docker run --rm -p 8088:80 -v $PIXI_PROJECT_ROOT/src/frontend/public:/usr/share/nginx/html:ro -v $PIXI_PROJECT_ROOT/src/frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro -v $PIXI_PROJECT_ROOT/dist:/usr/share/nginx/html/dist:ro nginx:alpine", description = "Serve src/frontend/public on http://localhost:8088 with COOP/COEP headers (requires docker)" }
 
 [feature.conda.tasks]

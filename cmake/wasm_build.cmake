@@ -4,7 +4,26 @@
 # either its mount reports success and every file operation on it traps. This backend does its I/O
 # synchronously from the worker instead. The JS API (opfsMount / opfsOpen / ...) is exported next to
 # FS, so it also lands in the generated .d.ts.
+# GLB_SHARDS: also link the sharded-conversion helper (src/wasmio/glb_shards.js -> Module.glbShards)
+# -- the STEP/IFC->GLB modules, whose StepGlbShard / IfcGlbShard verbs it drives.
 function(adacpp_wasm_fs target)
+    cmake_parse_arguments(_fs "GLB_SHARDS" "" "" ${ARGN})
+    set(_runtime
+        "'FS','opfsMount','opfsOpen','opfsDetach','opfsReserve','opfsSettle','mountOpfs'"
+    )
+    set(_libs "--js-library=${CMAKE_SOURCE_DIR}/src/wasmio/opfs_sync.js")
+    set(_deps
+        ${CMAKE_SOURCE_DIR}/src/wasmio/opfs_sync.js
+        ${CMAKE_SOURCE_DIR}/src/wasmio/fs_writefile.js
+    )
+    if(_fs_GLB_SHARDS)
+        string(APPEND _runtime ",'glbShards'")
+        list(
+            APPEND _libs
+            "--js-library=${CMAKE_SOURCE_DIR}/src/wasmio/glb_shards.js"
+        )
+        list(APPEND _deps ${CMAKE_SOURCE_DIR}/src/wasmio/glb_shards.js)
+    endif()
     target_sources(
         ${target}
         PRIVATE ${CMAKE_SOURCE_DIR}/src/wasmio/opfs_sync_backend.cpp
@@ -14,23 +33,17 @@ function(adacpp_wasm_fs target)
         ${target}
         PRIVATE ${EMSCRIPTEN_ROOT_PATH}/system/lib/wasmfs
     )
-    set(_js ${CMAKE_SOURCE_DIR}/src/wasmio/opfs_sync.js)
     target_link_options(
         ${target}
         PRIVATE
             "-sWASMFS=1"
             "-sFORCE_FILESYSTEM=1"
-            "--js-library=${_js}"
-            "-sEXPORTED_RUNTIME_METHODS=['FS','opfsMount','opfsOpen','opfsDetach','opfsReserve','opfsSettle','mountOpfs']"
+            ${_libs}
+            "-sEXPORTED_RUNTIME_METHODS=[${_runtime}]"
             # WASMFS's FS.writeFile appends to an existing file; this one replaces it.
             "--post-js=${CMAKE_SOURCE_DIR}/src/wasmio/fs_writefile.js"
     )
-    set_property(
-        TARGET ${target}
-        APPEND
-        PROPERTY
-            LINK_DEPENDS ${_js} ${CMAKE_SOURCE_DIR}/src/wasmio/fs_writefile.js
-    )
+    set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS ${_deps})
 endfunction()
 
 # The format-neutral FEA kernels (load-combination superposition, derived components, envelopes,
@@ -185,7 +198,7 @@ if(BUILD_STEP_GLB_WASM)
             "adacpp_step_glb.d.ts"
             "-sSTACK_SIZE=1048576"
     )
-    adacpp_wasm_fs(adacpp_step_glb)
+    adacpp_wasm_fs(adacpp_step_glb GLB_SHARDS)
     return() # standalone target; skip the legacy WASM_UTILS stub below
 endif()
 
@@ -221,7 +234,7 @@ if(BUILD_IFC_GLB_WASM)
             "adacpp_ifc_glb.d.ts"
             "-sSTACK_SIZE=1048576"
     )
-    adacpp_wasm_fs(adacpp_ifc_glb)
+    adacpp_wasm_fs(adacpp_ifc_glb GLB_SHARDS)
     return() # standalone target; skip the legacy WASM_UTILS stub below
 endif()
 
