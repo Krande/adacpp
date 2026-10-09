@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <deque>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <thread>
 #include <utility>
@@ -34,6 +35,7 @@
 #include "../geom/neutral/ngeom_glb.h"
 #include "../geom/neutral/ngeom_profile.h"
 #include "../geom/neutral/ngeom_tessellate.h"
+#include "huge_root_tess.h"
 
 namespace adacpp {
 
@@ -171,29 +173,13 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
                 lanes.emplace_back(spill, t);
             std::atomic<size_t> next{n_huge};
             const bool tprof = prof.on(); // gate ALL per-solid clock reads -> zero cost in prod
-            // One root: resolve with the caller's resolver, tessellate (``tpp.threads`` > 1 runs
-            // tessellate_doc's face-level pool), bake + spill into the caller's lane. Shared by the
-            // huge-prefix phase and the per-solid worker pool.
-            auto process_root = [&](adacpp::step::Resolver &r, adacpp::glb::GlbSpillWriter &lane, size_t i,
-                                    const TessParams &tpp) {
-                NgeomRoot root = r.resolve_root(roots[i]);
-                if (root.id.empty())
-                    return;
-                size_t fc = root.faces.size();
-                NgeomDoc one;
-                one.roots.push_back(std::move(root));
-                std::chrono::steady_clock::time_point tt0;
-                if (tprof)
-                    tt0 = std::chrono::steady_clock::now();
-                TessMesh tm = tessellate_doc(one, tpp);
-                if (tprof && prof.timing())
-                    prof.solid_timed(
-                        roots[i], i < est_of_root.size() ? est_of_root[i] : 0, fc, tm.indices.size() / 3,
-                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tt0).count());
+            // Bake one tessellated root (colour split, metres, spill into `lane`). `rr` carries the root's
+            // colour, transforms and names; its faces are not read.
+            auto bake_root = [&](const NgeomRoot &rr, TessMesh &&tm, adacpp::step::Resolver &r,
+                                 adacpp::glb::GlbSpillWriter &lane) {
                 if (tm.indices.empty())
                     return;
                 prof.solid(tm.indices.size() / 3);
-                const NgeomRoot &rr = one.roots[0];
                 adacpp::glb::GlbSolid gs;
                 gs.positions = std::move(tm.positions);
                 gs.indices = std::move(tm.indices);
@@ -236,6 +222,27 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
                 }
                 nwritten.fetch_add(1, std::memory_order_relaxed);
             };
+            // One root: resolve with the caller's resolver, tessellate (``tpp.threads`` > 1 runs
+            // tessellate_doc's face-level pool), bake + spill into the caller's lane. Shared by the
+            // huge-prefix phase and the per-solid worker pool.
+            auto process_root = [&](adacpp::step::Resolver &r, adacpp::glb::GlbSpillWriter &lane, size_t i,
+                                    const TessParams &tpp) {
+                NgeomRoot root = r.resolve_root(roots[i]);
+                if (root.id.empty())
+                    return;
+                size_t fc = root.faces.size();
+                NgeomDoc one;
+                one.roots.push_back(std::move(root));
+                std::chrono::steady_clock::time_point tt0;
+                if (tprof)
+                    tt0 = std::chrono::steady_clock::now();
+                TessMesh tm = tessellate_doc(one, tpp);
+                if (tprof && prof.timing())
+                    prof.solid_timed(
+                        roots[i], i < est_of_root.size() ? est_of_root[i] : 0, fc, tm.indices.size() / 3,
+                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tt0).count());
+                bake_root(one.roots[0], std::move(tm), r, lane);
+            };
             // Phase A — the huge prefix, one root at a time BEFORE the pool starts: every thread
             // works the same solid's faces (tessellate_doc face pool), so a lone 61k-face monster
             // no longer pins one worker for the conversion's whole tail.
@@ -244,21 +251,56 @@ inline long stream_step_to_glb(const std::string &in_path, const std::string &ou
                 tph.threads = nthreads;
                 adacpp::step::Resolver r0(idx);
                 r0.copy_metadata_from(master);
-                // Phase A resolves each huge solid SINGLE-THREADED (only tessellate_doc's face pool
-                // below is parallel), so parse-cache bounding is safe here — the constraint the flag
-                // documents. Without it, a 61k-face monster's parsed STEP statements pile up to ~2GB
-                // during its one resolve (469826's memory floor); bounding drops that shell to ~432MB
-                // by dropping parse_cache_ every 1024 faces (built ng:: geometry is retained). Phase B
-                // (the concurrent pool) stays unbounded — its solids are all below the huge threshold.
-                // Measured on 469826: peak RSS 2840 -> 1257 MB (-56%), conversion time unchanged.
+                // r0 counts each huge root's faces and resolves the ones that can't be split by face
+                // (whole, single-threaded, with only tessellate_doc's face pool parallel), so
+                // parse-cache bounding is safe here — the constraint the flag documents. Without it, a
+                // 61k-face monster's parsed STEP statements pile up to ~2GB during its one resolve (the
+                // model's memory floor); bounding drops that shell to ~432MB by dropping parse_cache_ every
+                // 1024 faces (built ng:: geometry is retained). Phase B (the concurrent pool) stays
+                // unbounded — its solids are all below the huge threshold. Measured on that model: peak
+                // RSS 2840 -> 1257 MB (-56%), conversion time unchanged.
                 r0.enable_parse_cache_bounding();
                 double busy_ms = 0;
                 std::chrono::steady_clock::time_point b0;
                 if (tprof)
                     b0 = std::chrono::steady_clock::now();
+                // Each thread resolves + tessellates its own face slices of the huge root with its own
+                // resolver (tessellate_root_by_faces), so the resolve is parallel too -- it was a serial
+                // share of every huge root. A root whose faces don't all come from its shells (a
+                // procedural or boolean root) counts 0 faces and keeps the one-resolver path.
+                std::vector<std::unique_ptr<adacpp::step::Resolver>> rs;
                 for (size_t i = 0; i < n_huge; ++i) {
-                    process_root(r0, lanes[0], i, tph);
+                    r0.set_face_window(0, 0); // count the faces, build none
+                    r0.resolve_root(roots[i]);
+                    r0.clear_face_window();
                     r0.clear_geom_cache();
+                    const size_t nf = r0.root_faces_seen();
+                    if (nf < 64) {
+                        process_root(r0, lanes[0], i, tph);
+                        r0.clear_geom_cache();
+                        continue;
+                    }
+                    if (rs.empty())
+                        for (int t = 0; t < nthreads; ++t) {
+                            rs.push_back(std::make_unique<adacpp::step::Resolver>(idx));
+                            rs.back()->copy_metadata_from(master);
+                        }
+                    std::chrono::steady_clock::time_point tt0;
+                    if (tprof)
+                        tt0 = std::chrono::steady_clock::now();
+                    HugeRootMesh hm = tessellate_root_by_faces(nthreads, nf, tp, [&](int t, size_t lo, size_t hi) {
+                        adacpp::step::Resolver &rt = *rs[(size_t) t];
+                        rt.set_face_window(lo, hi);
+                        NgeomRoot slice = rt.resolve_root(roots[i]);
+                        rt.clear_face_window();
+                        rt.clear_geom_cache();
+                        return slice;
+                    });
+                    if (tprof && prof.timing())
+                        prof.solid_timed(
+                            roots[i], i < est_of_root.size() ? est_of_root[i] : 0, nf, hm.mesh.indices.size() / 3,
+                            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tt0).count());
+                    bake_root(hm.meta, std::move(hm.mesh), r0, lanes[0]);
                 }
                 if (tprof)
                     busy_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - b0).count();

@@ -21,6 +21,55 @@
 
 namespace adacpp {
 
+// Bake one tessellated root to metres and add it to `lane`. Returns the triangles added. `rr` carries
+// the root's colour, transforms and names (its faces are not read).
+inline long step_bake_mesh(adacpp::step::Resolver &r, const ngeom::NgeomRoot &rr, ngeom::TessMesh &&tm,
+                           adacpp::glb::GlbSpillWriter &lane) {
+    if (tm.indices.empty())
+        return 0;
+    const long ntri = (long) (tm.indices.size() / 3); // before the move below empties it
+    adacpp::glb::GlbSolid gs;
+    gs.positions = std::move(tm.positions);
+    gs.indices = std::move(tm.indices);
+    gs.color = {rr.cr, rr.cg, rr.cb, rr.ca};
+    gs.transforms = rr.transforms;
+    gs.id = rr.id;
+    if (!rr.instance_paths.empty() && !rr.instance_paths[0].empty())
+        gs.product_name = rr.instance_paths[0].back().second;
+    gs.instance_paths = rr.instance_paths;
+    // file length unit -> metres (the viewer's assumption); rotation is unitless.
+    const double usc = r.unit_scale();
+    if (usc != 1.0) {
+        const float s = (float) usc;
+        for (float &p : gs.positions)
+            p *= s;
+        for (auto &M : gs.transforms) {
+            M[12] *= s;
+            M[13] *= s;
+            M[14] *= s;
+        }
+    }
+    lane.add(gs); // spilled to disk immediately
+    return ntri;
+}
+
+// Resolve one root solid, tessellate it, bake it to metres and add it to `lane`. Returns the triangles
+// added (0 for an empty or unresolvable root). The per-solid body of step_to_glb_single, shared with
+// the sharded browser path (step_glb_shard.h).
+inline long step_bake_root_single(adacpp::step::Resolver &r, long sid, const ngeom::TessParams &tp,
+                                  adacpp::glb::GlbSpillWriter &lane) {
+    using namespace adacpp::ngeom;
+    long ntri = 0;
+    NgeomRoot root = r.resolve_root(sid);
+    if (!root.id.empty()) {
+        NgeomDoc one;
+        one.roots.push_back(std::move(root));
+        ntri = step_bake_mesh(r, one.roots[0], tessellate_doc(one, tp), lane);
+    }
+    r.clear_geom_cache();
+    return ntri;
+}
+
 // Returns the number of triangles written, or -1 on I/O error (bad input file or unwritable output).
 inline long step_to_glb_single(const std::string &in_path, const std::string &out_path, const std::string &spill_dir,
                                double deflection, double angular_deg, bool meshopt) {
@@ -39,42 +88,8 @@ inline long step_to_glb_single(const std::string &in_path, const std::string &ou
 
     adacpp::glb::GlbSpillWriter lane(spill_dir, 0);
     long ntri = 0;
-    for (long sid : idx.lists.roots) {
-        NgeomRoot root = r.resolve_root(sid);
-        if (!root.id.empty()) {
-            NgeomDoc one;
-            one.roots.push_back(std::move(root));
-            TessMesh tm = tessellate_doc(one, tp);
-            if (!tm.indices.empty()) {
-                const long solid_tris = (long) (tm.indices.size() / 3); // before the move below empties it
-                const NgeomRoot &rr = one.roots[0];
-                adacpp::glb::GlbSolid gs;
-                gs.positions = std::move(tm.positions);
-                gs.indices = std::move(tm.indices);
-                gs.color = {rr.cr, rr.cg, rr.cb, rr.ca};
-                gs.transforms = rr.transforms;
-                gs.id = rr.id;
-                if (!rr.instance_paths.empty() && !rr.instance_paths[0].empty())
-                    gs.product_name = rr.instance_paths[0].back().second;
-                gs.instance_paths = rr.instance_paths;
-                // file length unit -> metres (the viewer's assumption); rotation is unitless.
-                const double usc = r.unit_scale();
-                if (usc != 1.0) {
-                    const float s = (float) usc;
-                    for (float &p : gs.positions)
-                        p *= s;
-                    for (auto &M : gs.transforms) {
-                        M[12] *= s;
-                        M[13] *= s;
-                        M[14] *= s;
-                    }
-                }
-                lane.add(gs); // spilled to disk immediately
-                ntri += solid_tris;
-            }
-        }
-        r.clear_geom_cache();
-    }
+    for (long sid : idx.lists.roots)
+        ntri += step_bake_root_single(r, sid, tp, lane);
     lane.flush();
 
     const std::string ada_ext = adacpp::ada_ext::AdaDesignAndAnalysisExtension{}.to_json();

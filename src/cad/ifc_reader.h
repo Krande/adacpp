@@ -106,13 +106,17 @@ public:
         // subtype) refs an IfcProductDefinitionShape. Resolving by representation — instead of the
         // old cheap name allowlist, which missed subtypes like IfcSanitaryTerminal / MEP / furniture
         // terminals — catches every product the ifcopenshell reader would, with no schema.
-        build_rel_maps();             // populate openings_ so opening elements are excluded (they cut their host)
+        build_rel_maps(); // populate openings_ so opening elements are excluded (they cut their host)
+        if (idx_.has_types())
+            return proxy_roots_typed();
         std::unordered_set<long> pds; // IfcProductDefinitionShape ids
         std::string scratch;
         for (long id : idx_.ids)
             if (iequals(type_of(id, scratch), "IFCPRODUCTDEFINITIONSHAPE"))
                 pds.insert(id);
         std::vector<long> roots;
+        std::string stmt_scratch;
+        Instance probe;
         for (long id : idx_.ids) {
             if (openings_.count(id))
                 continue; // an IfcOpeningElement — subtracted from its host, not a standalone product
@@ -121,11 +125,117 @@ public:
                 roots.push_back(id);
                 continue;
             }
-            const Instance *in = inst(id);
-            if (in && in->args.size() > 6 && in->args[6].is_ref() && pds.count(in->args[6].i))
+            if (t.empty() || is_never_product_type(t))
+                continue; // complex instance, or a geometry/topology entity: not an IfcProduct
+            // Parse into a scratch Instance, NOT inst(): the cache would keep every statement this scan
+            // touches -- on a 1 GB IFC that held ~9 GB of parsed geometry after the loop, freed only
+            // product by product during the stream.
+            std::string_view stmt = idx_.statement_bytes(id, stmt_scratch);
+            if (stmt.empty())
+                continue;
+            probe = Instance{}; // views into stmt_scratch (or the in-memory source), used right here
+            if (adacpp::step::parse_statement(stmt, probe) && probe.args.size() > 6 && probe.args[6].is_ref() &&
+                pds.count(probe.args[6].i))
                 roots.push_back(id);
         }
         return roots;
+    }
+
+    // proxy_roots over the scan's type table: one verdict per entity TYPE instead of per statement, and
+    // a type whose first parsed instance has no Representation slot (<= 6 attributes; every instance of
+    // a type has the same attribute count) is never parsed again. Same products, same order.
+    std::vector<long> proxy_roots_typed() {
+        const auto &names = idx_.type_names;
+        const auto &types = idx_.types;
+        enum : uint8_t { UNKNOWN, PRODUCT, NEVER, PROBE };
+        std::vector<uint8_t> verdict(names.size(), UNKNOWN);
+        uint16_t pds_code = 0;
+        for (size_t c = 1; c < names.size(); ++c)
+            if (iequals(names[c], "IFCPRODUCTDEFINITIONSHAPE"))
+                pds_code = (uint16_t) c;
+        std::unordered_set<long> pds; // IfcProductDefinitionShape ids
+        if (pds_code)
+            for (size_t i = 0; i < types.size(); ++i)
+                if (types[i] == pds_code)
+                    pds.insert(idx_.ids[i]);
+        std::vector<long> roots;
+        std::string stmt_scratch;
+        Instance probe;
+        for (size_t i = 0; i < types.size(); ++i) {
+            const long id = idx_.ids[i];
+            uint8_t &v = verdict[types[i]];
+            if (v == UNKNOWN) {
+                const std::string &t = names[types[i]];
+                v = t.empty() || is_never_product_type(t) ? NEVER : is_product_type(t) ? PRODUCT : PROBE;
+            }
+            if (v == NEVER || openings_.count(id))
+                continue;
+            if (v == PRODUCT) {
+                roots.push_back(id);
+                continue;
+            }
+            std::string_view stmt = idx_.statement_bytes(id, stmt_scratch);
+            probe = Instance{}; // views into stmt_scratch (or the in-memory source), used right here
+            if (stmt.empty() || !adacpp::step::parse_statement(stmt, probe))
+                continue;
+            if (probe.args.size() <= 6) {
+                v = NEVER;
+                continue;
+            }
+            if (probe.args[6].is_ref() && pds.count(probe.args[6].i))
+                roots.push_back(id);
+        }
+        return roots;
+    }
+
+    // Entity types that are never an IfcProduct and make up the bulk of a large file (points, loops,
+    // faces, directions, placements...): the product scan skips them without parsing.
+    static bool is_never_product_type(std::string_view t) {
+        static const char *kinds[] = {"IFCCARTESIANPOINT",
+                                      "IFCPOLYLOOP",
+                                      "IFCFACEOUTERBOUND",
+                                      "IFCFACEBOUND",
+                                      "IFCFACE",
+                                      "IFCDIRECTION",
+                                      "IFCAXIS2PLACEMENT3D",
+                                      "IFCAXIS2PLACEMENT2D",
+                                      "IFCLOCALPLACEMENT",
+                                      "IFCCARTESIANPOINTLIST3D",
+                                      "IFCCARTESIANPOINTLIST2D",
+                                      "IFCTRIANGULATEDFACESET",
+                                      "IFCPOLYGONALFACESET",
+                                      "IFCINDEXEDPOLYGONALFACE",
+                                      "IFCADVANCEDFACE",
+                                      "IFCORIENTEDEDGE",
+                                      "IFCEDGECURVE",
+                                      "IFCEDGELOOP",
+                                      "IFCVERTEXPOINT",
+                                      "IFCLINE",
+                                      "IFCVECTOR",
+                                      "IFCPOLYLINE",
+                                      "IFCCIRCLE",
+                                      "IFCPLANE",
+                                      "IFCBSPLINESURFACEWITHKNOTS",
+                                      "IFCBSPLINECURVEWITHKNOTS",
+                                      "IFCCLOSEDSHELL",
+                                      "IFCOPENSHELL",
+                                      "IFCFACETEDBREP",
+                                      "IFCADVANCEDBREP",
+                                      "IFCSTYLEDITEM",
+                                      "IFCPRESENTATIONSTYLEASSIGNMENT",
+                                      "IFCSURFACESTYLE",
+                                      "IFCSHAPEREPRESENTATION",
+                                      "IFCPRODUCTDEFINITIONSHAPE",
+                                      "IFCPROPERTYSINGLEVALUE",
+                                      "IFCRELDEFINESBYPROPERTIES",
+                                      "IFCPROPERTYSET",
+                                      "IFCMAPPEDITEM",
+                                      "IFCCARTESIANTRANSFORMATIONOPERATOR3D",
+                                      "IFCREPRESENTATIONMAP"};
+        for (const char *k : kinds)
+            if (iequals(t, k))
+                return true;
+        return false;
     }
 
     // The geometry-bearing IfcElement subtypes (cheap type-name test — avoids parsing every entity on
@@ -513,6 +623,7 @@ public:
     // product had no resolvable advanced-brep (skipped by the caller).
     NgeomRoot resolve_product(long pid) {
         NgeomRoot root;
+        face_seen_ = 0;
         solid_src_ = 0;
         mixed_ = false;
         const Instance *p = inst(pid);
@@ -566,13 +677,18 @@ public:
                 continue; // 2D reps are never rendered in 3D
             if (has_body && is_axis(id))
                 continue; // a body exists -> the Axis is only a reference line, skip it
-            for (const Value &item : sr->args[3].items) {
-                if (!item.is_ref())
-                    continue;
-                item_ids.push_back(item.i);
-                resolve_item(item.i, root);
-            }
+            for (const Value &item : sr->args[3].items)
+                if (item.is_ref())
+                    item_ids.push_back(item.i);
         }
+        // Resolve only after collecting: resolve_item may drop cache_ mid-shell (enable_cache_bounding,
+        // every 1024 faces), which frees `pds`, every `sr` and `p` itself -- so nothing parsed above is
+        // touched again; `p` is looked up anew below.
+        for (long iid : item_ids)
+            resolve_item(iid, root);
+        p = inst(pid);
+        if (!p)
+            return root;
         // Presentation colour (IfcStyledItem -> IfcSurfaceStyle -> IfcColourRgb) — keyed on the rep
         // item id, so it rides the same StepRootMeta.has_color/color rails the STEP path already uses.
         build_colour_map();
@@ -629,10 +745,12 @@ public:
                     long bid = op ? first_body_item(opid) : 0;
                     if (!bid)
                         continue;
+                    // The opening's placement BEFORE its solid resolves: that may drop cache_ (see above).
+                    const std::array<float, 16> op_place = object_placement(ref_arg(*op, 5));
                     SolidItemN cut = resolve_solid_item(bid);
                     if (!solid_ok(cut))
                         continue;
-                    std::array<float, 16> rel = mat_mul(host_inv, object_placement(ref_arg(*op, 5)));
+                    std::array<float, 16> rel = mat_mul(host_inv, op_place);
                     if (!xform_solid_item(cut, rel))
                         continue;
                     auto bn = std::make_shared<BooleanN>();
@@ -655,6 +773,9 @@ public:
         // Compose the product's world placement (IfcLocalPlacement chain) onto every instance — the
         // geometry rep is in the element's local frame; ObjectPlacement positions it in the world.
         if (!root.faces.empty() || root.extrusion || root.revolve || root.boolean) {
+            p = inst(pid); // the openings above may have dropped cache_
+            if (!p)
+                return root;
             std::array<float, 16> objp = object_placement(ref_arg(*p, 5)); // ObjectPlacement = arg 5
             if (!is_identity(objp)) {
                 if (root.transforms.empty())
@@ -797,6 +918,7 @@ public:
     void clear_cache() {
         cache_.clear();
         surf_cache_.clear();
+        recent_.clear();
     }
 
     // Bound cache_ MID-product for a huge single-product shell: drop the parsed Part-21 statements
@@ -808,6 +930,35 @@ public:
     // product. A no-op for products under 1024 faces (the mid-shell clear never fires).
     void enable_cache_bounding() {
         bound_cache_ = true;
+    }
+
+    // Build only faces [lo, hi) of the next resolve_product's shells and polygonal face sets (counted in
+    // resolve order across all its items). The sharded browser path splits ONE huge product across
+    // workers this way; see IfcGlbShard. root_faces_seen() reports the count the last resolve walked,
+    // which equals the product's face count when every face came through this path (the shard's
+    // prepare() only splits such products).
+    void set_face_window(size_t lo, size_t hi) {
+        face_lo_ = lo;
+        face_hi_ = hi;
+    }
+    void clear_face_window() {
+        face_lo_ = 0;
+        face_hi_ = (size_t) -1;
+    }
+    size_t root_faces_seen() const {
+        return face_seen_;
+    }
+    // The face count of product `pid` when it can be split by face range -- a pure face-set body whose
+    // every face comes through the windowed path (shells, polygonal face sets): no procedural item, no
+    // triangulated face set, no opening to subtract, not a mixed product -- else 0. Builds no faces.
+    size_t splittable_faces(long pid) {
+        set_face_window(0, 0);
+        NgeomRoot r = resolve_product(pid);
+        clear_face_window();
+        clear_cache();
+        const bool pure = !mixed_ && !voids_.count(pid) && r.faces.empty() && !r.extrusion && !r.revolve && !r.sweep &&
+                          !r.boolean && r.polylines.empty();
+        return pure ? face_seen_ : 0;
     }
 
     // Build the expensive, read-only, cross-product metadata (colour + spatial-hierarchy maps) ONCE on
@@ -829,6 +980,29 @@ public:
         openings_ = m.openings_;
         rel_maps_built_ = m.rel_maps_built_;
         angle_scale_ = m.angle_scale_;
+    }
+    // The same maps through a file (see the STEP Resolver's save_metadata): for workers that share no
+    // memory with the master.
+    void save_metadata(adacpp::step::binio::Out &o) const {
+        o.map(colour_map_);
+        o.pod(colour_map_built_);
+        o.map(contained_of_);
+        o.map(parent_of_);
+        o.map(voids_);
+        o.set(openings_);
+        o.pod(rel_maps_built_);
+        o.pod(angle_scale_);
+    }
+    bool load_metadata(adacpp::step::binio::In &in) {
+        in.map(colour_map_);
+        in.pod(colour_map_built_);
+        in.map(contained_of_);
+        in.map(parent_of_);
+        in.map(voids_);
+        in.set(openings_);
+        in.pod(rel_maps_built_);
+        in.pod(angle_scale_);
+        return (bool) in;
     }
 
     // Cheap LPT cost proxy for a product: the face count of its body representation's brep items
@@ -863,8 +1037,29 @@ public:
 
 private:
     // Face count of one representation item (brep -> shell face list; procedural -> small constant).
-    size_t item_face_count(const Instance *it) {
+    size_t item_face_count(const Instance *it, int depth = 0) {
         std::string_view t = it->type;
+        if (depth < 4 && iequals(t, "IFCMAPPEDITEM")) {
+            // MappingSource (IfcRepresentationMap) -> MappedRepresentation (arg 1) -> Items (arg 3): a
+            // mapped brep costs what the brep costs -- repeated geometry is often written this way.
+            const Instance *rm = inst(ref_arg(*it, 0));
+            const Instance *sr = rm ? inst(ref_arg(*rm, 1)) : nullptr;
+            size_t n = 0;
+            if (sr && sr->args.size() > 3 && sr->args[3].is_list())
+                for (const Value &v : sr->args[3].items)
+                    if (const Instance *sub = v.is_ref() ? inst(v.i) : nullptr)
+                        n += item_face_count(sub, depth + 1);
+            return n ? n : 4;
+        }
+        if (depth < 4 && (iequals(t, "IFCBOOLEANRESULT") || iequals(t, "IFCBOOLEANCLIPPINGRESULT"))) {
+            const long a = ref_arg(*it, 1), b = ref_arg(*it, 2);
+            size_t n = 0;
+            if (const Instance *op = inst(a))
+                n += item_face_count(op, depth + 1);
+            if (const Instance *op = inst(b))
+                n += item_face_count(op, depth + 1);
+            return n ? n : 4;
+        }
         if (iequals(t, "IFCADVANCEDBREP") || iequals(t, "IFCFACETEDBREP")) {
             const Instance *sh = inst(ref_arg(*it, 0));
             return (sh && !sh->args.empty() && sh->args[0].is_list()) ? sh->args[0].items.size() : 1;
@@ -885,6 +1080,8 @@ private:
     std::unordered_map<long, std::pair<std::string, Instance>> cache_;
     std::unordered_map<long, std::shared_ptr<Surface>> surf_cache_;
     bool bound_cache_ = false; // enable_cache_bounding(): drop cache_ mid-shell on huge products
+    size_t face_lo_ = 0, face_hi_ = (size_t) -1, face_seen_ = 0; // set_face_window
+    std::vector<long> recent_; // ids parsed while bounding is on, in order (iter_faces_bounded's marks)
     std::string pread_scratch_;
     long solid_src_ = 0;       // entity id of the one solid this product carries (mapped instances share it)
     bool mixed_ = false;       // product has >1 distinct solid / mixes brep+procedural -> skip (OCC)
@@ -912,11 +1109,25 @@ private:
             cache_.erase(id);
             return nullptr;
         }
+        if (bound_cache_)
+            recent_.push_back(id); // evictable by an enclosing iter_faces_bounded
         return &slot.second;
     }
     // Cheap type token of #id without a full parse.
     std::string_view type_of(long id, std::string &scratch) {
-        std::string_view s = idx_.statement_bytes(id, scratch);
+        if (idx_.has_types()) // recorded by the scan: no read at all
+            return idx_.type_name(id);
+        // The type token sits in the first few dozen bytes: read a short prefix, and fall back to the
+        // whole statement only when the token runs off its end. The metadata, product and unit scans
+        // call this for EVERY statement of the file.
+        std::string_view s = idx_.statement_prefix(id, 128, scratch);
+        std::string_view t = type_token(s);
+        if (t.empty() ? s.find('=') != std::string_view::npos : (size_t) (t.data() - s.data()) + t.size() < s.size())
+            return t; // a complex instance (no token), or a token the prefix ends after
+        s = idx_.statement_bytes(id, scratch);
+        return type_token(s);
+    }
+    static std::string_view type_token(std::string_view s) {
         size_t eq = s.find('=');
         if (eq == std::string_view::npos)
             return {};
@@ -2286,11 +2497,20 @@ private:
     // statements) every 1024 faces when bounding is on. Callers MUST copy the ids out first: the clear
     // frees the parent shell/faceset Instance, so iterating its arg list in place would use-after-free
     // (same hazard the STEP reader guards). Built geometry (surf_cache_) + persistent maps are kept.
+    // The drop evicts only what was parsed SINCE this loop started (recent_ past `mark`): the faces' own
+    // sub-entities. Everything parsed before -- the product, its representation, the shell, a mapped
+    // item, a boolean's first operand -- stays valid for the callers up the stack that still hold it.
     template <class Emit> void iter_faces_bounded(const std::vector<long> &face_ids, Emit emit) {
+        const size_t mark = recent_.size();
         for (size_t i = 0; i < face_ids.size(); ++i) {
-            emit(face_ids[i]);
-            if (bound_cache_ && (i & 1023u) == 1023u)
-                cache_.clear();
+            const size_t k = face_seen_++; // the face window (set_face_window) counts every face here
+            if (k >= face_lo_ && k < face_hi_)
+                emit(face_ids[i]);
+            if (bound_cache_ && (i & 1023u) == 1023u) {
+                for (size_t r = mark; r < recent_.size(); ++r)
+                    cache_.erase(recent_[r]);
+                recent_.resize(mark);
+            }
         }
     }
 
@@ -2419,6 +2639,10 @@ private:
             return;
         if (iequals(in->type, "IFCMAPPEDITEM")) {
             // (MappingSource=IfcRepresentationMap, MappingTarget=IfcCartesianTransformationOperator3D)
+            // Read everything needed from `in` / the map first: resolving an item may drop cache_ mid-shell
+            // (enable_cache_bounding), which frees them.
+            const long target = ref_arg(*in, 1);
+            std::vector<long> items;
             const Instance *rm = inst(ref_arg(*in, 0));
             if (rm && rm->args.size() > 1) {
                 // RepresentationMap.MappedRepresentation (arg 1) -> IfcShapeRepresentation.Items.
@@ -2426,10 +2650,12 @@ private:
                 if (sr && sr->args.size() > 3 && sr->args[3].is_list())
                     for (const Value &it : sr->args[3].items)
                         if (it.is_ref())
-                            resolve_item(it.i, root); // appends the brep faces (shared geometry)
+                            items.push_back(it.i);
             }
+            for (long iid : items)
+                resolve_item(iid, root); // appends the brep faces (shared geometry)
             // transform operator -> a world-placement matrix appended to root.transforms.
-            std::array<float, 16> M = op_matrix(ref_arg(*in, 1));
+            std::array<float, 16> M = op_matrix(target);
             root.transforms.push_back(M);
             return;
         }

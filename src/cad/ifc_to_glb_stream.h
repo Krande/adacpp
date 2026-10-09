@@ -18,6 +18,7 @@
 #include <chrono>
 #include <deque>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -29,11 +30,76 @@
 
 #include "../geom/neutral/ada_ext_schema.h"
 #include "../geom/neutral/ngeom_glb.h"
+#include "../geom/neutral/ngeom_profile.h"
 #include "../geom/neutral/ngeom_tessellate.h"
+#include "glb_shard_common.h"
+#include "huge_root_tess.h"
 #include "ifc_reader.h"
 #include "step_reader.h" // StreamIndex
 
 namespace adacpp {
+
+// Bake one tessellated product to metres and add it to `lane`. Returns true when it added triangles.
+// `rr` carries the product's colour, transforms and names (its faces are not read).
+inline bool ifc_bake_mesh(const ngeom::NgeomRoot &rr, ngeom::TessMesh &&tm, double usc,
+                          adacpp::glb::GlbSpillWriter &lane) {
+    using namespace adacpp::ngeom;
+    if (tm.indices.empty())
+        return false;
+    if (tm.mesh_type == MeshType::LINES)
+        return false; // curve-only body (alignment axis); GlbSolid is triangles-only
+    adacpp::glb::GlbSolid gs;
+    gs.positions = std::move(tm.positions);
+    gs.indices = std::move(tm.indices);
+    // Carry per-face clickable regions (relative to this product's index buffer) when captured --
+    // mirrors stream_step_to_glb. Capturing them in TessParams is not enough: the writer reads them
+    // off GlbSolid, so without this the flag would cost the serial face path and emit nothing.
+    gs.face_ranges.reserve(tm.face_ranges.size());
+    for (const auto &fr : tm.face_ranges)
+        gs.face_ranges.push_back({fr.first_index, fr.index_count, fr.face_id, fr.face_seq});
+    gs.color = {rr.cr, rr.cg, rr.cb, rr.ca}; // grey default when !has_color
+    gs.transforms = rr.transforms;
+    gs.id = rr.id;
+    if (!rr.instance_paths.empty() && !rr.instance_paths[0].empty())
+        gs.product_name = rr.instance_paths[0].back().second;
+    gs.instance_paths = rr.instance_paths;
+    if (usc != 1.0) {
+        const float s = (float) usc;
+        for (float &p : gs.positions)
+            p *= s;
+        for (auto &M : gs.transforms) {
+            M[12] *= s;
+            M[13] *= s;
+            M[14] *= s;
+        }
+    }
+    lane.add(gs);
+    return true;
+}
+
+// Resolve one product, tessellate it, bake it to metres and add it to `lane`. Returns true when the
+// product produced triangles. The per-product body of stream_ifc_to_glb, shared with the sharded
+// browser path (ifc_glb_shard.h) so both write the same solids.
+inline bool ifc_bake_product(adacpp::ifc_read::IfcResolver &r, long pid, const ngeom::TessParams &tpp, double usc,
+                             adacpp::glb::GlbSpillWriter &lane, adacpp::prof::StepProfiler *prof = nullptr) {
+    using namespace adacpp::ngeom;
+    NgeomRoot root = r.resolve_product(pid);
+    r.clear_cache(); // bounded memory: statement/surface caches don't grow across products
+    const size_t nfaces = root.faces.size();
+    NgeomDoc one;
+    one.roots.push_back(std::move(root));
+    const bool timed = prof && prof->timing();
+    std::chrono::steady_clock::time_point t0;
+    if (timed)
+        t0 = std::chrono::steady_clock::now();
+    TessMesh tm = tessellate_doc(one, tpp);
+    if (timed)
+        prof->solid_timed(pid, 0, nfaces, tm.indices.size() / 3,
+                          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    if (prof)
+        prof->solid(tm.indices.size() / 3);
+    return ifc_bake_mesh(one.roots[0], std::move(tm), usc, lane);
+}
 
 // `pipeline` / `face_regions` / `pin_boundary` mean exactly what they do on stream_step_to_glb, and
 // for the same reason: both converters feed the SAME neutral tessellator (TessParams) and the SAME
@@ -60,14 +126,18 @@ inline long stream_ifc_to_glb(const std::string &in_path, const std::string &out
                               const std::vector<std::string> &include_guids = {}) {
     using namespace adacpp::ngeom;
     adacpp::tune_malloc_for_streaming();
-    adacpp::ngeom::reset_tess_face_stats(); // count dropped faces (audit health flag)
+    adacpp::ngeom::reset_tess_face_stats();               // count dropped faces (audit health flag)
+    adacpp::prof::StepProfiler prof("stream_ifc_to_glb"); // ADACPP_STEP_PROFILE, same report as STEP's
     adacpp::step::StreamIndex idx = adacpp::step::StreamIndex::from_file(in_path);
     if (!idx.ok())
         return -1;
+    prof.phase("scan_index");
     // Master resolver: build the expensive read-only metadata once (workers share it, never rebuild).
     adacpp::ifc_read::IfcResolver master(idx);
     master.build_metadata();
+    prof.phase("metadata");
     std::vector<long> roots = master.proxy_roots();
+    prof.phase("proxy_roots");
     // Subset filter (see the contract above). Done here, before LPT ordering and before any worker
     // exists, so the whole pipeline downstream — cost model, huge-prefix detection, lane count —
     // sizes itself to the subset rather than to the file.
@@ -138,8 +208,15 @@ inline long stream_ifc_to_glb(const std::string &in_path, const std::string &out
         for (size_t i = 0; i < cost.size(); ++i)
             roots[i] = cost[i].second;
         const size_t fair_share = total / (size_t) nthreads;
-        while (n_huge < cost.size() && cost[n_huge].first >= HUGE_FACES && cost[n_huge].first >= fair_share)
+        // HEAVY products go through phase A too, one at a time: an IFC product of ~10k+ faces holds about
+        // 1 GB while it resolves and tessellates, so three of them concurrently in the pool took a 1 GB
+        // IFC to 3.0 GB at 3 threads -- more than a memory-capped worker has; serialised (each still on
+        // every thread, resolve included) it peaks at 1.06 GB in the same time. STEP solids are leaner
+        // (the same model as STEP: 1.4 GB) and its pool keeps them concurrent.
+        while (n_huge < cost.size() && cost[n_huge].first >= HUGE_FACES &&
+               (cost[n_huge].first >= fair_share || cost[n_huge].first >= shard::IFC_HEAVY_FACES))
             ++n_huge;
+        prof.phase("lpt_order");
     }
 
     // Spill dir: private mkdtemp (auto-removed) unless the caller supplied one.
@@ -172,44 +249,8 @@ inline long stream_ifc_to_glb(const std::string &in_path, const std::string &out
         // bake to metres + spill. Shared by the huge-prefix phase and the worker pool.
         auto process = [&](adacpp::ifc_read::IfcResolver &r, adacpp::glb::GlbSpillWriter &lane, size_t i,
                            const TessParams &tpp) {
-            NgeomRoot root = r.resolve_product(roots[i]);
-            r.clear_cache(); // bounded memory: statement/surface caches don't grow across products
-            NgeomDoc one;
-            one.roots.push_back(std::move(root));
-            TessMesh tm = tessellate_doc(one, tpp);
-            if (tm.indices.empty())
-                return;
-            if (tm.mesh_type == MeshType::LINES)
-                return; // curve-only body (alignment axis); GlbSolid is triangles-only
-            const NgeomRoot &rr = one.roots[0];
-            adacpp::glb::GlbSolid gs;
-            gs.positions = std::move(tm.positions);
-            gs.indices = std::move(tm.indices);
-            // Carry per-face clickable regions (relative to this product's index buffer) when
-            // captured — mirrors stream_step_to_glb. Capturing them in TessParams is not enough:
-            // the writer reads them off GlbSolid, so without this the flag would cost the serial
-            // face path and emit nothing.
-            gs.face_ranges.reserve(tm.face_ranges.size());
-            for (const auto &fr : tm.face_ranges)
-                gs.face_ranges.push_back({fr.first_index, fr.index_count, fr.face_id, fr.face_seq});
-            gs.color = {rr.cr, rr.cg, rr.cb, rr.ca}; // grey default when !has_color
-            gs.transforms = rr.transforms;
-            gs.id = rr.id;
-            if (!rr.instance_paths.empty() && !rr.instance_paths[0].empty())
-                gs.product_name = rr.instance_paths[0].back().second;
-            gs.instance_paths = rr.instance_paths;
-            if (usc != 1.0) {
-                const float s = (float) usc;
-                for (float &p : gs.positions)
-                    p *= s;
-                for (auto &M : gs.transforms) {
-                    M[12] *= s;
-                    M[13] *= s;
-                    M[14] *= s;
-                }
-            }
-            lane.add(gs);
-            nwritten.fetch_add(1, std::memory_order_relaxed);
+            if (ifc_bake_product(r, roots[i], tpp, usc, lane, &prof))
+                nwritten.fetch_add(1, std::memory_order_relaxed);
         };
 
         // Phase A — the huge prefix, one product at a time with every thread on its faces.
@@ -222,8 +263,33 @@ inline long stream_ifc_to_glb(const std::string &in_path, const std::string &out
             // parallel), so bound cache_ mid-shell — without it a single 61k-face IFC product piles
             // parsed statements to ~GB during its one resolve, same failure the STEP glb/mesh paths hit.
             r0.enable_cache_bounding();
-            for (size_t i = 0; i < n_huge; ++i)
-                process(r0, lanes[0], i, tph);
+            // A splittable product (a pure face-set body: IfcResolver::splittable_faces) is resolved AND
+            // tessellated by face slices on every thread, each with its own resolver
+            // (tessellate_root_by_faces); the rest keep the one-resolver path above.
+            std::vector<std::unique_ptr<adacpp::ifc_read::IfcResolver>> rs;
+            for (size_t i = 0; i < n_huge; ++i) {
+                const size_t nf = r0.splittable_faces(roots[i]);
+                if (nf < 64) {
+                    process(r0, lanes[0], i, tph);
+                    continue;
+                }
+                if (rs.empty())
+                    for (int t = 0; t < nthreads; ++t) {
+                        rs.push_back(std::make_unique<adacpp::ifc_read::IfcResolver>(idx));
+                        rs.back()->copy_metadata_from(master);
+                    }
+                HugeRootMesh hm = tessellate_root_by_faces(nthreads, nf, tp, [&](int t, size_t lo, size_t hi) {
+                    adacpp::ifc_read::IfcResolver &rt = *rs[(size_t) t];
+                    rt.set_face_window(lo, hi);
+                    NgeomRoot slice = rt.resolve_product(roots[i]);
+                    rt.clear_face_window();
+                    rt.clear_cache();
+                    return slice;
+                });
+                prof.solid(hm.mesh.indices.size() / 3);
+                if (ifc_bake_mesh(hm.meta, std::move(hm.mesh), usc, lanes[0]))
+                    nwritten.fetch_add(1, std::memory_order_relaxed);
+            }
             adacpp::mem_trim();
         }
         // Phase B — each worker pulls remaining products off the shared counter, resolving with its OWN
@@ -249,12 +315,14 @@ inline long stream_ifc_to_glb(const std::string &in_path, const std::string &out
         worker(0);
         for (std::thread &th : pool)
             th.join();
+        prof.phase("stream(resolve+tess+spill)");
 
         std::vector<adacpp::glb::GlbSpillWriter *> lane_ptrs;
         for (adacpp::glb::GlbSpillWriter &l : lanes)
             lane_ptrs.push_back(&l);
         const std::string ada_ext = adacpp::ada_ext::AdaDesignAndAnalysisExtension{}.to_json();
         ok = adacpp::glb::write_glb_merged(out_path, lane_ptrs, ada_ext, meshopt);
+        prof.phase(meshopt ? "write_glb_merged(meshopt)" : "write_glb_merged");
     }
     if (remove_after)
         ::rmdir(spill.c_str());

@@ -18,13 +18,15 @@
 // explicit one (the C++ default mkdtemp("/tmp/...") isn't reliable under WASMFS).
 //
 // Single-threaded (stream_ifc_to_glb uses threads=1), so this links WITHOUT -pthread and runs on any
-// page (no SharedArrayBuffer / cross-origin isolation required).
+// page (no SharedArrayBuffer / cross-origin isolation required). Several cores come from several
+// workers instead: `IfcGlbShard` + `mergeGlbLanes` -- see ifc_glb_shard.h.
 
 #include <string>
 
 #include <emscripten/bind.h>
 
 #include "ifc_clash.h"
+#include "ifc_glb_shard.h"
 #include "ifc_member_scan.h"
 #include "ifc_to_glb_stream.h"
 
@@ -72,4 +74,18 @@ EMSCRIPTEN_BINDINGS(adacpp_ifc_glb) {
     emscripten::function("ifcToGlb", &ifc_to_glb);
     emscripten::function("scanMembers", &ifc_scan_members);
     emscripten::function("clashJoints", &ifc_clash_joints);
+    // One conversion over N workers (no SharedArrayBuffer): see ifc_glb_shard.h for the protocol.
+    emscripten::register_vector<long>("VectorLong");
+    emscripten::class_<adacpp::IfcGlbShard>("IfcGlbShard")
+        .constructor<const std::string &, const std::string &, double, double>()
+        .class_function("prepare", &adacpp::IfcGlbShard::prepare)
+        .function("rootCount", &adacpp::IfcGlbShard::root_count)
+        .function("planBatches", &adacpp::IfcGlbShard::plan_batches)
+        .function("process", &adacpp::IfcGlbShard::process)
+        .function("hugeCount", &adacpp::IfcGlbShard::huge_count)
+        .function("hugeFaces", &adacpp::IfcGlbShard::huge_faces)
+        .function("processHuge", &adacpp::IfcGlbShard::process_huge)
+        .function("assembleHuge", &adacpp::IfcGlbShard::assemble_huge)
+        .function("persist", &adacpp::IfcGlbShard::persist);
+    emscripten::function("mergeGlbLanes", &adacpp::merge_ifc_glb_lanes);
 }
