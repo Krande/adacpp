@@ -45,7 +45,7 @@ struct GlbMember {
 };
 
 struct GlbContactResult {
-    std::vector<GlbMember> members;    //!< in first-appearance order; contact indices refer to this
+    std::vector<GlbMember> members; //!< in first-appearance order; contact indices refer to this
     ConvexContactResult contacts;
 };
 
