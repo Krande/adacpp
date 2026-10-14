@@ -73,7 +73,11 @@ def _write_glb(nodes, hierarchy, scene_roots=None) -> bytes:
             {"bufferView": view(idx.tobytes()), "componentType": 5125, "count": len(idx), "type": "SCALAR"}
         )
         gltf["meshes"].append(
-            {"primitives": [{"attributes": {"POSITION": len(gltf["accessors"]) - 2}, "indices": len(gltf["accessors"]) - 1}]}
+            {
+                "primitives": [
+                    {"attributes": {"POSITION": len(gltf["accessors"]) - 2}, "indices": len(gltf["accessors"]) - 1}
+                ]
+            }
         )
         gltf["nodes"].append({"name": name, "mesh": len(gltf["meshes"]) - 1, **node_extra})
         extras[f"draw_ranges_{name}"] = ranges
@@ -144,7 +148,9 @@ def test_a_y_up_glb_comes_back_in_the_z_up_model_frame():
 
 
 def test_a_node_matrix_is_applied_like_trs():
-    trs = clash.glb_members(_write_glb([("n", {"1": _box((0, 0, 0), (1, 1, 1))}, {"translation": [5, 6, 7]})], {"1": "a"}))
+    trs = clash.glb_members(
+        _write_glb([("n", {"1": _box((0, 0, 0), (1, 1, 1))}, {"translation": [5, 6, 7]})], {"1": "a"})
+    )
     mat = clash.glb_members(
         _write_glb(
             [("n", {"1": _box((0, 0, 0), (1, 1, 1))}, {"matrix": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 6, 7, 1]})],
