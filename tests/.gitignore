@@ -2,3 +2,6 @@
 *.glb
 *.gltf
 *.msh
+# Frozen inputs, not test output: the clash tests hold the browser and the worker to one answer on
+# these exact bytes (tools/gen_clash_glb_case.py).
+!fixtures/clash/*.glb

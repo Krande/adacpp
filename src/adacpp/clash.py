@@ -57,6 +57,41 @@ def find_convex_contacts(
     )
 
 
+def find_glb_contacts(
+    glb,
+    security_margin: float = DEFAULT_SECURITY_MARGIN,
+    min_contact_area: float = DEFAULT_MIN_CONTACT_AREA,
+    line_contact_thickness: float = DEFAULT_LINE_CONTACT_THICKNESS,
+    up_axis: str = "z",
+) -> dict:
+    """The same check on the members of a viewer GLB -- ``glb`` is the GLB's bytes or a path to it.
+
+    Each element of the GLB's ``id_hierarchy`` / ``draw_ranges`` tables is one member (keyed by its
+    element id; names may repeat), hulled from the vertices its triangles use. The result is
+    :func:`find_convex_contacts`'s plus ``members``: ``[(element id, name)]``, which the contact
+    indices refer to. Coordinates are the Z-up model frame; ``up_axis`` is the GLB's own ("z" for
+    adapy's GLBs, "y" for a glTF-convention mesh delivery). The browser runs the same C++ on the same
+    bytes through the ``adacpp_clash`` wasm module (``findGlbContacts``).
+    """
+    if not isinstance(glb, (bytes, bytearray, memoryview)):
+        glb = str(glb)
+    elif not isinstance(glb, bytes):
+        glb = bytes(glb)
+    return _clash.find_glb_contacts(
+        glb, float(security_margin), float(min_contact_area), float(line_contact_thickness), str(up_axis)
+    )
+
+
+def glb_members(glb, up_axis: str = "z") -> list[tuple[str, str, np.ndarray]]:
+    """The members of a viewer GLB as ``[(element id, name, vertices (n, 3))]`` in the Z-up model
+    frame -- exactly what :func:`find_glb_contacts` measures."""
+    if not isinstance(glb, (bytes, bytearray, memoryview)):
+        glb = str(glb)
+    elif not isinstance(glb, bytes):
+        glb = bytes(glb)
+    return [tuple(m) for m in _clash.glb_members(glb, str(up_axis))]
+
+
 def convex_hull(points) -> tuple[np.ndarray, np.ndarray]:
     """The convex hull of ``points`` ``(n, 3)``: ``(vertices (m, 3), triangles (t, 3) uint32)``,
     outward-wound. Both are empty when the points span no volume."""
@@ -84,5 +119,7 @@ __all__ = [
     "candidate_pairs",
     "convex_hull",
     "find_convex_contacts",
+    "find_glb_contacts",
+    "glb_members",
     "patch_area",
 ]

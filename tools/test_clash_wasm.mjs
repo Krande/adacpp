@@ -6,6 +6,7 @@
 // Usage: node tools/test_clash_wasm.mjs <adacpp_clash.js> <convex_contact_cases.json>
 
 import {readFileSync} from "node:fs";
+import {dirname, join} from "node:path";
 import {pathToFileURL} from "node:url";
 
 const [modPath, casesPath] = process.argv.slice(2);
@@ -99,6 +100,43 @@ for (const [hull, tol, areaRtol] of [[ false, TOL, AREA_RTOL ], [ true, TOL, ARE
             check(`${tag} patches`, pd <= tol, `max |diff| ${pd}`);
         });
     }
+
+// A real viewer GLB (glb_case.glb, next to the cases file) through findGlbContacts: the record was
+// made by the nanobind module on the same bytes (tools/gen_clash_glb_case.py), so this is the browser
+// and the worker held to one answer.
+{
+    const dir = dirname(casesPath);
+    const glbCase = JSON.parse(readFileSync(join(dir, "glb_case.json"), "utf-8"));
+    const glb = new Uint8Array(readFileSync(join(dir, glbCase.glb)));
+    console.log(`viewer GLB ${glbCase.glb}`);
+    const r = Module.findGlbContacts(glb, glbCase.security_margin, glbCase.min_contact_area,
+                                     glbCase.line_contact_thickness, "z");
+    if (r.error) {
+        check("findGlbContacts runs", false, r.error);
+    } else {
+        const members = r.memberIds.map((id, k) => [id, r.memberNames[k]]);
+        check("members", JSON.stringify(members) === JSON.stringify(glbCase.members), JSON.stringify(members));
+        check("contact count", r.penetrationDepth.length === glbCase.contacts.length,
+              `${r.penetrationDepth.length} vs ${glbCase.contacts.length}`);
+        let worst = 0, pairsOk = true;
+        glbCase.contacts.forEach((e, q) => {
+            pairsOk &&= r.pairs[2 * q] === e.pair[0] && r.pairs[2 * q + 1] === e.pair[1];
+            worst = Math.max(worst, maxDiff(r.near1, 3 * q, e.near1), maxDiff(r.near2, 3 * q, e.near2),
+                             maxDiff(r.normal, 3 * q, e.normal), Math.abs(r.penetrationDepth[q] - e.penetration_depth),
+                             Math.abs(r.contactArea[q] - e.contact_area) / e.contact_area);
+            const p = r.patchOffsets[q];
+            const v0 = r.patchPointOffsets[p], v1 = r.patchPointOffsets[p + 1];
+            if (v1 - v0 !== e.patches[0].points1.length)
+                worst = Infinity;
+            else
+                worst = Math.max(worst, maxDiff(r.patchPoints1, 3 * v0, e.patches[0].points1.flat()));
+        });
+        check("same pairs in the same order", pairsOk);
+        check("same contacts and patches", worst <= TOL, `max |diff| ${worst}`);
+    }
+    const notGlb = Module.findGlbContacts(new Uint8Array([ 1, 2, 3 ]), 0.01, 1e-6, 1e-3, "z");
+    check("bytes that are not a GLB are an error", typeof notGlb.error === "string", notGlb.error);
+}
 
 // Malformed input is an {error}, not a trap.
 const bad = Module.findConvexContacts(new Float64Array(9), new Uint32Array([ 0, 3 ]), new Uint32Array([ 0, 1, 5 ]),

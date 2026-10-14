@@ -103,6 +103,13 @@ if(BUILD_CLASH_WASM)
     add_executable(
         adacpp_clash_wasm
         ${CMAKE_SOURCE_DIR}/src/clash/clash_wasm.cpp
+        # findGlbContacts reads the viewer GLB: EXT_meshopt_compression decode + nlohmann json.
+        ${CMAKE_SOURCE_DIR}/src/geom/neutral/ngeom_meshopt.cpp
+        ${MESHOPT_SOURCES}
+    )
+    target_include_directories(
+        adacpp_clash_wasm
+        PRIVATE $ENV{CONDA_PREFIX}/include
     )
     target_link_libraries(adacpp_clash_wasm PRIVATE adacpp_clash)
     target_compile_options(adacpp_clash_wasm PRIVATE -fwasm-exceptions)

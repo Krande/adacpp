@@ -23,7 +23,7 @@ reference for what each argument means.
 | `adacpp_glb_diff` | **GLB diff** (element-level, with removed-element overlay) | `diffGlb` |
 | `adacpp_extrude` | **Prismatic extrusion** (section table + per-instance frames -> vertex/index buffers) | `expandBeamSolids` |
 | `adacpp_fea` | **FEA results**: load combinations, derived components and envelopes over baked AFBL/AFEL strides | `combineField`, `envelopeField`, `readBlobHeader`, `version` + [OPFS](#opfs) |
-| `adacpp_clash` | **Convex-contact clash detection** (coal: which convex member meshes touch or overlap, with contact points, normal, depth and patch area) | `findConvexContacts` |
+| `adacpp_clash` | **Convex-contact clash detection** (coal: which members touch or overlap, with contact points, normal, depth, patch area and patch polygon) | `findGlbContacts`, `findConvexContacts` |
 
 The `*_glb`, `brep_writer` and `fea` modules do their file I/O through emscripten's WASMFS (`mod.FS`):
 in-heap by default, and on an OPFS mount in a **dedicated Web Worker**, so multi-GB inputs stream
@@ -170,10 +170,29 @@ report the same contacts. coal measures CONVEX solids, so by default (`hull = tr
 hull is taken here from its vertices -- pass any tessellation, or just the vertices with empty triangle
 ranges. All the meshes go in as one flat soup:
 
+The usual entry point is the viewer GLB itself: the bytes the viewer loaded. Each element of the
+GLB's `id_hierarchy` / `draw_ranges` tables is one member (keyed by element id; an element split over
+several materials is one member), hulled and measured in the Z-up model frame. The worker runs the same
+C++ on the same bytes (`adacpp.clash.find_glb_contacts`), so both report the same contacts.
+
 ```ts
 import createAdacppClash from "./adacpp_clash.js";
 
 const clash = await createAdacppClash({ locateFile: (p) => `/wasm/${p}` });
+
+const r = clash.findGlbContacts(
+  glbBytes,          // Uint8Array: the viewer GLB
+  0.01, 1e-6, 1e-3,  // securityMargin, minContactArea, lineContactThickness
+  "z",               // upAxis: the GLB's own ("z" for adapy's GLBs, "y" for a glTF-convention delivery)
+);
+if (r.error) throw new Error(r.error);
+// r.memberIds / r.memberNames (string arrays): the members the contact indices in r.pairs refer to.
+// Everything else is as for findConvexContacts below.
+```
+
+The same check on meshes you assemble yourself:
+
+```ts
 
 // Mesh k = vertices [vOff[k], vOff[k+1]) and triangles [tOff[k], tOff[k+1]); triangle indices are
 // LOCAL to their mesh. Both offset arrays have one more entry than there are meshes.
