@@ -1,0 +1,106 @@
+// Convex-contact clash detection -- which members touch or overlap, and how.
+//
+// WHAT IT ANSWERS. For a set of CONVEX meshes (a member's convex hull), every pair that touches or
+// overlaps within a security margin, with the contact a connection is sized from: the nearest point on
+// each shape, the contact normal, the signed penetration depth and the contact-patch area. The geometry
+// is coal's (github.com/coal-library/coal): GJK/EPA on the two convex polytopes and coal's
+// contact-patch computation, compiled from coal's own sources (cmake/deps_coal.cmake) so the numbers
+// are coal's on every target -- native, pyodide and the standalone browser module.
+//
+// WHY IN C++. The same check runs on a worker and in a browser, and the two have to report the same
+// contacts. Compiled once and called from both, that holds by construction; a browser check also
+// needs no Python and no coal wheel. The reference it is held to is coal's own Python bindings plus a
+// numpy/scipy patch-area measure (tools/gen_clash_cases.py), which the parity fixture records.
+//
+// This header is coal-free on purpose: coal, Eigen and coal's generated headers stay inside
+// convex_contact.cpp, so a consumer (the nanobind module, the embind module) never sees them.
+
+#ifndef ADACPP_CLASH_CONVEX_CONTACT_H
+#define ADACPP_CLASH_CONVEX_CONTACT_H
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace adacpp::clash {
+
+//: The defaults adapy's convex-contact checker advertises.
+constexpr double DEFAULT_SECURITY_MARGIN = 0.01;
+constexpr double DEFAULT_MIN_CONTACT_AREA = 1e-6;
+constexpr double DEFAULT_LINE_CONTACT_THICKNESS = 1e-3;
+
+struct ConvexContactOptions {
+    //! Shapes closer than this count as touching (coal's `CollisionRequest::security_margin`).
+    double security_margin = DEFAULT_SECURITY_MARGIN;
+    //! Contacts with a smaller patch area are dropped (a corner grazing a face).
+    double min_contact_area = DEFAULT_MIN_CONTACT_AREA;
+    //! Width given to a line (edge-on-face) contact, so a real touching edge has a nonzero area.
+    double line_contact_thickness = DEFAULT_LINE_CONTACT_THICKNESS;
+};
+
+/** One convex mesh, borrowed: `n_vertices` xyz triples and `n_triangles` index triples into them.
+ *  The mesh must BE convex (pass a convex hull): coal's support function walks the triangle
+ *  adjacency, and on a non-convex soup it silently misses real overlaps. */
+struct MeshView {
+    const double *vertices = nullptr;
+    std::size_t n_vertices = 0;
+    const std::uint32_t *triangles = nullptr;
+    std::size_t n_triangles = 0;
+};
+
+struct ConvexContact {
+    std::size_t i = 0;                     //!< first mesh (i < j)
+    std::size_t j = 0;                     //!< second mesh
+    std::array<double, 3> near1{0, 0, 0};  //!< nearest point on mesh i
+    std::array<double, 3> near2{0, 0, 0};  //!< nearest point on mesh j
+    std::array<double, 3> normal{0, 0, 0}; //!< coal's contact normal, from mesh i towards mesh j
+    //! coal's sign: negative is overlap depth, positive a gap that is still inside the margin.
+    double penetration_depth = 0.0;
+    double contact_area = 0.0; //!< m^2, as `contact_patch_area` measured it
+};
+
+/** A candidate pair coal could not evaluate. Reported, not thrown: one bad pair must not cost the
+ *  rest of the check, and the caller decides whether to log it. */
+struct ConvexContactFailure {
+    std::size_t i = 0;
+    std::size_t j = 0;
+    std::string reason;
+};
+
+struct ConvexContactResult {
+    std::vector<ConvexContact> contacts; //!< in (i, j) order, i < j
+    std::vector<ConvexContactFailure> failures;
+    std::size_t candidate_pairs = 0; //!< pairs the broad phase passed to coal
+    std::size_t below_min_area = 0;  //!< colliding pairs dropped by `min_contact_area`
+};
+
+/** Index pairs (i, j), i < j, whose boxes come within `security_margin` on every axis, sorted.
+ *
+ *  Sweep-and-prune on x, with y and z tested per box. Conservative -- the gap
+ *  between two convex shapes is at least their largest per-axis box gap, so a pair dropped here is
+ *  farther apart than the margin and coal would not report it. A box with a non-finite coordinate
+ *  (an empty mesh) takes part in no pair. A negative margin counts as zero. */
+std::vector<std::pair<std::size_t, std::size_t>> candidate_pairs(const std::vector<std::array<double, 3>> &lo,
+                                                                 const std::vector<std::array<double, 3>> &hi,
+                                                                 double security_margin);
+
+/** The area of one contact patch: `points` (all on shape 1) lying in the plane with `normal`.
+ *
+ *  2 points are a line contact: length * `line_contact_thickness`. 3+ points: the area of their
+ *  convex hull in the patch plane -- except where qhull (scipy's ConvexHull, which the reference asks
+ *  about near-flat patches) would refuse the points as flat; then the largest in-plane extent *
+ *  `line_contact_thickness`.
+ *  Fewer than 2 points have no area. */
+double patch_area(const std::vector<std::array<double, 3>> &points, const std::array<double, 3> &normal,
+                  double line_contact_thickness = DEFAULT_LINE_CONTACT_THICKNESS);
+
+/** Every touching / overlapping pair among `meshes`. Throws std::invalid_argument for a mesh whose
+ *  triangles index past its vertices. */
+ConvexContactResult find_convex_contacts(const std::vector<MeshView> &meshes, const ConvexContactOptions &options = {});
+
+} // namespace adacpp::clash
+
+#endif // ADACPP_CLASH_CONVEX_CONTACT_H
