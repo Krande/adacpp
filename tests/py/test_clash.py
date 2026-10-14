@@ -22,25 +22,78 @@ TOL = 1e-9
 AREA_RTOL = 1e-7
 
 
-@pytest.mark.parametrize("case", FIXTURE["cases"], ids=lambda c: c["name"])
-def test_matches_coal_python(case):
-    r = clash.find_convex_contacts(
+def _run_case(case, hull):
+    return clash.find_convex_contacts(
         [np.asarray(m["vertices"], dtype=float).reshape(-1, 3) for m in case["meshes"]],
         [np.asarray(m["triangles"], dtype=np.uint32).reshape(-1, 3) for m in case["meshes"]],
         security_margin=FIXTURE["security_margin"],
         min_contact_area=FIXTURE["min_contact_area"],
         line_contact_thickness=FIXTURE["line_contact_thickness"],
+        hull=hull,
     )
+
+
+def _assert_matches(r, case, tol, area_rtol):
     expected = case["contacts"]
     assert r["failures"] == []
     assert r["below_min_area"] == case["below_min_area"]
     assert [tuple(p) for p in r["pairs"].tolist()] == [tuple(e["pair"]) for e in expected]
     for q, e in enumerate(expected):
-        np.testing.assert_allclose(r["near1"][q], e["near1"], rtol=0, atol=TOL)
-        np.testing.assert_allclose(r["near2"][q], e["near2"], rtol=0, atol=TOL)
-        np.testing.assert_allclose(r["normal"][q], e["normal"], rtol=0, atol=TOL)
-        assert r["penetration_depth"][q] == pytest.approx(e["penetration_depth"], abs=TOL)
-        assert r["contact_area"][q] == pytest.approx(e["contact_area"], rel=AREA_RTOL)
+        np.testing.assert_allclose(r["near1"][q], e["near1"], rtol=0, atol=tol)
+        np.testing.assert_allclose(r["near2"][q], e["near2"], rtol=0, atol=tol)
+        np.testing.assert_allclose(r["normal"][q], e["normal"], rtol=0, atol=tol)
+        assert r["penetration_depth"][q] == pytest.approx(e["penetration_depth"], abs=tol)
+        assert r["contact_area"][q] == pytest.approx(e["contact_area"], rel=area_rtol)
+
+
+@pytest.mark.parametrize("case", FIXTURE["cases"], ids=lambda c: c["name"])
+def test_matches_coal_python(case):
+    # The fixture's meshes are hulls already: as given, this is coal on coal.
+    _assert_matches(_run_case(case, hull=False), case, TOL, AREA_RTOL)
+
+
+@pytest.mark.parametrize("case", FIXTURE["cases"], ids=lambda c: c["name"])
+def test_rehulled_meshes_give_the_same_contacts(case):
+    # Taking the hull again re-triangulates coplanar faces, but keeps the input's vertex order -- the
+    # one thing coal's contact patch is sensitive to here (a near-parallel edge is a line patch or a
+    # point depending on it) -- so the hull of a hull gives exactly the same contacts.
+    r = _run_case(case, hull=True)
+    assert r["degenerate"] == []
+    _assert_matches(r, case, TOL, AREA_RTOL)
+
+
+def test_convex_hull_of_a_cube_with_inner_points():
+    corners = np.array([[x, y, z] for x in (0, 1) for y in (0, 2) for z in (0, 3)], dtype=float)
+    inner = np.random.default_rng(1).uniform(0.1, 0.9, (50, 3))
+    v, t = clash.convex_hull(np.vstack([inner, corners]))
+    assert v.tolist() == corners.tolist()  # the hull's vertices, in input order
+    assert t.shape == (12, 3) and t.dtype == np.uint32
+    # Outward-wound: every face normal points away from the centre.
+    c = v.mean(axis=0)
+    n = np.cross(v[t[:, 1]] - v[t[:, 0]], v[t[:, 2]] - v[t[:, 0]])
+    assert np.all(np.einsum("ij,ij->i", n, v[t[:, 0]] - c) > 0)
+    # Points spanning no volume have no hull.
+    flat = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0]], dtype=float)
+    assert clash.convex_hull(flat)[0].shape == (0, 3)
+
+
+def test_hull_makes_a_non_convex_member_safe():
+    # An L-shaped member's vertices only (no triangles). A small box sits in the L's inner corner:
+    # clear of the L itself, inside its convex hull -- which is the solid the check measures, so
+    # the pair is found rather than silently missed on a non-convex soup.
+    L = np.array(
+        [[x, y, z] for z in (0, 0.2) for x, y in [(0, 0), (1, 0), (1, 0.2), (0.2, 0.2), (0.2, 1), (0, 1)]], dtype=float
+    )
+    box = np.array([[x, y, z] for x in (0.4, 0.6) for y in (0.4, 0.6) for z in (0, 0.2)], dtype=float)
+    flat = np.array([[5, 5, 0], [6, 5, 0], [5, 6, 0]], dtype=float)
+    r = clash.find_convex_contacts([L, box, flat])
+    assert r["pairs"].tolist() == [[0, 1]]
+    assert r["degenerate"] == [2]
+
+
+def test_without_hull_triangles_are_required():
+    with pytest.raises(ValueError, match="triangles are required"):
+        clash.find_convex_contacts([np.zeros((4, 3))], hull=False)
 
 
 def _all_pairs_within(lo, hi, security_margin):
@@ -84,6 +137,6 @@ def test_patch_area_rules():
 def test_malformed_input_raises():
     v = np.zeros((3, 3))
     with pytest.raises(ValueError, match="indexes past"):
-        clash.find_convex_contacts([v, v], [np.array([[0, 1, 5]]), np.array([[0, 1, 2]])])
+        clash.find_convex_contacts([v, v], [np.array([[0, 1, 5]]), np.array([[0, 1, 2]])], hull=False)
     with pytest.raises(ValueError, match="one triangle array"):
         clash.find_convex_contacts([v], [])

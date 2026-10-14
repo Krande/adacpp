@@ -166,8 +166,9 @@ entry of `-1` drops that output.
 
 Convex-contact clash detection, via `adacpp_clash` -- coal's GJK/EPA and contact-patch code compiled
 from source, the same C++ the server's Python module (`adacpp.clash`) runs, so the browser and a worker
-report the same contacts. Pass each member as its CONVEX hull: coal walks the hull's triangles, and on a
-non-convex soup it misses real overlaps. All the meshes go in as one flat soup:
+report the same contacts. coal measures CONVEX solids, so by default (`hull = true`) each member's convex
+hull is taken here from its vertices -- pass any tessellation, or just the vertices with empty triangle
+ranges. All the meshes go in as one flat soup:
 
 ```ts
 import createAdacppClash from "./adacpp_clash.js";
@@ -184,12 +185,14 @@ const r = clash.findConvexContacts(
   0.01,              // securityMargin (m): closer than this counts as touching
   1e-6,              // minContactArea (m²): smaller patches (a corner grazing a face) are dropped
   1e-3,              // lineContactThickness (m): width given to an edge-on-face contact
+  true,              // hull: take each mesh's convex hull (false only if the meshes ARE hulls already)
 );
 if (r.error) throw new Error(r.error);
 // One row per contact, pairs i < j in order:
 // r.pairs Uint32Array(2k), r.near1 / r.near2 / r.normal Float64Array(3k),
 // r.penetrationDepth Float64Array(k) (coal's sign: negative = overlap, positive = gap inside the margin),
-// r.contactArea Float64Array(k), r.failures [{i, j, reason}], r.candidatePairs, r.belowMinArea
+// r.contactArea Float64Array(k), r.failures [{i, j, reason}], r.candidatePairs, r.belowMinArea,
+// r.degenerate Uint32Array (meshes whose points span no volume -- flat or too few -- and so touch nothing)
 ```
 
 The normal points from mesh `i` towards mesh `j`. `DEFAULT_SECURITY_MARGIN`, `DEFAULT_MIN_CONTACT_AREA`

@@ -144,7 +144,8 @@ target_include_directories(
         ${COAL_SOURCE_DIR}/src
 )
 target_include_directories(adacpp_clash PUBLIC ${CMAKE_SOURCE_DIR}/src/clash)
-target_link_libraries(adacpp_clash PRIVATE Eigen3::Eigen)
+# Manifold (deps_manifold.cmake, already on every target) supplies the convex hulls.
+target_link_libraries(adacpp_clash PRIVATE Eigen3::Eigen manifold)
 if(MSVC)
     # coal's own MSVC settings: big objects, no min/max macros, Eigen's aligned storage.
     target_compile_options(adacpp_clash PRIVATE /bigobj)

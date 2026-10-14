@@ -11,6 +11,7 @@
 #include <cmath>
 #include <exception>
 #include <limits>
+#include <map>
 #include <memory>
 #include <numeric>
 #include <stdexcept>
@@ -18,6 +19,7 @@
 #include <coal/collision.h>
 #include <coal/contact_patch.h>
 #include <coal/shape/convex.h>
+#include <manifold/manifold.h>
 
 namespace adacpp::clash {
 
@@ -253,9 +255,82 @@ double patch_area(const std::vector<std::array<double, 3>> &points, const std::a
     return std::max(w0, w1) * line_contact_thickness;
 }
 
-ConvexContactResult find_convex_contacts(const std::vector<MeshView> &meshes, const ConvexContactOptions &options) {
+ConvexMesh convex_hull(const double *points, std::size_t n_points) {
+    ConvexMesh out;
+    if (n_points < 4)
+        return out;
+    std::vector<manifold::vec3> pts(n_points);
+    std::array<double, 3> lo = {points[0], points[1], points[2]}, hi = lo;
+    for (std::size_t k = 0; k < n_points; ++k) {
+        pts[k] = {points[3 * k], points[3 * k + 1], points[3 * k + 2]};
+        for (int a = 0; a < 3; ++a) {
+            lo[a] = std::min(lo[a], points[3 * k + a]);
+            hi[a] = std::max(hi[a], points[3 * k + a]);
+        }
+    }
+    const manifold::Manifold hull = manifold::Manifold::Hull(pts);
+    // Points on one plane give a two-sided sheet, not an empty hull: it has triangles and no volume.
+    const double extent = std::max({hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]});
+    if (hull.IsEmpty() || !(hull.Volume() > 1e-12 * extent * extent * extent))
+        return out;
+    const manifold::MeshGL64 mesh = hull.GetMeshGL64();
+
+    // The hull's vertices IN INPUT ORDER (trimesh's convention too), not in the order QuickHull met
+    // them. coal is not order-blind: where an edge lies within its patch tolerance of the contact
+    // plane, the vertex order decides between a line patch and a point, so the same solid listed
+    // differently can gain or lose a contact at the area filter. Input order makes the hull of a hull
+    // the mesh itself and keeps a caller's results independent of this hull code's internals.
+    const std::size_t stride = mesh.numProp;
+    const std::size_t nv = stride ? mesh.vertProperties.size() / stride : 0;
+    std::map<std::array<double, 3>, std::size_t> input_index;
+    for (std::size_t k = n_points; k-- > 0;) // backwards, so a repeated point maps to its first index
+        input_index[{points[3 * k], points[3 * k + 1], points[3 * k + 2]}] = k;
+    std::vector<std::pair<std::size_t, std::size_t>> order(nv); // (input index, hull vertex)
+    for (std::size_t v = 0; v < nv; ++v) {
+        const std::array<double, 3> p = {mesh.vertProperties[stride * v], mesh.vertProperties[stride * v + 1],
+                                         mesh.vertProperties[stride * v + 2]};
+        const auto it = input_index.find(p);
+        // A hull vertex is always an input point; one that is not found sorts last rather than failing.
+        order[v] = {it != input_index.end() ? it->second : n_points + v, v};
+    }
+    std::sort(order.begin(), order.end());
+    std::vector<std::uint32_t> new_index(nv);
+    out.vertices.resize(3 * nv);
+    for (std::size_t r = 0; r < nv; ++r) {
+        const std::size_t v = order[r].second;
+        new_index[v] = static_cast<std::uint32_t>(r);
+        for (int a = 0; a < 3; ++a)
+            out.vertices[3 * r + a] = mesh.vertProperties[stride * v + a];
+    }
+    out.triangles.resize(mesh.triVerts.size());
+    for (std::size_t t = 0; t < mesh.triVerts.size(); ++t)
+        out.triangles[t] = new_index[mesh.triVerts[t]];
+    return out;
+}
+
+ConvexContactResult find_convex_contacts(const std::vector<MeshView> &input, const ConvexContactOptions &options) {
     ConvexContactResult result;
-    const std::size_t n = meshes.size();
+    const std::size_t n = input.size();
+
+    // The hulls, when asked for: owned here, viewed below exactly like a caller's own convex meshes.
+    std::vector<ConvexMesh> hulls;
+    std::vector<MeshView> hull_views;
+    if (options.hull) {
+        hulls.resize(n);
+        hull_views.resize(n);
+        for (std::size_t idx = 0; idx < n; ++idx) {
+            if (input[idx].n_vertices == 0)
+                continue;
+            hulls[idx] = convex_hull(input[idx].vertices, input[idx].n_vertices);
+            if (hulls[idx].triangles.empty()) {
+                hulls[idx].vertices.clear();
+                result.degenerate.push_back(idx);
+            }
+            hull_views[idx] = {hulls[idx].vertices.data(), hulls[idx].vertices.size() / 3, hulls[idx].triangles.data(),
+                               hulls[idx].triangles.size() / 3};
+        }
+    }
+    const std::vector<MeshView> &meshes = options.hull ? hull_views : input;
 
     std::vector<std::shared_ptr<coal::Convex<coal::Triangle>>> shapes(n);
     std::vector<std::array<double, 3>> lo(n), hi(n);

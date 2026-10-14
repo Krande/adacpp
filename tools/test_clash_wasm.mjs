@@ -52,38 +52,43 @@ function soup(meshes) {
 
 const maxDiff = (a, off, b) => Math.max(...b.map((x, k) => Math.abs(a[off + k] - x)));
 
-for (const c of fixture.cases) {
-    console.log(c.name);
-    const r = Module.findConvexContacts(...soup(c.meshes), fixture.security_margin, fixture.min_contact_area,
-                                        fixture.line_contact_thickness);
-    if (r.error) {
-        check("runs", false, r.error);
-        continue;
+// As given (the fixture's meshes are hulls), and re-hulled here: the hull of a hull keeps the input's
+// vertex order, so it must give exactly the same contacts (see tests/py/test_clash.py).
+for (const [hull, tol, areaRtol] of [[ false, TOL, AREA_RTOL ], [ true, TOL, AREA_RTOL ]])
+    for (const c of fixture.cases) {
+        console.log(`${c.name}${hull ? " (re-hulled)" : ""}`);
+        const r = Module.findConvexContacts(...soup(c.meshes), fixture.security_margin, fixture.min_contact_area,
+                                            fixture.line_contact_thickness, hull);
+        if (r.error) {
+            check("runs", false, r.error);
+            continue;
+        }
+        check("no degenerate meshes", r.degenerate.length === 0, `${Array.from(r.degenerate)}`);
+        check("contact count", r.penetrationDepth.length === c.contacts.length,
+              `${r.penetrationDepth.length} vs ${c.contacts.length}`);
+        check("below min area", r.belowMinArea === c.below_min_area, `${r.belowMinArea} vs ${c.below_min_area}`);
+        check("no failures", r.failures.length === 0, r.failures.map((f) => f.reason).join("; "));
+        c.contacts.forEach((e, q) => {
+            if (q >= r.penetrationDepth.length)
+                return;
+            const tag = `contact ${e.pair}`;
+            check(`${tag} pair`, r.pairs[2 * q] === e.pair[0] && r.pairs[2 * q + 1] === e.pair[1],
+                  `${r.pairs[2 * q]},${r.pairs[2 * q + 1]}`);
+            const d =
+                Math.max(maxDiff(r.near1, 3 * q, e.near1), maxDiff(r.near2, 3 * q, e.near2),
+                         maxDiff(r.normal, 3 * q, e.normal), Math.abs(r.penetrationDepth[q] - e.penetration_depth));
+            check(`${tag} geometry`, d <= tol, `max |diff| ${d.toExponential(2)}`);
+            const ra = Math.abs(r.contactArea[q] - e.contact_area) / Math.max(Math.abs(e.contact_area), 1e-300);
+            check(`${tag} area`, ra <= areaRtol, `${r.contactArea[q]} vs ${e.contact_area}`);
+        });
     }
-    check("contact count", r.penetrationDepth.length === c.contacts.length,
-          `${r.penetrationDepth.length} vs ${c.contacts.length}`);
-    check("below min area", r.belowMinArea === c.below_min_area, `${r.belowMinArea} vs ${c.below_min_area}`);
-    check("no failures", r.failures.length === 0, r.failures.map((f) => f.reason).join("; "));
-    c.contacts.forEach((e, q) => {
-        if (q >= r.penetrationDepth.length)
-            return;
-        const tag = `contact ${e.pair}`;
-        check(`${tag} pair`, r.pairs[2 * q] === e.pair[0] && r.pairs[2 * q + 1] === e.pair[1],
-              `${r.pairs[2 * q]},${r.pairs[2 * q + 1]}`);
-        const d = Math.max(maxDiff(r.near1, 3 * q, e.near1), maxDiff(r.near2, 3 * q, e.near2),
-                           maxDiff(r.normal, 3 * q, e.normal), Math.abs(r.penetrationDepth[q] - e.penetration_depth));
-        check(`${tag} geometry`, d <= TOL, `max |diff| ${d.toExponential(2)}`);
-        const ra = Math.abs(r.contactArea[q] - e.contact_area) / Math.max(Math.abs(e.contact_area), 1e-300);
-        check(`${tag} area`, ra <= AREA_RTOL, `${r.contactArea[q]} vs ${e.contact_area}`);
-    });
-}
 
 // Malformed input is an {error}, not a trap.
 const bad = Module.findConvexContacts(new Float64Array(9), new Uint32Array([ 0, 3 ]), new Uint32Array([ 0, 1, 5 ]),
-                                      new Uint32Array([ 0, 1 ]), 0.01, 1e-6, 1e-3);
+                                      new Uint32Array([ 0, 1 ]), 0.01, 1e-6, 1e-3, false);
 check("bad triangle index is an error", typeof bad.error === "string", bad.error);
 const short = Module.findConvexContacts(new Float64Array(3), new Uint32Array([ 0, 2 ]), new Uint32Array(0),
-                                        new Uint32Array([ 0, 0 ]), 0.01, 1e-6, 1e-3);
+                                        new Uint32Array([ 0, 0 ]), 0.01, 1e-6, 1e-3, true);
 check("offsets past the arrays are an error", typeof short.error === "string", short.error);
 
 console.log(failures ? `${failures} FAILED` : "all ok");

@@ -42,7 +42,8 @@ std::size_t rows_of_3(std::size_t ndim, std::size_t n0, std::size_t n1, std::siz
 }
 
 nb::dict find_convex_contacts_py(const std::vector<F64In> &vertices, const std::vector<U32In> &triangles,
-                                 double security_margin, double min_contact_area, double line_contact_thickness) {
+                                 double security_margin, double min_contact_area, double line_contact_thickness,
+                                 bool hull) {
     if (vertices.size() != triangles.size())
         throw std::invalid_argument("find_convex_contacts: one triangle array per vertex array");
     std::vector<MeshView> meshes(vertices.size());
@@ -60,6 +61,7 @@ nb::dict find_convex_contacts_py(const std::vector<F64In> &vertices, const std::
     options.security_margin = security_margin;
     options.min_contact_area = min_contact_area;
     options.line_contact_thickness = line_contact_thickness;
+    options.hull = hull;
 
     ConvexContactResult r;
     {
@@ -100,7 +102,23 @@ nb::dict find_convex_contacts_py(const std::vector<F64In> &vertices, const std::
     out["failures"] = failures;
     out["candidate_pairs"] = r.candidate_pairs;
     out["below_min_area"] = r.below_min_area;
+    out["degenerate"] = r.degenerate;
     return out;
+}
+
+nb::tuple convex_hull_py(const F64In &points) {
+    const std::size_t n = rows_of_3(points.ndim(), points.ndim() > 0 ? points.shape(0) : 0,
+                                    points.ndim() > 1 ? points.shape(1) : 0, points.size(), "points", 0);
+    ConvexMesh h;
+    {
+        nb::gil_scoped_release release;
+        h = convex_hull(points.data(), n);
+    }
+    auto v = new_array<double>({h.vertices.size() / 3, 3});
+    auto t = new_array<std::uint32_t>({h.triangles.size() / 3, 3});
+    std::copy(h.vertices.begin(), h.vertices.end(), v.data());
+    std::copy(h.triangles.begin(), h.triangles.end(), t.data());
+    return nb::make_tuple(v, t);
 }
 
 std::vector<std::array<double, 3>> rows3(const F64In &a, const char *what) {
@@ -121,13 +139,19 @@ void clash_module(nb::module_ &m) {
 
     m.def("find_convex_contacts", &find_convex_contacts_py, "vertices"_a, "triangles"_a,
           "security_margin"_a = DEFAULT_SECURITY_MARGIN, "min_contact_area"_a = DEFAULT_MIN_CONTACT_AREA,
-          "line_contact_thickness"_a = DEFAULT_LINE_CONTACT_THICKNESS,
-          "Every pair of CONVEX meshes that touches or overlaps within `security_margin`, measured by "
-          "coal: a dict of columns `pairs` (k, 2) int64 with i < j, `near1` / `near2` / `normal` (k, 3), "
-          "`penetration_depth` (k,) in coal's sign (negative = overlap) and `contact_area` (k,) m^2, plus "
-          "`failures` [(i, j, reason)] for pairs coal could not evaluate, `candidate_pairs` and "
-          "`below_min_area`. `vertices[k]` is an (n, 3) float64 array and `triangles[k]` an (m, 3) "
-          "uint32 array indexing it; pass convex hulls.");
+          "line_contact_thickness"_a = DEFAULT_LINE_CONTACT_THICKNESS, "hull"_a = true,
+          "Every pair of meshes whose convex hulls touch or overlap within `security_margin`, measured "
+          "by coal: a dict of columns `pairs` (k, 2) int64 with i < j, `near1` / `near2` / `normal` "
+          "(k, 3), `penetration_depth` (k,) in coal's sign (negative = overlap) and `contact_area` (k,) "
+          "m^2, plus `failures` [(i, j, reason)] for pairs coal could not evaluate, `candidate_pairs`, "
+          "`below_min_area` and `degenerate` (meshes with no solid hull). `vertices[k]` is an (n, 3) "
+          "float64 array and `triangles[k]` an (m, 3) uint32 array indexing it. With `hull` (the "
+          "default) the hull is taken here and the triangles are ignored; without it the meshes must "
+          "be convex hulls already.");
+
+    m.def("convex_hull", &convex_hull_py, "points"_a,
+          "The convex hull of `points` (n, 3) as (vertices (m, 3) float64, triangles (t, 3) uint32), "
+          "outward-wound; both empty when the points span no volume.");
 
     m.def(
         "candidate_pairs",

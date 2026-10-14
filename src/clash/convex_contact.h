@@ -39,11 +39,15 @@ struct ConvexContactOptions {
     double min_contact_area = DEFAULT_MIN_CONTACT_AREA;
     //! Width given to a line (edge-on-face) contact, so a real touching edge has a nonzero area.
     double line_contact_thickness = DEFAULT_LINE_CONTACT_THICKNESS;
+    //! Take each mesh's convex hull first (from its vertices alone; its triangles are ignored). Off
+    //! only for a caller whose meshes are convex hulls already.
+    bool hull = true;
 };
 
-/** One convex mesh, borrowed: `n_vertices` xyz triples and `n_triangles` index triples into them.
- *  The mesh must BE convex (pass a convex hull): coal's support function walks the triangle
- *  adjacency, and on a non-convex soup it silently misses real overlaps. */
+/** One mesh, borrowed: `n_vertices` xyz triples and `n_triangles` index triples into them.
+ *  coal needs it CONVEX: its support function walks the triangle adjacency, and on a non-convex
+ *  soup it silently misses real overlaps. With `ConvexContactOptions::hull` (the default) any mesh
+ *  will do -- even bare vertices -- since the hull is taken here. */
 struct MeshView {
     const double *vertices = nullptr;
     std::size_t n_vertices = 0;
@@ -75,7 +79,21 @@ struct ConvexContactResult {
     std::vector<ConvexContactFailure> failures;
     std::size_t candidate_pairs = 0; //!< pairs the broad phase passed to coal
     std::size_t below_min_area = 0;  //!< colliding pairs dropped by `min_contact_area`
+    //! Meshes that had vertices but no solid hull (all on one plane or line, or too few): they take
+    //! part in no pair. Only filled when `hull` is on.
+    std::vector<std::size_t> degenerate;
 };
+
+/** An owned convex mesh: xyz triples and outward-wound index triples into them. */
+struct ConvexMesh {
+    std::vector<double> vertices;
+    std::vector<std::uint32_t> triangles;
+};
+
+/** The convex hull of `n_points` xyz triples (Manifold's QuickHull), its vertices in the order they
+ *  appear in the input. Empty when the points span no volume -- fewer than four, or all on one
+ *  plane. */
+ConvexMesh convex_hull(const double *points, std::size_t n_points);
 
 /** Index pairs (i, j), i < j, whose boxes come within `security_margin` on every axis, sorted.
  *

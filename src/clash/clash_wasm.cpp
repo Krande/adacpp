@@ -6,11 +6,13 @@
 // typed arrays cross the boundary once. Mesh k is vertices [vertexOffsets[k], vertexOffsets[k+1]) of
 // `vertices` (xyz triples) and triangles [triangleOffsets[k], triangleOffsets[k+1]) of `triangles`
 // (index triples, LOCAL to the mesh). Both offset arrays have one entry more than there are meshes.
+// With `hull` true each mesh's convex hull is taken from its vertices and its triangles are ignored
+// (pass empty triangle ranges); with it false the meshes must be convex hulls already.
 //
 // Contacts come back as columns (typed arrays copied out of the wasm heap):
 //   { pairs: Uint32Array(2k), near1, near2, normal: Float64Array(3k),
 //     penetrationDepth, contactArea: Float64Array(k),
-//     failures: [{i, j, reason}], candidatePairs, belowMinArea }
+//     failures: [{i, j, reason}], candidatePairs, belowMinArea, degenerate: Uint32Array }
 // or { error } when the input is malformed.
 
 #include <cstdint>
@@ -35,7 +37,7 @@ template <typename T> val copy_out(const std::vector<T> &v) {
 
 val find_convex_contacts_js(const val &vertices_js, const val &vertex_offsets_js, const val &triangles_js,
                             const val &triangle_offsets_js, double security_margin, double min_contact_area,
-                            double line_contact_thickness) {
+                            double line_contact_thickness, bool hull) {
     try {
         const auto vertices = emscripten::convertJSArrayToNumberVector<double>(vertices_js);
         const auto vertex_offsets = emscripten::convertJSArrayToNumberVector<std::uint32_t>(vertex_offsets_js);
@@ -63,6 +65,7 @@ val find_convex_contacts_js(const val &vertices_js, const val &vertex_offsets_js
         options.security_margin = security_margin;
         options.min_contact_area = min_contact_area;
         options.line_contact_thickness = line_contact_thickness;
+        options.hull = hull;
         const ConvexContactResult r = find_convex_contacts(meshes, options);
 
         const std::size_t c = r.contacts.size();
@@ -99,6 +102,7 @@ val find_convex_contacts_js(const val &vertices_js, const val &vertex_offsets_js
         out.set("failures", failures);
         out.set("candidatePairs", static_cast<double>(r.candidate_pairs));
         out.set("belowMinArea", static_cast<double>(r.below_min_area));
+        out.set("degenerate", copy_out(std::vector<std::uint32_t>(r.degenerate.begin(), r.degenerate.end())));
         return out;
     } catch (const std::exception &e) {
         val out = val::object();
