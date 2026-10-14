@@ -377,16 +377,23 @@ ConvexContactResult find_convex_contacts(const std::vector<MeshView> &input, con
             continue;
 
         double area = 0.0;
+        std::vector<ContactPatch> patches;
         try {
             coal::ContactPatchRequest patch_req(req);
             coal::ContactPatchResult patch_res;
             coal::computeContactPatch(&a, T1, &b, T2, res, patch_req, patch_res);
             for (std::size_t p = 0; p < patch_res.numContactPatches(); ++p) {
                 const coal::ContactPatch &patch = patch_res.getContactPatch(p);
-                std::vector<std::array<double, 3>> points(patch.size());
-                for (std::size_t k = 0; k < patch.size(); ++k)
-                    points[k] = arr3(patch.getPointShape1(k));
-                area += patch_area(points, arr3(patch.getNormal()), options.line_contact_thickness);
+                ContactPatch out_patch;
+                out_patch.normal = arr3(patch.getNormal());
+                out_patch.points1.resize(patch.size());
+                out_patch.points2.resize(patch.size());
+                for (std::size_t k = 0; k < patch.size(); ++k) {
+                    out_patch.points1[k] = arr3(patch.getPointShape1(k));
+                    out_patch.points2[k] = arr3(patch.getPointShape2(k));
+                }
+                area += patch_area(out_patch.points1, out_patch.normal, options.line_contact_thickness);
+                patches.push_back(std::move(out_patch));
             }
         } catch (const std::exception &e) {
             result.failures.push_back({i, j, std::string("contact patch: ") + e.what()});
@@ -406,7 +413,8 @@ ConvexContactResult find_convex_contacts(const std::vector<MeshView> &input, con
         out.normal = arr3(c.normal);
         out.penetration_depth = c.penetration_depth;
         out.contact_area = area;
-        result.contacts.push_back(out);
+        out.patches = std::move(patches);
+        result.contacts.push_back(std::move(out));
     }
     return result;
 }

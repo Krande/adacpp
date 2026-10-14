@@ -80,6 +80,23 @@ for (const [hull, tol, areaRtol] of [[ false, TOL, AREA_RTOL ], [ true, TOL, ARE
             check(`${tag} geometry`, d <= tol, `max |diff| ${d.toExponential(2)}`);
             const ra = Math.abs(r.contactArea[q] - e.contact_area) / Math.max(Math.abs(e.contact_area), 1e-300);
             check(`${tag} area`, ra <= areaRtol, `${r.contactArea[q]} vs ${e.contact_area}`);
+            // The contact-patch polygons, from the flat columns.
+            const p0 = r.patchOffsets[q], p1 = r.patchOffsets[q + 1];
+            let pd = p1 - p0 === e.patches.length ? 0 : Infinity;
+            e.patches.forEach((w, k) => {
+                const p = p0 + k;
+                if (p >= p1)
+                    return;
+                const v0 = r.patchPointOffsets[p], v1 = r.patchPointOffsets[p + 1];
+                if (v1 - v0 !== w.points1.length) {
+                    pd = Infinity;
+                    return;
+                }
+                pd = Math.max(pd, maxDiff(r.patchNormals, 3 * p, w.normal),
+                              maxDiff(r.patchPoints1, 3 * v0, w.points1.flat()),
+                              maxDiff(r.patchPoints2, 3 * v0, w.points2.flat()));
+            });
+            check(`${tag} patches`, pd <= tol, `max |diff| ${pd}`);
         });
     }
 

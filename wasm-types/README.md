@@ -191,7 +191,11 @@ if (r.error) throw new Error(r.error);
 // One row per contact, pairs i < j in order:
 // r.pairs Uint32Array(2k), r.near1 / r.near2 / r.normal Float64Array(3k),
 // r.penetrationDepth Float64Array(k) (coal's sign: negative = overlap, positive = gap inside the margin),
-// r.contactArea Float64Array(k), r.failures [{i, j, reason}], r.candidatePairs, r.belowMinArea,
+// r.contactArea Float64Array(k),
+// the contact-patch polygons, flattened -- contact q's patches are [patchOffsets[q], patchOffsets[q+1]),
+// patch p's normal is patchNormals[3p..3p+3) and its polygon the points
+// [patchPointOffsets[p], patchPointOffsets[p+1]) of patchPoints1 (on mesh i) and patchPoints2 (on mesh j),
+// r.failures [{i, j, reason}], r.candidatePairs, r.belowMinArea,
 // r.degenerate Uint32Array (meshes whose points span no volume -- flat or too few -- and so touch nothing)
 ```
 

@@ -44,6 +44,31 @@ def _assert_matches(r, case, tol, area_rtol):
         np.testing.assert_allclose(r["normal"][q], e["normal"], rtol=0, atol=tol)
         assert r["penetration_depth"][q] == pytest.approx(e["penetration_depth"], abs=tol)
         assert r["contact_area"][q] == pytest.approx(e["contact_area"], rel=area_rtol)
+        # The contact-patch polygons, as coal computed them: same patches, same vertices, same order.
+        got = r["patches"][q]
+        assert len(got) == len(e["patches"])
+        for g, w in zip(got, e["patches"]):
+            np.testing.assert_allclose(g["normal"], w["normal"], rtol=0, atol=tol)
+            assert g["points1"].shape == (len(w["points1"]), 3)
+            np.testing.assert_allclose(g["points1"], np.asarray(w["points1"]).reshape(-1, 3), rtol=0, atol=tol)
+            np.testing.assert_allclose(g["points2"], np.asarray(w["points2"]).reshape(-1, 3), rtol=0, atol=tol)
+
+
+def test_a_face_contact_patch_is_the_overlap_polygon():
+    # Two unit-cross-section boxes meeting end-on: the patch is their 0.2 x 0.2 shared face.
+    face = next(c for c in FIXTURE["cases"] if c["name"] == "face overlap")
+    r = _run_case(face, hull=False)
+    (patch,) = r["patches"][0]
+    assert np.allclose(np.abs(patch["normal"]), (1, 0, 0))
+    assert sorted(map(tuple, np.round(patch["points1"][:, 1:], 9).tolist())) == [
+        (0.0, 0.0),
+        (0.0, 0.2),
+        (0.2, 0.0),
+        (0.2, 0.2),
+    ]
+    # The two polygons are the same one, a penetration depth apart along the normal.
+    gap = patch["points2"] - patch["points1"]
+    assert np.allclose(np.linalg.norm(gap, axis=1), abs(r["penetration_depth"][0]))
 
 
 @pytest.mark.parametrize("case", FIXTURE["cases"], ids=lambda c: c["name"])

@@ -92,6 +92,28 @@ nb::dict find_convex_contacts_py(const std::vector<F64In> &vertices, const std::
     for (const ConvexContactFailure &f : r.failures)
         failures.append(nb::make_tuple(f.i, f.j, f.reason));
 
+    // Per contact, its patches: {normal, points1 (m, 3), points2 (m, 3)}. Few and small, so plain
+    // objects rather than more columns.
+    auto points_array = [](const std::vector<std::array<double, 3>> &pts) {
+        auto a = new_array<double>({pts.size(), 3});
+        for (std::size_t k = 0; k < pts.size(); ++k)
+            for (int d = 0; d < 3; ++d)
+                a.data()[3 * k + d] = pts[k][d];
+        return a;
+    };
+    nb::list patches;
+    for (const ConvexContact &x : r.contacts) {
+        nb::list per_contact;
+        for (const ContactPatch &p : x.patches) {
+            nb::dict d;
+            d["normal"] = nb::make_tuple(p.normal[0], p.normal[1], p.normal[2]);
+            d["points1"] = points_array(p.points1);
+            d["points2"] = points_array(p.points2);
+            per_contact.append(d);
+        }
+        patches.append(per_contact);
+    }
+
     nb::dict out;
     out["pairs"] = pairs;
     out["near1"] = near1;
@@ -99,6 +121,7 @@ nb::dict find_convex_contacts_py(const std::vector<F64In> &vertices, const std::
     out["normal"] = normal;
     out["penetration_depth"] = depth;
     out["contact_area"] = area;
+    out["patches"] = patches;
     out["failures"] = failures;
     out["candidate_pairs"] = r.candidate_pairs;
     out["below_min_area"] = r.below_min_area;
@@ -143,7 +166,9 @@ void clash_module(nb::module_ &m) {
           "Every pair of meshes whose convex hulls touch or overlap within `security_margin`, measured "
           "by coal: a dict of columns `pairs` (k, 2) int64 with i < j, `near1` / `near2` / `normal` "
           "(k, 3), `penetration_depth` (k,) in coal's sign (negative = overlap) and `contact_area` (k,) "
-          "m^2, plus `failures` [(i, j, reason)] for pairs coal could not evaluate, `candidate_pairs`, "
+          "m^2, `patches` -- per contact, a list of {normal, points1 (m, 3) on mesh i, points2 (m, 3) on "
+          "mesh j}, coal's contact-patch polygons -- plus `failures` [(i, j, reason)] for pairs coal "
+          "could not evaluate, `candidate_pairs`, "
           "`below_min_area` and `degenerate` (meshes with no solid hull). `vertices[k]` is an (n, 3) "
           "float64 array and `triangles[k]` an (m, 3) uint32 array indexing it. With `hull` (the "
           "default) the hull is taken here and the triangles are ignored; without it the meshes must "

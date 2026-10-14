@@ -39,7 +39,9 @@ def find_convex_contacts(
 
     Returns a dict of columns, one row per contact, in ``(i, j)`` order: ``pairs`` ``(k, 2)`` int64 with
     ``i < j``, ``near1`` / ``near2`` / ``normal`` ``(k, 3)``, ``penetration_depth`` ``(k,)`` and
-    ``contact_area`` ``(k,)``; plus ``failures`` -- ``(i, j, reason)`` for pairs coal could not evaluate
+    ``contact_area`` ``(k,)``; ``patches`` -- per contact, a list of coal's contact-patch polygons, each
+    ``{"normal": (3,), "points1": (m, 3) on mesh i, "points2": (m, 3) on mesh j}``; plus ``failures`` --
+    ``(i, j, reason)`` for pairs coal could not evaluate
     -- ``candidate_pairs``, ``below_min_area`` and ``degenerate``, the meshes with no solid hull.
     """
     if triangles is None:

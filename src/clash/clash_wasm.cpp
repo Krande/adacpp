@@ -12,7 +12,11 @@
 // Contacts come back as columns (typed arrays copied out of the wasm heap):
 //   { pairs: Uint32Array(2k), near1, near2, normal: Float64Array(3k),
 //     penetrationDepth, contactArea: Float64Array(k),
+//     patchOffsets: Uint32Array(k+1), patchNormals: Float64Array(3P),
+//     patchPointOffsets: Uint32Array(P+1), patchPoints1, patchPoints2: Float64Array(3N),
 //     failures: [{i, j, reason}], candidatePairs, belowMinArea, degenerate: Uint32Array }
+// Contact q's patches are [patchOffsets[q], patchOffsets[q+1]); patch p's polygon is points
+// [patchPointOffsets[p], patchPointOffsets[p+1]) of patchPoints1 (on mesh i) and patchPoints2 (on j).
 // or { error } when the input is malformed.
 
 #include <cstdint>
@@ -83,6 +87,21 @@ val find_convex_contacts_js(const val &vertices_js, const val &vertex_offsets_js
             depth[q] = x.penetration_depth;
             area[q] = x.contact_area;
         }
+        // The contact patches, flattened: contact q owns patches [patchOffsets[q], patchOffsets[q+1]),
+        // patch p owns points [patchPointOffsets[p], patchPointOffsets[p+1]).
+        std::vector<std::uint32_t> patch_offsets(c + 1, 0), point_offsets(1, 0);
+        std::vector<double> patch_normals, points1, points2;
+        for (std::size_t q = 0; q < c; ++q) {
+            for (const ContactPatch &p : r.contacts[q].patches) {
+                patch_normals.insert(patch_normals.end(), p.normal.begin(), p.normal.end());
+                for (std::size_t k = 0; k < p.points1.size(); ++k) {
+                    points1.insert(points1.end(), p.points1[k].begin(), p.points1[k].end());
+                    points2.insert(points2.end(), p.points2[k].begin(), p.points2[k].end());
+                }
+                point_offsets.push_back(static_cast<std::uint32_t>(points1.size() / 3));
+            }
+            patch_offsets[q + 1] = static_cast<std::uint32_t>(point_offsets.size() - 1);
+        }
         val failures = val::array();
         for (const ConvexContactFailure &f : r.failures) {
             val o = val::object();
@@ -99,6 +118,11 @@ val find_convex_contacts_js(const val &vertices_js, const val &vertex_offsets_js
         out.set("normal", copy_out(normal));
         out.set("penetrationDepth", copy_out(depth));
         out.set("contactArea", copy_out(area));
+        out.set("patchOffsets", copy_out(patch_offsets));
+        out.set("patchNormals", copy_out(patch_normals));
+        out.set("patchPointOffsets", copy_out(point_offsets));
+        out.set("patchPoints1", copy_out(points1));
+        out.set("patchPoints2", copy_out(points2));
         out.set("failures", failures);
         out.set("candidatePairs", static_cast<double>(r.candidate_pairs));
         out.set("belowMinArea", static_cast<double>(r.below_min_area));

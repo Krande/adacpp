@@ -55,6 +55,16 @@ struct MeshView {
     std::size_t n_triangles = 0;
 };
 
+/** One contact patch: the polygon where the two shapes meet, as coal computes it. A face-on-face
+ *  contact is a polygon, an edge-on-face contact two points, a corner one. */
+struct ContactPatch {
+    std::array<double, 3> normal{0, 0, 0}; //!< the patch plane's normal, coal's, from mesh i towards mesh j
+    //! The polygon's vertices on mesh i's surface, in coal's order (convex, around `normal`).
+    std::vector<std::array<double, 3>> points1;
+    //! The same vertices on mesh j's surface: `points1` moved by the penetration depth along `normal`.
+    std::vector<std::array<double, 3>> points2;
+};
+
 struct ConvexContact {
     std::size_t i = 0;                     //!< first mesh (i < j)
     std::size_t j = 0;                     //!< second mesh
@@ -63,7 +73,8 @@ struct ConvexContact {
     std::array<double, 3> normal{0, 0, 0}; //!< coal's contact normal, from mesh i towards mesh j
     //! coal's sign: negative is overlap depth, positive a gap that is still inside the margin.
     double penetration_depth = 0.0;
-    double contact_area = 0.0; //!< m^2, as `contact_patch_area` measured it
+    double contact_area = 0.0;         //!< m^2, summed over `patches` by `patch_area`
+    std::vector<ContactPatch> patches; //!< usually one
 };
 
 /** A candidate pair coal could not evaluate. Reported, not thrown: one bad pair must not cost the

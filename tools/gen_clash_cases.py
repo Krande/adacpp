@@ -26,26 +26,40 @@ MIN_CONTACT_AREA = 1e-6
 LINE_CONTACT_THICKNESS = 1e-3
 
 
-def patch_area(shape1, T1, shape2, T2, col_res, col_req, thickness=LINE_CONTACT_THICKNESS) -> float:
+def contact_patches(shape1, T1, shape2, T2, col_res, col_req) -> list[dict]:
+    """coal's contact patches: per patch its normal and polygon on each shape."""
+    patch_res = coal.ContactPatchResult()
+    coal.computeContactPatch(shape1, T1, shape2, T2, col_res, coal.ContactPatchRequest(col_req), patch_res)
+    out = []
+    for p in range(patch_res.numContactPatches()):
+        patch = patch_res.getContactPatch(p)
+        out.append(
+            {
+                "normal": [float(x) for x in patch.getNormal()],
+                "points1": [[float(x) for x in patch.getPointShape1(k)] for k in range(patch.size())],
+                "points2": [[float(x) for x in patch.getPointShape2(k)] for k in range(patch.size())],
+            }
+        )
+    return out
+
+
+def patch_area(patches: list[dict], thickness=LINE_CONTACT_THICKNESS) -> float:
     """The summed contact-patch area, by the rules src/clash/convex_contact.cpp implements.
 
     A patch of 2 points is a line contact: length * thickness. 3+ points are projected into the patch
     plane and measured by qhull; where qhull refuses them as flat, the patch's largest in-plane extent
     * thickness. Fewer than 2 points have no area.
     """
-    patch_res = coal.ContactPatchResult()
-    coal.computeContactPatch(shape1, T1, shape2, T2, col_res, coal.ContactPatchRequest(col_req), patch_res)
     total = 0.0
-    for p in range(patch_res.numContactPatches()):
-        patch = patch_res.getContactPatch(p)
-        n = patch.size()
+    for patch in patches:
+        n = len(patch["points1"])
         if n < 2:
             continue
-        pts = np.vstack([np.array(patch.getPointShape1(k)) for k in range(n)])
+        pts = np.asarray(patch["points1"], dtype=float)
         if n == 2:
             total += float(np.linalg.norm(pts[1] - pts[0])) * thickness
             continue
-        normal = np.array(patch.getNormal())
+        normal = np.array(patch["normal"])
         normal /= np.linalg.norm(normal)
         arb = np.array([1.0, 0.0, 0.0])
         if abs(np.dot(arb, normal)) > 0.9:
@@ -110,7 +124,8 @@ def oracle(meshes):
             coal.collide(shapes[i], T, shapes[j], T, req, res)
             if not res.isCollision():
                 continue
-            area = patch_area(shapes[i], T, shapes[j], T, res, req)
+            patches = contact_patches(shapes[i], T, shapes[j], T, res, req)
+            area = patch_area(patches)
             if area < MIN_CONTACT_AREA:
                 below += 1
                 continue
@@ -123,6 +138,7 @@ def oracle(meshes):
                     "normal": [float(x) for x in c.normal],
                     "penetration_depth": float(c.penetration_depth),
                     "contact_area": float(area),
+                    "patches": patches,
                 }
             )
     return contacts, below
