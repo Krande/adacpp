@@ -29,7 +29,6 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include "../diff/glb_diff_native.h" // resolve_accessor: raw or EXT_meshopt_compression bufferViews
@@ -37,11 +36,13 @@
 
 namespace adacpp::clash {
 
-/** One member read out of a GLB: its element id, its name, its vertices (xyz, Z-up model frame). */
+/** One member read out of a GLB: its element id, its name, its vertices (xyz, Z-up model frame) and
+ *  its triangles (index triples into its OWN vertices, so it is a MeshView on its own). */
 struct GlbMember {
     std::string id;
     std::string name;
     std::vector<double> vertices;
+    std::vector<std::uint32_t> triangles;
 };
 
 struct GlbContactResult {
@@ -116,7 +117,9 @@ inline bool is_identity(const Mat4 &m) {
  *
  *  `up_axis` is the GLB's up axis: "z" (adapy's GLBs; no conversion) or "y" (glTF's convention: the
  *  inverse of the Z-up -> Y-up export rotation, (x, y, z) -> (x, -z, y)). A member's vertices are the
- *  distinct vertices its triangles use, in first-use order. Throws std::invalid_argument for bytes
+ *  distinct vertices its triangles use, in first-use order (per draw range: an element split over
+ *  several nodes keeps each node's vertices apart); its triangles are its draw ranges' index triples
+ *  renumbered into those vertices. Throws std::invalid_argument for bytes
  *  that are not a GLB the viewer could have loaded. */
 inline std::vector<GlbMember> glb_members(const unsigned char *data, std::size_t size,
                                           const std::string &up_axis = "z") {
@@ -243,16 +246,22 @@ inline std::vector<GlbMember> glb_members(const unsigned char *data, std::size_t
             auto [mit, fresh] = member_of.emplace(id, members.size());
             if (fresh) {
                 auto name = name_of.find(id);
-                members.push_back({id, name != name_of.end() ? name->second : id, {}});
+                members.push_back({id, name != name_of.end() ? name->second : id, {}, {}});
             }
             GlbMember &member = members[mit->second];
             // Distinct vertices only, in first-use order: an element's triangles share most of them.
-            std::unordered_set<std::uint32_t> seen;
+            // `local` renumbers a buffer index into the member's own vertices.
+            std::unordered_map<std::uint32_t, std::uint32_t> local;
+            const std::size_t tri_end = start + count - count % 3; // a trailing partial triple is no triangle
             for (std::size_t i = start; i < start + count; ++i) {
                 const std::uint32_t vi = read_idx(i);
                 if (vi >= pos_count)
                     throw std::invalid_argument("GLB index past its positions (element " + id + ")");
-                if (!seen.insert(vi).second)
+                const auto [lit, fresh_vertex] =
+                    local.emplace(vi, static_cast<std::uint32_t>(member.vertices.size() / 3));
+                if (i < tri_end)
+                    member.triangles.push_back(lit->second);
+                if (!fresh_vertex)
                     continue;
                 float f[3];
                 std::memcpy(f, posv.ptr + std::size_t(vi) * posv.stride, 12);

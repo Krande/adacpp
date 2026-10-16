@@ -23,7 +23,7 @@ reference for what each argument means.
 | `adacpp_glb_diff` | **GLB diff** (element-level, with removed-element overlay) | `diffGlb` |
 | `adacpp_extrude` | **Prismatic extrusion** (section table + per-instance frames -> vertex/index buffers) | `expandBeamSolids` |
 | `adacpp_fea` | **FEA results**: load combinations, derived components and envelopes over baked AFBL/AFEL strides | `combineField`, `envelopeField`, `readBlobHeader`, `version` + [OPFS](#opfs) |
-| `adacpp_clash` | **Convex-contact clash detection** (coal: which members touch or overlap, with contact points, normal, depth, patch area and patch polygon) | `findGlbContacts`, `findConvexContacts` |
+| `adacpp_clash` | **Convex-contact clash detection** (coal: which members touch or overlap, with contact points, normal, depth, patch area and patch polygon) | `findGlbContacts`, `glbMembers`, `findConvexContacts` |
 
 The `*_glb`, `brep_writer` and `fea` modules do their file I/O through emscripten's WASMFS (`mod.FS`):
 in-heap by default, and on an OPFS mount in a **dedicated Web Worker**, so multi-GB inputs stream
@@ -188,6 +188,24 @@ const r = clash.findGlbContacts(
 if (r.error) throw new Error(r.error);
 // r.memberIds / r.memberNames (string arrays): the members the contact indices in r.pairs refer to.
 // Everything else is as for findConvexContacts below.
+```
+
+To check members of SEVERAL GLBs against each other, read them out with `glbMembers` -- the same
+members, transform and up-axis handling as `findGlbContacts`, without measuring them -- filter and
+concatenate, and measure the soup with `findConvexContacts` (hull `true`). All the members of one GLB
+give exactly what `findGlbContacts` gives on it.
+
+```ts
+const m = clash.glbMembers(glbBytes, "z");
+if ("error" in m) throw new Error(m.error);
+// m.ids / m.names: string[], one per member, in findGlbContacts' order.
+// m.vertices Float64Array (xyz, Z-up model frame), m.vertexOffsets Uint32Array(n+1),
+// m.triangles Uint32Array (indices LOCAL to the member), m.triangleOffsets Uint32Array(n+1):
+// member k = vertices [3*vertexOffsets[k], 3*vertexOffsets[k+1]) and triangles
+// [3*triangleOffsets[k], 3*triangleOffsets[k+1]) -- the layout findConvexContacts takes, so subsets
+// and concatenations (offsets rebased) pass straight through.
+const r = clash.findConvexContacts(m.vertices, m.vertexOffsets, m.triangles, m.triangleOffsets,
+                                   0.01, 1e-6, 1e-3, true);
 ```
 
 The same check on meshes you assemble yourself:

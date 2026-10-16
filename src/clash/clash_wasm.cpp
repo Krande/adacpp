@@ -2,7 +2,7 @@
 // coal and the pass, no OCCT, no pyodide, no Python. The same C++ the nanobind module (adacpp.clash)
 // runs, so a browser and a worker report the same contacts for the same meshes.
 //
-// Two verbs:
+// Two verbs, and the reader behind the first:
 //
 // `findGlbContacts(glb, securityMargin, minContactArea, lineContactThickness, upAxis)` -- the members of
 // a viewer GLB (a Uint8Array: the bytes the viewer loaded), one per element of its id_hierarchy /
@@ -17,6 +17,12 @@
 // offset arrays have one entry more than there are meshes. With `hull` true each mesh's convex hull is
 // taken from its vertices and its triangles are ignored (pass empty triangle ranges); with it false
 // the meshes must be convex hulls already.
+//
+// `glbMembers(glb, upAxis)` -- the members findGlbContacts measures, without measuring them, in the
+// soup layout findConvexContacts takes: { ids, names: string[], vertices: Float64Array (xyz, Z-up model
+// frame), vertexOffsets: Uint32Array(n+1), triangles: Uint32Array (member-local), triangleOffsets:
+// Uint32Array(n+1) }. A caller pulls members out of several GLBs, filters and concatenates them, and
+// hands the result to findConvexContacts (hull true); all of one GLB gives what findGlbContacts gives.
 //
 // Contacts come back as columns (typed arrays copied out of the wasm heap):
 //   { pairs: Uint32Array(2k), near1, near2, normal: Float64Array(3k),
@@ -156,13 +162,53 @@ val find_convex_contacts_js(const val &vertices_js, const val &vertex_offsets_js
     }
 }
 
+std::vector<unsigned char> glb_bytes(const val &glb_js) {
+    // One bulk copy into the heap (TypedArray.set), not element by element: a GLB is megabytes.
+    const std::size_t n = glb_js["length"].as<std::size_t>();
+    std::vector<unsigned char> bytes(n);
+    val(emscripten::typed_memory_view(n, bytes.data())).call<void>("set", glb_js);
+    return bytes;
+}
+
+val glb_members_js(const val &glb_js, const std::string &up_axis) {
+    try {
+        const std::vector<unsigned char> bytes = glb_bytes(glb_js);
+        const std::vector<GlbMember> members = glb_members(bytes.data(), bytes.size(), up_axis);
+        std::size_t nv = 0, nt = 0;
+        for (const GlbMember &m : members) {
+            nv += m.vertices.size();
+            nt += m.triangles.size();
+        }
+        std::vector<double> vertices;
+        std::vector<std::uint32_t> triangles, vertex_offsets(1, 0), triangle_offsets(1, 0);
+        vertices.reserve(nv);
+        triangles.reserve(nt);
+        val ids = val::array(), names = val::array();
+        for (const GlbMember &m : members) {
+            ids.call<void>("push", m.id);
+            names.call<void>("push", m.name);
+            vertices.insert(vertices.end(), m.vertices.begin(), m.vertices.end());
+            triangles.insert(triangles.end(), m.triangles.begin(), m.triangles.end()); // already member-local
+            vertex_offsets.push_back(static_cast<std::uint32_t>(vertices.size() / 3));
+            triangle_offsets.push_back(static_cast<std::uint32_t>(triangles.size() / 3));
+        }
+        val out = val::object();
+        out.set("ids", ids);
+        out.set("names", names);
+        out.set("vertices", copy_out(vertices));
+        out.set("vertexOffsets", copy_out(vertex_offsets));
+        out.set("triangles", copy_out(triangles));
+        out.set("triangleOffsets", copy_out(triangle_offsets));
+        return out;
+    } catch (const std::exception &e) {
+        return error_val(e);
+    }
+}
+
 val find_glb_contacts_js(const val &glb_js, double security_margin, double min_contact_area,
                          double line_contact_thickness, const std::string &up_axis) {
     try {
-        // One bulk copy into the heap (TypedArray.set), not element by element: a GLB is megabytes.
-        const std::size_t n = glb_js["length"].as<std::size_t>();
-        std::vector<unsigned char> bytes(n);
-        val(emscripten::typed_memory_view(n, bytes.data())).call<void>("set", glb_js);
+        const std::vector<unsigned char> bytes = glb_bytes(glb_js);
         const GlbContactResult r =
             find_glb_contacts(bytes.data(), bytes.size(),
                               make_options(security_margin, min_contact_area, line_contact_thickness, true), up_axis);
@@ -188,4 +234,5 @@ EMSCRIPTEN_BINDINGS(adacpp_clash) {
     emscripten::constant("DEFAULT_LINE_CONTACT_THICKNESS", DEFAULT_LINE_CONTACT_THICKNESS);
     emscripten::function("findConvexContacts", &find_convex_contacts_js);
     emscripten::function("findGlbContacts", &find_glb_contacts_js);
+    emscripten::function("glbMembers", &glb_members_js);
 }

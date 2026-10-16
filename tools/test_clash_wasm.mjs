@@ -136,6 +136,100 @@ for (const [hull, tol, areaRtol] of [[ false, TOL, AREA_RTOL ], [ true, TOL, ARE
     }
     const notGlb = Module.findGlbContacts(new Uint8Array([ 1, 2, 3 ]), 0.01, 1e-6, 1e-3, "z");
     check("bytes that are not a GLB are an error", typeof notGlb.error === "string", notGlb.error);
+
+    // glbMembers: the members findGlbContacts measures, as a findConvexContacts soup. All of them,
+    // hulled, must give findGlbContacts' contacts exactly (same C++, same doubles); a subset only the
+    // contacts among that subset.
+    console.log(`glbMembers ${glbCase.glb}`);
+    const opts = [ glbCase.security_margin, glbCase.min_contact_area, glbCase.line_contact_thickness ];
+    const m = Module.glbMembers(glb, "z");
+    if (m.error || r.error) {
+        check("glbMembers runs", false, m.error || r.error);
+    } else {
+        const n = m.ids.length;
+        check("ids / names are findGlbContacts' members",
+              JSON.stringify(m.ids) === JSON.stringify(r.memberIds) &&
+                  JSON.stringify(m.names) === JSON.stringify(r.memberNames),
+              `${n} members`);
+        check("typed columns", m.vertices instanceof Float64Array && m.vertexOffsets instanceof Uint32Array &&
+                                   m.triangles instanceof Uint32Array && m.triangleOffsets instanceof Uint32Array);
+        check("offsets have n+1 entries and cover the arrays",
+              m.vertexOffsets.length === n + 1 && m.triangleOffsets.length === n + 1 && m.vertexOffsets[0] === 0 &&
+                  m.triangleOffsets[0] === 0 && 3 * m.vertexOffsets[n] === m.vertices.length &&
+                  3 * m.triangleOffsets[n] === m.triangles.length);
+        let local = true, everyoneHasTriangles = true;
+        for (let k = 0; k < n; ++k) {
+            const nv = m.vertexOffsets[k + 1] - m.vertexOffsets[k];
+            everyoneHasTriangles &&= m.triangleOffsets[k + 1] > m.triangleOffsets[k];
+            for (let t = 3 * m.triangleOffsets[k]; t < 3 * m.triangleOffsets[k + 1]; ++t)
+                local &&= m.triangles[t] < nv;
+        }
+        check("every member has triangles", everyoneHasTriangles);
+        check("triangle indices are member-local", local);
+
+        // The same columns findGlbContacts returns, compared exactly.
+        const COLS = [
+            "pairs", "near1", "near2", "normal", "penetrationDepth", "contactArea", "patchOffsets", "patchNormals",
+            "patchPointOffsets", "patchPoints1", "patchPoints2", "degenerate"
+        ];
+        const all =
+            Module.findConvexContacts(m.vertices, m.vertexOffsets, m.triangles, m.triangleOffsets, ...opts, true);
+        if (all.error) {
+            check("findConvexContacts(glbMembers) runs", false, all.error);
+        } else {
+            const differ = COLS.filter((c) => JSON.stringify(Array.from(all[c])) !== JSON.stringify(Array.from(r[c])));
+            check("findConvexContacts(all glbMembers) == findGlbContacts",
+                  differ.length === 0 && all.candidatePairs === r.candidatePairs && all.belowMinArea === r.belowMinArea,
+                  differ.length ? `differ: ${differ}` : `${all.penetrationDepth.length} contacts`);
+        }
+
+        // Members `pick` of `m`, concatenated as a caller filtering several GLBs would.
+        const subset = (pick) => {
+            const vOff = new Uint32Array(pick.length + 1), tOff = new Uint32Array(pick.length + 1);
+            pick.forEach((k, s) => {
+                vOff[s + 1] = vOff[s] + m.vertexOffsets[k + 1] - m.vertexOffsets[k];
+                tOff[s + 1] = tOff[s] + m.triangleOffsets[k + 1] - m.triangleOffsets[k];
+            });
+            const vertices = new Float64Array(3 * vOff[pick.length]),
+                  triangles = new Uint32Array(3 * tOff[pick.length]);
+            pick.forEach((k, s) => {
+                vertices.set(m.vertices.subarray(3 * m.vertexOffsets[k], 3 * m.vertexOffsets[k + 1]), 3 * vOff[s]);
+                triangles.set(m.triangles.subarray(3 * m.triangleOffsets[k], 3 * m.triangleOffsets[k + 1]),
+                              3 * tOff[s]);
+            });
+            return [ vertices, vOff, triangles, tOff ];
+        };
+        const [a, b] = [ r.pairs[0], r.pairs[1] ]; // the first touching pair, a < b
+        const two = Module.findConvexContacts(...subset([ a, b ]), ...opts, true);
+        const expect = [];
+        for (let q = 0; q < r.penetrationDepth.length; ++q)
+            if (r.pairs[2 * q] === a && r.pairs[2 * q + 1] === b)
+                expect.push(q);
+        if (two.error) {
+            check("findConvexContacts(two glbMembers) runs", false, two.error);
+        } else {
+            let same = two.penetrationDepth.length === expect.length && expect.length > 0;
+            expect.forEach((q, s) => {
+                same &&= two.pairs[2 * s] === 0 && two.pairs[2 * s + 1] === 1 &&
+                         two.penetrationDepth[s] === r.penetrationDepth[q] && two.contactArea[s] === r.contactArea[q] &&
+                         [ 0, 1, 2 ].every((k) => two.near1[3 * s + k] === r.near1[3 * q + k] &&
+                                                  two.near2[3 * s + k] === r.near2[3 * q + k]);
+            });
+            check(`two members (${m.ids[a]}, ${m.ids[b]}) give only their own contact`, same,
+                  `${two.penetrationDepth.length} vs ${expect.length}`);
+        }
+        const ym = Module.glbMembers(glb, "y");
+        let yOk = !ym.error && ym.vertices.length === m.vertices.length;
+        for (let v = 0; yOk && v < m.vertices.length; v += 3)
+            yOk = ym.vertices[v] === m.vertices[v] && ym.vertices[v + 1] === -m.vertices[v + 2] &&
+                  ym.vertices[v + 2] === m.vertices[v + 1];
+        check("upAxis \"y\" maps (x, y, z) -> (x, -z, y)", yOk, ym.error);
+    }
+    const notGlbMembers = Module.glbMembers(new Uint8Array([ 1, 2, 3 ]), "z");
+    check("glbMembers of bytes that are not a GLB is an error", typeof notGlbMembers.error === "string",
+          notGlbMembers.error);
+    const badAxis = Module.glbMembers(glb, "x");
+    check("glbMembers with an unknown upAxis is an error", typeof badAxis.error === "string", badAxis.error);
 }
 
 // Malformed input is an {error}, not a trap.
