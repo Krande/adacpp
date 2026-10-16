@@ -108,6 +108,12 @@ jobs:
       - name: build + test the FEA kernels embind module
         run: pixi run -e wasm test-fea-wasm
 
+      # Convex-contact clash detection (coal compiled from source). Checked against the contacts
+      # coal's own Python bindings report for the same meshes -- the fixture tests/py/test_clash.py
+      # holds the nanobind module to as well.
+      - name: build + test the convex-contact clash embind module
+        run: pixi run -e wasm test-clash-wasm
+
       # The OPFS mount the browser workers stream through. node has no OPFS, so this runs the backend
       # against an in-memory stand-in with the same synchronous handle API.
       - name: test the OPFS sync-access-handle backend (STEP->GLB + FEA modules)

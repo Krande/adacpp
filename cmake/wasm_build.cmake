@@ -96,6 +96,45 @@ if(BUILD_FEA_WASM)
     return() # standalone target
 endif()
 
+# Convex-contact clash detection (coal + src/clash) as a STANDALONE embind wasm module. No OCCT, no
+# tessellator, no file system: meshes in as typed arrays, contacts out as typed arrays. coal itself is
+# the adacpp_clash static library from deps_coal.cmake, the one the nanobind module links.
+if(BUILD_CLASH_WASM)
+    add_executable(
+        adacpp_clash_wasm
+        ${CMAKE_SOURCE_DIR}/src/clash/clash_wasm.cpp
+        # findGlbContacts reads the viewer GLB: EXT_meshopt_compression decode + nlohmann json.
+        ${CMAKE_SOURCE_DIR}/src/geom/neutral/ngeom_meshopt.cpp
+        ${MESHOPT_SOURCES}
+    )
+    target_include_directories(
+        adacpp_clash_wasm
+        PRIVATE $ENV{CONDA_PREFIX}/include
+    )
+    target_link_libraries(adacpp_clash_wasm PRIVATE adacpp_clash)
+    target_compile_options(adacpp_clash_wasm PRIVATE -fwasm-exceptions)
+    set_target_properties(
+        adacpp_clash_wasm
+        PROPERTIES OUTPUT_NAME "adacpp_clash" SUFFIX ".js"
+    )
+    target_link_options(
+        adacpp_clash_wasm
+        PRIVATE
+            "-lembind"
+            "-fwasm-exceptions"
+            "-sALLOW_MEMORY_GROWTH=1"
+            "-sMAXIMUM_MEMORY=4294967296"
+            "-sMODULARIZE=1"
+            "-sEXPORT_ES6=1"
+            "-sEXPORT_NAME=createAdacppClash"
+            "-sENVIRONMENT=web,worker,node"
+            "--emit-tsd"
+            "adacpp_clash.d.ts"
+            "-sSTACK_SIZE=1048576"
+    )
+    return() # standalone target
+endif()
+
 # Prismatic extrusion expansion as a STANDALONE embind wasm module. The leanest of the set: the
 # expander in ngeom_extrude.h is header-only, so this links no libtess2, no meshoptimizer, no
 # manifold and no OCCT — just the arithmetic that turns a section table plus per-instance frames
