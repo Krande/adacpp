@@ -2,6 +2,15 @@
 
 
 
+## v0.34.0 (2026-10-24)
+
+### Feature
+
+* feat: convex-contact clash detection on coal, for Python and the browser (#73)
+
+Co-authored-by: Claude Opus 5.5 &lt;noreply@anthropic.com&gt; ([`161d2d2`](https://github.com/Krande/adacpp/commit/161d2d2b615442cf39a9ad0d8597aa9bdc66aece))
+
+
 ## v0.33.0 (2026-10-09)
 
 ### Feature
