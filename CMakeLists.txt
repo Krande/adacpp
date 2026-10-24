@@ -41,6 +41,11 @@ option(
     OFF
 )
 option(
+    BUILD_CLASH_WASM
+    "Build ONLY the convex-contact clash wasm module (coal; embind, no OCCT/pyodide/Python)"
+    OFF
+)
+option(
     BUILD_STP2GLB_STANDALONE
     "Build ONLY the OCC-free STP2GLB CLI — skip OCCT/CGAL/gmsh/IFC/Python"
     OFF
@@ -214,6 +219,7 @@ if(BUILD_WASM)
         src/cad/cad_py_wrap.cpp
         src/geom/neutral/extrude_py_wrap.cpp
         src/fea/fea_py_wrap.cpp
+        src/clash/clash_py_wrap.cpp
     )
 else()
     set(ADA_CPP_PY_SOURCES
@@ -221,6 +227,7 @@ else()
         src/cad/cad_py_wrap.cpp
         src/geom/neutral/extrude_py_wrap.cpp
         src/fea/fea_py_wrap.cpp
+        src/clash/clash_py_wrap.cpp
         src/cadit/ifc/ifc_py_wrap.cpp
         src/cadit/occt/occt_py_wrap.cpp
         src/cadit/tinygltf/tiny_py_wrap.cpp
@@ -257,6 +264,7 @@ if(BUILD_WASM)
         AND NOT BUILD_BREP_WRITER_WASM
         AND NOT BUILD_EXTRUDE_WASM
         AND NOT BUILD_FEA_WASM
+        AND NOT BUILD_CLASH_WASM
     )
         include(cmake/wasm_occt.cmake)
     endif()
@@ -316,6 +324,15 @@ endif()
 include(cmake/deps_manifold.cmake)
 list(APPEND ADA_CPP_LINK_LIBS manifold)
 add_compile_definitions(ADACPP_HAVE_MANIFOLD)
+
+# coal, compiled from source into the convex-contact clash library (src/clash) -- native AND wasm.
+# Only where something links it: the Python module (every target) and the adacpp_clash embind module.
+if(BUILD_PYTHON OR BUILD_CLASH_WASM)
+    include(cmake/deps_coal.cmake)
+endif()
+if(BUILD_PYTHON)
+    list(APPEND ADA_CPP_LINK_LIBS adacpp_clash)
+endif()
 
 # zlib for gzip-compressed IFC/STEP input (StreamIndex inflates before indexing). Native only — the
 # pixi test/prod envs carry zlib; the wasm build skips gzip (gunzip() is a no-op without the define,

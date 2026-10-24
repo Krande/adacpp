@@ -20,6 +20,8 @@
 #   wasm/adacpp_extrude.{js,wasm}      prismatic-extrusion expander embind module
 #   wasm/adacpp_fea.{js,wasm}          FEA kernels embind module (load combinations, derived
 #                                      components, envelopes over AFBL/AFEL strides; WASMFS + OPFS)
+#   wasm/adacpp_clash.{js,wasm}        convex-contact clash embind module (coal: contacts between
+#                                      convex member meshes, typed arrays in and out)
 #   wasm/*.d.ts                        emscripten-generated types for each module
 #
 # busybox (not scratch) so `docker create` + `docker cp` work for consumers

@@ -1,6 +1,7 @@
 #include "binding_core.h"
 #include "cad/cad_py_wrap.h"
 #include "cad/occt_fork_safety.h"
+#include "clash/clash_py_wrap.h"
 #include "fea/fea_py_wrap.h"
 #include "geom/neutral/extrude_py_wrap.h"
 #include "occt_compat.h"
@@ -50,6 +51,9 @@ NB_MODULE(_ada_cpp_ext_impl, m) {
     // FEA result kernels: OCC-free too, and the same C++ as the adacpp_fea wasm module.
     auto fea_sub_module = m.def_submodule("fea", "Format-neutral FEA result kernels");
     fea_module(fea_sub_module);
+    // Convex-contact clash detection on coal: OCC-free, and the same C++ as the adacpp_clash wasm module.
+    auto clash_sub_module = m.def_submodule("clash", "Convex-contact clash detection (coal)");
+    clash_module(clash_sub_module);
 
 #ifndef __EMSCRIPTEN__
     auto cadit_module = m.def_submodule("cadit", "CAD Interoperability toolkit");

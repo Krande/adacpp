@@ -23,11 +23,12 @@ reference for what each argument means.
 | `adacpp_glb_diff` | **GLB diff** (element-level, with removed-element overlay) | `diffGlb` |
 | `adacpp_extrude` | **Prismatic extrusion** (section table + per-instance frames -> vertex/index buffers) | `expandBeamSolids` |
 | `adacpp_fea` | **FEA results**: load combinations, derived components and envelopes over baked AFBL/AFEL strides | `combineField`, `envelopeField`, `readBlobHeader`, `version` + [OPFS](#opfs) |
+| `adacpp_clash` | **Convex-contact clash detection** (coal: which members touch or overlap, with contact points, normal, depth, patch area and patch polygon) | `findGlbContacts`, `glbMembers`, `findConvexContacts` |
 
 The `*_glb`, `brep_writer` and `fea` modules do their file I/O through emscripten's WASMFS (`mod.FS`):
 in-heap by default, and on an OPFS mount in a **dedicated Web Worker**, so multi-GB inputs stream
-through `pread` (bounded RSS) instead of the wasm heap. `adacpp_glb_diff` and `adacpp_extrude` are
-in-heap only.
+through `pread` (bounded RSS) instead of the wasm heap. `adacpp_glb_diff`, `adacpp_extrude` and
+`adacpp_clash` are in-heap only.
 
 ## OPFS
 
@@ -162,3 +163,78 @@ Derivation ops: `copy`, `plane_von_mises` (3 args), `plane_principal` (3 args ->
 MVONMISES). The single-output names are the ones a lazy-case manifest's `derived_components` uses,
 so each entry maps onto one op: `{op, args: <component indices>, out: [<its column>]}`. An `out`
 entry of `-1` drops that output.
+
+Convex-contact clash detection, via `adacpp_clash` -- coal's GJK/EPA and contact-patch code compiled
+from source, the same C++ the server's Python module (`adacpp.clash`) runs, so the browser and a worker
+report the same contacts. coal measures CONVEX solids, so by default (`hull = true`) each member's convex
+hull is taken here from its vertices -- pass any tessellation, or just the vertices with empty triangle
+ranges. All the meshes go in as one flat soup:
+
+The usual entry point is the viewer GLB itself: the bytes the viewer loaded. Each element of the
+GLB's `id_hierarchy` / `draw_ranges` tables is one member (keyed by element id; an element split over
+several materials is one member), hulled and measured in the Z-up model frame. The worker runs the same
+C++ on the same bytes (`adacpp.clash.find_glb_contacts`), so both report the same contacts.
+
+```ts
+import createAdacppClash from "./adacpp_clash.js";
+
+const clash = await createAdacppClash({ locateFile: (p) => `/wasm/${p}` });
+
+const r = clash.findGlbContacts(
+  glbBytes,          // Uint8Array: the viewer GLB
+  0.01, 1e-6, 1e-3,  // securityMargin, minContactArea, lineContactThickness
+  "z",               // upAxis: the GLB's own ("z" for adapy's GLBs, "y" for a glTF-convention delivery)
+);
+if (r.error) throw new Error(r.error);
+// r.memberIds / r.memberNames (string arrays): the members the contact indices in r.pairs refer to.
+// Everything else is as for findConvexContacts below.
+```
+
+To check members of SEVERAL GLBs against each other, read them out with `glbMembers` -- the same
+members, transform and up-axis handling as `findGlbContacts`, without measuring them -- filter and
+concatenate, and measure the soup with `findConvexContacts` (hull `true`). All the members of one GLB
+give exactly what `findGlbContacts` gives on it.
+
+```ts
+const m = clash.glbMembers(glbBytes, "z");
+if ("error" in m) throw new Error(m.error);
+// m.ids / m.names: string[], one per member, in findGlbContacts' order.
+// m.vertices Float64Array (xyz, Z-up model frame), m.vertexOffsets Uint32Array(n+1),
+// m.triangles Uint32Array (indices LOCAL to the member), m.triangleOffsets Uint32Array(n+1):
+// member k = vertices [3*vertexOffsets[k], 3*vertexOffsets[k+1]) and triangles
+// [3*triangleOffsets[k], 3*triangleOffsets[k+1]) -- the layout findConvexContacts takes, so subsets
+// and concatenations (offsets rebased) pass straight through.
+const r = clash.findConvexContacts(m.vertices, m.vertexOffsets, m.triangles, m.triangleOffsets,
+                                   0.01, 1e-6, 1e-3, true);
+```
+
+The same check on meshes you assemble yourself:
+
+```ts
+
+// Mesh k = vertices [vOff[k], vOff[k+1]) and triangles [tOff[k], tOff[k+1]); triangle indices are
+// LOCAL to their mesh. Both offset arrays have one more entry than there are meshes.
+const r = clash.findConvexContacts(
+  vertices,          // Float64Array, xyz per vertex
+  vOff,              // Uint32Array
+  triangles,         // Uint32Array, 3 indices per triangle
+  tOff,              // Uint32Array
+  0.01,              // securityMargin (m): closer than this counts as touching
+  1e-6,              // minContactArea (m²): smaller patches (a corner grazing a face) are dropped
+  1e-3,              // lineContactThickness (m): width given to an edge-on-face contact
+  true,              // hull: take each mesh's convex hull (false only if the meshes ARE hulls already)
+);
+if (r.error) throw new Error(r.error);
+// One row per contact, pairs i < j in order:
+// r.pairs Uint32Array(2k), r.near1 / r.near2 / r.normal Float64Array(3k),
+// r.penetrationDepth Float64Array(k) (coal's sign: negative = overlap, positive = gap inside the margin),
+// r.contactArea Float64Array(k),
+// the contact-patch polygons, flattened -- contact q's patches are [patchOffsets[q], patchOffsets[q+1]),
+// patch p's normal is patchNormals[3p..3p+3) and its polygon the points
+// [patchPointOffsets[p], patchPointOffsets[p+1]) of patchPoints1 (on mesh i) and patchPoints2 (on mesh j),
+// r.failures [{i, j, reason}], r.candidatePairs, r.belowMinArea,
+// r.degenerate Uint32Array (meshes whose points span no volume -- flat or too few -- and so touch nothing)
+```
+
+The normal points from mesh `i` towards mesh `j`. `DEFAULT_SECURITY_MARGIN`, `DEFAULT_MIN_CONTACT_AREA`
+and `DEFAULT_LINE_CONTACT_THICKNESS` are exported as constants.
