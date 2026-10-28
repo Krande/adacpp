@@ -13,6 +13,8 @@ browser computes from the same baked strides:
 - :func:`combine_field` / :func:`envelope_field` -- the file verbs: read strides from baked AFBL/AFEL
   blobs and write a single-step case blob (or a two-step max/min envelope blob), byte-identical to
   the wasm module's ``combineField`` / ``envelopeField``.
+- :data:`sin` -- the per-record loops of adapy's Sesam SIN reader (pointer tables, per-case gathers,
+  complex presentation) and the fused compare statistics, each equal to the numpy it replaces.
 - :func:`write_afbl` / :func:`write_afel` / :func:`encode_afbl_header` / :func:`encode_afel_header` /
   :func:`read_header` -- the artefact format, byte-identical to adapy's writers.
 
@@ -33,6 +35,9 @@ DERIVE_OPS = _fea.DERIVE_OPS
 
 encode_afbl_header = _fea.encode_afbl_header
 encode_afel_header = _fea.encode_afel_header
+
+#: The per-record loops of a Sesam SIN result reader (adapy's sin_reader.py), over the file's bytes.
+sin = _fea.sin
 
 
 def read_header(path) -> dict:
