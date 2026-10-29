@@ -2,6 +2,15 @@
 
 
 
+## v0.35.0 (2026-10-29)
+
+### Feature
+
+* feat: adacpp.fea.sin, native loops for a SIN result reader (#74)
+
+Co-authored-by: Claude Opus 5.5 &lt;noreply@anthropic.com&gt; ([`f6b7067`](https://github.com/Krande/adacpp/commit/f6b706709b55c9b3b496d22c491599364a2b6790))
+
+
 ## v0.34.0 (2026-10-24)
 
 ### Feature
