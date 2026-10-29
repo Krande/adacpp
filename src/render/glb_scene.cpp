@@ -2,6 +2,7 @@
 
 #ifndef __EMSCRIPTEN__
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 #include <vector>
@@ -119,8 +120,41 @@ uint32_t pack_rgba8(const float *c) {
     return q(c[0]) | (q(c[1]) << 8) | (q(c[2]) << 16) | (q(c[3]) << 24);
 }
 
+// adapy writes each merged node's per-object index ranges into the scene extras as
+// "draw_ranges_<node name>": {object id: [start, count]}. They become the geometry's segments, as in the
+// viewer, so clusters and culling here behave as they do in the browser.
+std::vector<uint32_t> segments_from_extras(const tinygltf::Value *ranges, size_t index_count) {
+    std::vector<std::pair<uint32_t, uint32_t>> rs;
+    if (ranges && ranges->IsObject()) {
+        for (const auto &key : ranges->Keys()) {
+            const auto &v = ranges->Get(key);
+            if (!v.IsArray() || v.ArrayLen() < 2)
+                continue;
+            auto num = [](const tinygltf::Value &x) {
+                return x.IsInt() ? double(x.Get<int>()) : x.IsReal() ? x.Get<double>() : 0.0;
+            };
+            rs.emplace_back(uint32_t(num(v.Get(0))), uint32_t(num(v.Get(1))));
+        }
+    }
+    std::sort(rs.begin(), rs.end());
+    std::vector<uint32_t> out;
+    uint32_t cursor = 0;
+    for (const auto &[start, count] : rs) {
+        if (start >= index_count || count == 0)
+            continue;
+        if (start > cursor)
+            out.insert(out.end(), {cursor, start - cursor});
+        const uint32_t c = std::min<uint32_t>(count, uint32_t(index_count) - start);
+        out.insert(out.end(), {start, c});
+        cursor = std::max(cursor, start + c);
+    }
+    if (!out.empty() && cursor < index_count)
+        out.insert(out.end(), {cursor, uint32_t(index_count) - cursor});
+    return out;
+}
+
 void add_primitive(Renderer &r, const tinygltf::Model &model, const tinygltf::Primitive &prim, const Mat4 &world,
-                   GlbLoadResult &res) {
+                   GlbLoadResult &res, const tinygltf::Value *ranges) {
     Topology topo;
     if (prim.mode == TINYGLTF_MODE_TRIANGLES || prim.mode == -1)
         topo = Topology::Triangles;
@@ -156,6 +190,11 @@ void add_primitive(Renderer &r, const tinygltf::Model &model, const tinygltf::Pr
     gd.colors = colors.empty() ? nullptr : colors.data();
     gd.indices = indices.empty() ? nullptr : indices.data();
     gd.index_count = indices.size();
+    const auto segments =
+        topo == Topology::Triangles ? segments_from_extras(ranges, indices.size()) : std::vector<uint32_t>{};
+    gd.segments = segments.empty() ? nullptr : segments.data();
+    gd.segment_count = segments.size() / 2;
+    res.segments += gd.segment_count;
     const uint32_t geom = r.add_geometry(gd);
     const uint32_t inst = r.add_instance(geom);
 
@@ -186,14 +225,20 @@ void add_primitive(Renderer &r, const tinygltf::Model &model, const tinygltf::Pr
         res.triangles += (indices.empty() ? gd.vertex_count : indices.size()) / 3;
 }
 
-void walk(Renderer &r, const tinygltf::Model &model, int node_index, const Mat4 &parent, GlbLoadResult &res) {
+void walk(Renderer &r, const tinygltf::Model &model, int node_index, const Mat4 &parent, GlbLoadResult &res,
+          const tinygltf::Value &scene_extras) {
     const auto &node = model.nodes.at(node_index);
     const Mat4 world = mul(parent, node_matrix(node));
-    if (node.mesh >= 0)
-        for (const auto &prim : model.meshes.at(node.mesh).primitives)
-            add_primitive(r, model, prim, world, res);
+    if (node.mesh >= 0) {
+        const auto &prims = model.meshes.at(node.mesh).primitives;
+        const std::string key = "draw_ranges_" + node.name;
+        const tinygltf::Value *ranges =
+            prims.size() == 1 && scene_extras.IsObject() && scene_extras.Has(key) ? &scene_extras.Get(key) : nullptr;
+        for (const auto &prim : prims)
+            add_primitive(r, model, prim, world, res, ranges);
+    }
     for (int child : node.children)
-        walk(r, model, child, world, res);
+        walk(r, model, child, world, res, scene_extras);
 }
 
 void normalize(float v[3]) {
@@ -227,12 +272,38 @@ GlbLoadResult load_glb(Renderer &renderer, const std::string &path, bool y_up_to
     const int scene = model.defaultScene >= 0 ? model.defaultScene : 0;
     if (!model.scenes.empty()) {
         for (int n : model.scenes.at(scene).nodes)
-            walk(renderer, model, n, root, res);
+            walk(renderer, model, n, root, res, model.scenes.at(scene).extras);
     } else {
         for (size_t n = 0; n < model.nodes.size(); ++n)
-            walk(renderer, model, int(n), root, res);
+            walk(renderer, model, int(n), root, res, tinygltf::Value());
     }
     return res;
+}
+
+Camera look_at(const float eye[3], const float target[3], std::array<float, 3> up, float fov_y_deg, float aspect,
+               const std::array<float, 16> &fit) {
+    float zc[3] = {eye[0] - target[0], eye[1] - target[1], eye[2] - target[2]};
+    normalize(zc);
+    float xc[3] = {up[1] * zc[2] - up[2] * zc[1], up[2] * zc[0] - up[0] * zc[2], up[0] * zc[1] - up[1] * zc[0]};
+    normalize(xc);
+    float yc[3] = {zc[1] * xc[2] - zc[2] * xc[1], zc[2] * xc[0] - zc[0] * xc[2], zc[0] * xc[1] - zc[1] * xc[0]};
+    Camera cam{};
+    auto &v = cam.view;
+    v = {xc[0], yc[0], zc[0], 0, xc[1], yc[1], zc[1], 0, xc[2], yc[2], zc[2], 0, 0, 0, 0, 1};
+    v[12] = -(xc[0] * eye[0] + xc[1] * eye[1] + xc[2] * eye[2]);
+    v[13] = -(yc[0] * eye[0] + yc[1] * eye[1] + yc[2] * eye[2]);
+    v[14] = -(zc[0] * eye[0] + zc[1] * eye[1] + zc[2] * eye[2]);
+    const float near_z = 0.05f, far_z = 2000.0f;
+    const float f = 1.0f / std::tan(fov_y_deg * 3.14159265f / 360.0f);
+    auto &p = cam.proj;
+    p = {};
+    p[0] = f / aspect;
+    p[5] = f;
+    p[10] = (far_z + near_z) / (near_z - far_z);
+    p[11] = -1.0f;
+    p[14] = 2.0f * far_z * near_z / (near_z - far_z);
+    (void) fit;
+    return cam;
 }
 
 Camera frame_bounds(const std::array<float, 6> &b, std::array<float, 3> direction, std::array<float, 3> up,

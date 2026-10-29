@@ -92,7 +92,9 @@ struct RenderStats {
 
 class Renderer {
 public:
-    static constexpr uint32_t kClusterMaxVertices = 64;
+    // 255 = the most a u8 local index addresses. No mesh-shader limit applies to vertex pulling, and flat-shaded
+    // CAD (1.65 vertices per triangle) filled 64-vertex clusters at ~38 of 124 triangles.
+    static constexpr uint32_t kClusterMaxVertices = 255;
     static constexpr uint32_t kClusterMaxTriangles = 124;
     static constexpr uint32_t kSampleCount = 4;
 

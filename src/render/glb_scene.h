@@ -15,6 +15,7 @@ struct GlbLoadResult {
     uint32_t instances = 0;
     uint64_t vertices = 0;
     uint64_t triangles = 0;
+    uint64_t segments = 0; // per-object index ranges (adapy draw ranges), 0 = one per primitive
 };
 
 // Adds every mesh primitive of the GLB's default scene as one geometry + instance, with node transforms
@@ -29,6 +30,11 @@ struct Camera {
 
 // Perspective camera looking at `bounds` (min xyz, max xyz) from `direction` (towards the camera, world
 // space), fitted so the bounding sphere fills the view. `up` is the world up axis.
+// Perspective camera at `eye` looking at `target`; near/far are taken from `fit` (a frame_bounds()
+// projection) so depth precision matches the fitted view.
+Camera look_at(const float eye[3], const float target[3], std::array<float, 3> up, float fov_y_deg, float aspect,
+               const std::array<float, 16> &fit);
+
 Camera frame_bounds(const std::array<float, 6> &bounds, std::array<float, 3> direction, std::array<float, 3> up,
                     float fov_y_deg, float aspect, float margin = 1.1f);
 

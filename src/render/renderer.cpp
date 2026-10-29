@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -18,10 +19,10 @@ namespace {
 constexpr uint32_t kHasMorph = 1u << 6; // internal: set when the instance's geometry carries a morph target
 constexpr size_t kInstanceBytes = 112;  // WGSL `Instance`
 constexpr WGPUTextureFormat kDepthFormat = WGPUTextureFormat_Depth24Plus;
-// Above this many triangles per geometry, cluster with the linear scan builder: it keeps the index order
-// (adapy GLBs are already ordered object by object) and is several times faster than the spatial builder,
-// which matters because the browser builds clusters on the main thread at load.
-constexpr size_t kScanBuilderTriangles = 1'000'000;
+// Minimum triangles per clustering batch (runs of consecutive segments); see build_clusters. Measured on a
+// 1M-triangle / 25k-object frame model: larger batches fill clusters better, 8192 keeps load time low.
+constexpr size_t kBatchTriangles = 8192;
+constexpr size_t kClusterMinTriangles = 16;
 
 using Mat4 = std::array<float, 16>;
 
@@ -114,7 +115,7 @@ struct ClusterCull {
     float cutoff;
     float morph_extent; // max |morph displacement| over the cluster's vertices
     uint32_t triangles;
-    uint32_t segment;
+    uint32_t seg_first, seg_last; // the segments its triangles belong to (a contiguous run)
 };
 
 struct Range {
@@ -181,6 +182,7 @@ struct Renderer::Impl {
     BindGroupLayoutRef frame_layout, geom_layout;
     PipelineLayoutRef pipeline_layout;
     ShaderModuleRef shader;
+    std::string shader_source;
     RenderPipelineRef tri_double, tri_single, tri_blend, lines, lines_blend, points;
     RenderPipelineRef pick_double, pick_single; // id + world-position targets, 1 sample
     BufferRef dummy;
@@ -278,8 +280,11 @@ struct Renderer::Impl {
         pd.bindGroupLayouts = layouts;
         pipeline_layout.reset(wgpuDeviceCreatePipelineLayout(device, &pd));
 
+        shader_source = kShaderWGSL;
+        const std::string token = "{{CLUSTER_VERTS}}";
+        shader_source.replace(shader_source.find(token), token.size(), std::to_string(kClusterMaxTriangles * 3));
         WGPUShaderSourceWGSL src = WGPU_SHADER_SOURCE_WGSL_INIT;
-        src.code = sv(kShaderWGSL);
+        src.code = sv(shader_source);
         WGPUShaderModuleDescriptor sd = WGPU_SHADER_MODULE_DESCRIPTOR_INIT;
         sd.nextInChain = &src.chain;
         sd.label = sv("adacpp.shader");
@@ -419,33 +424,54 @@ struct Renderer::Impl {
                         std::vector<uint32_t> &prim) {
         const float *pos = desc.positions;
         const size_t nv = desc.vertex_count;
-        const bool scan = indices.size() / 3 > kScanBuilderTriangles;
 
-        std::vector<uint32_t> all_vertices, all_triangles; // triangles: packed u32 + original triangle index
+        // The segment of every triangle: clusters may span several (small) segments, so hiding and
+        // per-object colour are resolved per triangle.
+        const size_t tri_total = indices.size() / 3;
+        std::vector<uint32_t> tri_segment(tri_total, 0);
+        for (uint32_t s = 0; s < g.segments.size(); ++s) {
+            const Range r = g.segments[s];
+            for (size_t t = r.start / 3; t < (size_t(r.start) + r.count) / 3 && t < tri_total; ++t)
+                tri_segment[t] = s;
+        }
+
+        // Batches: runs of consecutive segments of at least kBatchTriangles (a large segment is a batch on
+        // its own). Clustering a batch instead of each segment keeps clusters full on models of many tiny
+        // objects (beams average ~20 triangles), where per-segment clusters were ~17% occupied.
+        std::vector<Range> batches;
+        for (const Range r : g.segments) {
+            if (r.count < 3)
+                continue;
+            const bool contiguous = !batches.empty() && batches.back().start + batches.back().count == r.start;
+            if (contiguous && batches.back().count / 3 < kBatchTriangles)
+                batches.back().count += r.count;
+            else
+                batches.push_back(r);
+        }
+
+        std::vector<uint32_t> all_vertices, all_triangles; // per triangle: packed, original index, segment
         std::vector<meshopt_Meshlet> meshlets;
         std::vector<unsigned int> mv;
         std::vector<unsigned char> mt;
         std::unordered_map<TriKey, uint32_t, TriKeyHash> tri_lookup;
-        for (uint32_t s = 0; s < g.segments.size(); ++s) {
-            const Range r = g.segments[s];
-            if (r.count < 3)
-                continue;
+        for (const Range r : batches) {
             const unsigned int *idx = indices.data() + r.start;
             const size_t count = r.count - r.count % 3;
-            // Meshlet building reorders triangles; remember where each came from (for picking).
+            // Meshlet building reorders triangles; remember where each came from (picking, segment).
             tri_lookup.clear();
             tri_lookup.reserve(count / 3);
             for (uint32_t t = 0; t < count / 3; ++t)
                 tri_lookup.emplace(tri_key(idx[t * 3], idx[t * 3 + 1], idx[t * 3 + 2]), r.start / 3 + t);
-            const size_t max_m = meshopt_buildMeshletsBound(count, kClusterMaxVertices, kClusterMaxTriangles);
+            const size_t max_m = meshopt_buildMeshletsBound(count, kClusterMaxVertices, kClusterMinTriangles);
             meshlets.resize(max_m);
             mv.resize(max_m * kClusterMaxVertices);
             mt.resize(max_m * kClusterMaxTriangles * 3);
-            size_t n = scan
-                           ? meshopt_buildMeshletsScan(meshlets.data(), mv.data(), mt.data(), idx, count, nv,
-                                                       kClusterMaxVertices, kClusterMaxTriangles)
-                           : meshopt_buildMeshlets(meshlets.data(), mv.data(), mt.data(), idx, count, pos, nv,
-                                                   sizeof(float) * 3, kClusterMaxVertices, kClusterMaxTriangles, 0.25f);
+            // Spatial builder: compact clusters whatever the triangle order, so frustum culling stays
+            // precise when a batch spans many objects (the order-based scan builder made clusters that
+            // joined distant objects: 3x more triangles drawn in a close-up).
+            size_t n = meshopt_buildMeshletsSpatial(meshlets.data(), mv.data(), mt.data(), idx, count, pos, nv,
+                                                    sizeof(float) * 3, kClusterMaxVertices, kClusterMinTriangles,
+                                                    kClusterMaxTriangles, 0.5f);
             for (size_t m = 0; m < n; ++m) {
                 const meshopt_Meshlet &ml = meshlets[m];
                 meshopt_Bounds b = meshopt_computeMeshletBounds(&mv[ml.vertex_offset], &mt[ml.triangle_offset],
@@ -458,7 +484,8 @@ struct Renderer::Impl {
                 c.radius = b.radius;
                 c.cutoff = b.cone_cutoff;
                 c.triangles = ml.triangle_count;
-                c.segment = s;
+                c.seg_first = UINT32_MAX;
+                c.seg_last = 0;
                 if (desc.morph) {
                     float ext = 0.0f;
                     for (uint32_t v = 0; v < ml.vertex_count; ++v) {
@@ -472,21 +499,26 @@ struct Renderer::Impl {
                     }
                     c.morph_extent = std::sqrt(ext);
                 }
-                g.clusters.push_back(c);
                 // GPU record: vertex offset / triangle offset are patched once the sections are laid out.
                 prim.push_back(uint32_t(all_vertices.size()));
                 prim.push_back(uint32_t(all_triangles.size()));
                 prim.push_back(ml.triangle_count);
-                prim.push_back(s);
+                prim.push_back(0);
                 for (uint32_t v = 0; v < ml.vertex_count; ++v)
                     all_vertices.push_back(mv[ml.vertex_offset + v]);
                 const unsigned int *mvp = &mv[ml.vertex_offset];
                 for (uint32_t t = 0; t < ml.triangle_count; ++t) {
                     const unsigned char *tri = &mt[ml.triangle_offset + t * 3];
-                    all_triangles.push_back(uint32_t(tri[0]) | (uint32_t(tri[1]) << 8) | (uint32_t(tri[2]) << 16));
                     auto it = tri_lookup.find(tri_key(mvp[tri[0]], mvp[tri[1]], mvp[tri[2]]));
-                    all_triangles.push_back(it != tri_lookup.end() ? it->second : 0xFFFFFFFFu);
+                    const uint32_t orig = it != tri_lookup.end() ? it->second : 0xFFFFFFFFu;
+                    const uint32_t seg = orig < tri_total ? tri_segment[orig] : tri_segment[r.start / 3];
+                    all_triangles.push_back(uint32_t(tri[0]) | (uint32_t(tri[1]) << 8) | (uint32_t(tri[2]) << 16));
+                    all_triangles.push_back(orig);
+                    all_triangles.push_back(seg);
+                    c.seg_first = std::min(c.seg_first, seg);
+                    c.seg_last = std::max(c.seg_last, seg);
                 }
+                g.clusters.push_back(c);
                 g.triangles += ml.triangle_count;
             }
         }
@@ -752,7 +784,11 @@ struct Renderer::Impl {
         uint32_t n = 0;
         for (uint32_t c = 0; c < g.clusters.size(); ++c) {
             const ClusterCull &cl = g.clusters[c];
-            if (seg[cl.segment * 2 + 1] & kSegmentHidden)
+            // Culled only when every segment in it is hidden; the shader drops hidden triangles of the rest.
+            bool any_visible = false;
+            for (uint32_t sg = cl.seg_first; sg <= cl.seg_last && !any_visible; ++sg)
+                any_visible = !(seg[sg * 2 + 1] & kSegmentHidden);
+            if (!any_visible)
                 continue;
             if (cull_frustum && !all_inside) {
                 const float r = cl.radius + morph_scale * cl.morph_extent;

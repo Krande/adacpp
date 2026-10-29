@@ -14,8 +14,8 @@ namespace adacpp::render {
 //   morph     3 x f32 per vertex
 //   prim      triangles: cluster records (4 x u32: vertex offset, triangle offset, triangle count,
 //             segment) followed by the cluster vertex lists and the packed local triangles (3 x u8 in
-//             one u32, followed by that triangle's index in the original index list: 2 x u32 per
-//             triangle); lines/points: the index list followed by the segment of every index entry
+//             one u32, followed by that triangle's index in the original index list and its segment:
+//             3 x u32 per triangle); lines/points: the index list followed by the segment of every index entry
 //             (at Instance.material.w, bit-cast), so hidden segments drop out without extra draws
 inline constexpr const char *kShaderWGSL = R"WGSL(
 struct Frame {
@@ -39,7 +39,7 @@ const FLAG_VERTEX_COLORS: u32 = 1u;
 const FLAG_UNLIT: u32 = 2u;
 const FLAG_MORPH_RELATIVE: u32 = 32u;
 const FLAG_HAS_MORPH: u32 = 64u;
-const CLUSTER_VERTS: u32 = 372u; // 124 triangles x 3
+const CLUSTER_VERTS: u32 = {{CLUSTER_VERTS}}u; // Renderer::kClusterMaxTriangles x 3, filled in at load
 
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var<storage, read> instances: array<Instance>;
@@ -105,15 +105,21 @@ fn vs_tri(@builtin(vertex_index) vid: u32, @builtin(instance_index) ii: u32) -> 
     let v_off = prim[cl];
     let t_off = prim[cl + 1u];
     let t_cnt = prim[cl + 2u];
-    let seg = prim[cl + 3u];
     if (tri >= t_cnt) {
         var dead: VOut;
         dead.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0); // all three corners equal: zero-area, outside the clip volume
         return dead;
     }
-    let local_index = (prim[t_off + tri * 2u] >> (corner * 8u)) & 0xffu;
+    let t = t_off + tri * 3u;
+    let seg = prim[t + 2u];
+    if ((segstate[(inst.seg_base + seg) * 2u + 1u] & 1u) != 0u) {
+        var hidden: VOut;
+        hidden.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0); // a hidden object sharing this cluster
+        return hidden;
+    }
+    let local_index = (prim[t] >> (corner * 8u)) & 0xffu;
     let vi = prim[v_off + local_index];
-    return shade_vertex(inst, vi, i32(seg), ii, prim[t_off + tri * 2u + 1u]);
+    return shade_vertex(inst, vi, i32(seg), ii, prim[t + 1u]);
 }
 
 @vertex
