@@ -14,7 +14,8 @@ namespace adacpp::render {
 //   morph     3 x f32 per vertex
 //   prim      triangles: cluster records (4 x u32: vertex offset, triangle offset, triangle count,
 //             segment) followed by the cluster vertex lists and the packed local triangles (3 x u8 in
-//             one u32); lines/points: the index list followed by the segment of every index entry
+//             one u32, followed by that triangle's index in the original index list: 2 x u32 per
+//             triangle); lines/points: the index list followed by the segment of every index entry
 //             (at Instance.material.w, bit-cast), so hidden segments drop out without extra draws
 inline constexpr const char *kShaderWGSL = R"WGSL(
 struct Frame {
@@ -57,9 +58,10 @@ struct VOut {
     @location(2) color: vec4<f32>,
     @location(3) @interpolate(flat) flags: u32,
     @location(4) @interpolate(flat) material: vec4<f32>,
+    @location(5) @interpolate(flat) pick: vec4<u32>, // instance + 1, primitive, segment, -
 };
 
-fn shade_vertex(inst: Instance, vi: u32, seg: i32) -> VOut {
+fn shade_vertex(inst: Instance, vi: u32, seg: i32, ii: u32, primitive: u32) -> VOut {
     var p = vec3<f32>(vtx[vi * 6u], vtx[vi * 6u + 1u], vtx[vi * 6u + 2u]);
     let n = vec3<f32>(vtx[vi * 6u + 3u], vtx[vi * 6u + 4u], vtx[vi * 6u + 5u]);
     if ((inst.flags & FLAG_HAS_MORPH) != 0u) {
@@ -88,6 +90,7 @@ fn shade_vertex(inst: Instance, vi: u32, seg: i32) -> VOut {
     out.color = c;
     out.flags = inst.flags;
     out.material = inst.material;
+    out.pick = vec4<u32>(ii + 1u, primitive, u32(max(seg, 0)), 0u);
     return out;
 }
 
@@ -108,9 +111,9 @@ fn vs_tri(@builtin(vertex_index) vid: u32, @builtin(instance_index) ii: u32) -> 
         dead.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0); // all three corners equal: zero-area, outside the clip volume
         return dead;
     }
-    let local_index = (prim[t_off + tri] >> (corner * 8u)) & 0xffu;
+    let local_index = (prim[t_off + tri * 2u] >> (corner * 8u)) & 0xffu;
     let vi = prim[v_off + local_index];
-    return shade_vertex(inst, vi, i32(seg));
+    return shade_vertex(inst, vi, i32(seg), ii, prim[t_off + tri * 2u + 1u]);
 }
 
 @vertex
@@ -122,7 +125,7 @@ fn vs_list(@builtin(vertex_index) vid: u32, @builtin(instance_index) ii: u32) ->
         dead.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0); // hidden segment: both ends collapse outside the clip volume
         return dead;
     }
-    return shade_vertex(inst, prim[vid], i32(seg));
+    return shade_vertex(inst, prim[vid], i32(seg), ii, vid);
 }
 
 const PI: f32 = 3.141592653589793;
@@ -144,6 +147,19 @@ fn brdf_ggx(l: vec3<f32>, v: vec3<f32>, n: vec3<f32>, f0: vec3<f32>, roughness: 
     let denom = ndh * ndh * (a2 - 1.0) + 1.0;
     let d = a2 / (PI * denom * denom);
     return f * (vis * d);
+}
+
+struct PickOut {
+    @location(0) id: vec4<u32>,
+    @location(1) world: vec4<f32>,
+};
+
+@fragment
+fn fs_pick(in: VOut) -> PickOut {
+    var o: PickOut;
+    o.id = in.pick;
+    o.world = vec4<f32>(in.world, 1.0);
+    return o;
 }
 
 fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {

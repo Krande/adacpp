@@ -31,6 +31,8 @@ public:
     }
     // Block until all submitted GPU work has finished.
     void wait_idle();
+    // Run pending AllowProcessEvents callbacks (async readbacks such as Renderer::pick).
+    void process_events();
 
 private:
     WGPUInstance instance_ = nullptr;

@@ -5,6 +5,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 
 #include <meshoptimizer.h>
 
@@ -120,6 +121,34 @@ struct Range {
     uint32_t start, count;
 };
 
+// A triangle by its (sorted) vertices: maps a meshlet's triangles back to their original index.
+struct TriKey {
+    uint32_t a, b, c;
+    bool operator==(const TriKey &o) const {
+        return a == o.a && b == o.b && c == o.c;
+    }
+};
+struct TriKeyHash {
+    size_t operator()(const TriKey &k) const {
+        uint64_t h = k.a * 0x9E3779B97F4A7C15ull;
+        h ^= (uint64_t(k.b) + 0x632BE59BD9B4E019ull + (h << 6) + (h >> 2));
+        h ^= (uint64_t(k.c) + 0x94D049BB133111EBull + (h << 6) + (h >> 2));
+        return size_t(h);
+    }
+};
+TriKey tri_key(uint32_t a, uint32_t b, uint32_t c) {
+    if (a > b)
+        std::swap(a, b);
+    if (b > c)
+        std::swap(b, c);
+    if (a > b)
+        std::swap(a, b);
+    return {a, b, c};
+}
+
+constexpr WGPUTextureFormat kPickIdFormat = WGPUTextureFormat_RGBA32Uint;
+constexpr WGPUTextureFormat kPickPosFormat = WGPUTextureFormat_RGBA32Float;
+
 } // namespace
 
 struct Renderer::Impl {
@@ -142,7 +171,7 @@ struct Renderer::Impl {
         uint32_t geometry = 0;
         InstanceDesc desc;
         std::vector<uint32_t> segstate; // 2 per segment
-        uint32_t gpu_index = 0, seg_base = 0, vis_base = 0, vis_count = 0;
+        uint32_t id = 0, gpu_index = 0, seg_base = 0, vis_base = 0, vis_count = 0;
     };
 
     WGPUDevice device;
@@ -153,11 +182,15 @@ struct Renderer::Impl {
     PipelineLayoutRef pipeline_layout;
     ShaderModuleRef shader;
     RenderPipelineRef tri_double, tri_single, tri_blend, lines, lines_blend, points;
+    RenderPipelineRef pick_double, pick_single; // id + world-position targets, 1 sample
     BufferRef dummy;
 
     BufferRef frame_buf, instance_buf, segstate_buf, visible_buf;
     size_t instance_cap = 0, segstate_cap = 0, visible_cap = 0;
-    BindGroupRef frame_bind;
+    BindGroupRef frame_bind, pick_frame_bind;
+    BufferRef pick_frame_buf;
+    TextureRef pick_id_tex, pick_pos_tex, pick_depth_tex;
+    TextureViewRef pick_id_view, pick_pos_view, pick_depth_view;
 
     TextureRef msaa_tex, depth_tex;
     TextureViewRef msaa_view, depth_view;
@@ -184,6 +217,8 @@ struct Renderer::Impl {
         create_pipelines();
         dummy = make_buffer(16, WGPUBufferUsage_Storage, "adacpp.dummy");
         frame_buf = make_buffer(112, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst, "adacpp.frame");
+        pick_frame_buf = make_buffer(112, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst, "adacpp.pick_frame");
+        create_pick_targets();
     }
     ~Impl() {
         geometries.clear();
@@ -298,6 +333,53 @@ struct Renderer::Impl {
         return RenderPipelineRef(wgpuDeviceCreateRenderPipeline(device, &d));
     }
 
+    RenderPipelineRef make_pick_pipeline(const char *label, WGPUCullMode cull) {
+        WGPUColorTargetState ct[2] = {WGPU_COLOR_TARGET_STATE_INIT, WGPU_COLOR_TARGET_STATE_INIT};
+        ct[0].format = kPickIdFormat;
+        ct[0].writeMask = WGPUColorWriteMask_All;
+        ct[1].format = kPickPosFormat;
+        ct[1].writeMask = WGPUColorWriteMask_All;
+        WGPUFragmentState fs = WGPU_FRAGMENT_STATE_INIT;
+        fs.module = shader.get();
+        fs.entryPoint = sv("fs_pick");
+        fs.targetCount = 2;
+        fs.targets = ct;
+        WGPUDepthStencilState ds = WGPU_DEPTH_STENCIL_STATE_INIT;
+        ds.format = kDepthFormat;
+        ds.depthWriteEnabled = WGPUOptionalBool_True;
+        ds.depthCompare = WGPUCompareFunction_Less;
+        WGPURenderPipelineDescriptor d = WGPU_RENDER_PIPELINE_DESCRIPTOR_INIT;
+        d.label = sv(label);
+        d.layout = pipeline_layout.get();
+        d.vertex.module = shader.get();
+        d.vertex.entryPoint = sv("vs_tri");
+        d.primitive.topology = WGPUPrimitiveTopology_TriangleList;
+        d.primitive.frontFace = WGPUFrontFace_CCW;
+        d.primitive.cullMode = cull;
+        d.depthStencil = &ds;
+        d.multisample.count = 1;
+        d.multisample.mask = 0xFFFFFFFFu;
+        d.fragment = &fs;
+        return RenderPipelineRef(wgpuDeviceCreateRenderPipeline(device, &d));
+    }
+
+    void create_pick_targets() {
+        auto make = [&](WGPUTextureFormat fmt, WGPUTextureUsage usage, TextureRef &tex, TextureViewRef &view,
+                        const char *label) {
+            WGPUTextureDescriptor d = WGPU_TEXTURE_DESCRIPTOR_INIT;
+            d.label = sv(label);
+            d.size = {1, 1, 1};
+            d.format = fmt;
+            d.usage = usage;
+            tex.reset(wgpuDeviceCreateTexture(device, &d));
+            view.reset(wgpuTextureCreateView(tex.get(), nullptr));
+        };
+        const auto readable = WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_CopySrc;
+        make(kPickIdFormat, readable, pick_id_tex, pick_id_view, "adacpp.pick_id");
+        make(kPickPosFormat, readable, pick_pos_tex, pick_pos_view, "adacpp.pick_pos");
+        make(kDepthFormat, WGPUTextureUsage_RenderAttachment, pick_depth_tex, pick_depth_view, "adacpp.pick_depth");
+    }
+
     void create_pipelines() {
         const auto tri = WGPUPrimitiveTopology_TriangleList;
         tri_double = make_pipeline("adacpp.tri_double", "vs_tri", tri, WGPUCullMode_None, false, true);
@@ -309,6 +391,8 @@ struct Renderer::Impl {
                                     true, false);
         points =
             make_pipeline("adacpp.points", "vs_list", WGPUPrimitiveTopology_PointList, WGPUCullMode_None, false, false);
+        pick_double = make_pick_pipeline("adacpp.pick_double", WGPUCullMode_None);
+        pick_single = make_pick_pipeline("adacpp.pick_single", WGPUCullMode_Back);
     }
 
     void bind_geometry(Geometry &g) {
@@ -337,16 +421,22 @@ struct Renderer::Impl {
         const size_t nv = desc.vertex_count;
         const bool scan = indices.size() / 3 > kScanBuilderTriangles;
 
-        std::vector<uint32_t> all_vertices, all_triangles; // triangles: one packed u32 each
+        std::vector<uint32_t> all_vertices, all_triangles; // triangles: packed u32 + original triangle index
         std::vector<meshopt_Meshlet> meshlets;
         std::vector<unsigned int> mv;
         std::vector<unsigned char> mt;
+        std::unordered_map<TriKey, uint32_t, TriKeyHash> tri_lookup;
         for (uint32_t s = 0; s < g.segments.size(); ++s) {
             const Range r = g.segments[s];
             if (r.count < 3)
                 continue;
             const unsigned int *idx = indices.data() + r.start;
             const size_t count = r.count - r.count % 3;
+            // Meshlet building reorders triangles; remember where each came from (for picking).
+            tri_lookup.clear();
+            tri_lookup.reserve(count / 3);
+            for (uint32_t t = 0; t < count / 3; ++t)
+                tri_lookup.emplace(tri_key(idx[t * 3], idx[t * 3 + 1], idx[t * 3 + 2]), r.start / 3 + t);
             const size_t max_m = meshopt_buildMeshletsBound(count, kClusterMaxVertices, kClusterMaxTriangles);
             meshlets.resize(max_m);
             mv.resize(max_m * kClusterMaxVertices);
@@ -390,9 +480,12 @@ struct Renderer::Impl {
                 prim.push_back(s);
                 for (uint32_t v = 0; v < ml.vertex_count; ++v)
                     all_vertices.push_back(mv[ml.vertex_offset + v]);
+                const unsigned int *mvp = &mv[ml.vertex_offset];
                 for (uint32_t t = 0; t < ml.triangle_count; ++t) {
                     const unsigned char *tri = &mt[ml.triangle_offset + t * 3];
                     all_triangles.push_back(uint32_t(tri[0]) | (uint32_t(tri[1]) << 8) | (uint32_t(tri[2]) << 16));
+                    auto it = tri_lookup.find(tri_key(mvp[tri[0]], mvp[tri[1]], mvp[tri[2]]));
+                    all_triangles.push_back(it != tri_lookup.end() ? it->second : 0xFFFFFFFFu);
                 }
                 g.triangles += ml.triangle_count;
             }
@@ -572,6 +665,10 @@ struct Renderer::Impl {
             d.entryCount = 4;
             d.entries = e;
             frame_bind.reset(wgpuDeviceCreateBindGroup(device, &d));
+            e[0].buffer = pick_frame_buf.get();
+            e[0].size = wgpuBufferGetSize(pick_frame_buf.get());
+            d.label = sv("adacpp.pick_frame");
+            pick_frame_bind.reset(wgpuDeviceCreateBindGroup(device, &d));
         }
         structure_dirty = false;
         instances_dirty = true;
@@ -682,23 +779,17 @@ struct Renderer::Impl {
         st.clusters_drawn += n;
     }
 
-    void render(WGPUTextureView target, uint32_t w, uint32_t h, RenderStats &st) {
-        if (w == 0 || h == 0)
-            return;
-        ensure_targets(w, h);
-        if (structure_dirty)
-            rebuild_structure();
-        if (instances_dirty)
-            upload_instances();
-        if (segstate_dirty)
-            upload_segstate();
-
+    // view x projection in WebGPU clip space: OpenGL clip z [-w, w] -> [0, w], z' = 0.5 z + 0.5 w.
+    Mat4 webgpu_view_proj() const {
         Mat4 proj_wgpu = proj;
-        // OpenGL clip z [-w, w] -> WebGPU [0, w]: z' = 0.5 z + 0.5 w.
         for (int c = 0; c < 4; ++c)
             proj_wgpu[c * 4 + 2] = 0.5f * proj[c * 4 + 2] + 0.5f * proj[c * 4 + 3];
-        const Mat4 view_proj = mul(proj_wgpu, view);
-        float cam[3], fwd[3];
+        return mul(proj_wgpu, view);
+    }
+
+    // The Frame uniform for `view_proj` into `buf`; returns the camera position in `cam`.
+    void write_frame(WGPUBuffer buf, const Mat4 &view_proj, float cam[3]) {
+        float fwd[3];
         for (int i = 0; i < 3; ++i) {
             cam[i] = -(view[i * 4 + 0] * view[12] + view[i * 4 + 1] * view[13] + view[i * 4 + 2] * view[14]);
             fwd[i] = -view[i * 4 + 2];
@@ -714,7 +805,162 @@ struct Renderer::Impl {
         frame[22] = fwd[2];
         frame[24] = ambient;
         frame[25] = diffuse;
-        wgpuQueueWriteBuffer(queue, frame_buf.get(), 0, frame, sizeof(frame));
+        wgpuQueueWriteBuffer(queue, buf, 0, frame, sizeof(frame));
+    }
+
+    struct PendingPick {
+        BufferRef readback;
+        std::vector<uint32_t> ids; // instance id by GPU index, as of the pick
+        std::function<void(const PickResult &)> done;
+    };
+
+    void pick(uint32_t px, uint32_t py, uint32_t w, uint32_t h, std::function<void(const PickResult &)> done) {
+        if (w == 0 || h == 0 || px >= w || py >= h) {
+            done(PickResult{});
+            return;
+        }
+        if (structure_dirty)
+            rebuild_structure();
+        if (instances_dirty)
+            upload_instances();
+        if (segstate_dirty)
+            upload_segstate();
+
+        // Pick matrix: scale + shift clip space so the clicked pixel fills the 1x1 target.
+        const float cx = 2.0f * (float(px) + 0.5f) / float(w) - 1.0f;
+        const float cy = 1.0f - 2.0f * (float(py) + 0.5f) / float(h);
+        Mat4 pm{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        pm[0] = float(w);
+        pm[5] = float(h);
+        pm[12] = -float(w) * cx;
+        pm[13] = -float(h) * cy;
+        const Mat4 view_proj = mul(pm, webgpu_view_proj());
+        float cam[3];
+        write_frame(pick_frame_buf.get(), view_proj, cam);
+
+        RenderStats scratch;
+        for (Instance *inst : order) {
+            inst->vis_count = 0;
+            const Geometry &g = geometry(inst->geometry);
+            if (g.topology == Topology::Triangles && !(inst->desc.flags & (kHidden | kNoPick)))
+                cull(*inst, view_proj, cam, scratch);
+        }
+        // The main pass that used this buffer is already submitted; the next render re-culls into it.
+        if (!visible.empty())
+            wgpuQueueWriteBuffer(queue, visible_buf.get(), 0, visible.data(), visible.size() * 4);
+
+        WGPUCommandEncoderDescriptor ed = WGPU_COMMAND_ENCODER_DESCRIPTOR_INIT;
+        WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(device, &ed);
+        WGPURenderPassColorAttachment ca[2] = {WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT,
+                                               WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT};
+        ca[0].view = pick_id_view.get();
+        ca[1].view = pick_pos_view.get();
+        for (auto &a : ca) {
+            a.loadOp = WGPULoadOp_Clear;
+            a.storeOp = WGPUStoreOp_Store;
+            a.clearValue = {0, 0, 0, 0};
+        }
+        WGPURenderPassDepthStencilAttachment da = WGPU_RENDER_PASS_DEPTH_STENCIL_ATTACHMENT_INIT;
+        da.view = pick_depth_view.get();
+        da.depthLoadOp = WGPULoadOp_Clear;
+        da.depthStoreOp = WGPUStoreOp_Discard;
+        da.depthClearValue = 1.0f;
+        WGPURenderPassDescriptor rp = WGPU_RENDER_PASS_DESCRIPTOR_INIT;
+        rp.label = sv("adacpp.pick");
+        rp.colorAttachmentCount = 2;
+        rp.colorAttachments = ca;
+        rp.depthStencilAttachment = &da;
+        WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(enc, &rp);
+        wgpuRenderPassEncoderSetBindGroup(pass, 0, pick_frame_bind.get(), 0, nullptr);
+        WGPURenderPipeline bound = nullptr;
+        for (Instance *inst : order) {
+            if (inst->vis_count == 0)
+                continue;
+            const Geometry &g = geometry(inst->geometry);
+            WGPURenderPipeline p =
+                (inst->desc.flags & (kDoubleSided | kTransparent)) ? pick_double.get() : pick_single.get();
+            if (p != bound) {
+                wgpuRenderPassEncoderSetPipeline(pass, p);
+                bound = p;
+            }
+            wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
+            wgpuRenderPassEncoderDraw(pass, inst->vis_count * kClusterMaxTriangles * 3, 1, 0, inst->gpu_index);
+        }
+        wgpuRenderPassEncoderEnd(pass);
+        wgpuRenderPassEncoderRelease(pass);
+
+        auto *pending = new PendingPick();
+        pending->done = std::move(done);
+        pending->ids.reserve(order.size());
+        for (Instance *inst : order)
+            pending->ids.push_back(inst->id);
+        // Two texels, each in its own 256-byte row (bytesPerRow must be a multiple of 256).
+        pending->readback = make_buffer(512, WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead, "adacpp.pick_readback");
+        WGPUExtent3D one = {1, 1, 1};
+        WGPUTexelCopyTextureInfo src = WGPU_TEXEL_COPY_TEXTURE_INFO_INIT;
+        WGPUTexelCopyBufferInfo dst = WGPU_TEXEL_COPY_BUFFER_INFO_INIT;
+        dst.buffer = pending->readback.get();
+        dst.layout.bytesPerRow = 256;
+        dst.layout.rowsPerImage = 1;
+        src.texture = pick_id_tex.get();
+        dst.layout.offset = 0;
+        wgpuCommandEncoderCopyTextureToBuffer(enc, &src, &dst, &one);
+        src.texture = pick_pos_tex.get();
+        dst.layout.offset = 256;
+        wgpuCommandEncoderCopyTextureToBuffer(enc, &src, &dst, &one);
+        WGPUCommandBufferDescriptor cd = WGPU_COMMAND_BUFFER_DESCRIPTOR_INIT;
+        WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, &cd);
+        wgpuQueueSubmit(queue, 1, &cmd);
+        wgpuCommandBufferRelease(cmd);
+        wgpuCommandEncoderRelease(enc);
+
+        WGPUBufferMapCallbackInfo cb = WGPU_BUFFER_MAP_CALLBACK_INFO_INIT;
+#ifdef __EMSCRIPTEN__
+        cb.mode = WGPUCallbackMode_AllowSpontaneous;
+#else
+        cb.mode = WGPUCallbackMode_AllowProcessEvents;
+#endif
+        cb.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void *ud1, void *) {
+            std::unique_ptr<PendingPick> p(static_cast<PendingPick *>(ud1));
+            PickResult r;
+            if (status == WGPUMapAsyncStatus_Success) {
+                const auto *bytes =
+                    static_cast<const uint8_t *>(wgpuBufferGetConstMappedRange(p->readback.get(), 0, 512));
+                uint32_t id[4];
+                float pos[4];
+                std::memcpy(id, bytes, 16);
+                std::memcpy(pos, bytes + 256, 16);
+                wgpuBufferUnmap(p->readback.get());
+                if (id[0] != 0 && id[0] - 1 < p->ids.size()) {
+                    r.hit = true;
+                    r.instance = p->ids[id[0] - 1];
+                    r.triangle = id[1];
+                    r.segment = id[2];
+                    r.world[0] = pos[0];
+                    r.world[1] = pos[1];
+                    r.world[2] = pos[2];
+                }
+            }
+            p->done(r);
+        };
+        cb.userdata1 = pending;
+        wgpuBufferMapAsync(pending->readback.get(), WGPUMapMode_Read, 0, 512, cb);
+    }
+
+    void render(WGPUTextureView target, uint32_t w, uint32_t h, RenderStats &st) {
+        if (w == 0 || h == 0)
+            return;
+        ensure_targets(w, h);
+        if (structure_dirty)
+            rebuild_structure();
+        if (instances_dirty)
+            upload_instances();
+        if (segstate_dirty)
+            upload_segstate();
+
+        const Mat4 view_proj = webgpu_view_proj();
+        float cam[3];
+        write_frame(frame_buf.get(), view_proj, cam);
 
         st = RenderStats{};
         auto t0 = std::chrono::steady_clock::now();
@@ -874,12 +1120,15 @@ uint32_t Renderer::add_instance(uint32_t geometry) {
     auto &list = impl_->instances;
     for (uint32_t id = 0; id < list.size(); ++id) {
         if (!list[id]) {
+            inst->id = id;
             list[id] = std::move(inst);
             return id;
         }
     }
+    const uint32_t id = uint32_t(list.size());
+    inst->id = id;
     list.push_back(std::move(inst));
-    return uint32_t(list.size() - 1);
+    return id;
 }
 
 void Renderer::set_instance(uint32_t instance, const InstanceDesc &desc) {
@@ -931,6 +1180,11 @@ void Renderer::set_culling(bool frustum, bool cone) {
 
 void Renderer::render(WGPUTextureView target, uint32_t width, uint32_t height) {
     impl_->render(target, width, height, stats_);
+}
+
+void Renderer::pick(uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+                    std::function<void(const PickResult &)> done) {
+    impl_->pick(x, y, width, height, std::move(done));
 }
 
 std::array<float, 6> Renderer::bounds() const {

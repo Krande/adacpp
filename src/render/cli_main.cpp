@@ -1,7 +1,7 @@
 // adacpp_render: headless GLB -> PNG through the same WebGPU renderer the browser uses.
 //
 //   adacpp_render <in.glb> <out.png> [--size WxH] [--view iso|front|back|left|right|top|bottom]
-//                 [--backend auto|vulkan|gl] [--y-up] [--no-cull] [--stats]
+//                 [--backend auto|vulkan|gl] [--y-up] [--no-cull] [--stats] [--pick X,Y]
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -20,13 +20,14 @@ int main(int argc, char **argv) {
     if (argc < 3) {
         std::fprintf(stderr,
                      "usage: %s <in.glb> <out.png> [--size WxH] [--view iso|front|back|left|right|top|bottom] "
-                     "[--backend auto|vulkan|gl] [--y-up] [--no-cull] [--stats]\n",
+                     "[--backend auto|vulkan|gl] [--y-up] [--no-cull] [--stats] [--pick X,Y]\n",
                      argv[0]);
         return 2;
     }
     std::string in = argv[1], out = argv[2], view = "iso", backend = "auto";
     uint32_t w = 1280, h = 960;
     bool cull = true, print_stats = false, y_up = false;
+    int pick_x = -1, pick_y = -1;
     for (int i = 3; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--size" && i + 1 < argc)
@@ -35,6 +36,8 @@ int main(int argc, char **argv) {
             view = argv[++i];
         else if (a == "--backend" && i + 1 < argc)
             backend = argv[++i];
+        else if (a == "--pick" && i + 1 < argc)
+            std::sscanf(argv[++i], "%d,%d", &pick_x, &pick_y);
         else if (a == "--y-up")
             y_up = true;
         else if (a == "--no-cull")
@@ -67,6 +70,20 @@ int main(int argc, char **argv) {
         if (!stbi_write_png(out.c_str(), int(w), int(h), 4, rgba.data(), int(w * 4))) {
             std::fprintf(stderr, "failed to write %s\n", out.c_str());
             return 1;
+        }
+        if (pick_x >= 0 && pick_y >= 0) {
+            bool done = false;
+            PickResult hit;
+            renderer.pick(uint32_t(pick_x), uint32_t(pick_y), w, h, [&](const PickResult &r) {
+                hit = r;
+                done = true;
+            });
+            while (!done)
+                dev.process_events();
+            std::printf("{\"pick\":{\"hit\":%s,\"instance\":%u,\"segment\":%u,\"triangle\":%u,"
+                        "\"world\":[%.4f,%.4f,%.4f]}}\n",
+                        hit.hit ? "true" : "false", hit.instance, hit.segment, hit.triangle, hit.world[0], hit.world[1],
+                        hit.world[2]);
         }
         if (print_stats) {
             const auto &st = renderer.stats();

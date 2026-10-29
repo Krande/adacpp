@@ -137,6 +137,11 @@ void NativeDevice::wait_idle() {
     wgpuDevicePoll(device_, true, nullptr);
 }
 
+void NativeDevice::process_events() {
+    wgpuDevicePoll(device_, true, nullptr);
+    wgpuInstanceProcessEvents(instance_);
+}
+
 OffscreenTarget::OffscreenTarget(NativeDevice &dev, uint32_t width, uint32_t height)
     : dev_(dev), width_(width), height_(height) {
     WGPUTextureDescriptor d = WGPU_TEXTURE_DESCRIPTOR_INIT;

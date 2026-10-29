@@ -20,6 +20,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -37,6 +38,7 @@ enum InstanceFlags : uint32_t {
     kTransparent = 1u << 3,   // alpha-blended, drawn after the opaque pass without depth writes
     kHidden = 1u << 4,        // skip the whole instance
     kMorphRelative = 1u << 5, // morph target holds displacements (else absolute target positions)
+    kNoPick = 1u << 8,        // drawn, but never returned by pick() (helpers, overlays, edges)
 };
 
 // Segment state flags (second u32 of a segment's state pair).
@@ -66,6 +68,15 @@ struct InstanceDesc {
     float metalness = 0.0f;
     float roughness = 1.0f;
     bool specular = true;
+};
+
+// What is under a pixel: the nearest pickable triangle there.
+struct PickResult {
+    bool hit = false;
+    uint32_t instance = 0; // instance id, as returned by add_instance()
+    uint32_t segment = 0;  // segment index within the instance's geometry
+    uint32_t triangle = 0; // triangle index in the geometry's original index list (index position / 3)
+    float world[3] = {0, 0, 0};
 };
 
 struct RenderStats {
@@ -114,6 +125,12 @@ public:
     void set_culling(bool frustum, bool cone);
 
     void render(WGPUTextureView target, uint32_t width, uint32_t height);
+
+    // GPU picking at pixel (x, y) of a width x height target (origin top-left), with the camera of the
+    // last set_camera(). Renders only that pixel (a pick matrix narrows the frustum, so cluster culling
+    // drops nearly everything), reads it back asynchronously and calls `done` -- from the browser's
+    // event loop on the web; natively once the device is polled.
+    void pick(uint32_t x, uint32_t y, uint32_t width, uint32_t height, std::function<void(const PickResult &)> done);
     const RenderStats &stats() const {
         return stats_;
     }
