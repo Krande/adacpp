@@ -14,12 +14,31 @@ test-ifc085 = { features = ["test", "common", "ifc085"], no-default-feature = tr
 # Lean env for the standalone OCC-free STP2GLB CLI — only the build toolchain + CLI11 + git
 # (manifold FetchContent). NO occt/cgal/gmsh/ifcopenshell/python-dev.
 stp2glb = { features = ["stp2glb"], no-default-feature = true }
+# Lean env for the WebGPU renderer (src/render): native build against wgpu-native + the standard
+# webgpu.h, plus tinygltf for the headless GLB->PNG CLI. The browser build of the same sources uses
+# emscripten >= 4.0.10's emdawnwebgpu port, which conda-forge's emscripten 4.0.9 lacks, so the wasm
+# side builds in the emscripten/emsdk image instead (tools/build_render_wasm.sh).
+render = { features = ["render"], no-default-feature = true }
 
 [feature.ifc085.dependencies]
 ifcopenshell = "0.8.5.*"
 # 0.8.5's libIfcParse.a embeds rocksdb and we link RocksDB::rocksdb statically beside it: keep the
 # rocksdb ABI it was built against (cmake/deps_ifc.cmake).
 rocksdb = ">=10.6.2,<10.7.0a0"
+
+[feature.render.dependencies]
+cmake = "*"
+ninja = "*"
+cxx-compiler = "*"
+wgpu-native = ">=29,<30"
+webgpu-headers = "*"
+tinygltf = "==2.9.1"
+nlohmann_json = "*"
+
+[feature.render.tasks]
+build-render = { cmd = "cmake -S src/render -B build-render -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build-render", description = "Build the native WebGPU renderer + the adacpp_render CLI (headless GLB -> PNG)" }
+render-glb = { cmd = "build-render/adacpp_render", depends-on = ["build-render"], description = "Headless render: adacpp_render <in.glb> <out.png> [--size WxH] [--view iso|front|top|...]" }
+build-render-wasm = { cmd = "bash tools/build_render_wasm.sh", description = "Build adacpp_render.js/.wasm for the browser in the emscripten/emsdk docker image (emdawnwebgpu)" }
 
 [feature.conda.dependencies]
 rattler-build = "*"
