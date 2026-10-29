@@ -51,6 +51,8 @@ NB_MODULE(_ada_cpp_ext_impl, m) {
     // FEA result kernels: OCC-free too, and the same C++ as the adacpp_fea wasm module.
     auto fea_sub_module = m.def_submodule("fea", "Format-neutral FEA result kernels");
     fea_module(fea_sub_module);
+    auto sin_sub_module = fea_sub_module.def_submodule("sin", "Sesam SIN result reader loops");
+    sin_module(sin_sub_module);
     // Convex-contact clash detection on coal: OCC-free, and the same C++ as the adacpp_clash wasm module.
     auto clash_sub_module = m.def_submodule("clash", "Convex-contact clash detection (coal)");
     clash_module(clash_sub_module);

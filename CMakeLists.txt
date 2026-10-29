@@ -131,6 +131,8 @@ set(FEA_SOURCES
     src/fea/artefact_io.cpp
     src/fea/envelope.cpp
     src/fea/field_ops.cpp
+    src/fea/sin_reader.cpp
+    src/fea/shell_stress.cpp
 )
 if(MSVC)
     set_source_files_properties(
@@ -219,6 +221,7 @@ if(BUILD_WASM)
         src/cad/cad_py_wrap.cpp
         src/geom/neutral/extrude_py_wrap.cpp
         src/fea/fea_py_wrap.cpp
+        src/fea/sin_py_wrap.cpp
         src/clash/clash_py_wrap.cpp
     )
 else()
@@ -227,6 +230,7 @@ else()
         src/cad/cad_py_wrap.cpp
         src/geom/neutral/extrude_py_wrap.cpp
         src/fea/fea_py_wrap.cpp
+        src/fea/sin_py_wrap.cpp
         src/clash/clash_py_wrap.cpp
         src/cadit/ifc/ifc_py_wrap.cpp
         src/cadit/occt/occt_py_wrap.cpp

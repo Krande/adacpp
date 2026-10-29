@@ -67,7 +67,9 @@ def test_the_file_and_the_dicts_are_the_same_members(scanned):
             else:
                 assert rec[key] == pytest.approx(list(d[key]))
         assert rec["placement"] == pytest.approx(list(d["placement"]))
-        assert [tuple(pt) for pt in rec["outline"]] == pytest.approx([tuple(pt) for pt in d["outline"]])
+        # pytest.approx takes no nested sequences: compare the point count and sizes, then the values flat.
+        assert [len(pt) for pt in rec["outline"]] == [len(pt) for pt in d["outline"]]
+        assert [x for pt in rec["outline"] for x in pt] == pytest.approx([x for pt in d["outline"] for x in pt])
 
 
 def test_a_name_with_json_in_it_does_not_break_the_line(tmp_path):
