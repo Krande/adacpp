@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <stdexcept>
 #include <vector>
 
@@ -153,57 +154,19 @@ std::vector<uint32_t> segments_from_extras(const tinygltf::Value *ranges, size_t
     return out;
 }
 
-void add_primitive(Renderer &r, const tinygltf::Model &model, const tinygltf::Primitive &prim, const Mat4 &world,
-                   GlbLoadResult &res, const tinygltf::Value *ranges) {
-    Topology topo;
-    if (prim.mode == TINYGLTF_MODE_TRIANGLES || prim.mode == -1)
-        topo = Topology::Triangles;
-    else if (prim.mode == TINYGLTF_MODE_LINE)
-        topo = Topology::Lines;
-    else if (prim.mode == TINYGLTF_MODE_POINTS)
-        topo = Topology::Points;
-    else
-        return; // strips/fans/loops: not produced by adapy's writers
-    auto pos_it = prim.attributes.find("POSITION");
-    if (pos_it == prim.attributes.end())
-        return;
-    const auto positions = read_floats(model, pos_it->second, 3);
-    std::vector<float> normals;
-    if (auto it = prim.attributes.find("NORMAL"); it != prim.attributes.end())
-        normals = read_floats(model, it->second, 3);
-    std::vector<uint32_t> colors;
-    if (auto it = prim.attributes.find("COLOR_0"); it != prim.attributes.end()) {
-        const auto c = read_floats(model, it->second, 4);
-        colors.resize(c.size() / 4);
-        for (size_t i = 0; i < colors.size(); ++i)
-            colors[i] = pack_rgba8(&c[i * 4]);
-    }
-    std::vector<uint32_t> indices;
-    if (prim.indices >= 0)
-        indices = read_indices(model, prim.indices);
+void normalize(float v[3]) {
+    float l = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (l > 0)
+        for (int i = 0; i < 3; ++i)
+            v[i] /= l;
+}
 
-    GeometryDesc gd;
-    gd.topology = topo;
-    gd.positions = positions.data();
-    gd.vertex_count = positions.size() / 3;
-    gd.normals = normals.empty() ? nullptr : normals.data();
-    gd.colors = colors.empty() ? nullptr : colors.data();
-    gd.indices = indices.empty() ? nullptr : indices.data();
-    gd.index_count = indices.size();
-    const auto segments =
-        topo == Topology::Triangles ? segments_from_extras(ranges, indices.size()) : std::vector<uint32_t>{};
-    gd.segments = segments.empty() ? nullptr : segments.data();
-    gd.segment_count = segments.size() / 2;
-    res.segments += gd.segment_count;
-    const uint32_t geom = r.add_geometry(gd);
-    const uint32_t inst = r.add_instance(geom);
-
+InstanceDesc material_desc(const tinygltf::Model &model, int material, bool vertex_colors) {
     InstanceDesc idesc;
-    idesc.model = world;
-    if (!colors.empty())
+    if (vertex_colors)
         idesc.flags |= kVertexColors;
-    if (prim.material >= 0) {
-        const auto &mat = model.materials.at(prim.material);
+    if (material >= 0) {
+        const auto &mat = model.materials.at(material);
         const auto &f = mat.pbrMetallicRoughness.baseColorFactor;
         for (int i = 0; i < 4 && i < int(f.size()); ++i)
             idesc.color[i] = float(f[i]);
@@ -217,15 +180,150 @@ void add_primitive(Renderer &r, const tinygltf::Model &model, const tinygltf::Pr
         if (mat.extensions.count("KHR_materials_unlit"))
             idesc.flags |= kUnlit;
     }
-    r.set_instance(inst, idesc);
-    res.geometries++;
-    res.instances++;
-    res.vertices += gd.vertex_count;
-    if (topo == Topology::Triangles)
-        res.triangles += (indices.empty() ? gd.vertex_count : indices.size()) / 3;
+    return idesc;
 }
 
-void walk(Renderer &r, const tinygltf::Model &model, int node_index, const Mat4 &parent, GlbLoadResult &res,
+// Every primitive of one material and topology, merged into one geometry in world space, as the viewer
+// batches a model (CustomBatchedMesh): a model of 15k objects is then a handful of draws instead of 15k.
+// Each primitive -- or each adapy draw range in it -- stays a segment, so picking still names the object.
+class Batcher {
+public:
+    Batcher(Renderer &r, const tinygltf::Model &model, GlbLoadResult &res) : r_(r), model_(model), res_(res) {}
+
+    void add(const tinygltf::Primitive &prim, const Mat4 &world, const tinygltf::Value *ranges) {
+        Topology topo;
+        if (prim.mode == TINYGLTF_MODE_TRIANGLES || prim.mode == -1)
+            topo = Topology::Triangles;
+        else if (prim.mode == TINYGLTF_MODE_LINE)
+            topo = Topology::Lines;
+        else if (prim.mode == TINYGLTF_MODE_POINTS)
+            topo = Topology::Points;
+        else
+            return; // strips/fans/loops: not produced by adapy's writers
+        auto pos_it = prim.attributes.find("POSITION");
+        if (pos_it == prim.attributes.end())
+            return;
+        const auto positions = read_floats(model_, pos_it->second, 3);
+        const size_t nv = positions.size() / 3;
+        std::vector<float> normals;
+        if (auto it = prim.attributes.find("NORMAL"); it != prim.attributes.end())
+            normals = read_floats(model_, it->second, 3);
+        std::vector<float> colors;
+        if (auto it = prim.attributes.find("COLOR_0"); it != prim.attributes.end())
+            colors = read_floats(model_, it->second, 4);
+        std::vector<uint32_t> indices;
+        if (prim.indices >= 0) {
+            indices = read_indices(model_, prim.indices);
+        } else {
+            indices.resize(nv);
+            for (uint32_t i = 0; i < nv; ++i)
+                indices[i] = i;
+        }
+
+        Batch &b = batches_[{int(topo), prim.material}];
+        b.topology = topo;
+        b.material = prim.material;
+        if (b.vertex_count() + nv > kBatchMaxVertices || b.indices.size() + indices.size() > kBatchMaxIndices)
+            flush(b);
+
+        // Normals take the inverse transpose (the cofactor matrix, up to scale); a mirroring transform also
+        // flips the winding, as glTF requires.
+        const Mat4 &m = world;
+        const float cof[9] = {m[5] * m[10] - m[6] * m[9], m[6] * m[8] - m[4] * m[10], m[4] * m[9] - m[5] * m[8],
+                              m[2] * m[9] - m[1] * m[10], m[0] * m[10] - m[2] * m[8], m[1] * m[8] - m[0] * m[9],
+                              m[1] * m[6] - m[2] * m[5],  m[2] * m[4] - m[0] * m[6],  m[0] * m[5] - m[1] * m[4]};
+        const float det = m[0] * cof[0] + m[4] * cof[1] + m[8] * cof[2];
+        const float sign = det < 0.0f ? -1.0f : 1.0f;
+        const uint32_t base = uint32_t(b.vertex_count());
+        for (size_t v = 0; v < nv; ++v) {
+            const float *p = &positions[v * 3];
+            for (int k = 0; k < 3; ++k)
+                b.positions.push_back(m[k] * p[0] + m[4 + k] * p[1] + m[8 + k] * p[2] + m[12 + k]);
+            float n[3] = {0, 0, 0}; // zero: the shader derives a flat normal
+            if (!normals.empty()) {
+                const float *s = &normals[v * 3];
+                for (int k = 0; k < 3; ++k)
+                    n[k] = sign * (cof[k * 3] * s[0] + cof[k * 3 + 1] * s[1] + cof[k * 3 + 2] * s[2]);
+                normalize(n);
+            }
+            b.normals.insert(b.normals.end(), n, n + 3);
+            b.colors.push_back(colors.empty() ? 0xFFFFFFFFu : pack_rgba8(&colors[v * 4]));
+        }
+        b.any_normals |= !normals.empty();
+        b.any_colors |= !colors.empty();
+
+        const uint32_t first = uint32_t(b.indices.size());
+        const bool flip = det < 0.0f && topo == Topology::Triangles;
+        for (size_t i = 0; i < indices.size(); ++i) {
+            // Mirrored triangle: swap its 2nd and 3rd corner.
+            size_t src = i;
+            if (flip && i - i % 3 + 2 < indices.size() && i % 3 != 0)
+                src = i % 3 == 1 ? i + 1 : i - 1;
+            b.indices.push_back(base + indices[src]);
+        }
+        auto segments =
+            topo == Topology::Triangles ? segments_from_extras(ranges, indices.size()) : std::vector<uint32_t>{};
+        if (segments.empty())
+            segments = {0, uint32_t(indices.size())};
+        for (size_t k = 0; k < segments.size(); k += 2)
+            b.segments.insert(b.segments.end(), {first + segments[k], segments[k + 1]});
+        res_.segments += segments.size() / 2;
+        res_.vertices += nv;
+        if (topo == Topology::Triangles)
+            res_.triangles += indices.size() / 3;
+    }
+
+    void finish() {
+        for (auto &[key, b] : batches_)
+            flush(b);
+    }
+
+private:
+    static constexpr size_t kBatchMaxVertices = 2'000'000; // 48 MB of vertex data, well inside 128 MB bindings
+    static constexpr size_t kBatchMaxIndices = 12'000'000;
+
+    struct Batch {
+        Topology topology = Topology::Triangles;
+        int material = -1;
+        std::vector<float> positions, normals;
+        std::vector<uint32_t> colors, indices, segments;
+        bool any_normals = false, any_colors = false;
+        size_t vertex_count() const {
+            return positions.size() / 3;
+        }
+    };
+
+    void flush(Batch &b) {
+        if (b.positions.empty())
+            return;
+        GeometryDesc gd;
+        gd.topology = b.topology;
+        gd.positions = b.positions.data();
+        gd.vertex_count = b.vertex_count();
+        gd.normals = b.any_normals ? b.normals.data() : nullptr;
+        gd.colors = b.any_colors ? b.colors.data() : nullptr;
+        gd.indices = b.indices.data();
+        gd.index_count = b.indices.size();
+        gd.segments = b.segments.data();
+        gd.segment_count = b.segments.size() / 2;
+        const uint32_t inst = r_.add_instance(r_.add_geometry(gd));
+        r_.set_instance(inst, material_desc(model_, b.material, b.any_colors));
+        res_.geometries++;
+        res_.instances++;
+        const Topology topo = b.topology;
+        const int material = b.material;
+        b = Batch{};
+        b.topology = topo;
+        b.material = material;
+    }
+
+    Renderer &r_;
+    const tinygltf::Model &model_;
+    GlbLoadResult &res_;
+    std::map<std::pair<int, int>, Batch> batches_;
+};
+
+void walk(Batcher &batcher, const tinygltf::Model &model, int node_index, const Mat4 &parent,
           const tinygltf::Value &scene_extras) {
     const auto &node = model.nodes.at(node_index);
     const Mat4 world = mul(parent, node_matrix(node));
@@ -235,17 +333,10 @@ void walk(Renderer &r, const tinygltf::Model &model, int node_index, const Mat4 
         const tinygltf::Value *ranges =
             prims.size() == 1 && scene_extras.IsObject() && scene_extras.Has(key) ? &scene_extras.Get(key) : nullptr;
         for (const auto &prim : prims)
-            add_primitive(r, model, prim, world, res, ranges);
+            batcher.add(prim, world, ranges);
     }
     for (int child : node.children)
-        walk(r, model, child, world, res, scene_extras);
-}
-
-void normalize(float v[3]) {
-    float l = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-    if (l > 0)
-        for (int i = 0; i < 3; ++i)
-            v[i] /= l;
+        walk(batcher, model, child, world, scene_extras);
 }
 
 } // namespace
@@ -269,14 +360,16 @@ GlbLoadResult load_glb(Renderer &renderer, const std::string &path, bool y_up_to
     const Mat4 root = y_up_to_z_up ? Mat4{1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1}
                                    : Mat4{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     GlbLoadResult res;
+    Batcher batcher(renderer, model, res);
     const int scene = model.defaultScene >= 0 ? model.defaultScene : 0;
     if (!model.scenes.empty()) {
         for (int n : model.scenes.at(scene).nodes)
-            walk(renderer, model, n, root, res, model.scenes.at(scene).extras);
+            walk(batcher, model, n, root, model.scenes.at(scene).extras);
     } else {
         for (size_t n = 0; n < model.nodes.size(); ++n)
-            walk(renderer, model, int(n), root, res, tinygltf::Value());
+            walk(batcher, model, int(n), root, tinygltf::Value());
     }
+    batcher.finish();
     return res;
 }
 

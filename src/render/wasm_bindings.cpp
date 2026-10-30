@@ -149,8 +149,8 @@ public:
     void set_lighting(float ambient, float diffuse) {
         renderer_->set_lighting(ambient, diffuse);
     }
-    void set_culling(bool frustum, bool cone) {
-        renderer_->set_culling(frustum, cone);
+    void set_culling(bool frustum, bool cone, bool occlusion) {
+        renderer_->set_culling(frustum, cone, occlusion);
     }
 
     // GPU pick at canvas pixel (x, y) of a width x height drawing buffer; `callback(result)` runs once the
@@ -171,7 +171,16 @@ public:
     }
 
     emscripten::val stats() const {
-        const auto &s = renderer_->stats();
+        return stats_object(renderer_->stats());
+    }
+
+    // The last frame's stats with the GPU culling counts read back; `callback(stats)` once they land.
+    void read_cull_stats(emscripten::val callback) {
+        renderer_->read_cull_stats([callback](const RenderStats &s) { callback(stats_object(s)); });
+    }
+
+private:
+    static emscripten::val stats_object(const RenderStats &s) {
         auto o = emscripten::val::object();
         o.set("geometries", s.geometries);
         o.set("instances", s.instances);
@@ -179,12 +188,13 @@ public:
         o.set("clustersDrawn", double(s.clusters_drawn));
         o.set("trianglesTotal", double(s.triangles_total));
         o.set("trianglesDrawn", double(s.triangles_drawn));
+        o.set("clustersOccluded", double(s.clusters_occluded));
+        o.set("gpuCulled", s.gpu_culled);
         o.set("drawCalls", s.draw_calls);
         o.set("cullMs", s.cull_ms);
         return o;
     }
 
-private:
     const char *selector_storage(const std::string &s) {
         selector_ = s;
         return selector_.c_str();
@@ -222,5 +232,6 @@ EMSCRIPTEN_BINDINGS(adacpp_render) {
         .function("setLighting", &WebRenderer::set_lighting)
         .function("setCulling", &WebRenderer::set_culling)
         .function("pick", &WebRenderer::pick)
-        .function("stats", &WebRenderer::stats);
+        .function("stats", &WebRenderer::stats)
+        .function("readCullStats", &WebRenderer::read_cull_stats);
 }

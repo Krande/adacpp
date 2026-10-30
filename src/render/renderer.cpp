@@ -17,7 +17,15 @@ namespace adacpp::render {
 namespace {
 
 constexpr uint32_t kHasMorph = 1u << 6; // internal: set when the instance's geometry carries a morph target
+constexpr uint32_t kConeOk = 1u << 9;   // internal: cone culling is exact for this instance (GPU culling)
 constexpr size_t kInstanceBytes = 112;  // WGSL `Instance`
+constexpr size_t kItemWords = 16;       // WGSL `Item` (cull shader)
+constexpr size_t kCullFrameBytes = 208; // WGSL `CullFrame`
+constexpr size_t kCounters = 8;         // cull counters, see kCullWGSL
+// Two-pass occlusion culling costs ~0.35 ms a frame where nothing is hidden (an extra render pass, the
+// multisampled targets stored and reloaded, the depth pyramid) and saves tens of ms where most of a big
+// model is (a 62M-triangle crane: 93 -> 17 ms). Below this many triangles the CPU culls instead.
+constexpr uint64_t kOcclusionMinTriangles = 2'000'000;
 constexpr WGPUTextureFormat kDepthFormat = WGPUTextureFormat_Depth24Plus;
 // Minimum triangles per clustering batch (runs of consecutive segments); see build_clusters. Measured on a
 // 1M-triangle / 25k-object frame model: larger batches fill clusters better, 8192 keeps load time low.
@@ -187,6 +195,26 @@ struct Renderer::Impl {
     RenderPipelineRef pick_double, pick_single; // id + world-position targets, 1 sample
     BufferRef dummy;
 
+    // GPU culling: per-(instance, cluster) items, last frame's visibility, the early / late visible lists and
+    // their indirect draw args, and a depth pyramid (HZB) of the early pass.
+    BindGroupLayoutRef cull_layout, hzb_init_layout, hzb_reduce_layout;
+    PipelineLayoutRef cull_pipeline_layout, hzb_init_pipeline_layout, hzb_reduce_pipeline_layout;
+    ShaderModuleRef cull_shader;
+    ComputePipelineRef cull_early, cull_late, hzb_init, hzb_reduce;
+    BufferRef cull_frame_buf, items_buf, history_buf, vis_early_buf, vis_late_buf, args_early_buf, args_late_buf;
+    BufferRef counters_buf;
+    size_t items_cap = 0, history_cap = 0, vis_gpu_cap = 0, args_cap = 0;
+    std::vector<uint32_t> args_template;
+    uint32_t item_count = 0;
+    uint64_t scene_triangles = 0;
+    BindGroupRef frame_bind_early, frame_bind_late, cull_bind_early, cull_bind_late, hzb_init_bind;
+    std::vector<BindGroupRef> hzb_reduce_binds;
+    TextureRef hzb_tex;
+    TextureViewRef hzb_view;
+    std::vector<TextureViewRef> hzb_mips;
+    uint32_t hzb_levels = 0;
+    bool cull_binds_dirty = true;
+
     BufferRef frame_buf, instance_buf, segstate_buf, visible_buf;
     size_t instance_cap = 0, segstate_cap = 0, visible_cap = 0;
     BindGroupRef frame_bind, pick_frame_bind;
@@ -211,7 +239,7 @@ struct Renderer::Impl {
     float clear[4] = {0.2235f, 0.2235f, 0.2235f, 1.0f}; // #393939, the viewer's background
     float ambient = 1.5707964f;                         // the viewer's AmbientLight(0xffffff, PI / 2)
     float diffuse = 1.4f;                               // its camera-tracking DirectionalLight(0xffffff, 1.4)
-    bool cull_frustum = true, cull_cone = true;
+    bool cull_frustum = true, cull_cone = true, cull_occlusion = true;
 
     Impl(WGPUDevice dev, WGPUTextureFormat fmt) : device(dev), queue(wgpuDeviceGetQueue(dev)), color_format(fmt) {
         wgpuDeviceAddRef(device);
@@ -221,6 +249,7 @@ struct Renderer::Impl {
         frame_buf = make_buffer(112, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst, "adacpp.frame");
         pick_frame_buf = make_buffer(112, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst, "adacpp.pick_frame");
         create_pick_targets();
+        create_cull();
     }
     ~Impl() {
         geometries.clear();
@@ -398,6 +427,162 @@ struct Renderer::Impl {
             make_pipeline("adacpp.points", "vs_list", WGPUPrimitiveTopology_PointList, WGPUCullMode_None, false, false);
         pick_double = make_pick_pipeline("adacpp.pick_double", WGPUCullMode_None);
         pick_single = make_pick_pipeline("adacpp.pick_single", WGPUCullMode_Back);
+    }
+
+    BindGroupRef make_frame_bind(WGPUBuffer frame, WGPUBuffer vis, const char *label) {
+        WGPUBindGroupEntry e[4] = {WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT,
+                                   WGPU_BIND_GROUP_ENTRY_INIT};
+        WGPUBuffer bufs[4] = {frame, instance_buf.get(), segstate_buf.get(), vis};
+        for (uint32_t i = 0; i < 4; ++i) {
+            e[i].binding = i;
+            e[i].buffer = bufs[i];
+            e[i].size = wgpuBufferGetSize(bufs[i]);
+        }
+        WGPUBindGroupDescriptor d = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
+        d.label = sv(label);
+        d.layout = frame_layout.get();
+        d.entryCount = 4;
+        d.entries = e;
+        return BindGroupRef(wgpuDeviceCreateBindGroup(device, &d));
+    }
+
+    BindGroupLayoutRef make_layout(const char *label, std::vector<WGPUBindGroupLayoutEntry> entries) {
+        for (uint32_t i = 0; i < entries.size(); ++i) {
+            entries[i].binding = i;
+            entries[i].visibility = WGPUShaderStage_Compute;
+        }
+        WGPUBindGroupLayoutDescriptor d = WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
+        d.label = sv(label);
+        d.entryCount = entries.size();
+        d.entries = entries.data();
+        return BindGroupLayoutRef(wgpuDeviceCreateBindGroupLayout(device, &d));
+    }
+
+    ComputePipelineRef make_compute(const char *entry, const BindGroupLayoutRef &layout, PipelineLayoutRef &pl) {
+        if (!pl) {
+            WGPUBindGroupLayout l = layout.get();
+            WGPUPipelineLayoutDescriptor pd = WGPU_PIPELINE_LAYOUT_DESCRIPTOR_INIT;
+            pd.bindGroupLayoutCount = 1;
+            pd.bindGroupLayouts = &l;
+            pl.reset(wgpuDeviceCreatePipelineLayout(device, &pd));
+        }
+        WGPUComputePipelineDescriptor d = WGPU_COMPUTE_PIPELINE_DESCRIPTOR_INIT;
+        d.label = sv(entry);
+        d.layout = pl.get();
+        d.compute.module = cull_shader.get();
+        d.compute.entryPoint = sv(entry);
+        return ComputePipelineRef(wgpuDeviceCreateComputePipeline(device, &d));
+    }
+
+    void create_cull() {
+        auto buffer = [](WGPUBufferBindingType type) {
+            WGPUBindGroupLayoutEntry e = WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT;
+            e.buffer.type = type;
+            return e;
+        };
+        auto texture = [](WGPUTextureSampleType type, bool multisampled) {
+            WGPUBindGroupLayoutEntry e = WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT;
+            e.texture.sampleType = type;
+            e.texture.viewDimension = WGPUTextureViewDimension_2D;
+            e.texture.multisampled = multisampled;
+            return e;
+        };
+        WGPUBindGroupLayoutEntry store = WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT;
+        store.storageTexture.access = WGPUStorageTextureAccess_WriteOnly;
+        store.storageTexture.format = WGPUTextureFormat_R32Float;
+        store.storageTexture.viewDimension = WGPUTextureViewDimension_2D;
+        const auto ro = WGPUBufferBindingType_ReadOnlyStorage, rw = WGPUBufferBindingType_Storage;
+        cull_layout = make_layout("adacpp.cull_layout", {buffer(WGPUBufferBindingType_Uniform), buffer(ro), buffer(ro),
+                                                         buffer(ro), buffer(rw), buffer(rw), buffer(rw), buffer(rw),
+                                                         texture(WGPUTextureSampleType_UnfilterableFloat, false)});
+        hzb_init_layout = make_layout("adacpp.hzb_init_layout", {texture(WGPUTextureSampleType_Depth, true), store});
+        hzb_reduce_layout =
+            make_layout("adacpp.hzb_reduce_layout", {texture(WGPUTextureSampleType_UnfilterableFloat, false), store});
+
+        std::string src_text = kCullWGSL;
+        const std::string token = "{{CLUSTER_VERTS}}";
+        src_text.replace(src_text.find(token), token.size(), std::to_string(kClusterMaxTriangles * 3));
+        WGPUShaderSourceWGSL src = WGPU_SHADER_SOURCE_WGSL_INIT;
+        src.code = sv(src_text);
+        WGPUShaderModuleDescriptor sd = WGPU_SHADER_MODULE_DESCRIPTOR_INIT;
+        sd.nextInChain = &src.chain;
+        sd.label = sv("adacpp.cull_shader");
+        cull_shader.reset(wgpuDeviceCreateShaderModule(device, &sd));
+        cull_early = make_compute("cs_early", cull_layout, cull_pipeline_layout);
+        cull_late = make_compute("cs_late", cull_layout, cull_pipeline_layout);
+        hzb_init = make_compute("hzb_init", hzb_init_layout, hzb_init_pipeline_layout);
+        hzb_reduce = make_compute("hzb_reduce", hzb_reduce_layout, hzb_reduce_pipeline_layout);
+
+        cull_frame_buf =
+            make_buffer(kCullFrameBytes, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst, "adacpp.cull_frame");
+        counters_buf =
+            make_buffer(kCounters * 4, WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc,
+                        "adacpp.cull_counters");
+    }
+
+    BindGroupRef make_bind(const BindGroupLayoutRef &layout, std::vector<WGPUBindGroupEntry> e, const char *label) {
+        for (uint32_t i = 0; i < e.size(); ++i)
+            e[i].binding = i;
+        WGPUBindGroupDescriptor d = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
+        d.label = sv(label);
+        d.layout = layout.get();
+        d.entryCount = e.size();
+        d.entries = e.data();
+        return BindGroupRef(wgpuDeviceCreateBindGroup(device, &d));
+    }
+    static WGPUBindGroupEntry buffer_entry(WGPUBuffer b) {
+        WGPUBindGroupEntry e = WGPU_BIND_GROUP_ENTRY_INIT;
+        e.buffer = b;
+        e.size = wgpuBufferGetSize(b);
+        return e;
+    }
+    static WGPUBindGroupEntry view_entry(WGPUTextureView v) {
+        WGPUBindGroupEntry e = WGPU_BIND_GROUP_ENTRY_INIT;
+        e.textureView = v;
+        return e;
+    }
+
+    // The depth pyramid for a w x h target: level 0 at full resolution, halving (rounded down) to 1 x 1.
+    void create_hzb(uint32_t w, uint32_t h) {
+        hzb_levels = 1;
+        while ((std::max(w, h) >> hzb_levels) > 0)
+            ++hzb_levels;
+        WGPUTextureDescriptor d = WGPU_TEXTURE_DESCRIPTOR_INIT;
+        d.label = sv("adacpp.hzb");
+        d.size = {w, h, 1};
+        d.format = WGPUTextureFormat_R32Float;
+        d.mipLevelCount = hzb_levels;
+        d.usage = WGPUTextureUsage_StorageBinding | WGPUTextureUsage_TextureBinding;
+        hzb_tex.reset(wgpuDeviceCreateTexture(device, &d));
+        hzb_view.reset(wgpuTextureCreateView(hzb_tex.get(), nullptr));
+        hzb_mips.clear();
+        for (uint32_t l = 0; l < hzb_levels; ++l) {
+            WGPUTextureViewDescriptor vd = WGPU_TEXTURE_VIEW_DESCRIPTOR_INIT;
+            vd.baseMipLevel = l;
+            vd.mipLevelCount = 1;
+            hzb_mips.emplace_back(wgpuTextureCreateView(hzb_tex.get(), &vd));
+        }
+        hzb_init_bind = make_bind(hzb_init_layout, {view_entry(depth_view.get()), view_entry(hzb_mips[0].get())},
+                                  "adacpp.hzb_init");
+        hzb_reduce_binds.clear();
+        for (uint32_t l = 1; l < hzb_levels; ++l)
+            hzb_reduce_binds.push_back(make_bind(
+                hzb_reduce_layout, {view_entry(hzb_mips[l - 1].get()), view_entry(hzb_mips[l].get())}, "adacpp.hzb"));
+        cull_binds_dirty = true;
+    }
+
+    void create_cull_binds() {
+        auto make = [&](const BufferRef &vis, const BufferRef &args, const char *label) {
+            return make_bind(cull_layout,
+                             {buffer_entry(cull_frame_buf.get()), buffer_entry(instance_buf.get()),
+                              buffer_entry(segstate_buf.get()), buffer_entry(items_buf.get()),
+                              buffer_entry(history_buf.get()), buffer_entry(vis.get()), buffer_entry(args.get()),
+                              buffer_entry(counters_buf.get()), view_entry(hzb_view.get())},
+                             label);
+        };
+        cull_bind_early = make(vis_early_buf, args_early_buf, "adacpp.cull_early");
+        cull_bind_late = make(vis_late_buf, args_late_buf, "adacpp.cull_late");
+        cull_binds_dirty = false;
     }
 
     void bind_geometry(Geometry &g) {
@@ -646,12 +831,14 @@ struct Renderer::Impl {
             d.size = {w, h, 1};
             d.format = fmt;
             d.sampleCount = kSampleCount;
-            d.usage = WGPUTextureUsage_RenderAttachment;
+            // Depth also feeds the occlusion pyramid.
+            d.usage = WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_TextureBinding;
             tex.reset(wgpuDeviceCreateTexture(device, &d));
             view.reset(wgpuTextureCreateView(tex.get(), nullptr));
         };
         make(color_format, msaa_tex, msaa_view, "adacpp.msaa");
         make(kDepthFormat, depth_tex, depth_view, "adacpp.depth");
+        create_hzb(w, h);
     }
 
     void rebuild_structure() {
@@ -668,7 +855,7 @@ struct Renderer::Impl {
             vis_total += uint32_t(g.clusters.size());
             order.push_back(inst.get());
         }
-        visible.assign(vis_total, 0);
+        visible.assign(size_t(vis_total) * 2, 0);
 
         auto grow = [&](BufferRef &buf, size_t &cap, size_t need, WGPUBufferUsage usage, const char *label) {
             if (need <= cap && buf)
@@ -681,26 +868,60 @@ struct Renderer::Impl {
         bool rebind = !frame_bind;
         rebind |= grow(instance_buf, instance_cap, order.size() * kInstanceBytes, st, "adacpp.instances");
         rebind |= grow(segstate_buf, segstate_cap, size_t(seg_total) * 8, st, "adacpp.segstate");
-        rebind |= grow(visible_buf, visible_cap, size_t(vis_total) * 4, st, "adacpp.visible");
+        rebind |= grow(visible_buf, visible_cap, size_t(vis_total) * 8, st, "adacpp.visible");
+        rebind |= grow(items_buf, items_cap, size_t(vis_total) * kItemWords * 4, st, "adacpp.cull_items");
+        rebind |= grow(history_buf, history_cap, size_t(vis_total) * 4, st, "adacpp.cull_history");
+        // Early / late pairs share a capacity.
+        if (grow(vis_late_buf, vis_gpu_cap, size_t(vis_total) * 8, st, "adacpp.visible_late")) {
+            vis_early_buf = make_buffer(vis_gpu_cap, st, "adacpp.visible_early");
+            rebind = true;
+        }
+        const auto args_usage = st | WGPUBufferUsage_Indirect;
+        if (grow(args_late_buf, args_cap, order.size() * 16, args_usage, "adacpp.args_late")) {
+            args_early_buf = make_buffer(args_cap, args_usage, "adacpp.args_early");
+            rebind = true;
+        }
         if (rebind) {
-            WGPUBindGroupEntry e[4] = {WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT,
-                                       WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT};
-            WGPUBuffer bufs[4] = {frame_buf.get(), instance_buf.get(), segstate_buf.get(), visible_buf.get()};
-            for (uint32_t i = 0; i < 4; ++i) {
-                e[i].binding = i;
-                e[i].buffer = bufs[i];
-                e[i].size = wgpuBufferGetSize(bufs[i]);
+            frame_bind = make_frame_bind(frame_buf.get(), visible_buf.get(), "adacpp.frame");
+            pick_frame_bind = make_frame_bind(pick_frame_buf.get(), visible_buf.get(), "adacpp.pick_frame");
+            frame_bind_early = make_frame_bind(frame_buf.get(), vis_early_buf.get(), "adacpp.frame_early");
+            frame_bind_late = make_frame_bind(frame_buf.get(), vis_late_buf.get(), "adacpp.frame_late");
+            cull_binds_dirty = true;
+        }
+
+        // Cull items, one per (instance, cluster) in visible-region order, and the draw args each frame
+        // starts from. Last frame's visibility no longer lines up: start from "nothing drawn", so the first
+        // frame after a change is drawn by the late pass alone.
+        std::vector<uint32_t> items(size_t(vis_total) * kItemWords, 0);
+        args_template.assign(order.size() * 4, 0);
+        for (Instance *inst : order) {
+            const Geometry &g = geometry(inst->geometry);
+            uint32_t *a = args_template.data() + inst->gpu_index * 4;
+            a[1] = 1;
+            a[2] = inst->vis_base * kClusterMaxTriangles * 3;
+            for (uint32_t c = 0; c < g.clusters.size(); ++c) {
+                const ClusterCull &cl = g.clusters[c];
+                uint32_t *rec = items.data() + size_t(inst->vis_base + c) * kItemWords;
+                const float f[9] = {cl.center[0], cl.center[1], cl.center[2], cl.radius, cl.morph_extent,
+                                    cl.axis[0],   cl.axis[1],   cl.axis[2],   cl.cutoff};
+                std::memcpy(rec, f, 16);
+                std::memcpy(rec + 4, f + 5, 16);
+                std::memcpy(rec + 8, f + 4, 4);
+                rec[9] = inst->gpu_index;
+                rec[10] = c;
+                rec[11] = cl.triangles;
+                rec[12] = cl.seg_first;
+                rec[13] = cl.seg_last;
             }
-            WGPUBindGroupDescriptor d = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
-            d.label = sv("adacpp.frame");
-            d.layout = frame_layout.get();
-            d.entryCount = 4;
-            d.entries = e;
-            frame_bind.reset(wgpuDeviceCreateBindGroup(device, &d));
-            e[0].buffer = pick_frame_buf.get();
-            e[0].size = wgpuBufferGetSize(pick_frame_buf.get());
-            d.label = sv("adacpp.pick_frame");
-            pick_frame_bind.reset(wgpuDeviceCreateBindGroup(device, &d));
+        }
+        item_count = vis_total;
+        scene_triangles = 0;
+        for (Instance *inst : order)
+            scene_triangles += geometry(inst->geometry).triangles;
+        if (!items.empty()) {
+            wgpuQueueWriteBuffer(queue, items_buf.get(), 0, items.data(), items.size() * 4);
+            const std::vector<uint32_t> zeros(vis_total, 0);
+            wgpuQueueWriteBuffer(queue, history_buf.get(), 0, zeros.data(), zeros.size() * 4);
         }
         structure_dirty = false;
         instances_dirty = true;
@@ -722,6 +943,8 @@ struct Renderer::Impl {
                 flags |= kUnlit;
             if (!g.has_colors)
                 flags &= ~uint32_t(kVertexColors);
+            if (cone_exact(*inst, g))
+                flags |= kConeOk;
             rec[20] = flags;
             rec[21] = inst->seg_base;
             std::memcpy(rec + 22, &inst->desc.morph_influence, 4);
@@ -733,6 +956,42 @@ struct Renderer::Impl {
         if (!data.empty())
             wgpuQueueWriteBuffer(queue, instance_buf.get(), 0, data.data(), data.size() * 4);
         instances_dirty = false;
+    }
+
+    // Cone culling on the GPU tests in world space, which is exact only for single-sided, unmorphed geometry
+    // under a rotation + uniform scale with positive determinant.
+    static bool cone_exact(const Instance &inst, const Geometry &g) {
+        if (inst.desc.flags & (kDoubleSided | kTransparent))
+            return false;
+        if (g.has_morph && inst.desc.morph_influence != 0.0f)
+            return false;
+        const Mat4 &m = inst.desc.model;
+        if (det3(m) <= 0.0f)
+            return false;
+        float len[3];
+        for (int c = 0; c < 3; ++c)
+            len[c] = std::sqrt(m[c * 4] * m[c * 4] + m[c * 4 + 1] * m[c * 4 + 1] + m[c * 4 + 2] * m[c * 4 + 2]);
+        const float tol = 1e-4f * len[0];
+        return std::fabs(len[1] - len[0]) <= tol && std::fabs(len[2] - len[0]) <= tol;
+    }
+
+    // The instance's bounding sphere is inside or crossing the frustum `planes` (world space).
+    bool instance_in_view(const Instance &inst, const std::array<std::array<float, 4>, 6> &planes) const {
+        const Geometry &g = *geometries[inst.geometry];
+        const Mat4 &m = inst.desc.model;
+        float c[3], scale = 0.0f;
+        for (int k = 0; k < 3; ++k) {
+            c[k] = m[k] * g.sphere[0] + m[4 + k] * g.sphere[1] + m[8 + k] * g.sphere[2] + m[12 + k];
+            scale = std::max(scale, m[k * 4] * m[k * 4] + m[k * 4 + 1] * m[k * 4 + 1] + m[k * 4 + 2] * m[k * 4 + 2]);
+        }
+        float r = g.sphere[3];
+        if (g.has_morph && inst.desc.morph_influence != 0.0f)
+            r += std::fabs(inst.desc.morph_influence) * g.morph_extent;
+        r *= std::sqrt(scale);
+        for (const auto &p : planes)
+            if (p[0] * c[0] + p[1] * c[1] + p[2] * c[2] + p[3] < -r)
+                return false;
+        return true;
     }
 
     void upload_segstate() {
@@ -780,7 +1039,7 @@ struct Renderer::Impl {
             }
         }
         const uint32_t *seg = inst.segstate.data();
-        uint32_t *out = visible.data() + inst.vis_base;
+        uint32_t *out = visible.data() + size_t(inst.vis_base) * 2;
         uint32_t n = 0;
         for (uint32_t c = 0; c < g.clusters.size(); ++c) {
             const ClusterCull &cl = g.clusters[c];
@@ -808,7 +1067,9 @@ struct Renderer::Impl {
                 if (d[0] * cl.axis[0] + d[1] * cl.axis[1] + d[2] * cl.axis[2] >= cl.cutoff * len + cl.radius)
                     continue;
             }
-            out[n++] = c;
+            out[n * 2] = inst.gpu_index;
+            out[n * 2 + 1] = c;
+            ++n;
             st.triangles_drawn += cl.triangles;
         }
         inst.vis_count = n;
@@ -920,7 +1181,8 @@ struct Renderer::Impl {
                 bound = p;
             }
             wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
-            wgpuRenderPassEncoderDraw(pass, inst->vis_count * kClusterMaxTriangles * 3, 1, 0, inst->gpu_index);
+            wgpuRenderPassEncoderDraw(pass, inst->vis_count * kClusterMaxTriangles * 3, 1,
+                                      inst->vis_base * kClusterMaxTriangles * 3, 0);
         }
         wgpuRenderPassEncoderEnd(pass);
         wgpuRenderPassEncoderRelease(pass);
@@ -983,6 +1245,92 @@ struct Renderer::Impl {
         wgpuBufferMapAsync(pending->readback.get(), WGPUMapMode_Read, 0, 512, cb);
     }
 
+    // One render pass. `clear` starts from the background (else loads what an earlier pass left), `resolve`
+    // ends the frame into `target`.
+    WGPURenderPassEncoder begin_pass(WGPUCommandEncoder enc, WGPUTextureView target, bool clear_targets, bool resolve,
+                                     const char *label) {
+        WGPURenderPassColorAttachment ca = WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT;
+        ca.view = msaa_view.get();
+        ca.resolveTarget = resolve ? target : nullptr;
+        ca.loadOp = clear_targets ? WGPULoadOp_Clear : WGPULoadOp_Load;
+        ca.storeOp = resolve ? WGPUStoreOp_Discard : WGPUStoreOp_Store;
+        ca.clearValue = {clear[0], clear[1], clear[2], clear[3]};
+        WGPURenderPassDepthStencilAttachment da = WGPU_RENDER_PASS_DEPTH_STENCIL_ATTACHMENT_INIT;
+        da.view = depth_view.get();
+        da.depthLoadOp = clear_targets ? WGPULoadOp_Clear : WGPULoadOp_Load;
+        da.depthStoreOp = resolve ? WGPUStoreOp_Discard : WGPUStoreOp_Store;
+        da.depthClearValue = 1.0f;
+        WGPURenderPassDescriptor rp = WGPU_RENDER_PASS_DESCRIPTOR_INIT;
+        rp.label = sv(label);
+        rp.colorAttachmentCount = 1;
+        rp.colorAttachments = &ca;
+        rp.depthStencilAttachment = &da;
+        return wgpuCommandEncoderBeginRenderPass(enc, &rp);
+    }
+
+    // Draws triangle instances (opaque or transparent) and/or line / point instances into `pass`.
+    // `args`: the GPU-culled indirect args, else the CPU visible counts.
+    struct Drawer {
+        Impl &r;
+        WGPURenderPassEncoder pass;
+        RenderStats &st;
+        WGPURenderPipeline bound = nullptr;
+        void use(const RenderPipelineRef &p) {
+            if (bound != p.get()) {
+                wgpuRenderPassEncoderSetPipeline(pass, p.get());
+                bound = p.get();
+            }
+        }
+        void tris(bool transparent, WGPUBuffer args, const std::vector<char> *in_view) {
+            for (Instance *inst : r.order) {
+                const Geometry &g = r.geometry(inst->geometry);
+                if (g.topology != Topology::Triangles || (inst->desc.flags & kHidden) || g.clusters.empty())
+                    continue;
+                if (bool(inst->desc.flags & kTransparent) != transparent)
+                    continue;
+                if (args ? !(*in_view)[inst->gpu_index] : inst->vis_count == 0)
+                    continue;
+                use(transparent ? r.tri_blend : (inst->desc.flags & kDoubleSided) ? r.tri_double : r.tri_single);
+                wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
+                if (args)
+                    wgpuRenderPassEncoderDrawIndirect(pass, args, uint64_t(inst->gpu_index) * 16);
+                else
+                    wgpuRenderPassEncoderDraw(pass, inst->vis_count * kClusterMaxTriangles * 3, 1,
+                                              inst->vis_base * kClusterMaxTriangles * 3, 0);
+                st.draw_calls++;
+            }
+        }
+        void lists(bool transparent) {
+            for (Instance *inst : r.order) {
+                const Geometry &g = r.geometry(inst->geometry);
+                if (g.topology == Topology::Triangles || (inst->desc.flags & kHidden))
+                    continue;
+                if (bool(inst->desc.flags & kTransparent) != transparent)
+                    continue;
+                if (g.topology == Topology::Points)
+                    use(r.points);
+                else
+                    use(transparent ? r.lines_blend : r.lines);
+                wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
+                wgpuRenderPassEncoderDraw(pass, g.list_count, 1, 0, inst->gpu_index);
+                st.draw_calls++;
+            }
+        }
+    };
+
+    static void end_pass(WGPURenderPassEncoder pass) {
+        wgpuRenderPassEncoderEnd(pass);
+        wgpuRenderPassEncoderRelease(pass);
+    }
+
+    void submit(WGPUCommandEncoder enc) {
+        WGPUCommandBufferDescriptor cd = WGPU_COMMAND_BUFFER_DESCRIPTOR_INIT;
+        WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, &cd);
+        wgpuQueueSubmit(queue, 1, &cmd);
+        wgpuCommandBufferRelease(cmd);
+        wgpuCommandEncoderRelease(enc);
+    }
+
     void render(WGPUTextureView target, uint32_t w, uint32_t h, RenderStats &st) {
         if (w == 0 || h == 0)
             return;
@@ -999,12 +1347,29 @@ struct Renderer::Impl {
         write_frame(frame_buf.get(), view_proj, cam);
 
         st = RenderStats{};
-        auto t0 = std::chrono::steady_clock::now();
         for (Instance *inst : order) {
             const Geometry &g = geometry(inst->geometry);
             st.instances++;
             st.clusters_total += g.clusters.size();
             st.triangles_total += g.triangles;
+        }
+        for (auto &g : geometries)
+            st.geometries += g ? 1 : 0;
+
+        WGPUCommandEncoderDescriptor ed = WGPU_COMMAND_ENCODER_DESCRIPTOR_INIT;
+        WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(device, &ed);
+        if (cull_occlusion && item_count > 0 && scene_triangles >= kOcclusionMinTriangles)
+            encode_gpu_culled(enc, target, view_proj, cam, st);
+        else
+            encode_cpu_culled(enc, target, view_proj, cam, st);
+        submit(enc);
+    }
+
+    void encode_cpu_culled(WGPUCommandEncoder enc, WGPUTextureView target, const Mat4 &view_proj, const float cam[3],
+                           RenderStats &st) {
+        auto t0 = std::chrono::steady_clock::now();
+        for (Instance *inst : order) {
+            const Geometry &g = geometry(inst->geometry);
             inst->vis_count = 0;
             if (g.topology == Topology::Triangles && !(inst->desc.flags & kHidden))
                 cull(*inst, view_proj, cam, st);
@@ -1012,78 +1377,132 @@ struct Renderer::Impl {
         if (!visible.empty())
             wgpuQueueWriteBuffer(queue, visible_buf.get(), 0, visible.data(), visible.size() * 4);
         st.cull_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-        for (auto &g : geometries)
-            st.geometries += g ? 1 : 0;
 
+        WGPURenderPassEncoder pass = begin_pass(enc, target, true, true, "adacpp.main");
+        wgpuRenderPassEncoderSetBindGroup(pass, 0, frame_bind.get(), 0, nullptr);
+        Drawer d{*this, pass, st};
+        d.tris(false, nullptr, nullptr);
+        d.lists(false);
+        d.tris(true, nullptr, nullptr);
+        d.lists(true);
+        end_pass(pass);
+    }
+
+    // Two-pass occlusion culling, see kCullWGSL. All on the GPU; the CPU only drops whole instances outside
+    // the frustum so their (empty) indirect draws are not encoded.
+    void encode_gpu_culled(WGPUCommandEncoder enc, WGPUTextureView target, const Mat4 &view_proj, const float cam[3],
+                           RenderStats &st) {
+        auto t0 = std::chrono::steady_clock::now();
+        st.gpu_culled = true;
+        if (cull_binds_dirty)
+            create_cull_binds();
+        const auto planes = frustum_planes(view_proj);
+        uint32_t frame[kCullFrameBytes / 4] = {};
+        std::memcpy(frame, view_proj.data(), 64);
+        for (int p = 0; p < 6; ++p)
+            std::memcpy(frame + 16 + p * 4, planes[p].data(), 16);
+        const float cam_pos[4] = {cam[0], cam[1], cam[2], ortho ? 0.0f : 1.0f};
+        std::memcpy(frame + 40, cam_pos, 16);
+        const float size[2] = {float(target_w), float(target_h)};
+        std::memcpy(frame + 44, size, 8);
+        frame[48] = hzb_levels;
+        frame[49] = (cull_frustum ? 1u : 0u) | (cull_cone ? 2u : 0u) | 4u;
+        frame[50] = item_count;
+        wgpuQueueWriteBuffer(queue, cull_frame_buf.get(), 0, frame, sizeof(frame));
+        wgpuQueueWriteBuffer(queue, args_early_buf.get(), 0, args_template.data(), args_template.size() * 4);
+        wgpuQueueWriteBuffer(queue, args_late_buf.get(), 0, args_template.data(), args_template.size() * 4);
+        const uint32_t zeros[kCounters] = {};
+        wgpuQueueWriteBuffer(queue, counters_buf.get(), 0, zeros, sizeof(zeros));
+
+        std::vector<char> in_view(order.size(), 0);
+        for (Instance *inst : order)
+            in_view[inst->gpu_index] = !cull_frustum || instance_in_view(*inst, planes);
+        st.cull_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+
+        const uint32_t groups = (item_count + 63) / 64;
+        const uint32_t groups_x = std::min(groups, 65535u), groups_y = (groups + groups_x - 1) / groups_x;
+        WGPUComputePassDescriptor cd = WGPU_COMPUTE_PASS_DESCRIPTOR_INIT;
+        cd.label = sv("adacpp.cull_early");
+        WGPUComputePassEncoder cp = wgpuCommandEncoderBeginComputePass(enc, &cd);
+        wgpuComputePassEncoderSetPipeline(cp, cull_early.get());
+        wgpuComputePassEncoderSetBindGroup(cp, 0, cull_bind_early.get(), 0, nullptr);
+        wgpuComputePassEncoderDispatchWorkgroups(cp, groups_x, groups_y, 1);
+        wgpuComputePassEncoderEnd(cp);
+        wgpuComputePassEncoderRelease(cp);
+
+        WGPURenderPassEncoder pass = begin_pass(enc, target, true, false, "adacpp.early");
+        wgpuRenderPassEncoderSetBindGroup(pass, 0, frame_bind_early.get(), 0, nullptr);
+        Drawer early{*this, pass, st};
+        early.tris(false, args_early_buf.get(), &in_view);
+        end_pass(pass);
+
+        cd.label = sv("adacpp.hzb_cull_late");
+        cp = wgpuCommandEncoderBeginComputePass(enc, &cd);
+        wgpuComputePassEncoderSetPipeline(cp, hzb_init.get());
+        wgpuComputePassEncoderSetBindGroup(cp, 0, hzb_init_bind.get(), 0, nullptr);
+        wgpuComputePassEncoderDispatchWorkgroups(cp, (target_w + 7) / 8, (target_h + 7) / 8, 1);
+        wgpuComputePassEncoderSetPipeline(cp, hzb_reduce.get());
+        for (uint32_t l = 1; l < hzb_levels; ++l) {
+            const uint32_t lw = std::max(1u, target_w >> l), lh = std::max(1u, target_h >> l);
+            wgpuComputePassEncoderSetBindGroup(cp, 0, hzb_reduce_binds[l - 1].get(), 0, nullptr);
+            wgpuComputePassEncoderDispatchWorkgroups(cp, (lw + 7) / 8, (lh + 7) / 8, 1);
+        }
+        wgpuComputePassEncoderSetPipeline(cp, cull_late.get());
+        wgpuComputePassEncoderSetBindGroup(cp, 0, cull_bind_late.get(), 0, nullptr);
+        wgpuComputePassEncoderDispatchWorkgroups(cp, groups_x, groups_y, 1);
+        wgpuComputePassEncoderEnd(cp);
+        wgpuComputePassEncoderRelease(cp);
+
+        pass = begin_pass(enc, target, false, true, "adacpp.late");
+        wgpuRenderPassEncoderSetBindGroup(pass, 0, frame_bind_late.get(), 0, nullptr);
+        Drawer late{*this, pass, st};
+        late.tris(false, args_late_buf.get(), &in_view);
+        late.lists(false);
+        late.tris(true, args_late_buf.get(), &in_view);
+        late.lists(true);
+        end_pass(pass);
+    }
+
+    struct PendingStats {
+        BufferRef readback;
+        RenderStats stats;
+        std::function<void(const RenderStats &)> done;
+    };
+
+    void read_cull_stats(const RenderStats &last, std::function<void(const RenderStats &)> done) {
+        if (!last.gpu_culled) {
+            done(last);
+            return;
+        }
+        auto *pending = new PendingStats();
+        pending->stats = last;
+        pending->done = std::move(done);
+        pending->readback =
+            make_buffer(kCounters * 4, WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead, "adacpp.cull_readback");
         WGPUCommandEncoderDescriptor ed = WGPU_COMMAND_ENCODER_DESCRIPTOR_INIT;
         WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(device, &ed);
-        WGPURenderPassColorAttachment ca = WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT;
-        ca.view = msaa_view.get();
-        ca.resolveTarget = target;
-        ca.loadOp = WGPULoadOp_Clear;
-        ca.storeOp = WGPUStoreOp_Discard;
-        ca.clearValue = {clear[0], clear[1], clear[2], clear[3]};
-        WGPURenderPassDepthStencilAttachment da = WGPU_RENDER_PASS_DEPTH_STENCIL_ATTACHMENT_INIT;
-        da.view = depth_view.get();
-        da.depthLoadOp = WGPULoadOp_Clear;
-        da.depthStoreOp = WGPUStoreOp_Discard;
-        da.depthClearValue = 1.0f;
-        WGPURenderPassDescriptor rp = WGPU_RENDER_PASS_DESCRIPTOR_INIT;
-        rp.label = sv("adacpp.main");
-        rp.colorAttachmentCount = 1;
-        rp.colorAttachments = &ca;
-        rp.depthStencilAttachment = &da;
-        WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(enc, &rp);
-        wgpuRenderPassEncoderSetBindGroup(pass, 0, frame_bind.get(), 0, nullptr);
-
-        WGPURenderPipeline bound = nullptr;
-        auto use = [&](const RenderPipelineRef &p) {
-            if (bound != p.get()) {
-                wgpuRenderPassEncoderSetPipeline(pass, p.get());
-                bound = p.get();
+        wgpuCommandEncoderCopyBufferToBuffer(enc, counters_buf.get(), 0, pending->readback.get(), 0, kCounters * 4);
+        submit(enc);
+        WGPUBufferMapCallbackInfo cb = WGPU_BUFFER_MAP_CALLBACK_INFO_INIT;
+#ifdef __EMSCRIPTEN__
+        cb.mode = WGPUCallbackMode_AllowSpontaneous;
+#else
+        cb.mode = WGPUCallbackMode_AllowProcessEvents;
+#endif
+        cb.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void *ud1, void *) {
+            std::unique_ptr<PendingStats> p(static_cast<PendingStats *>(ud1));
+            if (status == WGPUMapAsyncStatus_Success) {
+                uint32_t c[kCounters];
+                std::memcpy(c, wgpuBufferGetConstMappedRange(p->readback.get(), 0, sizeof(c)), sizeof(c));
+                wgpuBufferUnmap(p->readback.get());
+                p->stats.clusters_drawn = uint64_t(c[0]) + c[2];
+                p->stats.triangles_drawn = uint64_t(c[1]) + c[3];
+                p->stats.clusters_occluded = c[4];
             }
+            p->done(p->stats);
         };
-        auto draw_tris = [&](bool transparent) {
-            for (Instance *inst : order) {
-                const Geometry &g = geometry(inst->geometry);
-                if (g.topology != Topology::Triangles || inst->vis_count == 0)
-                    continue;
-                if (bool(inst->desc.flags & kTransparent) != transparent)
-                    continue;
-                use(transparent ? tri_blend : (inst->desc.flags & kDoubleSided) ? tri_double : tri_single);
-                wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
-                wgpuRenderPassEncoderDraw(pass, inst->vis_count * kClusterMaxTriangles * 3, 1, 0, inst->gpu_index);
-                st.draw_calls++;
-            }
-        };
-        auto draw_lists = [&](bool transparent) {
-            for (Instance *inst : order) {
-                const Geometry &g = geometry(inst->geometry);
-                if (g.topology == Topology::Triangles || (inst->desc.flags & kHidden))
-                    continue;
-                if (bool(inst->desc.flags & kTransparent) != transparent)
-                    continue;
-                if (g.topology == Topology::Points)
-                    use(points);
-                else
-                    use(transparent ? lines_blend : lines);
-                wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
-                wgpuRenderPassEncoderDraw(pass, g.list_count, 1, 0, inst->gpu_index);
-                st.draw_calls++;
-            }
-        };
-        draw_tris(false);
-        draw_lists(false);
-        draw_tris(true);
-        draw_lists(true);
-
-        wgpuRenderPassEncoderEnd(pass);
-        wgpuRenderPassEncoderRelease(pass);
-        WGPUCommandBufferDescriptor cd = WGPU_COMMAND_BUFFER_DESCRIPTOR_INIT;
-        WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, &cd);
-        wgpuQueueSubmit(queue, 1, &cmd);
-        wgpuCommandBufferRelease(cmd);
-        wgpuCommandEncoderRelease(enc);
+        cb.userdata1 = pending;
+        wgpuBufferMapAsync(pending->readback.get(), WGPUMapMode_Read, 0, kCounters * 4, cb);
     }
 };
 
@@ -1209,9 +1628,14 @@ void Renderer::set_lighting(float ambient, float diffuse) {
     impl_->diffuse = diffuse;
 }
 
-void Renderer::set_culling(bool frustum, bool cone) {
+void Renderer::set_culling(bool frustum, bool cone, bool occlusion) {
     impl_->cull_frustum = frustum;
     impl_->cull_cone = cone;
+    impl_->cull_occlusion = occlusion;
+}
+
+void Renderer::read_cull_stats(std::function<void(const RenderStats &)> done) {
+    impl_->read_cull_stats(stats_, std::move(done));
 }
 
 void Renderer::render(WGPUTextureView target, uint32_t width, uint32_t height) {

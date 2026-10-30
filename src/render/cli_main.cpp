@@ -1,7 +1,8 @@
 // adacpp_render: headless GLB -> PNG through the same WebGPU renderer the browser uses.
 //
 //   adacpp_render <in.glb> <out.png> [--size WxH] [--view iso|front|back|left|right|top|bottom]
-//                 [--backend auto|vulkan|gl] [--y-up] [--no-cull] [--stats] [--pick X,Y]
+//                 [--backend auto|vulkan|gl] [--y-up] [--no-cull] [--cpu-cull] [--stats]
+//                 [--pick X,Y] [--bench N] [--camera ex,ey,ez,tx,ty,tz]
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -22,13 +23,14 @@ int main(int argc, char **argv) {
     if (argc < 3) {
         std::fprintf(stderr,
                      "usage: %s <in.glb> <out.png> [--size WxH] [--view iso|front|back|left|right|top|bottom] "
-                     "[--backend auto|vulkan|gl] [--y-up] [--no-cull] [--stats] [--pick X,Y]\n",
+                     "[--backend auto|vulkan|gl] [--y-up] [--no-cull] [--cpu-cull] [--stats] [--pick X,Y] [--bench N] "
+                     "[--camera ex,ey,ez,tx,ty,tz]\n",
                      argv[0]);
         return 2;
     }
     std::string in = argv[1], out = argv[2], view = "iso", backend = "auto";
     uint32_t w = 1280, h = 960;
-    bool cull = true, print_stats = false, y_up = false;
+    bool cull = true, gpu_cull = true, print_stats = false, y_up = false;
     int pick_x = -1, pick_y = -1, bench = 0;
     float cam_eye[3], cam_target[3];
     bool cam_set = false;
@@ -51,6 +53,8 @@ int main(int argc, char **argv) {
             y_up = true;
         else if (a == "--no-cull")
             cull = false;
+        else if (a == "--cpu-cull")
+            gpu_cull = false;
         else if (a == "--stats")
             print_stats = true;
     }
@@ -69,7 +73,7 @@ int main(int argc, char **argv) {
         std::fprintf(stderr, "adapter: %s (%s, %s)\n", info.device.c_str(), info.backend.c_str(),
                      info.description.c_str());
         Renderer renderer(dev.device(), OffscreenTarget::kFormat);
-        renderer.set_culling(cull, cull);
+        renderer.set_culling(cull, cull, cull && gpu_cull);
         const auto load_t0 = std::chrono::steady_clock::now();
         const auto res = load_glb(renderer, in, y_up);
         const double load_ms =
@@ -111,14 +115,23 @@ int main(int argc, char **argv) {
                         hit.world[2]);
         }
         if (print_stats) {
-            const auto &st = renderer.stats();
+            RenderStats st;
+            bool have = false;
+            renderer.read_cull_stats([&](const RenderStats &s) {
+                st = s;
+                have = true;
+            });
+            while (!have)
+                dev.process_events();
             std::printf("{\"geometries\":%u,\"instances\":%u,\"vertices\":%llu,\"triangles\":%llu,"
                         "\"clusters_total\":%llu,\"clusters_drawn\":%llu,\"triangles_drawn\":%llu,"
-                        "\"draw_calls\":%u,\"cull_ms\":%.3f,\"segments\":%llu,\"frame_ms\":%.3f,\"load_ms\":%.0f,"
+                        "\"clusters_occluded\":%llu,\"gpu_cull\":%s,\"draw_calls\":%u,\"cull_ms\":%.3f,\"segments\":%"
+                        "llu,\"frame_ms\":%.3f,\"load_ms\":%.0f,"
                         "\"backend\":\"%s\"}\n",
                         res.geometries, res.instances, (unsigned long long) res.vertices,
                         (unsigned long long) res.triangles, (unsigned long long) st.clusters_total,
-                        (unsigned long long) st.clusters_drawn, (unsigned long long) st.triangles_drawn, st.draw_calls,
+                        (unsigned long long) st.clusters_drawn, (unsigned long long) st.triangles_drawn,
+                        (unsigned long long) st.clusters_occluded, st.gpu_culled ? "true" : "false", st.draw_calls,
                         st.cull_ms, (unsigned long long) res.segments, bench_ms, load_ms, info.backend.c_str());
         }
     } catch (const std::exception &e) {

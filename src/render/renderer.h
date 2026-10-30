@@ -5,16 +5,23 @@
 // draws it.
 //
 // Scene model
-//   geometry   vertex data + primitives, uploaded once. Triangle geometries are split into clusters of
-//              at most 64 vertices / 124 triangles (meshoptimizer), never spanning two segments.
+//   geometry   vertex data + primitives, uploaded once. Triangle geometries are split into spatially
+//              compact clusters of at most 255 vertices / 124 triangles (meshoptimizer), which may span
+//              several small segments; hidden state and colour are resolved per triangle.
 //   segment    a contiguous index range of a geometry, i.e. one CAD object / FEM part inside a batched
 //              buffer (adapy's draw ranges). Segments carry the per-object state: hidden, colour override.
 //   instance   a geometry placed in the world: model matrix, base colour, flags, morph influence.
 //
-// Drawing is GPU "vertex pulling": per frame the CPU culls clusters (hidden segment, view frustum,
-// back-facing normal cone) into a visible-cluster list, and one non-indexed draw per instance expands
+// Drawing is GPU "vertex pulling": clusters are culled (hidden segment, view frustum, back-facing normal
+// cone, occlusion) into a visible-cluster list, and one non-indexed draw per instance expands
 // visible_clusters x 124 x 3 vertices in the vertex shader, which looks every vertex up through the
 // cluster's local index list. Unused triangle slots of a partial cluster collapse to a degenerate point.
+//
+// Large scenes (2M+ triangles) are culled on the GPU, in two passes against the previous frame's visible
+// set (see kCullWGSL): what was visible last frame is drawn first, a depth pyramid is built from it, and
+// every other cluster is tested against that pyramid before the second pass draws the ones still visible.
+// Smaller scenes, scenes with occlusion culling switched off, and picking are culled on the CPU (frustum +
+// cone).
 #pragma once
 
 #include <array>
@@ -86,8 +93,11 @@ struct RenderStats {
     uint64_t clusters_drawn = 0;
     uint64_t triangles_total = 0;
     uint64_t triangles_drawn = 0;
+    uint64_t clusters_occluded = 0;
     uint32_t draw_calls = 0;
     double cull_ms = 0.0;
+    // GPU culling: the drawn / occluded counts live on the GPU and are only filled in by read_cull_stats().
+    bool gpu_culled = false;
 };
 
 class Renderer {
@@ -124,7 +134,9 @@ public:
     void set_background(float r, float g, float b, float a = 1.0f); // sRGB-encoded, as written to the target
     // Ambient irradiance and headlight intensity, in three.js units (AmbientLight / DirectionalLight).
     void set_lighting(float ambient, float headlight);
-    void set_culling(bool frustum, bool cone);
+    // `occlusion` allows GPU culling with two-pass occlusion culling (used from 2M triangles); off, the CPU
+    // culls (frustum, cone).
+    void set_culling(bool frustum, bool cone, bool occlusion = true);
 
     void render(WGPUTextureView target, uint32_t width, uint32_t height);
 
@@ -136,6 +148,9 @@ public:
     const RenderStats &stats() const {
         return stats_;
     }
+    // The last frame's stats with the GPU culling counts read back (drawn clusters / triangles, occluded
+    // clusters). Asynchronous like pick(); with CPU culling it calls back with stats() as they are.
+    void read_cull_stats(std::function<void(const RenderStats &)> done);
 
     // World-space bounds of all visible instances: min xyz, max xyz. Empty scene -> all zeros.
     std::array<float, 6> bounds() const;

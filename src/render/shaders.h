@@ -8,7 +8,9 @@ namespace adacpp::render {
 //   Instance  storage, 112 bytes each (model, colour, flags, segment base, morph influence, visible base,
 //             material: metalness, roughness, specular on/off)
 //   segstate  2 x u32 per segment: RGBA8 colour override (alpha 0 = none), flags
-//   visible   visible-cluster ids, one region per instance starting at Instance.vis_base
+//   visible   visible clusters as (instance, cluster) pairs, one region per instance starting at
+//             Instance.vis_base; a draw starts at vertex vis_base x CLUSTER_VERTS, so vs_tri finds its
+//             slot from the vertex index alone (indirect draws cannot rely on firstInstance)
 //   vtx       6 x f32 per vertex: position, normal (zero normal = derive a flat one)
 //   colors    packed RGBA8 per vertex
 //   morph     3 x f32 per vertex
@@ -95,13 +97,14 @@ fn shade_vertex(inst: Instance, vi: u32, seg: i32, ii: u32, primitive: u32) -> V
 }
 
 @vertex
-fn vs_tri(@builtin(vertex_index) vid: u32, @builtin(instance_index) ii: u32) -> VOut {
-    let inst = instances[ii];
+fn vs_tri(@builtin(vertex_index) vid: u32) -> VOut {
     let slot = vid / CLUSTER_VERTS;
+    let ii = visible[slot * 2u];
+    let inst = instances[ii];
     let local = vid % CLUSTER_VERTS;
     let tri = local / 3u;
     let corner = local % 3u;
-    let cl = visible[inst.vis_base + slot] * 4u;
+    let cl = visible[slot * 2u + 1u] * 4u;
     let v_off = prim[cl];
     let t_off = prim[cl + 1u];
     let t_cnt = prim[cl + 2u];
@@ -207,6 +210,249 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         rgb = out_rgb;
     }
     return vec4<f32>(linear_to_srgb(rgb), in.color.a);
+}
+)WGSL";
+
+// GPU cluster culling with two-pass occlusion culling (the "previous frame's visible set" scheme):
+//   cs_early   draws clusters that were visible last frame and still pass the frustum / cone tests
+//   hzb_*      build a max-depth pyramid from what the early pass drew
+//   cs_late    tests every cluster against the pyramid: draws the visible ones the early pass did not,
+//              and records this frame's visibility for the next one
+// Anything visible in the final image passes the late test (the early depth is never nearer than the final
+// depth), so nothing is lost when the camera moves; at worst a cluster is drawn late instead of early.
+//
+// Layout contract with renderer.cpp:
+//   CullFrame  uniform, 208 bytes
+//   items      one 64-byte record per (instance, cluster), in visible-region order: item i of an instance
+//              with vis_base b is item b + cluster
+//   history    u32 per item: drawn last frame
+//   visible    (instance, cluster) pairs, see the render shader
+//   args       drawIndirect args per instance (vertex count, 1, vis_base x CLUSTER_VERTS, 0)
+//   counters   early clusters, early triangles, late clusters, late triangles, occluded clusters
+inline constexpr const char *kCullWGSL = R"WGSL(
+struct Instance {
+    model: mat4x4<f32>,
+    color: vec4<f32>,
+    flags: u32,
+    seg_base: u32,
+    morph: f32,
+    vis_base: u32,
+    material: vec4<f32>,
+};
+
+struct CullFrame {
+    view_proj: mat4x4<f32>,
+    planes: array<vec4<f32>, 6>, // world space, normalised
+    cam_pos: vec4<f32>,          // w: 1 = perspective
+    size: vec4<f32>,             // target width, height in pixels
+    params: vec4<u32>,           // pyramid levels, options (1 frustum, 2 cone, 4 occlusion), item count
+};
+
+struct Item {
+    center: vec4<f32>, // xyz, radius (model space)
+    axis: vec4<f32>,   // normal cone axis, cutoff
+    morph_extent: f32,
+    instance: u32,
+    cluster: u32,
+    triangles: u32,
+    seg_first: u32,
+    seg_last: u32,
+    pad0: u32,
+    pad1: u32,
+};
+
+const FLAG_TRANSPARENT: u32 = 8u;
+const FLAG_HIDDEN: u32 = 16u;
+const FLAG_HAS_MORPH: u32 = 64u;
+const FLAG_CONE_OK: u32 = 512u; // set by the renderer: single-sided, opaque, unmorphed, similarity transform
+const CLUSTER_VERTS: u32 = {{CLUSTER_VERTS}}u;
+
+@group(0) @binding(0) var<uniform> cf: CullFrame;
+@group(0) @binding(1) var<storage, read> instances: array<Instance>;
+@group(0) @binding(2) var<storage, read> segstate: array<u32>;
+@group(0) @binding(3) var<storage, read> items: array<Item>;
+@group(0) @binding(4) var<storage, read_write> history: array<u32>;
+@group(0) @binding(5) var<storage, read_write> visible: array<u32>;
+@group(0) @binding(6) var<storage, read_write> args: array<atomic<u32>>;
+@group(0) @binding(7) var<storage, read_write> counters: array<atomic<u32>>;
+@group(0) @binding(8) var hzb: texture_2d<f32>;
+
+// The cluster's bounding sphere in world space.
+fn world_sphere(it: Item, inst: Instance) -> vec4<f32> {
+    let m = inst.model;
+    let scale = max(length(m[0].xyz), max(length(m[1].xyz), length(m[2].xyz)));
+    var r = it.center.w;
+    if ((inst.flags & FLAG_HAS_MORPH) != 0u) {
+        r = r + abs(inst.morph) * it.morph_extent;
+    }
+    return vec4<f32>((m * vec4<f32>(it.center.xyz, 1.0)).xyz, r * scale);
+}
+
+// Hidden, outside the frustum or facing away: the tests that need no depth.
+fn passes(it: Item, inst: Instance, s: vec4<f32>) -> bool {
+    if ((inst.flags & FLAG_HIDDEN) != 0u) {
+        return false;
+    }
+    var any_visible = false;
+    for (var sg = it.seg_first; sg <= it.seg_last; sg = sg + 1u) {
+        if ((segstate[(inst.seg_base + sg) * 2u + 1u] & 1u) == 0u) {
+            any_visible = true;
+            break;
+        }
+    }
+    if (!any_visible) {
+        return false;
+    }
+    if ((cf.params.y & 1u) != 0u) {
+        for (var p = 0u; p < 6u; p = p + 1u) {
+            if (dot(cf.planes[p].xyz, s.xyz) + cf.planes[p].w < -s.w) {
+                return false;
+            }
+        }
+    }
+    if ((cf.params.y & 2u) != 0u && (inst.flags & FLAG_CONE_OK) != 0u && cf.cam_pos.w > 0.5) {
+        let axis = normalize((inst.model * vec4<f32>(it.axis.xyz, 0.0)).xyz);
+        let d = s.xyz - cf.cam_pos.xyz;
+        if (dot(d, axis) >= it.axis.w * length(d) + s.w) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Behind what the pyramid holds: the nearest depth of the sphere's box is farther than the farthest depth
+// over the screen rectangle it covers. Conservative: the box bounds the sphere, the rectangle the box.
+fn occluded(s: vec4<f32>) -> bool {
+    let c = cf.view_proj * vec4<f32>(s.xyz, 1.0);
+    let ex = cf.view_proj[0] * s.w;
+    let ey = cf.view_proj[1] * s.w;
+    let ez = cf.view_proj[2] * s.w;
+    var lo = vec3<f32>(1e30);
+    var hi = vec3<f32>(-1e30);
+    for (var k = 0u; k < 8u; k = k + 1u) {
+        let p = c + select(-ex, ex, (k & 1u) != 0u) + select(-ey, ey, (k & 2u) != 0u) +
+                select(-ez, ez, (k & 4u) != 0u);
+        if (p.w <= 1e-6) {
+            return false; // reaches behind the camera
+        }
+        let n = p.xyz / p.w;
+        lo = min(lo, n);
+        hi = max(hi, n);
+    }
+    if (lo.z <= 0.0) {
+        return false; // crosses the near plane
+    }
+    let size = cf.size.xy;
+    let x0 = u32(clamp((lo.x * 0.5 + 0.5) * size.x, 0.0, size.x - 1.0));
+    let x1 = u32(clamp((hi.x * 0.5 + 0.5) * size.x, 0.0, size.x - 1.0));
+    let y0 = u32(clamp((0.5 - hi.y * 0.5) * size.y, 0.0, size.y - 1.0));
+    let y1 = u32(clamp((0.5 - lo.y * 0.5) * size.y, 0.0, size.y - 1.0));
+    // The level where the rectangle spans at most 2 x 2 texels.
+    let extent = f32(max(x1 - x0, y1 - y0) + 1u);
+    let level = min(u32(ceil(log2(extent))), cf.params.x - 1u);
+    let dims = textureDimensions(hzb, level) - vec2<u32>(1u);
+    let a = min(vec2<u32>(x0, y0) >> vec2<u32>(level), dims);
+    let b = min(vec2<u32>(x1, y1) >> vec2<u32>(level), dims);
+    let far = max(max(textureLoad(hzb, a, level).r, textureLoad(hzb, vec2<u32>(b.x, a.y), level).r),
+                  max(textureLoad(hzb, vec2<u32>(a.x, b.y), level).r, textureLoad(hzb, b, level).r));
+    return lo.z > far;
+}
+
+fn emit(it: Item, inst: Instance, counter: u32) {
+    let n = atomicAdd(&args[it.instance * 4u], CLUSTER_VERTS) / CLUSTER_VERTS;
+    let o = (inst.vis_base + n) * 2u;
+    visible[o] = it.instance;
+    visible[o + 1u] = it.cluster;
+    atomicAdd(&counters[counter], 1u);
+    atomicAdd(&counters[counter + 1u], it.triangles);
+}
+
+// Items beyond 65535 workgroups spill into the dispatch's second dimension.
+fn item_index(gid: vec3<u32>, groups: vec3<u32>) -> u32 {
+    return gid.x + gid.y * groups.x * 64u;
+}
+
+@compute @workgroup_size(64)
+fn cs_early(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
+    let i = item_index(gid, groups);
+    if (i >= cf.params.z || history[i] == 0u) {
+        return;
+    }
+    let it = items[i];
+    let inst = instances[it.instance];
+    if ((inst.flags & FLAG_TRANSPARENT) != 0u || !passes(it, inst, world_sphere(it, inst))) {
+        return;
+    }
+    emit(it, inst, 0u);
+}
+
+@compute @workgroup_size(64)
+fn cs_late(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
+    let i = item_index(gid, groups);
+    if (i >= cf.params.z) {
+        return;
+    }
+    let it = items[i];
+    let inst = instances[it.instance];
+    let s = world_sphere(it, inst);
+    let drawn_last = history[i] != 0u;
+    if (!passes(it, inst, s)) {
+        history[i] = 0u;
+        return;
+    }
+    if ((cf.params.y & 4u) != 0u && occluded(s)) {
+        history[i] = 0u;
+        atomicAdd(&counters[4], 1u);
+        return;
+    }
+    let transparent = (inst.flags & FLAG_TRANSPARENT) != 0u;
+    history[i] = select(1u, 0u, transparent); // transparent clusters never occlude, so never draw early
+    if (drawn_last && !transparent) {
+        return; // the early pass drew it
+    }
+    emit(it, inst, 2u);
+}
+
+// Depth pyramid. Level 0: the farthest sample of each pixel of the multisampled depth buffer.
+@group(0) @binding(0) var depth_ms: texture_depth_multisampled_2d;
+@group(0) @binding(1) var hzb_out0: texture_storage_2d<r32float, write>;
+
+@compute @workgroup_size(8, 8)
+fn hzb_init(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let size = textureDimensions(hzb_out0);
+    if (gid.x >= size.x || gid.y >= size.y) {
+        return;
+    }
+    var d = 0.0;
+    for (var s = 0u; s < textureNumSamples(depth_ms); s = s + 1u) {
+        d = max(d, textureLoad(depth_ms, gid.xy, s));
+    }
+    textureStore(hzb_out0, gid.xy, vec4<f32>(d, 0.0, 0.0, 0.0));
+}
+
+// Level n from level n - 1: the farthest of each 2 x 2 block. Mip sizes round down, so the last texel of
+// a row / column also takes the finer level's odd last row / column; the coarser level then still covers
+// every pixel (a pixel p at level n lies in texel min(p >> n, size - 1)).
+@group(0) @binding(0) var hzb_src: texture_2d<f32>;
+@group(0) @binding(1) var hzb_dst: texture_storage_2d<r32float, write>;
+
+@compute @workgroup_size(8, 8)
+fn hzb_reduce(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let size = textureDimensions(hzb_dst);
+    if (gid.x >= size.x || gid.y >= size.y) {
+        return;
+    }
+    let src = textureDimensions(hzb_src);
+    let last = src - vec2<u32>(1u);
+    let odd = (gid.xy == size - vec2<u32>(1u)) & ((src & vec2<u32>(1u)) == vec2<u32>(1u));
+    let span = select(vec2<u32>(2u), vec2<u32>(3u), odd);
+    var d = 0.0;
+    for (var y = 0u; y < span.y; y = y + 1u) {
+        for (var x = 0u; x < span.x; x = x + 1u) {
+            d = max(d, textureLoad(hzb_src, min(gid.xy * 2u + vec2<u32>(x, y), last), 0).r);
+        }
+    }
+    textureStore(hzb_dst, gid.xy, vec4<f32>(d, 0.0, 0.0, 0.0));
 }
 )WGSL";
 
