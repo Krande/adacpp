@@ -53,9 +53,20 @@ else()
         overlay.cpp
         overlay_json.cpp
     )
+    # tinygltf (with its json.hpp) is a noarch conda package: it installs to <prefix>/include on
+    # every platform, which on Windows is not Library/include, where webgpu.h and the prefix path are.
+    find_path(
+        TINYGLTF_INCLUDE_DIR
+        tiny_gltf.h
+        HINTS
+        ENV PREFIX
+        ENV CONDA_PREFIX
+        PATH_SUFFIXES include
+        REQUIRED
+    )
     target_include_directories(
         adacpp_render_headless
-        PUBLIC ${ADACPP_ROOT}/third_party/stb
+        PUBLIC ${ADACPP_ROOT}/third_party/stb ${TINYGLTF_INCLUDE_DIR}
     )
     target_link_libraries(adacpp_render_headless PUBLIC adacpp_render_core)
 
