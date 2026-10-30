@@ -61,6 +61,12 @@ requirements:
   run:
     - python
     - ${{ pin_compatible('gmsh', upper_bound='x.x.x') }}
+  # Windows: wgpu_native.lib is the static library, so _render carries wgpu itself and needs no
+  # wgpu-native at run time (see src/render/CMakeLists.txt).
+  ignore_run_exports:
+    by_name:
+      - if: win
+        then: wgpu-native
   run_exports:
     - ${{ pin_subpackage(name, upper_bound='x.x.x') }}
 
