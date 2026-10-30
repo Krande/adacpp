@@ -2,7 +2,7 @@
 //
 //   adacpp_render <in.glb> <out.png> [--size WxH] [--view iso|front|back|left|right|top|bottom]
 //                 [--backend auto|vulkan|gl] [--y-up] [--no-cull] [--cpu-cull] [--stats]
-//                 [--pick X,Y] [--bench N] [--camera ex,ey,ez,tx,ty,tz]
+//                 [--pick X,Y] [--bench N] [--camera ex,ey,ez,tx,ty,tz] [--line-width PX] [--point-size PX]
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -24,7 +24,7 @@ int main(int argc, char **argv) {
         std::fprintf(stderr,
                      "usage: %s <in.glb> <out.png> [--size WxH] [--view iso|front|back|left|right|top|bottom] "
                      "[--backend auto|vulkan|gl] [--y-up] [--no-cull] [--cpu-cull] [--stats] [--pick X,Y] [--bench N] "
-                     "[--camera ex,ey,ez,tx,ty,tz]\n",
+                     "[--camera ex,ey,ez,tx,ty,tz] [--line-width PX] [--point-size PX]\n",
                      argv[0]);
         return 2;
     }
@@ -32,7 +32,7 @@ int main(int argc, char **argv) {
     uint32_t w = 1280, h = 960;
     bool cull = true, gpu_cull = true, print_stats = false, y_up = false;
     int pick_x = -1, pick_y = -1, bench = 0;
-    float cam_eye[3], cam_target[3];
+    float cam_eye[3], cam_target[3], line_width = 1.0f, point_size = 1.0f;
     bool cam_set = false;
     for (int i = 3; i < argc; ++i) {
         std::string a = argv[i];
@@ -49,6 +49,10 @@ int main(int argc, char **argv) {
                                   &cam_target[1], &cam_target[2]) == 6;
         else if (a == "--bench" && i + 1 < argc)
             bench = std::atoi(argv[++i]);
+        else if (a == "--line-width" && i + 1 < argc)
+            line_width = std::strtof(argv[++i], nullptr);
+        else if (a == "--point-size" && i + 1 < argc)
+            point_size = std::strtof(argv[++i], nullptr);
         else if (a == "--y-up")
             y_up = true;
         else if (a == "--no-cull")
@@ -75,7 +79,7 @@ int main(int argc, char **argv) {
         Renderer renderer(dev.device(), OffscreenTarget::kFormat);
         renderer.set_culling(cull, cull, cull && gpu_cull);
         const auto load_t0 = std::chrono::steady_clock::now();
-        const auto res = load_glb(renderer, in, y_up);
+        const auto res = load_glb(renderer, in, y_up, line_width, point_size);
         const double load_ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - load_t0).count();
         Camera cam = frame_bounds(renderer.bounds(), vit->second, {0, 0, 1}, 60.0f, float(w) / float(h));

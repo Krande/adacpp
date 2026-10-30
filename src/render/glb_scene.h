@@ -21,7 +21,9 @@ struct GlbLoadResult {
 // Adds every mesh primitive of the GLB's default scene as one geometry + instance, with node transforms
 // applied. adapy writes its z-up coordinates into the GLB as they are (the viewer only turns the camera's
 // up axis), so nothing is rotated by default; `y_up_to_z_up` rotates a conventional y-up glTF instead.
-GlbLoadResult load_glb(Renderer &renderer, const std::string &path, bool y_up_to_z_up = false);
+// `line_width` / `point_size`: pixels for every line / point primitive (see InstanceDesc::line_width).
+GlbLoadResult load_glb(Renderer &renderer, const std::string &path, bool y_up_to_z_up = false, float line_width = 1.0f,
+                       float point_size = 1.0f);
 
 struct Camera {
     std::array<float, 16> view;

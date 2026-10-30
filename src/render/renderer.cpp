@@ -18,6 +18,7 @@ namespace {
 
 constexpr uint32_t kHasMorph = 1u << 6; // internal: set when the instance's geometry carries a morph target
 constexpr uint32_t kConeOk = 1u << 9;   // internal: cone culling is exact for this instance (GPU culling)
+constexpr uint32_t kPoints = 1u << 10;  // internal: a points instance, for vs_wide
 constexpr size_t kInstanceBytes = 112;  // WGSL `Instance`
 constexpr size_t kItemWords = 16;       // WGSL `Item` (cull shader)
 constexpr size_t kCullFrameBytes = 208; // WGSL `CullFrame`
@@ -192,6 +193,7 @@ struct Renderer::Impl {
     ShaderModuleRef shader;
     std::string shader_source;
     RenderPipelineRef tri_double, tri_single, tri_blend, lines, lines_blend, points;
+    RenderPipelineRef wide, wide_blend;         // lines / points wider than a pixel, as quads (vs_wide)
     RenderPipelineRef pick_double, pick_single; // id + world-position targets, 1 sample
     BufferRef dummy;
 
@@ -321,7 +323,7 @@ struct Renderer::Impl {
     }
 
     RenderPipelineRef make_pipeline(const char *label, const char *vs, WGPUPrimitiveTopology topo, WGPUCullMode cull,
-                                    bool blend, bool depth_bias) {
+                                    bool blend, bool depth_bias, const char *fs_entry = "fs_main") {
         WGPUBlendState bs = WGPU_BLEND_STATE_INIT;
         bs.color.srcFactor = WGPUBlendFactor_SrcAlpha;
         bs.color.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
@@ -337,7 +339,7 @@ struct Renderer::Impl {
 
         WGPUFragmentState fs = WGPU_FRAGMENT_STATE_INIT;
         fs.module = shader.get();
-        fs.entryPoint = sv("fs_main");
+        fs.entryPoint = sv(fs_entry);
         fs.targetCount = 1;
         fs.targets = &ct;
 
@@ -425,6 +427,8 @@ struct Renderer::Impl {
                                     true, false);
         points =
             make_pipeline("adacpp.points", "vs_list", WGPUPrimitiveTopology_PointList, WGPUCullMode_None, false, false);
+        wide = make_pipeline("adacpp.wide", "vs_wide", tri, WGPUCullMode_None, false, false, "fs_disc");
+        wide_blend = make_pipeline("adacpp.wide_blend", "vs_wide", tri, WGPUCullMode_None, true, false, "fs_disc");
         pick_double = make_pick_pipeline("adacpp.pick_double", WGPUCullMode_None);
         pick_single = make_pick_pipeline("adacpp.pick_single", WGPUCullMode_Back);
     }
@@ -949,7 +953,12 @@ struct Renderer::Impl {
             rec[21] = inst->seg_base;
             std::memcpy(rec + 22, &inst->desc.morph_influence, 4);
             rec[23] = inst->vis_base;
-            const float material[3] = {inst->desc.metalness, inst->desc.roughness, inst->desc.specular ? 1.0f : 0.0f};
+            float material[3] = {inst->desc.metalness, inst->desc.roughness, inst->desc.specular ? 1.0f : 0.0f};
+            if (g.topology != Topology::Triangles) {
+                material[0] = inst->desc.line_width;
+                if (g.topology == Topology::Points)
+                    rec[20] |= kPoints;
+            }
             std::memcpy(rec + 24, material, 12);
             rec[27] = g.list_count; // lines/points: where the per-index segment ids start in `prim`
         }
@@ -1102,6 +1111,8 @@ struct Renderer::Impl {
         frame[22] = fwd[2];
         frame[24] = ambient;
         frame[25] = diffuse;
+        frame[26] = float(std::max(target_w, 1u));
+        frame[27] = float(std::max(target_h, 1u));
         wgpuQueueWriteBuffer(queue, buf, 0, frame, sizeof(frame));
     }
 
@@ -1307,12 +1318,18 @@ struct Renderer::Impl {
                     continue;
                 if (bool(inst->desc.flags & kTransparent) != transparent)
                     continue;
-                if (g.topology == Topology::Points)
-                    use(r.points);
-                else
-                    use(transparent ? r.lines_blend : r.lines);
                 wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
-                wgpuRenderPassEncoderDraw(pass, g.list_count, 1, 0, inst->gpu_index);
+                if (inst->desc.line_width > 1.0f) {
+                    use(transparent ? r.wide_blend : r.wide);
+                    const uint32_t items = g.topology == Topology::Points ? g.list_count : g.list_count / 2;
+                    wgpuRenderPassEncoderDraw(pass, items * 6, 1, 0, inst->gpu_index);
+                } else {
+                    if (g.topology == Topology::Points)
+                        use(r.points);
+                    else
+                        use(transparent ? r.lines_blend : r.lines);
+                    wgpuRenderPassEncoderDraw(pass, g.list_count, 1, 0, inst->gpu_index);
+                }
                 st.draw_calls++;
             }
         }

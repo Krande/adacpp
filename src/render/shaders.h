@@ -24,7 +24,7 @@ struct Frame {
     view_proj: mat4x4<f32>,
     cam_pos: vec4<f32>,
     light_dir: vec4<f32>,
-    params: vec4<f32>,
+    params: vec4<f32>, // ambient, headlight, target width, target height (pixels)
 };
 
 struct Instance {
@@ -35,12 +35,14 @@ struct Instance {
     morph: f32,
     vis_base: u32,
     material: vec4<f32>, // metalness, roughness, specular (0 = Lambert), lines/points: segment-id offset (u32 bits)
+                         // lines/points: x = width / diameter in pixels
 };
 
 const FLAG_VERTEX_COLORS: u32 = 1u;
 const FLAG_UNLIT: u32 = 2u;
 const FLAG_MORPH_RELATIVE: u32 = 32u;
 const FLAG_HAS_MORPH: u32 = 64u;
+const FLAG_POINTS: u32 = 1024u; // internal: a points instance (vs_wide draws discs, not segments)
 const CLUSTER_VERTS: u32 = {{CLUSTER_VERTS}}u; // Renderer::kClusterMaxTriangles x 3, filled in at load
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -61,6 +63,7 @@ struct VOut {
     @location(3) @interpolate(flat) flags: u32,
     @location(4) @interpolate(flat) material: vec4<f32>,
     @location(5) @interpolate(flat) pick: vec4<u32>, // instance + 1, primitive, segment, -
+    @location(6) quad: vec2<f32>,                    // vs_wide: position across the quad, -1..1
 };
 
 fn shade_vertex(inst: Instance, vi: u32, seg: i32, ii: u32, primitive: u32) -> VOut {
@@ -137,6 +140,64 @@ fn vs_list(@builtin(vertex_index) vid: u32, @builtin(instance_index) ii: u32) ->
     return shade_vertex(inst, prim[vid], i32(seg), ii, vid);
 }
 
+// Lines wider than a pixel and points larger than one: WebGPU rasterises only 1-pixel lines and points,
+// so each segment / point is a screen-space quad of 6 vertices (material.x pixels across), as three.js'
+// LineSegments2 does. A segment crossing the near plane is clipped there first.
+@vertex
+fn vs_wide(@builtin(vertex_index) vid: u32, @builtin(instance_index) ii: u32) -> VOut {
+    let inst = instances[ii];
+    let item = vid / 6u;
+    let corner = vid % 6u;
+    let along = select(0.0, 1.0, corner == 1u || corner == 2u || corner == 4u); // which end
+    let side = select(-1.0, 1.0, corner == 2u || corner == 4u || corner == 5u);
+    let points = (inst.flags & FLAG_POINTS) != 0u;
+    let ia = select(item * 2u, item, points);
+    let ib = select(item * 2u + 1u, item, points);
+    let seg = prim[bitcast<u32>(inst.material.w) + ia];
+    var dead: VOut;
+    dead.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+    if ((segstate[(inst.seg_base + seg) * 2u + 1u] & 1u) != 0u) {
+        return dead;
+    }
+    let va = shade_vertex(inst, prim[ia], i32(seg), ii, ia);
+    let vb = shade_vertex(inst, prim[ib], i32(seg), ii, ia);
+    var ca = va.pos;
+    var cb = vb.pos;
+    if (ca.z < 0.0 && cb.z < 0.0) {
+        return dead;
+    }
+    if (ca.z < 0.0) {
+        ca = mix(ca, cb, ca.z / (ca.z - cb.z));
+    } else if (cb.z < 0.0) {
+        cb = mix(cb, ca, cb.z / (cb.z - ca.z));
+    }
+    let half_px = 0.5 * max(inst.material.x, 1.0);
+    let viewport = frame.params.zw;
+    var out = va;
+    var c = ca;
+    if (along > 0.5) {
+        out = vb;
+        c = cb;
+    }
+    var offset: vec2<f32>;
+    if (points) {
+        out.quad = vec2<f32>(along * 2.0 - 1.0, side);
+        offset = out.quad * half_px;
+    } else {
+        var dir = (cb.xy / cb.w - ca.xy / ca.w) * viewport;
+        if (dot(dir, dir) < 1e-12) {
+            dir = vec2<f32>(1.0, 0.0);
+        }
+        dir = normalize(dir);
+        out.quad = vec2<f32>(along * 2.0 - 1.0, side);
+        offset = vec2<f32>(-dir.y, dir.x) * side * half_px;
+    }
+    // Pixels -> clip space at this vertex's depth.
+    c = vec4<f32>(c.xy + offset * 2.0 / viewport * c.w, c.z, c.w);
+    out.pos = c;
+    return out;
+}
+
 const PI: f32 = 3.141592653589793;
 
 // three.js MeshStandardMaterial's direct-light BRDF (lights_physical_pars_fragment): GGX distribution,
@@ -179,6 +240,20 @@ fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
+    return shade_fragment(in);
+}
+
+// Points drawn by vs_wide: a disc, as three.js' PointsMaterial draws them round (a separate entry point so
+// the triangle pipelines carry no discard).
+@fragment
+fn fs_disc(in: VOut) -> @location(0) vec4<f32> {
+    if ((in.flags & FLAG_POINTS) != 0u && dot(in.quad, in.quad) > 1.0) {
+        discard;
+    }
+    return shade_fragment(in);
+}
+
+fn shade_fragment(in: VOut) -> vec4<f32> {
     // Derivatives first, in uniform control flow: the flat normal for geometry without normals.
     let flat_n = cross(dpdx(in.world), dpdy(in.world));
     var rgb = in.color.rgb;
