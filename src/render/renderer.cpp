@@ -323,7 +323,7 @@ struct Renderer::Impl {
     }
 
     RenderPipelineRef make_pipeline(const char *label, const char *vs, WGPUPrimitiveTopology topo, WGPUCullMode cull,
-                                    bool blend, bool depth_bias, const char *fs_entry = "fs_main") {
+                                    bool blend, bool depth_bias) {
         WGPUBlendState bs = WGPU_BLEND_STATE_INIT;
         bs.color.srcFactor = WGPUBlendFactor_SrcAlpha;
         bs.color.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
@@ -339,7 +339,7 @@ struct Renderer::Impl {
 
         WGPUFragmentState fs = WGPU_FRAGMENT_STATE_INIT;
         fs.module = shader.get();
-        fs.entryPoint = sv(fs_entry);
+        fs.entryPoint = sv("fs_main");
         fs.targetCount = 1;
         fs.targets = &ct;
 
@@ -427,8 +427,8 @@ struct Renderer::Impl {
                                     true, false);
         points =
             make_pipeline("adacpp.points", "vs_list", WGPUPrimitiveTopology_PointList, WGPUCullMode_None, false, false);
-        wide = make_pipeline("adacpp.wide", "vs_wide", tri, WGPUCullMode_None, false, false, "fs_disc");
-        wide_blend = make_pipeline("adacpp.wide_blend", "vs_wide", tri, WGPUCullMode_None, true, false, "fs_disc");
+        wide = make_pipeline("adacpp.wide", "vs_wide", tri, WGPUCullMode_None, false, false);
+        wide_blend = make_pipeline("adacpp.wide_blend", "vs_wide", tri, WGPUCullMode_None, true, false);
         pick_double = make_pick_pipeline("adacpp.pick_double", WGPUCullMode_None);
         pick_single = make_pick_pipeline("adacpp.pick_single", WGPUCullMode_Back);
     }

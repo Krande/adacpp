@@ -75,7 +75,8 @@ struct InstanceDesc {
     float metalness = 0.0f;
     float roughness = 1.0f;
     bool specular = true;
-    // Lines: width in pixels; points: diameter in pixels. Above 1 they are drawn as screen-space quads.
+    // Lines: width in pixels; points: side in pixels (squares, like three.js). Above 1 they are drawn as
+    // screen-space quads.
     float line_width = 1.0f;
 };
 

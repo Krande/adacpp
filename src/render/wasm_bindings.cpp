@@ -118,7 +118,7 @@ public:
         return renderer_->add_instance(geometry);
     }
     void set_instance(uint32_t instance, uintptr_t matrix, float r, float g, float b, float a, uint32_t flags,
-                      float morph_influence, float metalness, float roughness, bool specular) {
+                      float morph_influence, float metalness, float roughness, bool specular, float line_width) {
         InstanceDesc d;
         const float *m = ptr<float>(matrix);
         std::copy(m, m + 16, d.model.begin());
@@ -128,6 +128,7 @@ public:
         d.metalness = metalness;
         d.roughness = roughness;
         d.specular = specular;
+        d.line_width = line_width;
         renderer_->set_instance(instance, d);
     }
     void set_segment_states(uint32_t instance, uintptr_t packed, uint32_t count) {

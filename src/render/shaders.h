@@ -42,7 +42,7 @@ const FLAG_VERTEX_COLORS: u32 = 1u;
 const FLAG_UNLIT: u32 = 2u;
 const FLAG_MORPH_RELATIVE: u32 = 32u;
 const FLAG_HAS_MORPH: u32 = 64u;
-const FLAG_POINTS: u32 = 1024u; // internal: a points instance (vs_wide draws discs, not segments)
+const FLAG_POINTS: u32 = 1024u; // internal: a points instance (vs_wide draws squares, not segments)
 const CLUSTER_VERTS: u32 = {{CLUSTER_VERTS}}u; // Renderer::kClusterMaxTriangles x 3, filled in at load
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -63,7 +63,6 @@ struct VOut {
     @location(3) @interpolate(flat) flags: u32,
     @location(4) @interpolate(flat) material: vec4<f32>,
     @location(5) @interpolate(flat) pick: vec4<u32>, // instance + 1, primitive, segment, -
-    @location(6) quad: vec2<f32>,                    // vs_wide: position across the quad, -1..1
 };
 
 fn shade_vertex(inst: Instance, vi: u32, seg: i32, ii: u32, primitive: u32) -> VOut {
@@ -142,7 +141,8 @@ fn vs_list(@builtin(vertex_index) vid: u32, @builtin(instance_index) ii: u32) ->
 
 // Lines wider than a pixel and points larger than one: WebGPU rasterises only 1-pixel lines and points,
 // so each segment / point is a screen-space quad of 6 vertices (material.x pixels across), as three.js'
-// LineSegments2 does. A segment crossing the near plane is clipped there first.
+// LineSegments2 does; points are squares, like three.js' untextured PointsMaterial. A segment crossing
+// the near plane is clipped there first.
 @vertex
 fn vs_wide(@builtin(vertex_index) vid: u32, @builtin(instance_index) ii: u32) -> VOut {
     let inst = instances[ii];
@@ -181,15 +181,13 @@ fn vs_wide(@builtin(vertex_index) vid: u32, @builtin(instance_index) ii: u32) ->
     }
     var offset: vec2<f32>;
     if (points) {
-        out.quad = vec2<f32>(along * 2.0 - 1.0, side);
-        offset = out.quad * half_px;
+        offset = vec2<f32>(along * 2.0 - 1.0, side) * half_px;
     } else {
         var dir = (cb.xy / cb.w - ca.xy / ca.w) * viewport;
         if (dot(dir, dir) < 1e-12) {
             dir = vec2<f32>(1.0, 0.0);
         }
         dir = normalize(dir);
-        out.quad = vec2<f32>(along * 2.0 - 1.0, side);
         offset = vec2<f32>(-dir.y, dir.x) * side * half_px;
     }
     // Pixels -> clip space at this vertex's depth.
@@ -240,20 +238,6 @@ fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
-    return shade_fragment(in);
-}
-
-// Points drawn by vs_wide: a disc, as three.js' PointsMaterial draws them round (a separate entry point so
-// the triangle pipelines carry no discard).
-@fragment
-fn fs_disc(in: VOut) -> @location(0) vec4<f32> {
-    if ((in.flags & FLAG_POINTS) != 0u && dot(in.quad, in.quad) > 1.0) {
-        discard;
-    }
-    return shade_fragment(in);
-}
-
-fn shade_fragment(in: VOut) -> vec4<f32> {
     // Derivatives first, in uniform control flow: the flat normal for geometry without normals.
     let flat_n = cross(dpdx(in.world), dpdy(in.world));
     var rgb = in.color.rgb;
