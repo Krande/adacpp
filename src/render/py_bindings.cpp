@@ -17,6 +17,7 @@
 
 #include "glb_scene.h"
 #include "native_device.h"
+#include "overlay_json.h"
 #include "renderer.h"
 
 namespace nb = nanobind;
@@ -193,6 +194,13 @@ public:
         if (view.size() != 16 || proj.size() != 16)
             throw std::invalid_argument("view / proj: expected 16 floats each (column-major 4x4)");
         renderer_.set_camera(view.data(), proj.data(), orthographic);
+        std::memcpy(view_, view.data(), sizeof(view_));
+    }
+    // The gizmo / legend drawn over every render (overlay_json.h for the spec); None removes it.
+    void set_overlay(std::optional<std::string> spec_json) {
+        overlay_.reset();
+        if (spec_json)
+            overlay_ = std::make_unique<Overlay>(overlay_from_json(*spec_json));
     }
     void set_background(float r, float g, float b, float a) {
         renderer_.set_background(r, g, b, a);
@@ -214,6 +222,8 @@ public:
             nb::gil_scoped_release release;
             renderer_.render(target_->view(), target_->width(), target_->height());
             rgba = target_->read_rgba();
+            if (overlay_)
+                draw_overlay(rgba.data(), target_->width(), target_->height(), view_, *overlay_);
         }
         auto *data = new std::vector<uint8_t>(std::move(rgba));
         nb::capsule owner(data, [](void *p) noexcept { delete static_cast<std::vector<uint8_t> *>(p); });
@@ -226,7 +236,9 @@ public:
         {
             nb::gil_scoped_release release;
             renderer_.render(target_->view(), target_->width(), target_->height());
-            const auto rgba = target_->read_rgba();
+            auto rgba = target_->read_rgba();
+            if (overlay_)
+                draw_overlay(rgba.data(), target_->width(), target_->height(), view_, *overlay_);
             stbi_write_png_to_func(
                 [](void *ctx, void *data, int n) {
                     static_cast<std::string *>(ctx)->append(static_cast<const char *>(data), size_t(n));
@@ -302,6 +314,8 @@ private:
     std::unique_ptr<OffscreenTarget> target_;
     std::map<uint32_t, uint32_t> geometry_of_;
     std::map<uint32_t, InstanceDesc> descs_;
+    float view_[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    std::unique_ptr<Overlay> overlay_;
 };
 
 } // namespace
@@ -329,6 +343,9 @@ NB_MODULE(_render, m) {
         .def("remove", &OffscreenRenderer::remove, "instance"_a)
         .def("clear", &OffscreenRenderer::clear)
         .def("set_camera", &OffscreenRenderer::set_camera, "view"_a, "proj"_a, "orthographic"_a = false)
+        .def("set_overlay", &OffscreenRenderer::set_overlay, "spec_json"_a.none(),
+             "Gizmo / colour legend drawn over every render: a JSON spec (see adacpp src/render/overlay_json.h), "
+             "or None.")
         .def("set_background", &OffscreenRenderer::set_background, "r"_a, "g"_a, "b"_a, "a"_a = 1.0f)
         .def("set_lighting", &OffscreenRenderer::set_lighting, "ambient"_a, "headlight"_a)
         .def("set_culling", &OffscreenRenderer::set_culling, "frustum"_a = true, "cone"_a = true, "occlusion"_a = true)

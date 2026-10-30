@@ -3,11 +3,14 @@
 //   adacpp_render <in.glb> <out.png> [--size WxH] [--view iso|front|back|left|right|top|bottom]
 //                 [--backend auto|vulkan|gl] [--y-up] [--no-cull] [--cpu-cull] [--stats]
 //                 [--pick X,Y] [--bench N] [--camera ex,ey,ez,tx,ty,tz] [--line-width PX] [--point-size PX]
+//                 [--gizmo] [--overlay spec.json]   (orientation gizmo / colour legend, see overlay_json.h)
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <map>
+#include <sstream>
 #include <string>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -15,17 +18,19 @@
 
 #include "glb_scene.h"
 #include "native_device.h"
+#include "overlay_json.h"
 #include "renderer.h"
 
 using namespace adacpp::render;
 
 int main(int argc, char **argv) {
     if (argc < 3) {
-        std::fprintf(stderr,
-                     "usage: %s <in.glb> <out.png> [--size WxH] [--view iso|front|back|left|right|top|bottom] "
-                     "[--backend auto|vulkan|gl] [--y-up] [--no-cull] [--cpu-cull] [--stats] [--pick X,Y] [--bench N] "
-                     "[--camera ex,ey,ez,tx,ty,tz] [--line-width PX] [--point-size PX]\n",
-                     argv[0]);
+        std::fprintf(
+            stderr,
+            "usage: %s <in.glb> <out.png> [--size WxH] [--view iso|front|back|left|right|top|bottom] "
+            "[--backend auto|vulkan|gl] [--y-up] [--no-cull] [--cpu-cull] [--stats] [--pick X,Y] [--bench N] "
+            "[--camera ex,ey,ez,tx,ty,tz] [--line-width PX] [--point-size PX] [--gizmo] [--overlay spec.json]\n",
+            argv[0]);
         return 2;
     }
     std::string in = argv[1], out = argv[2], view = "iso", backend = "auto";
@@ -33,7 +38,8 @@ int main(int argc, char **argv) {
     bool cull = true, gpu_cull = true, print_stats = false, y_up = false;
     int pick_x = -1, pick_y = -1, bench = 0;
     float cam_eye[3], cam_target[3], line_width = 1.0f, point_size = 1.0f;
-    bool cam_set = false;
+    bool cam_set = false, gizmo = false;
+    std::string overlay_path;
     for (int i = 3; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--size" && i + 1 < argc)
@@ -53,6 +59,10 @@ int main(int argc, char **argv) {
             line_width = std::strtof(argv[++i], nullptr);
         else if (a == "--point-size" && i + 1 < argc)
             point_size = std::strtof(argv[++i], nullptr);
+        else if (a == "--gizmo")
+            gizmo = true;
+        else if (a == "--overlay" && i + 1 < argc)
+            overlay_path = argv[++i];
         else if (a == "--y-up")
             y_up = true;
         else if (a == "--no-cull")
@@ -103,7 +113,20 @@ int main(int argc, char **argv) {
             }
             bench_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / bench;
         }
-        const auto rgba = target.read_rgba();
+        auto rgba = target.read_rgba();
+        if (gizmo || !overlay_path.empty()) {
+            Overlay overlay;
+            if (!overlay_path.empty()) {
+                std::ifstream f(overlay_path);
+                if (!f)
+                    throw std::runtime_error("cannot open " + overlay_path);
+                std::stringstream text;
+                text << f.rdbuf();
+                overlay = overlay_from_json(text.str());
+            }
+            overlay.gizmo.show |= gizmo;
+            draw_overlay(rgba.data(), w, h, cam.view.data(), overlay);
+        }
         if (!stbi_write_png(out.c_str(), int(w), int(h), 4, rgba.data(), int(w * 4))) {
             std::fprintf(stderr, "failed to write %s\n", out.c_str());
             return 1;

@@ -44,8 +44,20 @@ else()
     target_include_directories(adacpp_render_core PUBLIC ${WEBGPU_INCLUDE_DIR})
     target_link_libraries(adacpp_render_core PUBLIC ${WGPU_NATIVE_LIBRARY})
 
-    add_executable(adacpp_render cli_main.cpp native_device.cpp glb_scene.cpp)
-    target_link_libraries(adacpp_render PRIVATE adacpp_render_core)
+    # Headless hosts: GLB loading and the CPU-drawn overlay (gizmo, legend; vendored stb_truetype).
+    add_library(
+        adacpp_render_headless
+        STATIC
+        native_device.cpp
+        glb_scene.cpp
+        overlay.cpp
+        overlay_json.cpp
+    )
+    target_include_directories(adacpp_render_headless PUBLIC ${ADACPP_ROOT}/third_party/stb)
+    target_link_libraries(adacpp_render_headless PUBLIC adacpp_render_core)
+
+    add_executable(adacpp_render cli_main.cpp)
+    target_link_libraries(adacpp_render PRIVATE adacpp_render_headless)
     if(UNIX AND NOT APPLE)
         target_link_libraries(adacpp_render PRIVATE dl pthread m)
         set_target_properties(
@@ -59,7 +71,11 @@ else()
     option(ADACPP_RENDER_PYTHON "Build the adacpp._render Python module" OFF)
     set(ADACPP_RENDER_PY_INSTALL_DIR "adacpp" CACHE STRING "Install destination of the _render module")
     if(ADACPP_RENDER_PYTHON)
-        set_target_properties(adacpp_render_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+        set_target_properties(
+            adacpp_render_core
+            adacpp_render_headless
+            PROPERTIES POSITION_INDEPENDENT_CODE ON
+        )
         find_package(Python 3.12 REQUIRED COMPONENTS Interpreter Development.Module)
         execute_process(
             COMMAND "${Python_EXECUTABLE}" -m nanobind --cmake_dir
@@ -67,8 +83,8 @@ else()
             OUTPUT_VARIABLE nanobind_ROOT
         )
         find_package(nanobind CONFIG REQUIRED)
-        nanobind_add_module(_render NB_STATIC py_bindings.cpp native_device.cpp glb_scene.cpp)
-        target_link_libraries(_render PRIVATE adacpp_render_core)
+        nanobind_add_module(_render NB_STATIC py_bindings.cpp)
+        target_link_libraries(_render PRIVATE adacpp_render_headless)
         install(TARGETS _render LIBRARY DESTINATION ${ADACPP_RENDER_PY_INSTALL_DIR})
     endif()
 endif()
