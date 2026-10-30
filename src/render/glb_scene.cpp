@@ -7,6 +7,7 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <tuple>
 #include <stdexcept>
 #include <vector>
 
@@ -302,6 +303,9 @@ InstanceDesc material_desc(const tinygltf::Model &model, int material, bool vert
     InstanceDesc idesc;
     if (vertex_colors)
         idesc.flags |= kVertexColors;
+    // No material: glTF's default material, as three.js' GLTFLoader builds it (metallic 1, roughness 1).
+    idesc.metalness = 1.0f;
+    idesc.roughness = 1.0f;
     if (material >= 0) {
         const auto &mat = model.materials.at(material);
         const auto &f = mat.pbrMetallicRoughness.baseColorFactor;
@@ -325,8 +329,8 @@ InstanceDesc material_desc(const tinygltf::Model &model, int material, bool vert
 // Each primitive -- or each adapy draw range in it -- stays a segment, so picking still names the object.
 class Batcher {
 public:
-    Batcher(Renderer &r, const tinygltf::Model &model, GlbLoadResult &res, float line_width, float point_size)
-        : r_(r), model_(model), res_(res), line_width_(line_width), point_size_(point_size) {}
+    Batcher(Renderer &r, const tinygltf::Model &model, GlbLoadResult &res, const GlbOptions &options)
+        : r_(r), model_(model), res_(res), options_(options) {}
 
     void add(const tinygltf::Primitive &prim, const Mat4 &world, const tinygltf::Value *ranges) {
         Topology topo;
@@ -358,7 +362,9 @@ public:
                 indices[i] = i;
         }
 
-        Batch &b = batches_[{int(topo), prim.material}];
+        // Coloured and plain lines draw differently (members vs wireframe): never in one batch.
+        const bool colored = !colors.empty() && topo != Topology::Triangles;
+        Batch &b = batches_[{int(topo), prim.material, colored}];
         b.topology = topo;
         b.material = prim.material;
         if (b.vertex_count() + nv > kBatchMaxVertices || b.indices.size() + indices.size() > kBatchMaxIndices)
@@ -446,10 +452,15 @@ private:
         gd.segment_count = b.segments.size() / 2;
         const uint32_t inst = r_.add_instance(r_.add_geometry(gd));
         InstanceDesc desc = material_desc(model_, b.material, b.any_colors);
-        if (b.topology == Topology::Lines)
-            desc.line_width = line_width_;
-        else if (b.topology == Topology::Points)
-            desc.line_width = point_size_;
+        if (b.topology == Topology::Lines) {
+            desc.line_width = b.any_colors ? options_.member_width : options_.line_width;
+            if (!b.any_colors && options_.line_color[3] > 0.0f)
+                desc.color = options_.line_color;
+        } else if (b.topology == Topology::Points) {
+            desc.line_width = options_.point_size;
+        } else if (options_.double_sided) {
+            desc.flags |= kDoubleSided;
+        }
         r_.set_instance(inst, desc);
         res_.geometries++;
         res_.instances++;
@@ -463,8 +474,8 @@ private:
     Renderer &r_;
     const tinygltf::Model &model_;
     GlbLoadResult &res_;
-    float line_width_, point_size_;
-    std::map<std::pair<int, int>, Batch> batches_;
+    GlbOptions options_;
+    std::map<std::tuple<int, int, bool>, Batch> batches_;
 };
 
 void walk(Batcher &batcher, const tinygltf::Model &model, int node_index, const Mat4 &parent,
@@ -485,8 +496,7 @@ void walk(Batcher &batcher, const tinygltf::Model &model, int node_index, const 
 
 } // namespace
 
-GlbLoadResult load_glb(Renderer &renderer, const std::string &path, bool y_up_to_z_up, float line_width,
-                       float point_size) {
+GlbLoadResult load_glb(Renderer &renderer, const std::string &path, const GlbOptions &options) {
     tinygltf::TinyGLTF loader;
     tinygltf::Model model;
     std::string err, warn;
@@ -512,10 +522,10 @@ GlbLoadResult load_glb(Renderer &renderer, const std::string &path, bool y_up_to
             throw std::runtime_error("adacpp.render: " + path + " requires " + ext + ", not supported");
 
     // glTF y-up -> z-up: rotate +90 degrees about x.
-    const Mat4 root = y_up_to_z_up ? Mat4{1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1}
-                                   : Mat4{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    const Mat4 root = options.y_up_to_z_up ? Mat4{1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1}
+                                           : Mat4{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     GlbLoadResult res;
-    Batcher batcher(renderer, model, res, line_width, point_size);
+    Batcher batcher(renderer, model, res, options);
     const int scene = model.defaultScene >= 0 ? model.defaultScene : 0;
     if (!model.scenes.empty()) {
         for (int n : model.scenes.at(scene).nodes)

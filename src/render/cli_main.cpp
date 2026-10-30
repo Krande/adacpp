@@ -79,7 +79,11 @@ int main(int argc, char **argv) {
         Renderer renderer(dev.device(), OffscreenTarget::kFormat);
         renderer.set_culling(cull, cull, cull && gpu_cull);
         const auto load_t0 = std::chrono::steady_clock::now();
-        const auto res = load_glb(renderer, in, y_up, line_width, point_size);
+        GlbOptions opts;
+        opts.y_up_to_z_up = y_up;
+        opts.line_width = opts.member_width = line_width;
+        opts.point_size = point_size;
+        const auto res = load_glb(renderer, in, opts);
         const double load_ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - load_t0).count();
         Camera cam = frame_bounds(renderer.bounds(), vit->second, {0, 0, 1}, 60.0f, float(w) / float(h));

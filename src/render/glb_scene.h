@@ -21,9 +21,19 @@ struct GlbLoadResult {
 // Adds every mesh primitive of the GLB's default scene as one geometry + instance, with node transforms
 // applied. adapy writes its z-up coordinates into the GLB as they are (the viewer only turns the camera's
 // up axis), so nothing is rotated by default; `y_up_to_z_up` rotates a conventional y-up glTF instead.
-// `line_width` / `point_size`: pixels for every line / point primitive (see InstanceDesc::line_width).
-GlbLoadResult load_glb(Renderer &renderer, const std::string &path, bool y_up_to_z_up = false, float line_width = 1.0f,
-                       float point_size = 1.0f);
+struct GlbOptions {
+    bool y_up_to_z_up = false;
+    // Pixels (see InstanceDesc::line_width). Lines without vertex colours are wireframes / feature edges;
+    // lines with them are FEA members (beam elements) drawn in their field colour.
+    float line_width = 1.0f;
+    float member_width = 1.0f;
+    float point_size = 1.0f;
+    // Linear RGBA for every line without vertex colours (wireframes, edges); alpha 0 = its material's colour.
+    std::array<float, 4> line_color{0, 0, 0, 0};
+    // Draw every surface double-sided, whatever its material says (thin shells seen from behind).
+    bool double_sided = false;
+};
+GlbLoadResult load_glb(Renderer &renderer, const std::string &path, const GlbOptions &options = {});
 
 struct Camera {
     std::array<float, 16> view;

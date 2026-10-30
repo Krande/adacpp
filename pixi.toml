@@ -34,10 +34,15 @@ wgpu-native = ">=29,<30"
 webgpu-headers = "*"
 tinygltf = "==2.9.1"
 nlohmann_json = "*"
+# adacpp._render (ADACPP_RENDER_PYTHON): matches adapy's test env Python.
+python = "3.14.*"
+nanobind = "==3.0.1"
+numpy = "*"
 
 [feature.render.tasks]
 build-render = { cmd = "cmake -S src/render -B build-render -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build-render", description = "Build the native WebGPU renderer + the adacpp_render CLI (headless GLB -> PNG)" }
 render-glb = { cmd = "build-render/adacpp_render", depends-on = ["build-render"], description = "Headless render: adacpp_render <in.glb> <out.png> [--size WxH] [--view iso|front|top|...]" }
+build-render-py = { cmd = "cmake -S src/render -B build-render-py -G Ninja -DCMAKE_BUILD_TYPE=Release -DADACPP_RENDER_PYTHON=ON && cmake --build build-render-py", description = "Build the adacpp._render Python module (headless WebGPU renderer for Python)" }
 build-render-wasm = { cmd = "bash tools/build_render_wasm.sh", description = "Build adacpp_render.js/.wasm for the browser in the emscripten/emsdk docker image (emdawnwebgpu)" }
 
 [feature.conda.dependencies]
