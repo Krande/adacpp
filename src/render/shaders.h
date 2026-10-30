@@ -49,6 +49,16 @@ const FLAG_POINTS: u32 = 1024u; // internal: a points instance (vs_wide draws sq
 const FLAG_CLIPPED: u32 = 2048u;
 const FLAG_DASHED: u32 = 8192u; // internal: dashed lines
 const SEGMENT_MATTE: u32 = 2u; // segment state flag: the colour override is a matte surface
+const FLAG_UNDERLAY: u32 = 32768u; // lines under the model (a ground grid): drawn first and pushed back
+
+// An underlay line a hair farther away than the face on its plane, so the face wins even where the two
+// rasterise to slightly different depths (WebGPU's depth bias applies to triangles only).
+fn underlay(inst: Instance, c: vec4<f32>) -> vec4<f32> {
+    if ((inst.flags & FLAG_UNDERLAY) == 0u) {
+        return c;
+    }
+    return vec4<f32>(c.xy, c.z + 2e-4 * c.w, c.w);
+}
 const CLUSTER_VERTS: u32 = {{CLUSTER_VERTS}}u; // Renderer::kClusterMaxTriangles x 3, filled in at load
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -149,7 +159,9 @@ fn vs_list(@builtin(vertex_index) vid: u32, @builtin(instance_index) ii: u32) ->
         dead.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0); // hidden segment: both ends collapse outside the clip volume
         return dead;
     }
-    return shade_vertex(inst, prim[vid], i32(seg), ii, vid);
+    var out = shade_vertex(inst, prim[vid], i32(seg), ii, vid);
+    out.pos = underlay(inst, out.pos);
+    return out;
 }
 
 // Lines wider than a pixel and points larger than one: WebGPU rasterises only 1-pixel lines and points,
@@ -205,7 +217,7 @@ fn vs_wide(@builtin(vertex_index) vid: u32, @builtin(instance_index) ii: u32) ->
     }
     // Pixels -> clip space at this vertex's depth.
     c = vec4<f32>(c.xy + offset * 2.0 / viewport * c.w, c.z, c.w);
-    out.pos = c;
+    out.pos = underlay(inst, c);
     return out;
 }
 

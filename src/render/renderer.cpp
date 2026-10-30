@@ -195,7 +195,9 @@ struct Renderer::Impl {
     ShaderModuleRef shader;
     std::string shader_source;
     RenderPipelineRef tri_double, tri_single, tri_blend, lines, lines_blend, points;
-    // The same pulled forward instead of pushed back: kDepthOffset overlays, in front of coplanar faces and lines.
+    // three.js' polygonOffset: kDepthBack faces pushed behind the edges drawn on them, kDepthOffset
+    // overlays pulled in front of the faces and lines they lie on. Plain faces have no bias, as in three.js.
+    RenderPipelineRef tri_double_back, tri_single_back, tri_blend_back;
     RenderPipelineRef tri_double_front, tri_single_front, tri_blend_front;
     RenderPipelineRef wide, wide_blend;         // lines / points wider than a pixel, as quads (vs_wide)
     RenderPipelineRef pick_double, pick_single; // id + world-position targets, 1 sample
@@ -426,9 +428,12 @@ struct Renderer::Impl {
 
     void create_pipelines() {
         const auto tri = WGPUPrimitiveTopology_TriangleList;
-        tri_double = make_pipeline("adacpp.tri_double", "vs_tri", tri, WGPUCullMode_None, false, 1);
-        tri_single = make_pipeline("adacpp.tri_single", "vs_tri", tri, WGPUCullMode_Back, false, 1);
-        tri_blend = make_pipeline("adacpp.tri_blend", "vs_tri", tri, WGPUCullMode_None, true, 1);
+        tri_double = make_pipeline("adacpp.tri_double", "vs_tri", tri, WGPUCullMode_None, false, 0);
+        tri_single = make_pipeline("adacpp.tri_single", "vs_tri", tri, WGPUCullMode_Back, false, 0);
+        tri_blend = make_pipeline("adacpp.tri_blend", "vs_tri", tri, WGPUCullMode_None, true, 0);
+        tri_double_back = make_pipeline("adacpp.tri_double_back", "vs_tri", tri, WGPUCullMode_None, false, 1);
+        tri_single_back = make_pipeline("adacpp.tri_single_back", "vs_tri", tri, WGPUCullMode_Back, false, 1);
+        tri_blend_back = make_pipeline("adacpp.tri_blend_back", "vs_tri", tri, WGPUCullMode_None, true, 1);
         tri_double_front = make_pipeline("adacpp.tri_double_front", "vs_tri", tri, WGPUCullMode_None, false, -1);
         tri_single_front = make_pipeline("adacpp.tri_single_front", "vs_tri", tri, WGPUCullMode_Back, false, -1);
         tri_blend_front = make_pipeline("adacpp.tri_blend_front", "vs_tri", tri, WGPUCullMode_None, true, -1);
@@ -1323,12 +1328,13 @@ struct Renderer::Impl {
                 if (args ? !(*in_view)[inst->gpu_index] : inst->vis_count == 0)
                     continue;
                 const bool front = inst->desc.flags & kDepthOffset;
+                const bool back = !front && (inst->desc.flags & kDepthBack);
                 if (transparent)
-                    use(front ? r.tri_blend_front : r.tri_blend);
+                    use(front ? r.tri_blend_front : back ? r.tri_blend_back : r.tri_blend);
                 else if (inst->desc.flags & kDoubleSided)
-                    use(front ? r.tri_double_front : r.tri_double);
+                    use(front ? r.tri_double_front : back ? r.tri_double_back : r.tri_double);
                 else
-                    use(front ? r.tri_single_front : r.tri_single);
+                    use(front ? r.tri_single_front : back ? r.tri_single_back : r.tri_single);
                 wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
                 if (args)
                     wgpuRenderPassEncoderDrawIndirect(pass, args, uint64_t(inst->gpu_index) * 16);
@@ -1338,12 +1344,17 @@ struct Renderer::Impl {
                 st.draw_calls++;
             }
         }
-        void lists(bool transparent) {
+        // `underlay`: only the kUnderlay lines, opaque or not (drawn before the faces); otherwise every other
+        // line of the given transparency (drawn after them, so edges on a face win).
+        void lists(bool pass_transparent, bool underlay = false) {
             for (Instance *inst : r.order) {
                 const Geometry &g = r.geometry(inst->geometry);
                 if (g.topology == Topology::Triangles || (inst->desc.flags & kHidden))
                     continue;
-                if (bool(inst->desc.flags & kTransparent) != transparent)
+                if (bool(inst->desc.flags & kUnderlay) != underlay)
+                    continue;
+                const bool transparent = inst->desc.flags & kTransparent;
+                if (!underlay && transparent != pass_transparent)
                     continue;
                 wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
                 if (inst->desc.line_width > 1.0f) {
@@ -1425,6 +1436,7 @@ struct Renderer::Impl {
         WGPURenderPassEncoder pass = begin_pass(enc, target, true, true, "adacpp.main");
         wgpuRenderPassEncoderSetBindGroup(pass, 0, frame_bind.get(), 0, nullptr);
         Drawer d{*this, pass, st};
+        d.lists(false, true);
         d.tris(false, nullptr, nullptr);
         d.lists(false);
         d.tris(true, nullptr, nullptr);
@@ -1477,6 +1489,7 @@ struct Renderer::Impl {
         WGPURenderPassEncoder pass = begin_pass(enc, target, true, false, "adacpp.early");
         wgpuRenderPassEncoderSetBindGroup(pass, 0, frame_bind_early.get(), 0, nullptr);
         Drawer early{*this, pass, st};
+        early.lists(false, true);
         early.tris(false, args_early_buf.get(), &in_view);
         end_pass(pass);
 

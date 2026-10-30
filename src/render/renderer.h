@@ -48,6 +48,8 @@ enum InstanceFlags : uint32_t {
     kNoPick = 1u << 8,        // drawn, but never returned by pick() (helpers, overlays, edges)
     kClipped = 1u << 11,      // cut by the section planes (set_clip_planes), as three.js' clippingPlanes
     kDepthOffset = 1u << 12,  // triangles pulled in front of coplanar faces and lines (negative polygonOffset)
+    kDepthBack = 1u << 14,    // triangles pushed behind coplanar lines, so edges on them win (positive polygonOffset)
+    kUnderlay = 1u << 15,     // lines / points drawn before the faces (a ground grid): a coplanar face hides them
 };
 
 // Segment state flags (second u32 of a segment's state pair).
