@@ -175,7 +175,9 @@ std::vector<unsigned char> decode_meshopt_glb(std::vector<unsigned char> glb) {
     const uint32_t json_len = u32(12);
     if (u32(16) != 0x4E4F534Au || 20 + size_t(json_len) > glb.size()) // "JSON"
         return glb;
-    nlohmann::json doc = nlohmann::json::parse(glb.begin() + 20, glb.begin() + 20 + json_len);
+    // Parse as chars: an unsigned-char range needs std::char_traits<unsigned char>, which libc++ 19 dropped.
+    const char *json_begin = reinterpret_cast<const char *>(glb.data()) + 20;
+    nlohmann::json doc = nlohmann::json::parse(json_begin, json_begin + json_len);
     const char *ext_name = nullptr;
     for (const char *name : {"EXT_meshopt_compression", "KHR_meshopt_compression"})
         for (const auto &e : doc.value("extensionsUsed", nlohmann::json::array()))
