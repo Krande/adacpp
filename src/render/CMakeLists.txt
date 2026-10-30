@@ -43,6 +43,23 @@ else()
     find_library(WGPU_NATIVE_LIBRARY NAMES wgpu_native REQUIRED)
     target_include_directories(adacpp_render_core PUBLIC ${WEBGPU_INCLUDE_DIR})
     target_link_libraries(adacpp_render_core PUBLIC ${WGPU_NATIVE_LIBRARY})
+    if(WIN32)
+        # conda-forge's wgpu_native.lib is the static Rust library (no import library for the DLL),
+        # so the Windows system libraries Rust's std and wgpu-hal call into come along, as in
+        # wgpu-native's own examples.
+        target_link_libraries(
+            adacpp_render_core
+            PUBLIC
+                d3dcompiler
+                ws2_32
+                userenv
+                bcrypt
+                ntdll
+                opengl32
+                propsys
+                runtimeobject
+        )
+    endif()
 
     # Headless hosts: GLB loading and the CPU-drawn overlay (gizmo, legend; vendored stb_truetype).
     add_library(
