@@ -21,6 +21,10 @@ if ! command -v emcc >/dev/null 2>&1 || [ "${ADACPP_RENDER_USE_DOCKER:-0}" = "1"
 fi
 
 BUILD="${ADACPP_RENDER_BUILD_DIR:-/tmp/adacpp-render-wasm-build}"
+# Unpack the emdawnwebgpu port into the cache once, up front: left to the parallel build, every emcc
+# process races to unpack it and the cache lock can deadlock ("Accessing the Emscripten cache ... is
+# taking a long time"), which hung a viewer image build for over ten minutes.
+embuilder build emdawnwebgpu
 emcmake cmake -S "$ROOT/src/render" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release
 cmake --build "$BUILD" -j"$(nproc)"
 mkdir -p "$OUT"
