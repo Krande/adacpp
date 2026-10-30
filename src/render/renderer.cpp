@@ -19,6 +19,7 @@ namespace {
 constexpr uint32_t kHasMorph = 1u << 6; // internal: set when the instance's geometry carries a morph target
 constexpr uint32_t kConeOk = 1u << 9;   // internal: cone culling is exact for this instance (GPU culling)
 constexpr uint32_t kPoints = 1u << 10;  // internal: a points instance, for vs_wide
+constexpr uint32_t kDashed = 1u << 13;  // internal: a dashed lines instance (material.y dash, .z gap)
 constexpr size_t kInstanceBytes = 112;  // WGSL `Instance`
 constexpr size_t kFrameBytes = 224;     // WGSL `Frame`
 constexpr size_t kItemWords = 16;       // WGSL `Item` (cull shader)
@@ -768,6 +769,9 @@ struct Renderer::Impl {
                 if (desc.normals)
                     vtx[v * 6 + 3 + k] = desc.normals[v * 3 + k];
             }
+            // Lines have no normals: the distance along the line goes in that slot instead.
+            if (desc.distances && desc.topology == Topology::Lines)
+                vtx[v * 6 + 3] = desc.distances[v];
         }
         for (int k = 0; k < 3; ++k) {
             g->aabb[k] = lo[k];
@@ -967,6 +971,11 @@ struct Renderer::Impl {
                 material[0] = inst->desc.line_width;
                 if (g.topology == Topology::Points)
                     rec[20] |= kPoints;
+                if (g.topology == Topology::Lines && inst->desc.dash > 0.0f) {
+                    material[1] = inst->desc.dash;
+                    material[2] = std::max(inst->desc.gap, 0.0f);
+                    rec[20] |= kDashed;
+                }
             }
             std::memcpy(rec + 24, material, 12);
             rec[27] = g.list_count; // lines/points: where the per-index segment ids start in `prim`

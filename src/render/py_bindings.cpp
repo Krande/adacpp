@@ -80,12 +80,14 @@ public:
 
     // One geometry + one instance of it; returns the instance id. `colors`: linear RGBA8 per vertex.
     // `depth_offset`: triangles drawn in front of coplanar faces (an overlay on a surface).
+    // Lines: `distances` along the line per vertex, drawn dashed with `dash` / `gap` (same units) when dash > 0.
     uint32_t add_mesh(Array<float> positions, std::optional<Array<uint32_t>> indices,
                       std::optional<Array<float>> normals, std::optional<Array<uint8_t>> colors,
                       std::optional<Array<float>> morph, std::optional<Array<uint32_t>> segments,
                       const std::string &topology, std::array<float, 4> color, float metalness, float roughness,
                       bool specular, bool double_sided, bool unlit, float line_width, float morph_influence,
-                      bool morph_relative, std::optional<Array<float>> model, bool depth_offset) {
+                      bool morph_relative, std::optional<Array<float>> model, bool depth_offset,
+                      std::optional<Array<float>> distances, float dash, float gap) {
         const size_t nv = positions.size() / 3;
         if (positions.size() % 3 != 0 || nv == 0)
             throw std::invalid_argument("positions: expected (N, 3) floats");
@@ -127,6 +129,10 @@ public:
             gd.segments = segments->data();
             gd.segment_count = segments->size() / 2;
         }
+        if (distances) {
+            check(distances->size(), nv, "distances");
+            gd.distances = distances->data();
+        }
         uint32_t geom, inst;
         InstanceDesc d;
         {
@@ -140,6 +146,8 @@ public:
         d.roughness = roughness;
         d.specular = specular;
         d.line_width = line_width;
+        d.dash = dash;
+        d.gap = gap;
         d.morph_influence = morph_influence;
         d.flags |= kClipped; // cut by set_clip_planes, when any are set
         if (depth_offset)
@@ -346,7 +354,7 @@ NB_MODULE(_render, m) {
              "topology"_a = "triangles", "color"_a = std::array<float, 4>{1, 1, 1, 1}, "metalness"_a = 0.0f,
              "roughness"_a = 1.0f, "specular"_a = true, "double_sided"_a = false, "unlit"_a = false,
              "line_width"_a = 1.0f, "morph_influence"_a = 0.0f, "morph_relative"_a = true, "model"_a = nb::none(),
-             "depth_offset"_a = false)
+             "depth_offset"_a = false, "distances"_a = nb::none(), "dash"_a = 0.0f, "gap"_a = 0.0f)
         .def("set_morph_influence", &OffscreenRenderer::set_morph_influence, "instance"_a, "influence"_a)
         .def("set_visible", &OffscreenRenderer::set_visible, "instance"_a, "visible"_a)
         .def("update_colors", &OffscreenRenderer::update_colors, "instance"_a, "colors"_a)

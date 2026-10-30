@@ -66,6 +66,7 @@ struct GeometryDesc {
     size_t index_count = 0;
     const uint32_t *segments = nullptr; // optional [start, count] pairs in index units; default one segment
     size_t segment_count = 0;
+    const float *distances = nullptr; // optional, lines: distance along the line at each vertex (for dashes)
 };
 
 struct InstanceDesc {
@@ -80,6 +81,10 @@ struct InstanceDesc {
     // Lines: width in pixels; points: side in pixels (squares, like three.js). Above 1 they are drawn as
     // screen-space quads.
     float line_width = 1.0f;
+    // Lines: dash and gap lengths, in the geometry's `distances` units (three.js' dashSize / gapSize); a
+    // zero dash draws solid.
+    float dash = 0.0f;
+    float gap = 0.0f;
 };
 
 // What is under a pixel: the nearest pickable triangle there.

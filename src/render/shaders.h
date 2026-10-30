@@ -11,7 +11,8 @@ namespace adacpp::render {
 //   visible   visible clusters as (instance, cluster) pairs, one region per instance starting at
 //             Instance.vis_base; a draw starts at vertex vis_base x CLUSTER_VERTS, so vs_tri finds its
 //             slot from the vertex index alone (indirect draws cannot rely on firstInstance)
-//   vtx       6 x f32 per vertex: position, normal (zero normal = derive a flat one)
+//   vtx       6 x f32 per vertex: position, normal (zero normal = derive a flat one; lines: x = distance
+//             along the line, for dashes)
 //   colors    packed RGBA8 per vertex
 //   morph     3 x f32 per vertex
 //   prim      triangles: cluster records (4 x u32: vertex offset, triangle offset, triangle count,
@@ -37,7 +38,7 @@ struct Instance {
     morph: f32,
     vis_base: u32,
     material: vec4<f32>, // metalness, roughness, specular (0 = Lambert), lines/points: segment-id offset (u32 bits)
-                         // lines/points: x = width / diameter in pixels
+                         // lines/points: x = width / diameter in pixels; dashed lines: y = dash, z = gap
 };
 
 const FLAG_VERTEX_COLORS: u32 = 1u;
@@ -46,6 +47,7 @@ const FLAG_MORPH_RELATIVE: u32 = 32u;
 const FLAG_HAS_MORPH: u32 = 64u;
 const FLAG_POINTS: u32 = 1024u; // internal: a points instance (vs_wide draws squares, not segments)
 const FLAG_CLIPPED: u32 = 2048u;
+const FLAG_DASHED: u32 = 8192u; // internal: dashed lines
 const CLUSTER_VERTS: u32 = {{CLUSTER_VERTS}}u; // Renderer::kClusterMaxTriangles x 3, filled in at load
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -66,6 +68,7 @@ struct VOut {
     @location(3) @interpolate(flat) flags: u32,
     @location(4) @interpolate(flat) material: vec4<f32>,
     @location(5) @interpolate(flat) pick: vec4<u32>, // instance + 1, primitive, segment, -
+    @location(6) dist: f32, // lines: distance along the line
 };
 
 fn shade_vertex(inst: Instance, vi: u32, seg: i32, ii: u32, primitive: u32) -> VOut {
@@ -98,6 +101,7 @@ fn shade_vertex(inst: Instance, vi: u32, seg: i32, ii: u32, primitive: u32) -> V
     out.flags = inst.flags;
     out.material = inst.material;
     out.pick = vec4<u32>(ii + 1u, primitive, u32(max(seg, 0)), 0u);
+    out.dist = vtx[vi * 6u + 3u];
     return out;
 }
 
@@ -261,6 +265,10 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     // Derivatives first, in uniform control flow: the flat normal for geometry without normals.
     let flat_n = cross(dpdx(in.world), dpdy(in.world));
     if (clipped(in)) {
+        discard;
+    }
+    // three.js' dashed lines: the gap part of each dash + gap period is not drawn.
+    if ((in.flags & FLAG_DASHED) != 0u && in.dist % (in.material.y + in.material.z) > in.material.y) {
         discard;
     }
     var rgb = in.color.rgb;

@@ -87,7 +87,7 @@ public:
 
     uint32_t add_geometry(uint32_t topology, uintptr_t positions, uint32_t vertex_count, uintptr_t normals,
                           uintptr_t colors, uintptr_t morph, uintptr_t indices, uint32_t index_count,
-                          uintptr_t segments, uint32_t segment_count) {
+                          uintptr_t segments, uint32_t segment_count, uintptr_t distances) {
         GeometryDesc d;
         d.topology = static_cast<Topology>(topology);
         d.positions = ptr<float>(positions);
@@ -99,6 +99,7 @@ public:
         d.index_count = index_count;
         d.segments = ptr<uint32_t>(segments);
         d.segment_count = segment_count;
+        d.distances = ptr<float>(distances);
         return renderer_->add_geometry(d);
     }
     void update_colors(uint32_t geometry, uintptr_t colors, uint32_t count) {
@@ -118,7 +119,8 @@ public:
         return renderer_->add_instance(geometry);
     }
     void set_instance(uint32_t instance, uintptr_t matrix, float r, float g, float b, float a, uint32_t flags,
-                      float morph_influence, float metalness, float roughness, bool specular, float line_width) {
+                      float morph_influence, float metalness, float roughness, bool specular, float line_width,
+                      float dash, float gap) {
         InstanceDesc d;
         const float *m = ptr<float>(matrix);
         std::copy(m, m + 16, d.model.begin());
@@ -129,6 +131,8 @@ public:
         d.roughness = roughness;
         d.specular = specular;
         d.line_width = line_width;
+        d.dash = dash;
+        d.gap = gap;
         renderer_->set_instance(instance, d);
     }
     void set_segment_states(uint32_t instance, uintptr_t packed, uint32_t count) {
