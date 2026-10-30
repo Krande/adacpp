@@ -2,6 +2,15 @@
 
 
 
+## v0.36.0 (2026-10-30)
+
+### Feature
+
+* feat: WebGPU renderer (native headless + browser) and adacpp._render (#75)
+
+Co-authored-by: Claude Opus 5.5 &lt;noreply@anthropic.com&gt; ([`2e1e9bd`](https://github.com/Krande/adacpp/commit/2e1e9bd8b3f997887c2400f653c58fa4ec288695))
+
+
 ## v0.35.0 (2026-10-29)
 
 ### Feature
