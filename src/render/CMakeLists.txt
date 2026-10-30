@@ -53,7 +53,10 @@ else()
         overlay.cpp
         overlay_json.cpp
     )
-    target_include_directories(adacpp_render_headless PUBLIC ${ADACPP_ROOT}/third_party/stb)
+    target_include_directories(
+        adacpp_render_headless
+        PUBLIC ${ADACPP_ROOT}/third_party/stb
+    )
     target_link_libraries(adacpp_render_headless PUBLIC adacpp_render_core)
 
     add_executable(adacpp_render cli_main.cpp)
@@ -69,14 +72,23 @@ else()
     # adacpp._render, the Python module (nanobind). Its own small extension, so headless rendering does not
     # pull in the OCCT-based _ada_cpp_ext_impl.
     option(ADACPP_RENDER_PYTHON "Build the adacpp._render Python module" OFF)
-    set(ADACPP_RENDER_PY_INSTALL_DIR "adacpp" CACHE STRING "Install destination of the _render module")
+    set(ADACPP_RENDER_PY_INSTALL_DIR
+        "adacpp"
+        CACHE STRING
+        "Install destination of the _render module"
+    )
     if(ADACPP_RENDER_PYTHON)
         set_target_properties(
             adacpp_render_core
             adacpp_render_headless
             PROPERTIES POSITION_INDEPENDENT_CODE ON
         )
-        find_package(Python 3.12 REQUIRED COMPONENTS Interpreter Development.Module)
+        find_package(
+            Python
+            3.12
+            REQUIRED
+            COMPONENTS Interpreter Development.Module
+        )
         execute_process(
             COMMAND "${Python_EXECUTABLE}" -m nanobind --cmake_dir
             OUTPUT_STRIP_TRAILING_WHITESPACE
@@ -85,6 +97,9 @@ else()
         find_package(nanobind CONFIG REQUIRED)
         nanobind_add_module(_render NB_STATIC py_bindings.cpp)
         target_link_libraries(_render PRIVATE adacpp_render_headless)
-        install(TARGETS _render LIBRARY DESTINATION ${ADACPP_RENDER_PY_INSTALL_DIR})
+        install(
+            TARGETS _render
+            LIBRARY DESTINATION ${ADACPP_RENDER_PY_INSTALL_DIR}
+        )
     endif()
 endif()
