@@ -1,5 +1,5 @@
-// adacpp._render: the WebGPU renderer for Python, headless (wgpu-native). Python's adacpp.render wraps it
-// with camera presets and the GLB -> image entry points adapy calls.
+// adacpp._render: the WebGPU renderer for Python, headless (wgpu-native). adapy wraps it
+// (ada.visit.rendering.adacpp_offscreen) with camera presets and the GLB -> image entry points.
 #include <cstring>
 #include <map>
 #include <optional>

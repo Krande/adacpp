@@ -24,10 +24,8 @@ requirements:
     - if: linux
       then: libgl-devel
     - cmake
-    - if: win
-      then: ninja
-    - if: unix
-      then: make
+    # build.sh and build.bat both generate for Ninja.
+    - ninja
   host:
     - python
     # Pin occt/ifcopenshell to the same versions pixi resolves (see pixi.toml).
@@ -53,6 +51,10 @@ requirements:
     - cli11
     - tinygltf
     - gmsh
+    # adacpp._render, the headless WebGPU renderer (src/render). wgpu-native's run_exports add it as a
+    # run dependency; webgpu-headers carries webgpu.h.
+    - wgpu-native >=29,<30
+    - webgpu-headers
     - pip
     - setuptools
     - wheel
@@ -79,6 +81,8 @@ tests:
         - ifcopenshell
     script:
       - pytest tests/py
+      # The renderer module must import without a GPU (the adapter is only requested on construction).
+      - python -c "from adacpp import _render; print(_render.OffscreenRenderer)"
 
 about:
   license: GPL-3.0-or-later
