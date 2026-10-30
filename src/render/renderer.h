@@ -53,6 +53,9 @@ enum InstanceFlags : uint32_t {
 // Segment state flags (second u32 of a segment's state pair).
 enum SegmentFlags : uint32_t {
     kSegmentHidden = 1u << 0,
+    // The colour override is a matte surface (metalness 0, roughness 1: three.js' default
+    // MeshStandardMaterial, e.g. the selection highlight), not the instance's own material.
+    kSegmentMatte = 1u << 1,
 };
 
 struct GeometryDesc {

@@ -7,7 +7,7 @@ namespace adacpp::render {
 //   Frame     uniform, 224 bytes (with the section planes)
 //   Instance  storage, 112 bytes each (model, colour, flags, segment base, morph influence, visible base,
 //             material: metalness, roughness, specular on/off)
-//   segstate  2 x u32 per segment: RGBA8 colour override (alpha 0 = none), flags
+//   segstate  2 x u32 per segment: RGBA8 colour override (alpha 0 = none), flags (1 hidden, 2 matte override)
 //   visible   visible clusters as (instance, cluster) pairs, one region per instance starting at
 //             Instance.vis_base; a draw starts at vertex vis_base x CLUSTER_VERTS, so vs_tri finds its
 //             slot from the vertex index alone (indirect draws cannot rely on firstInstance)
@@ -48,6 +48,7 @@ const FLAG_HAS_MORPH: u32 = 64u;
 const FLAG_POINTS: u32 = 1024u; // internal: a points instance (vs_wide draws squares, not segments)
 const FLAG_CLIPPED: u32 = 2048u;
 const FLAG_DASHED: u32 = 8192u; // internal: dashed lines
+const SEGMENT_MATTE: u32 = 2u; // segment state flag: the colour override is a matte surface
 const CLUSTER_VERTS: u32 = {{CLUSTER_VERTS}}u; // Renderer::kClusterMaxTriangles x 3, filled in at load
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -87,10 +88,15 @@ fn shade_vertex(inst: Instance, vi: u32, seg: i32, ii: u32, primitive: u32) -> V
     if ((inst.flags & FLAG_VERTEX_COLORS) != 0u) {
         c = vec4<f32>(c.rgb * unpack4x8unorm(colors[vi]).rgb, c.a);
     }
+    var material = inst.material;
     if (seg >= 0) {
         let ov = unpack4x8unorm(segstate[(inst.seg_base + u32(seg)) * 2u]);
         if (ov.a > 0.0) {
             c = vec4<f32>(ov.rgb, c.a);
+            // A matte override (the selection highlight) is lit as its own material, not the instance's.
+            if ((segstate[(inst.seg_base + u32(seg)) * 2u + 1u] & SEGMENT_MATTE) != 0u) {
+                material = vec4<f32>(0.0, 1.0, 1.0, material.w);
+            }
         }
     }
     var out: VOut;
@@ -99,7 +105,7 @@ fn shade_vertex(inst: Instance, vi: u32, seg: i32, ii: u32, primitive: u32) -> V
     out.normal = (inst.model * vec4<f32>(n, 0.0)).xyz;
     out.color = c;
     out.flags = inst.flags;
-    out.material = inst.material;
+    out.material = material;
     out.pick = vec4<u32>(ii + 1u, primitive, u32(max(seg, 0)), 0u);
     out.dist = vtx[vi * 6u + 3u];
     return out;
