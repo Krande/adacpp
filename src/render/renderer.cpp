@@ -194,7 +194,7 @@ struct Renderer::Impl {
     ShaderModuleRef shader;
     std::string shader_source;
     RenderPipelineRef tri_double, tri_single, tri_blend, lines, lines_blend, points;
-    // The same without the faces' depth bias: kDepthOffset overlays, in front of coplanar faces.
+    // The same pulled forward instead of pushed back: kDepthOffset overlays, in front of coplanar faces and lines.
     RenderPipelineRef tri_double_front, tri_single_front, tri_blend_front;
     RenderPipelineRef wide, wide_blend;         // lines / points wider than a pixel, as quads (vs_wide)
     RenderPipelineRef pick_double, pick_single; // id + world-position targets, 1 sample
@@ -327,8 +327,10 @@ struct Renderer::Impl {
         shader.reset(wgpuDeviceCreateShaderModule(device, &sd));
     }
 
+    // `depth_bias`: +1 pushes faces back (so feature edges drawn on them win), -1 pulls them forward
+    // (kDepthOffset overlays, in front of both the faces and lines they lie on), 0 none.
     RenderPipelineRef make_pipeline(const char *label, const char *vs, WGPUPrimitiveTopology topo, WGPUCullMode cull,
-                                    bool blend, bool depth_bias) {
+                                    bool blend, int depth_bias) {
         WGPUBlendState bs = WGPU_BLEND_STATE_INIT;
         bs.color.srcFactor = WGPUBlendFactor_SrcAlpha;
         bs.color.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
@@ -352,11 +354,11 @@ struct Renderer::Impl {
         ds.format = kDepthFormat;
         ds.depthWriteEnabled = blend ? WGPUOptionalBool_False : WGPUOptionalBool_True;
         ds.depthCompare = WGPUCompareFunction_LessEqual;
-        if (depth_bias) {
-            // Push faces back a little so feature edges drawn on top of them win the depth test (what
-            // three.js does with polygonOffset on the CAD materials).
-            ds.depthBias = 2;
-            ds.depthBiasSlopeScale = 1.5f;
+        if (depth_bias != 0) {
+            // three.js' polygonOffset: faces pushed back so the feature edges on them win the depth test
+            // (the CAD materials), or an overlay pulled in front of what it lies on (negative offsets).
+            ds.depthBias = 2 * depth_bias;
+            ds.depthBiasSlopeScale = 1.5f * float(depth_bias);
         }
 
         WGPURenderPipelineDescriptor d = WGPU_RENDER_PIPELINE_DESCRIPTOR_INIT;
@@ -423,20 +425,19 @@ struct Renderer::Impl {
 
     void create_pipelines() {
         const auto tri = WGPUPrimitiveTopology_TriangleList;
-        tri_double = make_pipeline("adacpp.tri_double", "vs_tri", tri, WGPUCullMode_None, false, true);
-        tri_single = make_pipeline("adacpp.tri_single", "vs_tri", tri, WGPUCullMode_Back, false, true);
-        tri_blend = make_pipeline("adacpp.tri_blend", "vs_tri", tri, WGPUCullMode_None, true, true);
-        tri_double_front = make_pipeline("adacpp.tri_double_front", "vs_tri", tri, WGPUCullMode_None, false, false);
-        tri_single_front = make_pipeline("adacpp.tri_single_front", "vs_tri", tri, WGPUCullMode_Back, false, false);
-        tri_blend_front = make_pipeline("adacpp.tri_blend_front", "vs_tri", tri, WGPUCullMode_None, true, false);
-        lines =
-            make_pipeline("adacpp.lines", "vs_list", WGPUPrimitiveTopology_LineList, WGPUCullMode_None, false, false);
-        lines_blend = make_pipeline("adacpp.lines_blend", "vs_list", WGPUPrimitiveTopology_LineList, WGPUCullMode_None,
-                                    true, false);
+        tri_double = make_pipeline("adacpp.tri_double", "vs_tri", tri, WGPUCullMode_None, false, 1);
+        tri_single = make_pipeline("adacpp.tri_single", "vs_tri", tri, WGPUCullMode_Back, false, 1);
+        tri_blend = make_pipeline("adacpp.tri_blend", "vs_tri", tri, WGPUCullMode_None, true, 1);
+        tri_double_front = make_pipeline("adacpp.tri_double_front", "vs_tri", tri, WGPUCullMode_None, false, -1);
+        tri_single_front = make_pipeline("adacpp.tri_single_front", "vs_tri", tri, WGPUCullMode_Back, false, -1);
+        tri_blend_front = make_pipeline("adacpp.tri_blend_front", "vs_tri", tri, WGPUCullMode_None, true, -1);
+        lines = make_pipeline("adacpp.lines", "vs_list", WGPUPrimitiveTopology_LineList, WGPUCullMode_None, false, 0);
+        lines_blend =
+            make_pipeline("adacpp.lines_blend", "vs_list", WGPUPrimitiveTopology_LineList, WGPUCullMode_None, true, 0);
         points =
-            make_pipeline("adacpp.points", "vs_list", WGPUPrimitiveTopology_PointList, WGPUCullMode_None, false, false);
-        wide = make_pipeline("adacpp.wide", "vs_wide", tri, WGPUCullMode_None, false, false);
-        wide_blend = make_pipeline("adacpp.wide_blend", "vs_wide", tri, WGPUCullMode_None, true, false);
+            make_pipeline("adacpp.points", "vs_list", WGPUPrimitiveTopology_PointList, WGPUCullMode_None, false, 0);
+        wide = make_pipeline("adacpp.wide", "vs_wide", tri, WGPUCullMode_None, false, 0);
+        wide_blend = make_pipeline("adacpp.wide_blend", "vs_wide", tri, WGPUCullMode_None, true, 0);
         pick_double = make_pick_pipeline("adacpp.pick_double", WGPUCullMode_None);
         pick_single = make_pick_pipeline("adacpp.pick_single", WGPUCullMode_Back);
     }

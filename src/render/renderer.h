@@ -47,7 +47,7 @@ enum InstanceFlags : uint32_t {
     kMorphRelative = 1u << 5, // morph target holds displacements (else absolute target positions)
     kNoPick = 1u << 8,        // drawn, but never returned by pick() (helpers, overlays, edges)
     kClipped = 1u << 11,      // cut by the section planes (set_clip_planes), as three.js' clippingPlanes
-    kDepthOffset = 1u << 12,  // triangles: drawn in front of coplanar faces (three.js' negative polygonOffset)
+    kDepthOffset = 1u << 12,  // triangles pulled in front of coplanar faces and lines (negative polygonOffset)
 };
 
 // Segment state flags (second u32 of a segment's state pair).
