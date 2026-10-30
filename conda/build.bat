@@ -29,6 +29,25 @@ cmake --install build
 
 if errorlevel 1 exit 1
 
+@REM adacpp._render, the headless WebGPU renderer: its own CMake project (src/render), installed into the package.
+cmake -B build-render -S src/render -G Ninja ^
+    -DCMAKE_BUILD_TYPE=Release ^
+    -DCMAKE_PREFIX_PATH="%LIBRARY_PREFIX%" ^
+    -DADACPP_RENDER_PYTHON=ON ^
+    -DPython_EXECUTABLE="%PYTHON%" ^
+    -DCMAKE_INSTALL_PREFIX="%LIBRARY_PREFIX%" ^
+    -DADACPP_RENDER_PY_INSTALL_DIR="%PYTHON_SITE_PACKAGES%/adacpp"
+
+if errorlevel 1 exit 1
+
+cmake --build build-render --target _render
+
+if errorlevel 1 exit 1
+
+cmake --install build-render
+
+if errorlevel 1 exit 1
+
 @REM Install Python package files
 %PYTHON% -m pip install . --no-deps --no-build-isolation -vv
 
