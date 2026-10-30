@@ -97,6 +97,39 @@ else()
         find_package(nanobind CONFIG REQUIRED)
         nanobind_add_module(_render NB_STATIC py_bindings.cpp)
         target_link_libraries(_render PRIVATE adacpp_render_headless)
+        if(APPLE)
+            # conda-forge's libwgpu_native.dylib carries its build directory as its install name, which
+            # the linker copies into _render; dlopen then looks there. Point the dependency at @rpath,
+            # and the rpath at the env's lib/ (site-packages/adacpp -> ../../..).
+            execute_process(
+                COMMAND otool -D "${WGPU_NATIVE_LIBRARY}"
+                OUTPUT_VARIABLE _wgpu_otool
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+            )
+            string(
+                REGEX REPLACE
+                "^[^\n]*\n"
+                ""
+                _wgpu_install_name
+                "${_wgpu_otool}"
+            )
+            if(_wgpu_install_name AND NOT _wgpu_install_name MATCHES "^@rpath/")
+                add_custom_command(
+                    TARGET _render
+                    POST_BUILD
+                    COMMAND
+                        install_name_tool -change "${_wgpu_install_name}"
+                        "@rpath/libwgpu_native.dylib" "$<TARGET_FILE:_render>"
+                    VERBATIM
+                )
+            endif()
+            set_target_properties(
+                _render
+                PROPERTIES
+                    BUILD_RPATH "@loader_path/../../..;${CMAKE_PREFIX_PATH}/lib"
+                    INSTALL_RPATH "@loader_path/../../.."
+            )
+        endif()
         install(
             TARGETS _render
             LIBRARY DESTINATION ${ADACPP_RENDER_PY_INSTALL_DIR}
