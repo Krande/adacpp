@@ -79,12 +79,13 @@ public:
     }
 
     // One geometry + one instance of it; returns the instance id. `colors`: linear RGBA8 per vertex.
+    // `depth_offset`: triangles drawn in front of coplanar faces (an overlay on a surface).
     uint32_t add_mesh(Array<float> positions, std::optional<Array<uint32_t>> indices,
                       std::optional<Array<float>> normals, std::optional<Array<uint8_t>> colors,
                       std::optional<Array<float>> morph, std::optional<Array<uint32_t>> segments,
                       const std::string &topology, std::array<float, 4> color, float metalness, float roughness,
                       bool specular, bool double_sided, bool unlit, float line_width, float morph_influence,
-                      bool morph_relative, std::optional<Array<float>> model) {
+                      bool morph_relative, std::optional<Array<float>> model, bool depth_offset) {
         const size_t nv = positions.size() / 3;
         if (positions.size() % 3 != 0 || nv == 0)
             throw std::invalid_argument("positions: expected (N, 3) floats");
@@ -140,6 +141,9 @@ public:
         d.specular = specular;
         d.line_width = line_width;
         d.morph_influence = morph_influence;
+        d.flags |= kClipped; // cut by set_clip_planes, when any are set
+        if (depth_offset)
+            d.flags |= kDepthOffset;
         if (gd.colors)
             d.flags |= kVertexColors;
         if (double_sided)
@@ -210,6 +214,12 @@ public:
     }
     void set_culling(bool frustum, bool cone, bool occlusion) {
         renderer_.set_culling(frustum, cone, occlusion);
+    }
+    // Section planes as (nx, ny, nz, constant) rows, three.js' Plane; they cut instances added with clipped=True.
+    void set_clip_planes(Array<float> planes) {
+        if (planes.size() % 4 != 0)
+            throw std::invalid_argument("planes: expected (n, 4) floats");
+        renderer_.set_clip_planes(planes.data(), planes.size() / 4);
     }
     std::array<float, 6> bounds() const {
         return renderer_.bounds();
@@ -335,7 +345,8 @@ NB_MODULE(_render, m) {
              "normals"_a = nb::none(), "colors"_a = nb::none(), "morph"_a = nb::none(), "segments"_a = nb::none(),
              "topology"_a = "triangles", "color"_a = std::array<float, 4>{1, 1, 1, 1}, "metalness"_a = 0.0f,
              "roughness"_a = 1.0f, "specular"_a = true, "double_sided"_a = false, "unlit"_a = false,
-             "line_width"_a = 1.0f, "morph_influence"_a = 0.0f, "morph_relative"_a = true, "model"_a = nb::none())
+             "line_width"_a = 1.0f, "morph_influence"_a = 0.0f, "morph_relative"_a = true, "model"_a = nb::none(),
+             "depth_offset"_a = false)
         .def("set_morph_influence", &OffscreenRenderer::set_morph_influence, "instance"_a, "influence"_a)
         .def("set_visible", &OffscreenRenderer::set_visible, "instance"_a, "visible"_a)
         .def("update_colors", &OffscreenRenderer::update_colors, "instance"_a, "colors"_a)
@@ -349,6 +360,7 @@ NB_MODULE(_render, m) {
         .def("set_background", &OffscreenRenderer::set_background, "r"_a, "g"_a, "b"_a, "a"_a = 1.0f)
         .def("set_lighting", &OffscreenRenderer::set_lighting, "ambient"_a, "headlight"_a)
         .def("set_culling", &OffscreenRenderer::set_culling, "frustum"_a = true, "cone"_a = true, "occlusion"_a = true)
+        .def("set_clip_planes", &OffscreenRenderer::set_clip_planes, "planes"_a)
         .def("bounds", &OffscreenRenderer::bounds)
         .def("render", &OffscreenRenderer::render)
         .def("render_png", &OffscreenRenderer::render_png)

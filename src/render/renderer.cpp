@@ -20,6 +20,7 @@ constexpr uint32_t kHasMorph = 1u << 6; // internal: set when the instance's geo
 constexpr uint32_t kConeOk = 1u << 9;   // internal: cone culling is exact for this instance (GPU culling)
 constexpr uint32_t kPoints = 1u << 10;  // internal: a points instance, for vs_wide
 constexpr size_t kInstanceBytes = 112;  // WGSL `Instance`
+constexpr size_t kFrameBytes = 224;     // WGSL `Frame`
 constexpr size_t kItemWords = 16;       // WGSL `Item` (cull shader)
 constexpr size_t kCullFrameBytes = 208; // WGSL `CullFrame`
 constexpr size_t kCounters = 8;         // cull counters, see kCullWGSL
@@ -193,6 +194,8 @@ struct Renderer::Impl {
     ShaderModuleRef shader;
     std::string shader_source;
     RenderPipelineRef tri_double, tri_single, tri_blend, lines, lines_blend, points;
+    // The same without the faces' depth bias: kDepthOffset overlays, in front of coplanar faces.
+    RenderPipelineRef tri_double_front, tri_single_front, tri_blend_front;
     RenderPipelineRef wide, wide_blend;         // lines / points wider than a pixel, as quads (vs_wide)
     RenderPipelineRef pick_double, pick_single; // id + world-position targets, 1 sample
     BufferRef dummy;
@@ -238,6 +241,7 @@ struct Renderer::Impl {
     Mat4 view{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     Mat4 proj{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     bool ortho = false;
+    std::vector<float> clip_planes;                     // 4 floats per section plane
     float clear[4] = {0.2235f, 0.2235f, 0.2235f, 1.0f}; // #393939, the viewer's background
     float ambient = 1.5707964f;                         // the viewer's AmbientLight(0xffffff, PI / 2)
     float diffuse = 1.4f;                               // its camera-tracking DirectionalLight(0xffffff, 1.4)
@@ -248,8 +252,9 @@ struct Renderer::Impl {
         create_layouts();
         create_pipelines();
         dummy = make_buffer(16, WGPUBufferUsage_Storage, "adacpp.dummy");
-        frame_buf = make_buffer(112, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst, "adacpp.frame");
-        pick_frame_buf = make_buffer(112, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst, "adacpp.pick_frame");
+        frame_buf = make_buffer(kFrameBytes, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst, "adacpp.frame");
+        pick_frame_buf =
+            make_buffer(kFrameBytes, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst, "adacpp.pick_frame");
         create_pick_targets();
         create_cull();
     }
@@ -421,6 +426,9 @@ struct Renderer::Impl {
         tri_double = make_pipeline("adacpp.tri_double", "vs_tri", tri, WGPUCullMode_None, false, true);
         tri_single = make_pipeline("adacpp.tri_single", "vs_tri", tri, WGPUCullMode_Back, false, true);
         tri_blend = make_pipeline("adacpp.tri_blend", "vs_tri", tri, WGPUCullMode_None, true, true);
+        tri_double_front = make_pipeline("adacpp.tri_double_front", "vs_tri", tri, WGPUCullMode_None, false, false);
+        tri_single_front = make_pipeline("adacpp.tri_single_front", "vs_tri", tri, WGPUCullMode_Back, false, false);
+        tri_blend_front = make_pipeline("adacpp.tri_blend_front", "vs_tri", tri, WGPUCullMode_None, true, false);
         lines =
             make_pipeline("adacpp.lines", "vs_list", WGPUPrimitiveTopology_LineList, WGPUCullMode_None, false, false);
         lines_blend = make_pipeline("adacpp.lines_blend", "vs_list", WGPUPrimitiveTopology_LineList, WGPUCullMode_None,
@@ -1100,7 +1108,7 @@ struct Renderer::Impl {
             cam[i] = -(view[i * 4 + 0] * view[12] + view[i * 4 + 1] * view[13] + view[i * 4 + 2] * view[14]);
             fwd[i] = -view[i * 4 + 2];
         }
-        float frame[28] = {};
+        float frame[kFrameBytes / 4] = {};
         std::memcpy(frame, view_proj.data(), 64);
         frame[16] = cam[0];
         frame[17] = cam[1];
@@ -1113,6 +1121,9 @@ struct Renderer::Impl {
         frame[25] = diffuse;
         frame[26] = float(std::max(target_w, 1u));
         frame[27] = float(std::max(target_h, 1u));
+        const uint32_t clip_count = uint32_t(clip_planes.size() / 4);
+        std::memcpy(frame + 28, &clip_count, 4);
+        std::copy(clip_planes.begin(), clip_planes.end(), frame + 32);
         wgpuQueueWriteBuffer(queue, buf, 0, frame, sizeof(frame));
     }
 
@@ -1301,7 +1312,13 @@ struct Renderer::Impl {
                     continue;
                 if (args ? !(*in_view)[inst->gpu_index] : inst->vis_count == 0)
                     continue;
-                use(transparent ? r.tri_blend : (inst->desc.flags & kDoubleSided) ? r.tri_double : r.tri_single);
+                const bool front = inst->desc.flags & kDepthOffset;
+                if (transparent)
+                    use(front ? r.tri_blend_front : r.tri_blend);
+                else if (inst->desc.flags & kDoubleSided)
+                    use(front ? r.tri_double_front : r.tri_double);
+                else
+                    use(front ? r.tri_single_front : r.tri_single);
                 wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
                 if (args)
                     wgpuRenderPassEncoderDrawIndirect(pass, args, uint64_t(inst->gpu_index) * 16);
@@ -1638,6 +1655,11 @@ void Renderer::set_background(float r, float g, float b, float a) {
     impl_->clear[1] = g;
     impl_->clear[2] = b;
     impl_->clear[3] = a;
+}
+
+void Renderer::set_clip_planes(const float *planes, size_t count) {
+    count = std::min(count, kMaxClipPlanes);
+    impl_->clip_planes.assign(planes, planes + count * 4);
 }
 
 void Renderer::set_lighting(float ambient, float diffuse) {

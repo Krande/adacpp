@@ -4,7 +4,7 @@
 namespace adacpp::render {
 
 // Layout contract with renderer.cpp:
-//   Frame     uniform, 112 bytes
+//   Frame     uniform, 224 bytes (with the section planes)
 //   Instance  storage, 112 bytes each (model, colour, flags, segment base, morph influence, visible base,
 //             material: metalness, roughness, specular on/off)
 //   segstate  2 x u32 per segment: RGBA8 colour override (alpha 0 = none), flags
@@ -25,6 +25,8 @@ struct Frame {
     cam_pos: vec4<f32>,
     light_dir: vec4<f32>,
     params: vec4<f32>, // ambient, headlight, target width, target height (pixels)
+    clip_info: vec4<u32>, // x: section plane count
+    clip: array<vec4<f32>, 6>, // section planes (normal, constant): cut where dot(n, p) + constant < 0
 };
 
 struct Instance {
@@ -43,6 +45,7 @@ const FLAG_UNLIT: u32 = 2u;
 const FLAG_MORPH_RELATIVE: u32 = 32u;
 const FLAG_HAS_MORPH: u32 = 64u;
 const FLAG_POINTS: u32 = 1024u; // internal: a points instance (vs_wide draws squares, not segments)
+const FLAG_CLIPPED: u32 = 2048u;
 const CLUSTER_VERTS: u32 = {{CLUSTER_VERTS}}u; // Renderer::kClusterMaxTriangles x 3, filled in at load
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -222,8 +225,25 @@ struct PickOut {
     @location(1) world: vec4<f32>,
 };
 
+// Whether the section planes cut this fragment away (three.js' clippingPlanes, union: any plane cuts).
+fn clipped(in: VOut) -> bool {
+    if ((in.flags & FLAG_CLIPPED) == 0u) {
+        return false;
+    }
+    for (var i = 0u; i < min(frame.clip_info.x, 6u); i = i + 1u) {
+        let pl = frame.clip[i];
+        if (dot(pl.xyz, in.world) + pl.w < 0.0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 @fragment
 fn fs_pick(in: VOut) -> PickOut {
+    if (clipped(in)) {
+        discard;
+    }
     var o: PickOut;
     o.id = in.pick;
     o.world = vec4<f32>(in.world, 1.0);
@@ -240,6 +260,9 @@ fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     // Derivatives first, in uniform control flow: the flat normal for geometry without normals.
     let flat_n = cross(dpdx(in.world), dpdy(in.world));
+    if (clipped(in)) {
+        discard;
+    }
     var rgb = in.color.rgb;
     if ((in.flags & FLAG_UNLIT) == 0u) {
         var n = in.normal;

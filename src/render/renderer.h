@@ -46,6 +46,8 @@ enum InstanceFlags : uint32_t {
     kHidden = 1u << 4,        // skip the whole instance
     kMorphRelative = 1u << 5, // morph target holds displacements (else absolute target positions)
     kNoPick = 1u << 8,        // drawn, but never returned by pick() (helpers, overlays, edges)
+    kClipped = 1u << 11,      // cut by the section planes (set_clip_planes), as three.js' clippingPlanes
+    kDepthOffset = 1u << 12,  // triangles: drawn in front of coplanar faces (three.js' negative polygonOffset)
 };
 
 // Segment state flags (second u32 of a segment's state pair).
@@ -140,6 +142,10 @@ public:
     // `occlusion` allows GPU culling with two-pass occlusion culling (used from 2M triangles); off, the CPU
     // culls (frustum, cone).
     void set_culling(bool frustum, bool cone, bool occlusion = true);
+    // Section planes: `count` (at most kMaxClipPlanes) planes as (nx, ny, nz, constant), three.js' Plane. A
+    // point p of a kClipped instance is cut away where dot(n, p) + constant < 0 for any plane.
+    static constexpr size_t kMaxClipPlanes = 6;
+    void set_clip_planes(const float *planes, size_t count);
 
     void render(WGPUTextureView target, uint32_t width, uint32_t height);
 

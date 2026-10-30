@@ -153,6 +153,10 @@ public:
     void set_culling(bool frustum, bool cone, bool occlusion) {
         renderer_->set_culling(frustum, cone, occlusion);
     }
+    // `planes`: `count` x (nx, ny, nz, constant) floats in the wasm heap.
+    void set_clip_planes(uintptr_t planes, uint32_t count) {
+        renderer_->set_clip_planes(ptr<float>(planes), count);
+    }
 
     // GPU pick at canvas pixel (x, y) of a width x height drawing buffer; `callback(result)` runs once the
     // readback lands: {hit, instance, segment, triangle, world: [x, y, z]}.
@@ -232,6 +236,7 @@ EMSCRIPTEN_BINDINGS(adacpp_render) {
         .function("setBackground", &WebRenderer::set_background)
         .function("setLighting", &WebRenderer::set_lighting)
         .function("setCulling", &WebRenderer::set_culling)
+        .function("setClipPlanes", &WebRenderer::set_clip_planes)
         .function("pick", &WebRenderer::pick)
         .function("stats", &WebRenderer::stats)
         .function("readCullStats", &WebRenderer::read_cull_stats);

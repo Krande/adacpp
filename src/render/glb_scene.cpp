@@ -303,6 +303,7 @@ void normalize(float v[3]) {
 
 InstanceDesc material_desc(const tinygltf::Model &model, int material, bool vertex_colors) {
     InstanceDesc idesc;
+    idesc.flags |= kClipped; // a loaded model is cut by the section planes, when any are set
     if (vertex_colors)
         idesc.flags |= kVertexColors;
     // No material: glTF's default material, as three.js' GLTFLoader builds it (metallic 1, roughness 1).
