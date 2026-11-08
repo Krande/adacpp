@@ -10,6 +10,7 @@
 #include <memory>
 #include <string>
 
+#include "glb_scene.h"
 #include "renderer.h"
 
 extern "C" WGPUDevice emscripten_webgpu_get_device(void);
@@ -83,6 +84,60 @@ public:
         renderer_->render(view, width_, height_);
         wgpuTextureViewRelease(view);
         wgpuTextureRelease(st.texture);
+    }
+
+    // A GLB (its bytes at `bytes`, `length` long) added to the scene through the same reader the Python
+    // offscreen renderer uses (glb_scene.cpp), so a model draws as its poster does. `opts` (all optional):
+    // {yUp, lineWidth, memberWidth, pointSize, lineColor: [r, g, b, a] linear, doubleSided,
+    //  featureEdgeAngleDeg, keepPositions}. Returns {bounds: [6], featureEdges, geometries: [{geometry,
+    // instance, topology, vertexCount, vertexColors, featureEdges, positions?: Float32Array}]}.
+    emscripten::val load_glb(uintptr_t bytes, uint32_t length, emscripten::val opts) {
+        auto num = [&](const char *k, float d) {
+            const emscripten::val v = opts[k];
+            return v.isNumber() ? v.as<float>() : d;
+        };
+        auto flag = [&](const char *k) {
+            const emscripten::val v = opts[k];
+            return !v.isUndefined() && !v.isNull() && v.as<bool>();
+        };
+        GlbOptions o;
+        if (!opts.isUndefined() && !opts.isNull()) {
+            o.y_up_to_z_up = flag("yUp");
+            o.line_width = num("lineWidth", 1.0f);
+            o.member_width = num("memberWidth", 1.0f);
+            o.point_size = num("pointSize", 1.0f);
+            o.double_sided = flag("doubleSided");
+            o.feature_edge_angle_deg = num("featureEdgeAngleDeg", 0.0f);
+            o.keep_positions = flag("keepPositions");
+            const emscripten::val c = opts["lineColor"];
+            if (c.isArray())
+                for (int i = 0; i < 4; ++i)
+                    o.line_color[i] = c[i].as<float>();
+        }
+        const auto *p = ptr<unsigned char>(bytes);
+        GlbLoadResult r = load_glb_bytes(*renderer_, std::vector<unsigned char>(p, p + length), o);
+        emscripten::val out = emscripten::val::object();
+        emscripten::val bounds = emscripten::val::array();
+        for (float b : r.bounds)
+            bounds.call<void>("push", b);
+        out.set("bounds", bounds);
+        out.set("featureEdges", double(r.feature_edges));
+        emscripten::val list = emscripten::val::array();
+        for (const GlbGeometry &g : r.loaded) {
+            emscripten::val e = emscripten::val::object();
+            e.set("geometry", g.geometry);
+            e.set("instance", g.instance);
+            e.set("topology", uint32_t(g.topology));
+            e.set("vertexCount", g.vertex_count);
+            e.set("vertexColors", g.vertex_colors);
+            e.set("featureEdges", g.feature_edges);
+            if (!g.positions.empty()) // a copy: the view would dangle once `r` goes
+                e.set("positions", emscripten::val::global("Float32Array")
+                                       .new_(emscripten::typed_memory_view(g.positions.size(), g.positions.data())));
+            list.call<void>("push", e);
+        }
+        out.set("geometries", list);
+        return out;
     }
 
     uint32_t add_geometry(uint32_t topology, uintptr_t positions, uint32_t vertex_count, uintptr_t normals,
@@ -226,6 +281,7 @@ EMSCRIPTEN_BINDINGS(adacpp_render) {
         .constructor<const std::string &, const std::string &>()
         .function("resize", &WebRenderer::resize)
         .function("render", &WebRenderer::render)
+        .function("loadGlb", &WebRenderer::load_glb)
         .function("addGeometry", &WebRenderer::add_geometry)
         .function("updateColors", &WebRenderer::update_colors)
         .function("updateMorph", &WebRenderer::update_morph)

@@ -360,8 +360,12 @@ struct Renderer::Impl {
         if (depth_bias != 0) {
             // three.js' polygonOffset: faces pushed back so the feature edges on them win the depth test
             // (the CAD materials), or an overlay pulled in front of what it lies on (negative offsets).
-            ds.depthBias = 2 * depth_bias;
-            ds.depthBiasSlopeScale = 1.5f * float(depth_bias);
+            // polygonOffset(1, 1), as the viewer's FEA materials set it. A larger slope term pushed a
+            // face seen at a grazing angle back by more than a thin plate's thickness at poster
+            // resolution, and the hidden edge under it (an I-beam's web-flange junction) broke through
+            // as a dashed line.
+            ds.depthBias = depth_bias;
+            ds.depthBiasSlopeScale = float(depth_bias);
         }
 
         WGPURenderPipelineDescriptor d = WGPU_RENDER_PIPELINE_DESCRIPTOR_INIT;

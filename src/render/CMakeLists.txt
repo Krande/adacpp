@@ -20,7 +20,10 @@ target_include_directories(
 
 if(EMSCRIPTEN)
     target_compile_options(adacpp_render_core PUBLIC --use-port=emdawnwebgpu)
-    add_executable(adacpp_render wasm_bindings.cpp)
+    # glb_scene.cpp: the GLB reader the Python offscreen renderer uses, so the browser reads models the
+    # same way. tinygltf (+ json.hpp) is vendored for this build; the native one takes conda's.
+    add_executable(adacpp_render wasm_bindings.cpp glb_scene.cpp)
+    target_include_directories(adacpp_render PRIVATE ${ADACPP_ROOT}/third_party/tinygltf)
     target_link_libraries(adacpp_render PRIVATE adacpp_render_core)
     target_link_options(
         adacpp_render
