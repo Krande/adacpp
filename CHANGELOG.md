@@ -2,6 +2,17 @@
 
 
 
+## v0.37.0 (2026-11-08)
+
+### Feature
+
+* feat: one GLB reader for the browser and Python, feature edges, polygonOffset(1, 1) (#77)
+
+Signed-off-by: dependabot[bot] &lt;support@github.com&gt;
+Co-authored-by: Claude Opus 5.5 &lt;noreply@anthropic.com&gt;
+Co-authored-by: dependabot[bot] &lt;49699333+dependabot[bot]@users.noreply.github.com&gt; ([`375622a`](https://github.com/Krande/adacpp/commit/375622ab8df758cf2043f6e3c5059db86bb0027d))
+
+
 ## v0.36.0 (2026-10-30)
 
 ### Feature
