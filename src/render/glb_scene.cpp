@@ -1,7 +1,5 @@
 #include "glb_scene.h"
 
-#ifndef __EMSCRIPTEN__
-
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -9,12 +7,19 @@
 #include <map>
 #include <tuple>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 
 #define TINYGLTF_IMPLEMENTATION
 #define TINYGLTF_NO_STB_IMAGE_WRITE
 #define TINYGLTF_NO_EXTERNAL_IMAGE
+#ifdef __EMSCRIPTEN__
+// The renderer does not texture: no image decoder in the browser build (load_glb_bytes installs a no-op
+// image loader on every host anyway).
+#define TINYGLTF_NO_STB_IMAGE
+#else
 #define STB_IMAGE_IMPLEMENTATION
+#endif
 #include <tiny_gltf.h>
 
 #include <meshoptimizer.h>
@@ -386,8 +391,12 @@ public:
         const uint32_t base = uint32_t(b.vertex_count());
         for (size_t v = 0; v < nv; ++v) {
             const float *p = &positions[v * 3];
-            for (int k = 0; k < 3; ++k)
-                b.positions.push_back(m[k] * p[0] + m[4 + k] * p[1] + m[8 + k] * p[2] + m[12 + k]);
+            for (int k = 0; k < 3; ++k) {
+                const float w = m[k] * p[0] + m[4 + k] * p[1] + m[8 + k] * p[2] + m[12 + k];
+                b.positions.push_back(w);
+                res_.bounds[k] = std::min(res_.bounds[k], w);
+                res_.bounds[3 + k] = std::max(res_.bounds[3 + k], w);
+            }
             float n[3] = {0, 0, 0}; // zero: the shader derives a flat normal
             if (!normals.empty()) {
                 const float *s = &normals[v * 3];
@@ -455,7 +464,8 @@ private:
         gd.index_count = b.indices.size();
         gd.segments = b.segments.data();
         gd.segment_count = b.segments.size() / 2;
-        const uint32_t inst = r_.add_instance(r_.add_geometry(gd));
+        const uint32_t geom = r_.add_geometry(gd);
+        const uint32_t inst = r_.add_instance(geom);
         InstanceDesc desc = material_desc(model_, b.material, b.any_colors);
         if (b.topology == Topology::Lines) {
             desc.line_width = b.any_colors ? options_.member_width : options_.line_width;
@@ -469,11 +479,53 @@ private:
         r_.set_instance(inst, desc);
         res_.geometries++;
         res_.instances++;
+        GlbGeometry rec;
+        rec.geometry = geom;
+        rec.instance = inst;
+        rec.topology = b.topology;
+        rec.vertex_count = uint32_t(b.vertex_count());
+        rec.vertex_colors = b.any_colors;
+        if (options_.keep_positions) {
+            rec.positions = b.positions;
+            rec.indices = b.indices;
+        }
+        res_.loaded.push_back(std::move(rec));
+        if (b.topology == Topology::Triangles && options_.feature_edge_angle_deg > 0.0f)
+            add_feature_edges(b);
         const Topology topo = b.topology;
         const int material = b.material;
         b = Batch{};
         b.topology = topo;
         b.material = material;
+    }
+
+    // The batch's feature edges as a line overlay (GlbOptions::feature_edge_angle_deg), drawn like the
+    // GLB's own uncoloured lines; the faces already sit behind coplanar lines (kDepthBack).
+    void add_feature_edges(const Batch &b) {
+        const std::vector<float> lines = feature_edges(b.positions, b.indices, options_.feature_edge_angle_deg);
+        if (lines.empty())
+            return;
+        GeometryDesc gd;
+        gd.topology = Topology::Lines;
+        gd.positions = lines.data();
+        gd.vertex_count = lines.size() / 3;
+        const uint32_t geom = r_.add_geometry(gd);
+        const uint32_t inst = r_.add_instance(geom);
+        InstanceDesc desc;
+        desc.flags = kClipped | kUnlit;
+        desc.color = options_.line_color[3] > 0.0f ? options_.line_color : std::array<float, 4>{0, 0, 0, 1};
+        desc.line_width = options_.line_width;
+        r_.set_instance(inst, desc);
+        res_.geometries++;
+        res_.instances++;
+        res_.feature_edges += lines.size() / 6;
+        GlbGeometry rec;
+        rec.geometry = geom;
+        rec.instance = inst;
+        rec.topology = Topology::Lines;
+        rec.vertex_count = uint32_t(lines.size() / 3);
+        rec.feature_edges = true;
+        res_.loaded.push_back(std::move(rec));
     }
 
     Renderer &r_;
@@ -502,13 +554,6 @@ void walk(Batcher &batcher, const tinygltf::Model &model, int node_index, const 
 } // namespace
 
 GlbLoadResult load_glb(Renderer &renderer, const std::string &path, const GlbOptions &options) {
-    tinygltf::TinyGLTF loader;
-    tinygltf::Model model;
-    std::string err, warn;
-    // Images are never needed: the renderer does not texture.
-    loader.SetImageLoader([](tinygltf::Image *, const int, std::string *, std::string *, int, int,
-                             const unsigned char *, int, void *) { return true; },
-                          nullptr);
     std::vector<unsigned char> bytes;
     {
         std::ifstream f(path, std::ios::binary);
@@ -516,15 +561,27 @@ GlbLoadResult load_glb(Renderer &renderer, const std::string &path, const GlbOpt
             throw std::runtime_error("adacpp.render: cannot open " + path);
         bytes.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
     }
+    return load_glb_bytes(renderer, std::move(bytes), options, path);
+}
+
+GlbLoadResult load_glb_bytes(Renderer &renderer, std::vector<unsigned char> bytes, const GlbOptions &options,
+                             const std::string &name) {
+    tinygltf::TinyGLTF loader;
+    tinygltf::Model model;
+    std::string err, warn;
+    // Images are never needed: the renderer does not texture.
+    loader.SetImageLoader([](tinygltf::Image *, const int, std::string *, std::string *, int, int,
+                             const unsigned char *, int, void *) { return true; },
+                          nullptr);
     bytes = decode_meshopt_glb(std::move(bytes));
     const bool ok = loader.LoadBinaryFromMemory(&model, &err, &warn, bytes.data(), unsigned(bytes.size()));
     bytes.clear();
     bytes.shrink_to_fit();
     if (!ok)
-        throw std::runtime_error("adacpp.render: failed to read " + path + ": " + err);
+        throw std::runtime_error("adacpp.render: failed to read " + name + ": " + err);
     for (const auto &ext : model.extensionsRequired)
         if (ext == "KHR_draco_mesh_compression")
-            throw std::runtime_error("adacpp.render: " + path + " requires " + ext + ", not supported");
+            throw std::runtime_error("adacpp.render: " + name + " requires " + ext + ", not supported");
 
     // glTF y-up -> z-up: rotate +90 degrees about x.
     const Mat4 root = options.y_up_to_z_up ? Mat4{1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1}
@@ -541,6 +598,82 @@ GlbLoadResult load_glb(Renderer &renderer, const std::string &path, const GlbOpt
     }
     batcher.finish();
     return res;
+}
+
+std::vector<float> feature_edges(const std::vector<float> &positions, const std::vector<uint32_t> &indices,
+                                 float angle_deg) {
+    // Weld by position (a tessellated GLB is a triangle soup), quantised to 1e-4 model units as the viewer
+    // does (frontend utils/mesh_select/edgeCore.ts).
+    struct Key {
+        int64_t x, y, z;
+        bool operator==(const Key &o) const {
+            return x == o.x && y == o.y && z == o.z;
+        }
+    };
+    struct KeyHash {
+        size_t operator()(const Key &k) const {
+            return size_t(k.x * 73856093) ^ size_t(k.y * 19349663) ^ size_t(k.z * 83492791);
+        }
+    };
+    const size_t nv = positions.size() / 3;
+    std::unordered_map<Key, uint32_t, KeyHash> weld;
+    weld.reserve(nv);
+    std::vector<uint32_t> id(nv);
+    for (size_t v = 0; v < nv; ++v) {
+        const Key k{std::llround(positions[v * 3] * 1e4), std::llround(positions[v * 3 + 1] * 1e4),
+                    std::llround(positions[v * 3 + 2] * 1e4)};
+        id[v] = weld.emplace(k, uint32_t(v)).first->second;
+    }
+
+    const size_t nt = indices.size() / 3;
+    std::vector<float> normal(nt * 3, 0.0f);
+    for (size_t t = 0; t < nt; ++t) {
+        const float *a = &positions[id[indices[t * 3]] * 3], *b = &positions[id[indices[t * 3 + 1]] * 3],
+                    *c = &positions[id[indices[t * 3 + 2]] * 3];
+        const float u[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, w[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+        float n[3] = {u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]};
+        normalize(n);
+        std::copy(n, n + 3, &normal[t * 3]);
+    }
+
+    // Edge (lo << 32 | hi) -> the first face on it, how many faces share it, and (once a second face
+    // arrives) whether the two meet at more than the angle.
+    struct Use {
+        uint32_t first, count;
+        bool sharp;
+    };
+    std::unordered_map<uint64_t, Use> edges;
+    edges.reserve(nt * 2);
+    std::vector<uint64_t> order; // first-seen order, so the output is deterministic
+    const float cos_angle = std::cos(angle_deg * 3.14159265358979f / 180.0f);
+    for (size_t t = 0; t < nt; ++t) {
+        const uint32_t v[3] = {id[indices[t * 3]], id[indices[t * 3 + 1]], id[indices[t * 3 + 2]]};
+        if (v[0] == v[1] || v[1] == v[2] || v[0] == v[2])
+            continue; // collapsed by the weld
+        for (int e = 0; e < 3; ++e) {
+            const uint32_t lo = std::min(v[e], v[(e + 1) % 3]), hi = std::max(v[e], v[(e + 1) % 3]);
+            const uint64_t key = (uint64_t(lo) << 32) | hi;
+            auto [it, fresh] = edges.try_emplace(key, Use{uint32_t(t), 0, false});
+            if (fresh)
+                order.push_back(key);
+            it->second.count++;
+            if (it->second.count == 2) {
+                const float *n1 = &normal[it->second.first * 3], *n2 = &normal[t * 3];
+                it->second.sharp = n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2] <= cos_angle;
+            }
+        }
+    }
+    std::vector<float> out;
+    for (const uint64_t key : order) {
+        const Use &u = edges[key];
+        // boundary (1) and non-manifold (>2) edges always; shared ones when the faces meet at the angle
+        const bool show = u.count != 2 || u.sharp;
+        if (!show)
+            continue;
+        for (const uint32_t v : {uint32_t(key >> 32), uint32_t(key & 0xFFFFFFFFu)})
+            out.insert(out.end(), &positions[v * 3], &positions[v * 3] + 3);
+    }
+    return out;
 }
 
 Camera look_at(const float eye[3], const float target[3], std::array<float, 3> up, float fov_y_deg, float aspect,
@@ -606,5 +739,3 @@ Camera frame_bounds(const std::array<float, 6> &b, std::array<float, 3> directio
 }
 
 } // namespace adacpp::render
-
-#endif

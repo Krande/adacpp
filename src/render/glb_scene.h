@@ -1,14 +1,30 @@
-// Native GLB -> Renderer scene loading (tinygltf), and a camera that frames it the way the viewer does.
+// GLB -> Renderer scene loading (tinygltf), and a camera that frames it the way the viewer does. The one
+// GLB reader for every host: the Python offscreen renderer (posters) and the browser (wasm_bindings), so
+// a model draws the same in both.
 #pragma once
-
-#ifndef __EMSCRIPTEN__
 
 #include <array>
 #include <string>
+#include <vector>
 
 #include "renderer.h"
 
 namespace adacpp::render {
+
+// One geometry the load added (a batch of primitives of one material and topology; or a feature-edge
+// overlay), with its instance, so a caller can drive it afterwards (a morph, per-vertex colours).
+struct GlbGeometry {
+    uint32_t geometry = 0;
+    uint32_t instance = 0;
+    Topology topology = Topology::Triangles;
+    uint32_t vertex_count = 0;
+    bool vertex_colors = false;
+    bool feature_edges = false; // the overlay GlbOptions::feature_edge_angle_deg added
+    // World-space positions (3 per vertex), in the geometry's vertex order, and its index buffer (into
+    // them), when GlbOptions::keep_positions.
+    std::vector<float> positions;
+    std::vector<uint32_t> indices;
+};
 
 struct GlbLoadResult {
     uint32_t geometries = 0;
@@ -16,6 +32,10 @@ struct GlbLoadResult {
     uint64_t vertices = 0;
     uint64_t triangles = 0;
     uint64_t segments = 0; // per-object index ranges (adapy draw ranges), 0 = one per primitive
+    uint64_t feature_edges = 0;
+    // World-space bounds of what was loaded: min xyz, max xyz (inverted when nothing was).
+    std::array<float, 6> bounds{3.4e38f, 3.4e38f, 3.4e38f, -3.4e38f, -3.4e38f, -3.4e38f};
+    std::vector<GlbGeometry> loaded;
 };
 
 // Adds every mesh primitive of the GLB's default scene as one geometry + instance, with node transforms
@@ -32,8 +52,24 @@ struct GlbOptions {
     std::array<float, 4> line_color{0, 0, 0, 0};
     // Draw every surface double-sided, whatever its material says (thin shells seen from behind).
     bool double_sided = false;
+    // Above 0: also draw the surfaces' feature edges as Ada Studio's viewer does with tessellation edges
+    // hidden (its default) -- vertices welded by position, then every boundary edge and every edge whose
+    // two faces meet at more than this angle (degrees; the viewer's is 30), in `line_color` at
+    // `line_width`. 0 draws only the lines the GLB carries.
+    float feature_edge_angle_deg = 0.0f;
+    // Keep each added geometry's world-space positions and indices in GlbLoadResult::loaded (for a caller
+    // that builds more geometry on the same vertices, e.g. an FEA mesh's element edges).
+    bool keep_positions = false;
 };
 GlbLoadResult load_glb(Renderer &renderer, const std::string &path, const GlbOptions &options = {});
+// The same from the GLB's bytes (the browser has no file to name). `name` labels errors.
+GlbLoadResult load_glb_bytes(Renderer &renderer, std::vector<unsigned char> bytes, const GlbOptions &options = {},
+                             const std::string &name = "GLB");
+
+// Feature edges of a triangle mesh (positions: 3 per vertex; indices: 3 per triangle), as segment endpoint
+// positions (6 floats per edge): see GlbOptions::feature_edge_angle_deg.
+std::vector<float> feature_edges(const std::vector<float> &positions, const std::vector<uint32_t> &indices,
+                                 float angle_deg);
 
 struct Camera {
     std::array<float, 16> view;
@@ -51,5 +87,3 @@ Camera frame_bounds(const std::array<float, 6> &bounds, std::array<float, 3> dir
                     float fov_y_deg, float aspect, float margin = 1.1f);
 
 } // namespace adacpp::render
-
-#endif
