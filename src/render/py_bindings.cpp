@@ -55,8 +55,7 @@ public:
     }
 
     nb::dict load_glb(const std::string &path, bool y_up, float line_width, float member_width, float point_size,
-                      std::optional<std::array<float, 4>> line_color, bool double_sided,
-                      float feature_edge_angle_deg) {
+                      std::optional<std::array<float, 4>> line_color, bool double_sided, float feature_edge_angle_deg) {
         GlbOptions o;
         o.y_up_to_z_up = y_up;
         o.line_width = line_width;
