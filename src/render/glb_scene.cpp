@@ -485,8 +485,10 @@ private:
         rec.topology = b.topology;
         rec.vertex_count = uint32_t(b.vertex_count());
         rec.vertex_colors = b.any_colors;
-        if (options_.keep_positions)
+        if (options_.keep_positions) {
             rec.positions = b.positions;
+            rec.indices = b.indices;
+        }
         res_.loaded.push_back(std::move(rec));
         if (b.topology == Topology::Triangles && options_.feature_edge_angle_deg > 0.0f)
             add_feature_edges(b);

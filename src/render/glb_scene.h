@@ -20,8 +20,10 @@ struct GlbGeometry {
     uint32_t vertex_count = 0;
     bool vertex_colors = false;
     bool feature_edges = false; // the overlay GlbOptions::feature_edge_angle_deg added
-    // World-space positions (3 per vertex), in the geometry's vertex order, when GlbOptions::keep_positions.
+    // World-space positions (3 per vertex), in the geometry's vertex order, and its index buffer (into
+    // them), when GlbOptions::keep_positions.
     std::vector<float> positions;
+    std::vector<uint32_t> indices;
 };
 
 struct GlbLoadResult {
@@ -55,8 +57,8 @@ struct GlbOptions {
     // two faces meet at more than this angle (degrees; the viewer's is 30), in `line_color` at
     // `line_width`. 0 draws only the lines the GLB carries.
     float feature_edge_angle_deg = 0.0f;
-    // Keep each added geometry's world-space positions in GlbLoadResult::loaded (for a caller that builds
-    // more geometry on the same vertices, e.g. an FEA mesh's element edges).
+    // Keep each added geometry's world-space positions and indices in GlbLoadResult::loaded (for a caller
+    // that builds more geometry on the same vertices, e.g. an FEA mesh's element edges).
     bool keep_positions = false;
 };
 GlbLoadResult load_glb(Renderer &renderer, const std::string &path, const GlbOptions &options = {});

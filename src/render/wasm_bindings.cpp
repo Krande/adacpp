@@ -90,7 +90,8 @@ public:
     // offscreen renderer uses (glb_scene.cpp), so a model draws as its poster does. `opts` (all optional):
     // {yUp, lineWidth, memberWidth, pointSize, lineColor: [r, g, b, a] linear, doubleSided,
     //  featureEdgeAngleDeg, keepPositions}. Returns {bounds: [6], featureEdges, geometries: [{geometry,
-    // instance, topology, vertexCount, vertexColors, featureEdges, positions?: Float32Array}]}.
+    // instance, topology, vertexCount, vertexColors, featureEdges, positions?: Float32Array,
+    // indices?: Uint32Array}]} (positions and indices with keepPositions).
     emscripten::val load_glb(uintptr_t bytes, uint32_t length, emscripten::val opts) {
         auto num = [&](const char *k, float d) {
             const emscripten::val v = opts[k];
@@ -131,9 +132,12 @@ public:
             e.set("vertexCount", g.vertex_count);
             e.set("vertexColors", g.vertex_colors);
             e.set("featureEdges", g.feature_edges);
-            if (!g.positions.empty()) // a copy: the view would dangle once `r` goes
+            if (!g.positions.empty()) // copies: the views would dangle once `r` goes
                 e.set("positions", emscripten::val::global("Float32Array")
                                        .new_(emscripten::typed_memory_view(g.positions.size(), g.positions.data())));
+            if (!g.indices.empty())
+                e.set("indices", emscripten::val::global("Uint32Array")
+                                     .new_(emscripten::typed_memory_view(g.indices.size(), g.indices.data())));
             list.call<void>("push", e);
         }
         out.set("geometries", list);
