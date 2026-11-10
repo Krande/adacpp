@@ -89,7 +89,7 @@ public:
                       const std::string &topology, std::array<float, 4> color, float metalness, float roughness,
                       bool specular, bool double_sided, bool unlit, float line_width, float morph_influence,
                       bool morph_relative, std::optional<Array<float>> model, bool depth_offset,
-                      std::optional<Array<float>> distances, float dash, float gap) {
+                      std::optional<Array<float>> distances, float dash, float gap, bool capped, bool on_top) {
         const size_t nv = positions.size() / 3;
         if (positions.size() % 3 != 0 || nv == 0)
             throw std::invalid_argument("positions: expected (N, 3) floats");
@@ -154,6 +154,10 @@ public:
         d.flags |= kClipped; // cut by set_clip_planes, when any are set
         if (depth_offset)
             d.flags |= kDepthOffset;
+        if (on_top)
+            d.flags |= kOnTop; // drawn over the model, with no depth test
+        if (capped)
+            d.flags |= kCapped; // a closed solid: its cut is filled, with set_section_caps(True)
         if (gd.colors)
             d.flags |= kVertexColors;
         if (double_sided)
@@ -231,6 +235,37 @@ public:
             throw std::invalid_argument("planes: expected (n, 4) floats");
         renderer_.set_clip_planes(planes.data(), planes.size() / 4);
     }
+    void set_section_caps(bool enabled) {
+        renderer_.set_section_caps(enabled);
+    }
+    void set_section_cap_color(float r, float g, float b, float a) {
+        renderer_.set_section_cap_color(r, g, b, a);
+    }
+    // A sprite texture from (H, W, 4) uint8: sRGB-encoded, straight alpha, top row first.
+    uint32_t add_texture(nb::ndarray<const uint8_t, nb::shape<-1, -1, 4>, nb::c_contig, nb::device::cpu> rgba) {
+        return renderer_.add_texture(rgba.data(), uint32_t(rgba.shape(1)), uint32_t(rgba.shape(0)));
+    }
+    // A camera-facing quad (three.js' Sprite); `texture` None draws the plain tint. Returns the sprite id.
+    uint32_t add_sprite(std::optional<uint32_t> texture, std::array<float, 3> position, std::array<float, 2> scale,
+                        std::array<float, 2> center, float rotation, std::array<float, 4> color, bool size_attenuation,
+                        bool depth_test, bool clipped, float render_order) {
+        SpriteDesc d;
+        d.texture = texture.value_or(kNoTexture);
+        d.position = position;
+        d.scale = scale;
+        d.center = center;
+        d.rotation = rotation;
+        d.color = color;
+        d.flags = (size_attenuation ? kSpriteSizeAttenuation : 0u) | (depth_test ? kSpriteDepthTest : 0u) |
+                  (clipped ? kSpriteClipped : 0u);
+        d.render_order = render_order;
+        const uint32_t id = renderer_.add_sprite();
+        renderer_.set_sprite(id, d);
+        return id;
+    }
+    void remove_sprite(uint32_t sprite) {
+        renderer_.remove_sprite(sprite);
+    }
     std::array<float, 6> bounds() const {
         return renderer_.bounds();
     }
@@ -285,6 +320,7 @@ public:
         d["instance"] = hit.instance;
         d["segment"] = hit.segment;
         d["triangle"] = hit.triangle;
+        d["topology"] = hit.topology; // 0 a triangle, 2 a point (its index is in "triangle")
         d["world"] = std::array<float, 3>{hit.world[0], hit.world[1], hit.world[2]};
         return d;
     }
@@ -357,7 +393,8 @@ NB_MODULE(_render, m) {
              "topology"_a = "triangles", "color"_a = std::array<float, 4>{1, 1, 1, 1}, "metalness"_a = 0.0f,
              "roughness"_a = 1.0f, "specular"_a = true, "double_sided"_a = false, "unlit"_a = false,
              "line_width"_a = 1.0f, "morph_influence"_a = 0.0f, "morph_relative"_a = true, "model"_a = nb::none(),
-             "depth_offset"_a = false, "distances"_a = nb::none(), "dash"_a = 0.0f, "gap"_a = 0.0f)
+             "depth_offset"_a = false, "distances"_a = nb::none(), "dash"_a = 0.0f, "gap"_a = 0.0f, "capped"_a = false,
+             "on_top"_a = false)
         .def("set_morph_influence", &OffscreenRenderer::set_morph_influence, "instance"_a, "influence"_a)
         .def("set_visible", &OffscreenRenderer::set_visible, "instance"_a, "visible"_a)
         .def("update_colors", &OffscreenRenderer::update_colors, "instance"_a, "colors"_a)
@@ -372,6 +409,18 @@ NB_MODULE(_render, m) {
         .def("set_lighting", &OffscreenRenderer::set_lighting, "ambient"_a, "headlight"_a)
         .def("set_culling", &OffscreenRenderer::set_culling, "frustum"_a = true, "cone"_a = true, "occlusion"_a = true)
         .def("set_clip_planes", &OffscreenRenderer::set_clip_planes, "planes"_a)
+        .def("set_section_caps", &OffscreenRenderer::set_section_caps, "enabled"_a,
+             "Fill the cut through meshes added with capped=True (closed solids) on every clip plane.")
+        .def("set_section_cap_color", &OffscreenRenderer::set_section_cap_color, "r"_a, "g"_a, "b"_a, "a"_a = 1.0f,
+             "One linear RGB colour for every cap; a = 0 gives each cap its mesh's base colour.")
+        .def("add_texture", &OffscreenRenderer::add_texture, "rgba"_a,
+             "A sprite texture from (H, W, 4) uint8: sRGB-encoded, straight alpha, top row first.")
+        .def("add_sprite", &OffscreenRenderer::add_sprite, "texture"_a = nb::none(),
+             "position"_a = std::array<float, 3>{0, 0, 0}, "scale"_a = std::array<float, 2>{1, 1},
+             "center"_a = std::array<float, 2>{0.5f, 0.5f}, "rotation"_a = 0.0f,
+             "color"_a = std::array<float, 4>{1, 1, 1, 1}, "size_attenuation"_a = true, "depth_test"_a = true,
+             "clipped"_a = false, "render_order"_a = 0.0f)
+        .def("remove_sprite", &OffscreenRenderer::remove_sprite, "sprite"_a)
         .def("bounds", &OffscreenRenderer::bounds)
         .def("render", &OffscreenRenderer::render)
         .def("render_png", &OffscreenRenderer::render_png)

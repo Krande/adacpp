@@ -4,9 +4,9 @@
 namespace adacpp::render {
 
 // Layout contract with renderer.cpp:
-//   Frame     uniform, 224 bytes (with the section planes)
-//   Instance  storage, 112 bytes each (model, colour, flags, segment base, morph influence, visible base,
-//             material: metalness, roughness, specular on/off)
+//   Frame     uniform, 240 bytes (with the section planes)
+//   Instance  storage, 128 bytes each (model, colour, flags, segment base, morph influence, visible base,
+//             material: metalness, roughness, specular on/off; world-space bounding sphere)
 //   segstate  2 x u32 per segment: RGBA8 colour override (alpha 0 = none), flags (1 hidden, 2 matte override)
 //   visible   visible clusters as (instance, cluster) pairs, one region per instance starting at
 //             Instance.vis_base; a draw starts at vertex vis_base x CLUSTER_VERTS, so vs_tri finds its
@@ -26,8 +26,11 @@ struct Frame {
     cam_pos: vec4<f32>,
     light_dir: vec4<f32>,
     params: vec4<f32>, // ambient, headlight, target width, target height (pixels)
-    clip_info: vec4<u32>, // x: section plane count
+    // x: section plane count, y: the plane being capped + 1 (cap passes, else 0), z: the least size of a
+    // point in pixels (the pick pass, else 0)
+    clip_info: vec4<u32>,
     clip: array<vec4<f32>, 6>, // section planes (normal, constant): cut where dot(n, p) + constant < 0
+    cap_color: vec4<f32>, // section caps: linear rgb for every cap; a = 0: each instance's base colour
 };
 
 struct Instance {
@@ -39,6 +42,7 @@ struct Instance {
     vis_base: u32,
     material: vec4<f32>, // metalness, roughness, specular (0 = Lambert), lines/points: segment-id offset (u32 bits)
                          // lines/points: x = width / diameter in pixels; dashed lines: y = dash, z = gap
+    bounds: vec4<f32>,   // world-space bounding sphere: centre, radius
 };
 
 const FLAG_VERTEX_COLORS: u32 = 1u;
@@ -50,6 +54,9 @@ const FLAG_CLIPPED: u32 = 2048u;
 const FLAG_DASHED: u32 = 8192u; // internal: dashed lines
 const SEGMENT_MATTE: u32 = 2u; // segment state flag: the colour override is a matte surface
 const FLAG_UNDERLAY: u32 = 32768u; // lines under the model (a ground grid): drawn first and pushed back
+const FLAG_CAPPED: u32 = 65536u; // its cut is capped; the renderer picks the instances, the shaders do not read it
+const FLAG_ON_TOP: u32 = 131072u; // drawn last with no depth test; the renderer picks the pipeline, as above
+const FLAG_CAP: u32 = 1073741824u; // internal, set by vs_cap: a fragment of the cap on plane clip_info.y - 1
 
 // An underlay line a hair farther away than the face on its plane, so the face wins even where the two
 // rasterise to slightly different depths (WebGPU's depth bias applies to triangles only).
@@ -78,7 +85,7 @@ struct VOut {
     @location(2) color: vec4<f32>,
     @location(3) @interpolate(flat) flags: u32,
     @location(4) @interpolate(flat) material: vec4<f32>,
-    @location(5) @interpolate(flat) pick: vec4<u32>, // instance + 1, primitive, segment, -
+    @location(5) @interpolate(flat) pick: vec4<u32>, // instance + 1, primitive, segment, topology (0 or 2)
     @location(6) dist: f32, // lines: distance along the line
 };
 
@@ -116,7 +123,7 @@ fn shade_vertex(inst: Instance, vi: u32, seg: i32, ii: u32, primitive: u32) -> V
     out.color = c;
     out.flags = inst.flags;
     out.material = material;
-    out.pick = vec4<u32>(ii + 1u, primitive, u32(max(seg, 0)), 0u);
+    out.pick = vec4<u32>(ii + 1u, primitive, u32(max(seg, 0)), select(0u, 2u, (inst.flags & FLAG_POINTS) != 0u));
     out.dist = vtx[vi * 6u + 3u];
     return out;
 }
@@ -196,7 +203,7 @@ fn vs_wide(@builtin(vertex_index) vid: u32, @builtin(instance_index) ii: u32) ->
     } else if (cb.z < 0.0) {
         cb = mix(cb, ca, cb.z / (cb.z - ca.z));
     }
-    let half_px = 0.5 * max(inst.material.x, 1.0);
+    let half_px = 0.5 * max(inst.material.x, max(1.0, f32(frame.clip_info.z)));
     let viewport = frame.params.zw;
     var out = va;
     var c = ca;
@@ -217,7 +224,53 @@ fn vs_wide(@builtin(vertex_index) vid: u32, @builtin(instance_index) ii: u32) ->
     }
     // Pixels -> clip space at this vertex's depth.
     c = vec4<f32>(c.xy + offset * 2.0 / viewport * c.w, c.z, c.w);
+    if (points && frame.clip_info.z > 0u) {
+        // Picking: the square is flat at the point's depth, so a point lying on a face would lose half of
+        // itself to that face. Nearer by 0.2% of its distance (perspective) or 0.02% of the depth range.
+        c.z = c.z - select(2e-4, 2e-3 * (c.w - c.z), frame.cam_pos.w > 0.5);
+    }
     out.pos = underlay(inst, c);
+    return out;
+}
+
+// Section caps, as three.js' stencil capping (webgl_clipping_stencil). Per plane and capped solid:
+//   vs_tri + fs_stencil   the solid cut by that plane alone, no colour or depth: back faces increment the
+//                         stencil and front faces decrement it, leaving non-zero where the plane runs
+//                         through the solid's interior
+//   vs_cap + fs_main      a quad in the plane over the solid's bounding sphere, drawn where the stencil is
+//                         non-zero (and zeroing it), cut by the other planes, lit as three.js'
+//                         MeshStandardMaterial(metalness 0.1, roughness 0.75)
+// vs_reset zeroes what an open mesh's unbalanced faces left outside the quads before the next plane.
+@vertex
+fn vs_cap(@builtin(vertex_index) vid: u32, @builtin(instance_index) ii: u32) -> VOut {
+    let inst = instances[ii];
+    let pl = frame.clip[frame.clip_info.y - 1u];
+    let len = max(length(pl.xyz), 1e-20);
+    let n = pl.xyz / len;
+    let dist = (dot(pl.xyz, inst.bounds.xyz) + pl.w) / len;
+    // The plane cuts the bounding sphere in a disc of this radius around the centre's projection.
+    let half = sqrt(max(inst.bounds.w * inst.bounds.w - dist * dist, 0.0));
+    let centre = inst.bounds.xyz - dist * n;
+    let u = normalize(cross(n, select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(n.x) > 0.7)));
+    let v = cross(n, u);
+    let corner = vid % 6u;
+    let x = select(-1.0, 1.0, corner == 1u || corner == 2u || corner == 4u);
+    let y = select(-1.0, 1.0, corner == 2u || corner == 4u || corner == 5u);
+    let wp = centre + (x * u + y * v) * half;
+    var out: VOut;
+    out.pos = frame.view_proj * vec4<f32>(wp, 1.0);
+    out.world = wp;
+    out.normal = n;
+    out.color = vec4<f32>(select(inst.color.rgb, frame.cap_color.rgb, frame.cap_color.a > 0.0), 1.0);
+    out.flags = FLAG_CLIPPED | FLAG_CAP;
+    out.material = vec4<f32>(0.1, 0.75, 1.0, 0.0);
+    return out;
+}
+
+@vertex
+fn vs_reset(@builtin(vertex_index) vid: u32) -> VOut {
+    var out: VOut;
+    out.pos = vec4<f32>(f32(vid & 1u) * 4.0 - 1.0, f32(vid >> 1u) * 4.0 - 1.0, 0.0, 1.0);
     return out;
 }
 
@@ -252,9 +305,11 @@ fn clipped(in: VOut) -> bool {
     if ((in.flags & FLAG_CLIPPED) == 0u) {
         return false;
     }
+    // A cap lies in its own plane: only the other planes cut it.
+    let own = select(0u, frame.clip_info.y, (in.flags & FLAG_CAP) != 0u);
     for (var i = 0u; i < min(frame.clip_info.x, 6u); i = i + 1u) {
         let pl = frame.clip[i];
-        if (dot(pl.xyz, in.world) + pl.w < 0.0) {
+        if (i + 1u != own && dot(pl.xyz, in.world) + pl.w < 0.0) {
             return true;
         }
     }
@@ -270,6 +325,19 @@ fn fs_pick(in: VOut) -> PickOut {
     o.id = in.pick;
     o.world = vec4<f32>(in.world, 1.0);
     return o;
+}
+
+// Stencil-only draws: nothing reaches the colour target (its write mask is empty).
+@fragment
+fn fs_stencil(in: VOut) -> @location(0) vec4<f32> {
+    let own = frame.clip_info.y;
+    if (own > 0u && (in.flags & FLAG_CLIPPED) != 0u) {
+        let pl = frame.clip[own - 1u];
+        if (dot(pl.xyz, in.world) + pl.w < 0.0) {
+            discard;
+        }
+    }
+    return vec4<f32>(0.0);
 }
 
 fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
@@ -321,6 +389,96 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
 }
 )WGSL";
 
+// Sprites: camera-facing textured quads, three.js' Sprite (its vertex shader, sprite.glsl.js, is reproduced
+// here). One draw of 6 vertices per sprite, in sorted order; the instance index is its slot in `sprites`.
+//
+// Layout contract with renderer.cpp:
+//   SpriteFrame  uniform, 240 bytes
+//   Sprite       storage, 64 bytes each
+//   tex          rgba8unorm-srgb with straight alpha, row 0 at the top of the quad
+inline constexpr const char *kSpriteWGSL = R"WGSL(
+struct SpriteFrame {
+    view: mat4x4<f32>,
+    proj: mat4x4<f32>, // WebGPU clip space (z in [0, w])
+    clip_info: vec4<u32>, // x: section plane count
+    clip: array<vec4<f32>, 6>,
+};
+
+struct Sprite {
+    anchor: vec4<f32>, // world position, rotation (radians)
+    shape: vec4<f32>,  // scale x y, centre x y
+    tint: vec4<f32>,   // linear rgb, opacity
+    flags: vec4<u32>,  // x: SpriteFlags
+};
+
+const SPRITE_SIZE_ATTENUATION: u32 = 1u;
+const SPRITE_DEPTH_TEST: u32 = 2u; // picks the pipeline; the shader does not read it
+const SPRITE_HIDDEN: u32 = 4u;     // dropped by the renderer
+const SPRITE_CLIPPED: u32 = 8u;
+
+@group(0) @binding(0) var<uniform> sf: SpriteFrame;
+@group(0) @binding(1) var<storage, read> sprites: array<Sprite>;
+@group(0) @binding(2) var samp: sampler;
+@group(1) @binding(0) var tex: texture_2d<f32>;
+
+struct SOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) world: vec3<f32>,
+    @location(2) @interpolate(flat) tint: vec4<f32>,
+    @location(3) @interpolate(flat) flags: u32,
+};
+
+@vertex
+fn vs_sprite(@builtin(vertex_index) vid: u32, @builtin(instance_index) ii: u32) -> SOut {
+    let s = sprites[ii];
+    let corner = vid % 6u;
+    let p = vec2<f32>(select(-0.5, 0.5, corner == 1u || corner == 2u || corner == 4u),
+                      select(-0.5, 0.5, corner == 2u || corner == 4u || corner == 5u));
+    var mv = sf.view * vec4<f32>(s.anchor.xyz, 1.0);
+    var scale = s.shape.xy;
+    // three.js: without size attenuation a perspective camera (projectionMatrix[2][3] == -1) scales the
+    // sprite by its depth, which the perspective divide then cancels; an orthographic one changes nothing.
+    if ((s.flags.x & SPRITE_SIZE_ATTENUATION) == 0u && sf.proj[2][3] == -1.0) {
+        scale = scale * -mv.z;
+    }
+    let aligned = (p - (s.shape.zw - vec2<f32>(0.5))) * scale;
+    let c = cos(s.anchor.w);
+    let sn = sin(s.anchor.w);
+    let rotated = vec2<f32>(c * aligned.x - sn * aligned.y, sn * aligned.x + c * aligned.y);
+    mv = vec4<f32>(mv.xy + rotated, mv.zw);
+    var out: SOut;
+    out.pos = sf.proj * mv;
+    out.uv = vec2<f32>(p.x + 0.5, 0.5 - p.y);
+    // Back to world space for the section planes: the view matrix is a rotation and a translation.
+    let rot = mat3x3<f32>(sf.view[0].xyz, sf.view[1].xyz, sf.view[2].xyz);
+    out.world = transpose(rot) * (mv.xyz - sf.view[3].xyz);
+    out.tint = s.tint;
+    out.flags = s.flags.x;
+    return out;
+}
+
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055;
+    return select(hi, lo, c <= vec3<f32>(0.0031308));
+}
+
+@fragment
+fn fs_sprite(in: SOut) -> @location(0) vec4<f32> {
+    let texel = textureSample(tex, samp, in.uv); // sampled first: derivatives need uniform control flow
+    if ((in.flags & SPRITE_CLIPPED) != 0u) {
+        for (var i = 0u; i < min(sf.clip_info.x, 6u); i = i + 1u) {
+            if (dot(sf.clip[i].xyz, in.world) + sf.clip[i].w < 0.0) {
+                discard;
+            }
+        }
+    }
+    let c = texel * in.tint;
+    return vec4<f32>(linear_to_srgb(c.rgb), c.a);
+}
+)WGSL";
+
 // GPU cluster culling with two-pass occlusion culling (the "previous frame's visible set" scheme):
 //   cs_early   draws clusters that were visible last frame and still pass the frustum / cone tests
 //   hzb_*      build a max-depth pyramid from what the early pass drew
@@ -346,6 +504,7 @@ struct Instance {
     morph: f32,
     vis_base: u32,
     material: vec4<f32>,
+    bounds: vec4<f32>,
 };
 
 struct CullFrame {

@@ -16,20 +16,24 @@ namespace adacpp::render {
 
 namespace {
 
-constexpr uint32_t kHasMorph = 1u << 6; // internal: set when the instance's geometry carries a morph target
-constexpr uint32_t kConeOk = 1u << 9;   // internal: cone culling is exact for this instance (GPU culling)
-constexpr uint32_t kPoints = 1u << 10;  // internal: a points instance, for vs_wide
-constexpr uint32_t kDashed = 1u << 13;  // internal: a dashed lines instance (material.y dash, .z gap)
-constexpr size_t kInstanceBytes = 112;  // WGSL `Instance`
-constexpr size_t kFrameBytes = 224;     // WGSL `Frame`
-constexpr size_t kItemWords = 16;       // WGSL `Item` (cull shader)
-constexpr size_t kCullFrameBytes = 208; // WGSL `CullFrame`
-constexpr size_t kCounters = 8;         // cull counters, see kCullWGSL
+constexpr uint32_t kHasMorph = 1u << 6;   // internal: set when the instance's geometry carries a morph target
+constexpr uint32_t kConeOk = 1u << 9;     // internal: cone culling is exact for this instance (GPU culling)
+constexpr uint32_t kPoints = 1u << 10;    // internal: a points instance, for vs_wide
+constexpr uint32_t kDashed = 1u << 13;    // internal: a dashed lines instance (material.y dash, .z gap)
+constexpr size_t kInstanceBytes = 128;    // WGSL `Instance`
+constexpr size_t kFrameBytes = 240;       // WGSL `Frame`
+constexpr size_t kItemWords = 16;         // WGSL `Item` (cull shader)
+constexpr size_t kCullFrameBytes = 208;   // WGSL `CullFrame`
+constexpr size_t kSpriteBytes = 64;       // WGSL `Sprite`
+constexpr size_t kSpriteFrameBytes = 240; // WGSL `SpriteFrame`
+constexpr size_t kCounters = 8;           // cull counters, see kCullWGSL
 // Two-pass occlusion culling costs ~0.35 ms a frame where nothing is hidden (an extra render pass, the
 // multisampled targets stored and reloaded, the depth pyramid) and saves tens of ms where most of a big
 // model is (a 62M-triangle crane: 93 -> 17 ms). Below this many triangles the CPU culls instead.
 constexpr uint64_t kOcclusionMinTriangles = 2'000'000;
 constexpr WGPUTextureFormat kDepthFormat = WGPUTextureFormat_Depth24Plus;
+// The main depth target once section caps have been switched on: they count faces in the stencil.
+constexpr WGPUTextureFormat kDepthStencilFormat = WGPUTextureFormat_Depth24PlusStencil8;
 // Minimum triangles per clustering batch (runs of consecutive segments); see build_clusters. Measured on a
 // 1M-triangle / 25k-object frame model: larger batches fill clusters better, 8192 keeps load time low.
 constexpr size_t kBatchTriangles = 8192;
@@ -158,6 +162,52 @@ TriKey tri_key(uint32_t a, uint32_t b, uint32_t c) {
     return {a, b, c};
 }
 
+// Sprite textures arrive sRGB-encoded with straight alpha. Their mip chain is filtered in linear light,
+// weighted by alpha so that transparent texels (whatever colour they hold) do not darken a label's edge.
+float srgb8_to_linear(uint8_t v) {
+    static const std::array<float, 256> table = [] {
+        std::array<float, 256> t{};
+        for (int i = 0; i < 256; ++i) {
+            const float c = float(i) / 255.0f;
+            t[i] = c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+        }
+        return t;
+    }();
+    return table[v];
+}
+
+uint8_t linear_to_srgb8(float c) {
+    c = std::clamp(c, 0.0f, 1.0f);
+    const float e = c <= 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
+    return uint8_t(std::lround(e * 255.0f));
+}
+
+// The next mip level (half size, rounded down, at least 1) of a w x h RGBA8 image.
+std::vector<uint8_t> half_mip(const std::vector<uint8_t> &src, uint32_t w, uint32_t h) {
+    const uint32_t mw = std::max(1u, w / 2), mh = std::max(1u, h / 2);
+    std::vector<uint8_t> dst(size_t(mw) * mh * 4);
+    for (uint32_t y = 0; y < mh; ++y)
+        for (uint32_t x = 0; x < mw; ++x) {
+            float rgb[3] = {0, 0, 0}, plain[3] = {0, 0, 0}, alpha = 0.0f;
+            for (uint32_t k = 0; k < 4; ++k) {
+                const uint32_t sx = std::min(x * 2 + (k & 1), w - 1), sy = std::min(y * 2 + (k >> 1), h - 1);
+                const uint8_t *t = &src[(size_t(sy) * w + sx) * 4];
+                const float a = float(t[3]) / 255.0f;
+                for (int c = 0; c < 3; ++c) {
+                    const float lin = srgb8_to_linear(t[c]);
+                    rgb[c] += lin * a;
+                    plain[c] += lin;
+                }
+                alpha += a;
+            }
+            uint8_t *o = &dst[(size_t(y) * mw + x) * 4];
+            for (int c = 0; c < 3; ++c)
+                o[c] = linear_to_srgb8(alpha > 0.0f ? rgb[c] / alpha : plain[c] * 0.25f);
+            o[3] = uint8_t(std::lround(alpha * 0.25f * 255.0f));
+        }
+    return dst;
+}
+
 constexpr WGPUTextureFormat kPickIdFormat = WGPUTextureFormat_RGBA32Uint;
 constexpr WGPUTextureFormat kPickPosFormat = WGPUTextureFormat_RGBA32Float;
 
@@ -186,6 +236,13 @@ struct Renderer::Impl {
         uint32_t id = 0, gpu_index = 0, seg_base = 0, vis_base = 0, vis_count = 0;
     };
 
+    struct Texture {
+        uint32_t width = 0, height = 0;
+        TextureRef tex;
+        TextureViewRef view;
+        BindGroupRef bind;
+    };
+
     WGPUDevice device;
     WGPUQueue queue;
     WGPUTextureFormat color_format;
@@ -199,8 +256,34 @@ struct Renderer::Impl {
     // overlays pulled in front of the faces and lines they lie on. Plain faces have no bias, as in three.js.
     RenderPipelineRef tri_double_back, tri_single_back, tri_blend_back;
     RenderPipelineRef tri_double_front, tri_single_front, tri_blend_front;
-    RenderPipelineRef wide, wide_blend;         // lines / points wider than a pixel, as quads (vs_wide)
+    RenderPipelineRef wide, wide_blend; // lines / points wider than a pixel, as quads (vs_wide)
+    // kOnTop instances: the same without a depth test or write.
+    RenderPipelineRef top_double, top_single, top_blend, top_lines, top_lines_blend, top_points, top_wide,
+        top_wide_blend;
+    // kCullBack: transparent, back faces culled.
+    RenderPipelineRef tri_blend_cull, tri_blend_cull_back, tri_blend_cull_front, top_blend_cull;
     RenderPipelineRef pick_double, pick_single; // id + world-position targets, 1 sample
+    RenderPipelineRef pick_points;              // points as squares (vs_wide)
+    // Section caps (see vs_cap): made with the stencil depth format, the first time caps are switched on.
+    RenderPipelineRef cap_count, cap_fill, cap_reset;
+    WGPUTextureFormat depth_format = kDepthFormat;
+    bool caps_enabled = false;
+    float cap_color[4] = {0, 0, 0, 0};
+    BufferRef cap_frame_bufs[kMaxClipPlanes]; // the Frame of each plane's cap draws
+    BindGroupRef cap_binds[kMaxClipPlanes];
+
+    // Sprites: their own shader and layouts (a texture per draw), see kSpriteWGSL.
+    BindGroupLayoutRef sprite_frame_layout, sprite_texture_layout;
+    PipelineLayoutRef sprite_pipeline_layout;
+    ShaderModuleRef sprite_shader;
+    RenderPipelineRef sprite_tested, sprite_untested; // with / without the depth test
+    SamplerRef sprite_sampler;
+    BufferRef sprite_frame_buf, sprite_buf;
+    size_t sprite_cap = 0;
+    BindGroupRef sprite_bind;
+    Texture white; // what a kNoTexture sprite samples
+    std::vector<std::unique_ptr<Texture>> textures;
+    std::vector<std::unique_ptr<SpriteDesc>> sprites;
     BufferRef dummy;
 
     // GPU culling: per-(instance, cluster) items, last frame's visibility, the early / late visible lists and
@@ -232,6 +315,7 @@ struct Renderer::Impl {
 
     TextureRef msaa_tex, depth_tex;
     TextureViewRef msaa_view, depth_view;
+    TextureViewRef depth_only_view; // the depth aspect alone, for the occlusion pyramid
     uint32_t target_w = 0, target_h = 0;
 
     std::vector<std::unique_ptr<Geometry>> geometries;
@@ -253,17 +337,22 @@ struct Renderer::Impl {
     Impl(WGPUDevice dev, WGPUTextureFormat fmt) : device(dev), queue(wgpuDeviceGetQueue(dev)), color_format(fmt) {
         wgpuDeviceAddRef(device);
         create_layouts();
+        create_sprite_resources();
         create_pipelines();
+        create_pick_pipelines();
         dummy = make_buffer(16, WGPUBufferUsage_Storage, "adacpp.dummy");
         frame_buf = make_buffer(kFrameBytes, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst, "adacpp.frame");
         pick_frame_buf =
             make_buffer(kFrameBytes, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst, "adacpp.pick_frame");
+        for (auto &b : cap_frame_bufs)
+            b = make_buffer(kFrameBytes, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst, "adacpp.cap_frame");
         create_pick_targets();
         create_cull();
     }
     ~Impl() {
         geometries.clear();
         instances.clear();
+        textures.clear();
         wgpuQueueRelease(queue);
         wgpuDeviceRelease(device);
     }
@@ -332,8 +421,11 @@ struct Renderer::Impl {
 
     // `depth_bias`: +1 pushes faces back (so feature edges drawn on them win), -1 pulls them forward
     // (kDepthOffset overlays, in front of both the faces and lines they lie on), 0 none.
+    // What a pipeline does with the stencil: nothing, or one of the section-cap steps (see vs_cap).
+    enum class Stencil { None, Count, Fill, Reset };
+
     RenderPipelineRef make_pipeline(const char *label, const char *vs, WGPUPrimitiveTopology topo, WGPUCullMode cull,
-                                    bool blend, int depth_bias) {
+                                    bool blend, int depth_bias, Stencil stencil = Stencil::None, bool on_top = false) {
         WGPUBlendState bs = WGPU_BLEND_STATE_INIT;
         bs.color.srcFactor = WGPUBlendFactor_SrcAlpha;
         bs.color.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
@@ -345,18 +437,37 @@ struct Renderer::Impl {
         WGPUColorTargetState ct = WGPU_COLOR_TARGET_STATE_INIT;
         ct.format = color_format;
         ct.blend = blend ? &bs : nullptr;
-        ct.writeMask = WGPUColorWriteMask_All;
+        const bool stencil_only = stencil == Stencil::Count || stencil == Stencil::Reset;
+        ct.writeMask = stencil_only ? WGPUColorWriteMask_None : WGPUColorWriteMask_All;
 
         WGPUFragmentState fs = WGPU_FRAGMENT_STATE_INIT;
         fs.module = shader.get();
-        fs.entryPoint = sv("fs_main");
+        fs.entryPoint = sv(stencil_only ? "fs_stencil" : "fs_main");
         fs.targetCount = 1;
         fs.targets = &ct;
 
         WGPUDepthStencilState ds = WGPU_DEPTH_STENCIL_STATE_INIT;
-        ds.format = kDepthFormat;
-        ds.depthWriteEnabled = blend ? WGPUOptionalBool_False : WGPUOptionalBool_True;
-        ds.depthCompare = WGPUCompareFunction_LessEqual;
+        ds.format = depth_format;
+        const bool no_depth = stencil_only || on_top;
+        ds.depthWriteEnabled = blend || no_depth ? WGPUOptionalBool_False : WGPUOptionalBool_True;
+        ds.depthCompare = no_depth ? WGPUCompareFunction_Always : WGPUCompareFunction_LessEqual;
+        auto ops = [](WGPUStencilFaceState &f, WGPUCompareFunction compare, WGPUStencilOperation op) {
+            f.compare = compare;
+            f.failOp = op;
+            f.depthFailOp = op;
+            f.passOp = op;
+        };
+        if (stencil == Stencil::Count) {
+            // Every face counts, hidden behind another or not: no depth test.
+            ops(ds.stencilFront, WGPUCompareFunction_Always, WGPUStencilOperation_DecrementWrap);
+            ops(ds.stencilBack, WGPUCompareFunction_Always, WGPUStencilOperation_IncrementWrap);
+        } else if (stencil == Stencil::Fill) {
+            ops(ds.stencilFront, WGPUCompareFunction_NotEqual, WGPUStencilOperation_Zero);
+            ops(ds.stencilBack, WGPUCompareFunction_NotEqual, WGPUStencilOperation_Zero);
+        } else if (stencil == Stencil::Reset) {
+            ops(ds.stencilFront, WGPUCompareFunction_Always, WGPUStencilOperation_Zero);
+            ops(ds.stencilBack, WGPUCompareFunction_Always, WGPUStencilOperation_Zero);
+        }
         if (depth_bias != 0) {
             // three.js' polygonOffset: faces pushed back so the feature edges on them win the depth test
             // (the CAD materials), or an overlay pulled in front of what it lies on (negative offsets).
@@ -383,7 +494,140 @@ struct Renderer::Impl {
         return RenderPipelineRef(wgpuDeviceCreateRenderPipeline(device, &d));
     }
 
-    RenderPipelineRef make_pick_pipeline(const char *label, WGPUCullMode cull) {
+    void create_sprite_resources() {
+        WGPUBindGroupLayoutEntry fe[3] = {WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT, WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT,
+                                          WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT};
+        fe[0].binding = 0;
+        fe[0].visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
+        fe[0].buffer.type = WGPUBufferBindingType_Uniform;
+        fe[1].binding = 1;
+        fe[1].visibility = WGPUShaderStage_Vertex;
+        fe[1].buffer.type = WGPUBufferBindingType_ReadOnlyStorage;
+        fe[2].binding = 2;
+        fe[2].visibility = WGPUShaderStage_Fragment;
+        fe[2].sampler.type = WGPUSamplerBindingType_Filtering;
+        WGPUBindGroupLayoutDescriptor fd = WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
+        fd.label = sv("adacpp.sprite_frame_layout");
+        fd.entryCount = 3;
+        fd.entries = fe;
+        sprite_frame_layout.reset(wgpuDeviceCreateBindGroupLayout(device, &fd));
+
+        WGPUBindGroupLayoutEntry te = WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT;
+        te.binding = 0;
+        te.visibility = WGPUShaderStage_Fragment;
+        te.texture.sampleType = WGPUTextureSampleType_Float;
+        te.texture.viewDimension = WGPUTextureViewDimension_2D;
+        WGPUBindGroupLayoutDescriptor td = WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
+        td.label = sv("adacpp.sprite_texture_layout");
+        td.entryCount = 1;
+        td.entries = &te;
+        sprite_texture_layout.reset(wgpuDeviceCreateBindGroupLayout(device, &td));
+
+        WGPUBindGroupLayout layouts[2] = {sprite_frame_layout.get(), sprite_texture_layout.get()};
+        WGPUPipelineLayoutDescriptor pd = WGPU_PIPELINE_LAYOUT_DESCRIPTOR_INIT;
+        pd.label = sv("adacpp.sprite_pipeline_layout");
+        pd.bindGroupLayoutCount = 2;
+        pd.bindGroupLayouts = layouts;
+        sprite_pipeline_layout.reset(wgpuDeviceCreatePipelineLayout(device, &pd));
+
+        WGPUShaderSourceWGSL src = WGPU_SHADER_SOURCE_WGSL_INIT;
+        src.code = sv(kSpriteWGSL);
+        WGPUShaderModuleDescriptor sd = WGPU_SHADER_MODULE_DESCRIPTOR_INIT;
+        sd.nextInChain = &src.chain;
+        sd.label = sv("adacpp.sprite_shader");
+        sprite_shader.reset(wgpuDeviceCreateShaderModule(device, &sd));
+
+        // As three.js samples a CanvasTexture: trilinear, clamped.
+        WGPUSamplerDescriptor smp = WGPU_SAMPLER_DESCRIPTOR_INIT;
+        smp.label = sv("adacpp.sprite_sampler");
+        smp.addressModeU = WGPUAddressMode_ClampToEdge;
+        smp.addressModeV = WGPUAddressMode_ClampToEdge;
+        smp.magFilter = WGPUFilterMode_Linear;
+        smp.minFilter = WGPUFilterMode_Linear;
+        smp.mipmapFilter = WGPUMipmapFilterMode_Linear;
+        sprite_sampler.reset(wgpuDeviceCreateSampler(device, &smp));
+
+        sprite_frame_buf =
+            make_buffer(kSpriteFrameBytes, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst, "adacpp.sprite_frame");
+        const uint8_t texel[4] = {255, 255, 255, 255};
+        set_texture(white, texel, 1, 1);
+    }
+
+    RenderPipelineRef make_sprite_pipeline(const char *label, bool depth_test) {
+        WGPUBlendState bs = WGPU_BLEND_STATE_INIT;
+        bs.color.srcFactor = WGPUBlendFactor_SrcAlpha;
+        bs.color.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
+        bs.color.operation = WGPUBlendOperation_Add;
+        bs.alpha.srcFactor = WGPUBlendFactor_One;
+        bs.alpha.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
+        bs.alpha.operation = WGPUBlendOperation_Add;
+        WGPUColorTargetState ct = WGPU_COLOR_TARGET_STATE_INIT;
+        ct.format = color_format;
+        ct.blend = &bs;
+        ct.writeMask = WGPUColorWriteMask_All;
+        WGPUFragmentState fs = WGPU_FRAGMENT_STATE_INIT;
+        fs.module = sprite_shader.get();
+        fs.entryPoint = sv("fs_sprite");
+        fs.targetCount = 1;
+        fs.targets = &ct;
+        WGPUDepthStencilState ds = WGPU_DEPTH_STENCIL_STATE_INIT;
+        ds.format = depth_format;
+        ds.depthWriteEnabled = WGPUOptionalBool_False;
+        ds.depthCompare = depth_test ? WGPUCompareFunction_LessEqual : WGPUCompareFunction_Always;
+        WGPURenderPipelineDescriptor d = WGPU_RENDER_PIPELINE_DESCRIPTOR_INIT;
+        d.label = sv(label);
+        d.layout = sprite_pipeline_layout.get();
+        d.vertex.module = sprite_shader.get();
+        d.vertex.entryPoint = sv("vs_sprite");
+        d.primitive.topology = WGPUPrimitiveTopology_TriangleList;
+        d.primitive.frontFace = WGPUFrontFace_CCW;
+        d.primitive.cullMode = WGPUCullMode_None;
+        d.depthStencil = &ds;
+        d.multisample.count = kSampleCount;
+        d.multisample.mask = 0xFFFFFFFFu;
+        d.fragment = &fs;
+        return RenderPipelineRef(wgpuDeviceCreateRenderPipeline(device, &d));
+    }
+
+    // (Re)fill a sprite texture with its mip chain; a new size makes a new texture.
+    void set_texture(Texture &t, const uint8_t *rgba, uint32_t w, uint32_t h) {
+        if (!rgba || w == 0 || h == 0)
+            throw std::invalid_argument("adacpp.render: texture without pixels");
+        uint32_t levels = 1;
+        while ((std::max(w, h) >> levels) > 0)
+            ++levels;
+        if (!t.tex || t.width != w || t.height != h) {
+            WGPUTextureDescriptor d = WGPU_TEXTURE_DESCRIPTOR_INIT;
+            d.label = sv("adacpp.sprite_texture");
+            d.size = {w, h, 1};
+            d.format = WGPUTextureFormat_RGBA8UnormSrgb;
+            d.mipLevelCount = levels;
+            d.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst;
+            t.tex.reset(wgpuDeviceCreateTexture(device, &d));
+            t.view.reset(wgpuTextureCreateView(t.tex.get(), nullptr));
+            t.bind = make_bind(sprite_texture_layout, {view_entry(t.view.get())}, "adacpp.sprite_texture");
+            t.width = w;
+            t.height = h;
+        }
+        std::vector<uint8_t> mip(rgba, rgba + size_t(w) * h * 4);
+        for (uint32_t l = 0; l < levels; ++l) {
+            WGPUTexelCopyTextureInfo dst = WGPU_TEXEL_COPY_TEXTURE_INFO_INIT;
+            dst.texture = t.tex.get();
+            dst.mipLevel = l;
+            WGPUTexelCopyBufferLayout layout = WGPU_TEXEL_COPY_BUFFER_LAYOUT_INIT;
+            layout.bytesPerRow = w * 4;
+            layout.rowsPerImage = h;
+            const WGPUExtent3D size = {w, h, 1};
+            wgpuQueueWriteTexture(queue, &dst, mip.data(), mip.size(), &layout, &size);
+            if (l + 1 < levels) {
+                mip = half_mip(mip, w, h);
+                w = std::max(1u, w / 2);
+                h = std::max(1u, h / 2);
+            }
+        }
+    }
+
+    RenderPipelineRef make_pick_pipeline(const char *label, WGPUCullMode cull, const char *vs = "vs_tri") {
         WGPUColorTargetState ct[2] = {WGPU_COLOR_TARGET_STATE_INIT, WGPU_COLOR_TARGET_STATE_INIT};
         ct[0].format = kPickIdFormat;
         ct[0].writeMask = WGPUColorWriteMask_All;
@@ -402,7 +646,7 @@ struct Renderer::Impl {
         d.label = sv(label);
         d.layout = pipeline_layout.get();
         d.vertex.module = shader.get();
-        d.vertex.entryPoint = sv("vs_tri");
+        d.vertex.entryPoint = sv(vs);
         d.primitive.topology = WGPUPrimitiveTopology_TriangleList;
         d.primitive.frontFace = WGPUFrontFace_CCW;
         d.primitive.cullMode = cull;
@@ -441,6 +685,9 @@ struct Renderer::Impl {
         tri_double_front = make_pipeline("adacpp.tri_double_front", "vs_tri", tri, WGPUCullMode_None, false, -1);
         tri_single_front = make_pipeline("adacpp.tri_single_front", "vs_tri", tri, WGPUCullMode_Back, false, -1);
         tri_blend_front = make_pipeline("adacpp.tri_blend_front", "vs_tri", tri, WGPUCullMode_None, true, -1);
+        tri_blend_cull = make_pipeline("adacpp.tri_blend_cull", "vs_tri", tri, WGPUCullMode_Back, true, 0);
+        tri_blend_cull_back = make_pipeline("adacpp.tri_blend_cull_back", "vs_tri", tri, WGPUCullMode_Back, true, 1);
+        tri_blend_cull_front = make_pipeline("adacpp.tri_blend_cull_front", "vs_tri", tri, WGPUCullMode_Back, true, -1);
         lines = make_pipeline("adacpp.lines", "vs_list", WGPUPrimitiveTopology_LineList, WGPUCullMode_None, false, 0);
         lines_blend =
             make_pipeline("adacpp.lines_blend", "vs_list", WGPUPrimitiveTopology_LineList, WGPUCullMode_None, true, 0);
@@ -448,8 +695,55 @@ struct Renderer::Impl {
             make_pipeline("adacpp.points", "vs_list", WGPUPrimitiveTopology_PointList, WGPUCullMode_None, false, 0);
         wide = make_pipeline("adacpp.wide", "vs_wide", tri, WGPUCullMode_None, false, 0);
         wide_blend = make_pipeline("adacpp.wide_blend", "vs_wide", tri, WGPUCullMode_None, true, 0);
+        const auto top = [&](const char *label, const char *vs, WGPUPrimitiveTopology topo, WGPUCullMode cull,
+                             bool blend) {
+            return make_pipeline(label, vs, topo, cull, blend, 0, Stencil::None, true);
+        };
+        top_double = top("adacpp.top_double", "vs_tri", tri, WGPUCullMode_None, false);
+        top_single = top("adacpp.top_single", "vs_tri", tri, WGPUCullMode_Back, false);
+        top_blend = top("adacpp.top_blend", "vs_tri", tri, WGPUCullMode_None, true);
+        top_blend_cull = top("adacpp.top_blend_cull", "vs_tri", tri, WGPUCullMode_Back, true);
+        top_lines = top("adacpp.top_lines", "vs_list", WGPUPrimitiveTopology_LineList, WGPUCullMode_None, false);
+        top_lines_blend =
+            top("adacpp.top_lines_blend", "vs_list", WGPUPrimitiveTopology_LineList, WGPUCullMode_None, true);
+        top_points = top("adacpp.top_points", "vs_list", WGPUPrimitiveTopology_PointList, WGPUCullMode_None, false);
+        top_wide = top("adacpp.top_wide", "vs_wide", tri, WGPUCullMode_None, false);
+        top_wide_blend = top("adacpp.top_wide_blend", "vs_wide", tri, WGPUCullMode_None, true);
+        sprite_tested = make_sprite_pipeline("adacpp.sprite_tested", true);
+        sprite_untested = make_sprite_pipeline("adacpp.sprite_untested", false);
+        if (depth_format == kDepthStencilFormat) {
+            cap_count = make_pipeline("adacpp.cap_count", "vs_tri", tri, WGPUCullMode_None, false, 0, Stencil::Count);
+            cap_fill = make_pipeline("adacpp.cap_fill", "vs_cap", tri, WGPUCullMode_None, false, 0, Stencil::Fill);
+            cap_reset = make_pipeline("adacpp.cap_reset", "vs_reset", tri, WGPUCullMode_None, false, 0, Stencil::Reset);
+        }
+    }
+
+    void create_pick_pipelines() {
         pick_double = make_pick_pipeline("adacpp.pick_double", WGPUCullMode_None);
         pick_single = make_pick_pipeline("adacpp.pick_single", WGPUCullMode_Back);
+        pick_points = make_pick_pipeline("adacpp.pick_points", WGPUCullMode_None, "vs_wide");
+    }
+
+    // Section caps need a stencil, which the depth target only gets once they are asked for: a viewer that
+    // never caps keeps the plain depth format, and its memory.
+    void set_section_caps(bool enabled) {
+        caps_enabled = enabled;
+        if (!enabled || depth_format == kDepthStencilFormat)
+            return;
+        depth_format = kDepthStencilFormat;
+        create_pipelines();
+        msaa_tex.reset(); // ensure_targets() makes the targets again, in the new format
+    }
+
+    bool caps_active() const {
+        return caps_enabled && !clip_planes.empty();
+    }
+
+    // The instance's cut is capped: a single-sided solid the section planes cut.
+    bool cap_source(const Instance &inst, const Geometry &g) const {
+        const uint32_t f = inst.desc.flags;
+        return caps_active() && g.topology == Topology::Triangles && (f & kCapped) && (f & kClipped) &&
+               !(f & (kDoubleSided | kHidden | kOnTop));
     }
 
     BindGroupRef make_frame_bind(WGPUBuffer frame, WGPUBuffer vis, const char *label) {
@@ -585,7 +879,7 @@ struct Renderer::Impl {
             vd.mipLevelCount = 1;
             hzb_mips.emplace_back(wgpuTextureCreateView(hzb_tex.get(), &vd));
         }
-        hzb_init_bind = make_bind(hzb_init_layout, {view_entry(depth_view.get()), view_entry(hzb_mips[0].get())},
+        hzb_init_bind = make_bind(hzb_init_layout, {view_entry(depth_only_view.get()), view_entry(hzb_mips[0].get())},
                                   "adacpp.hzb_init");
         hzb_reduce_binds.clear();
         for (uint32_t l = 1; l < hzb_levels; ++l)
@@ -863,7 +1157,10 @@ struct Renderer::Impl {
             view.reset(wgpuTextureCreateView(tex.get(), nullptr));
         };
         make(color_format, msaa_tex, msaa_view, "adacpp.msaa");
-        make(kDepthFormat, depth_tex, depth_view, "adacpp.depth");
+        make(depth_format, depth_tex, depth_view, "adacpp.depth");
+        WGPUTextureViewDescriptor vd = WGPU_TEXTURE_VIEW_DESCRIPTOR_INIT;
+        vd.aspect = WGPUTextureAspect_DepthOnly;
+        depth_only_view.reset(wgpuTextureCreateView(depth_tex.get(), &vd));
         create_hzb(w, h);
     }
 
@@ -912,6 +1209,8 @@ struct Renderer::Impl {
             pick_frame_bind = make_frame_bind(pick_frame_buf.get(), visible_buf.get(), "adacpp.pick_frame");
             frame_bind_early = make_frame_bind(frame_buf.get(), vis_early_buf.get(), "adacpp.frame_early");
             frame_bind_late = make_frame_bind(frame_buf.get(), vis_late_buf.get(), "adacpp.frame_late");
+            for (size_t k = 0; k < kMaxClipPlanes; ++k)
+                cap_binds[k] = make_frame_bind(cap_frame_bufs[k].get(), visible_buf.get(), "adacpp.cap_frame");
             cull_binds_dirty = true;
         }
 
@@ -988,6 +1287,9 @@ struct Renderer::Impl {
             }
             std::memcpy(rec + 24, material, 12);
             rec[27] = g.list_count; // lines/points: where the per-index segment ids start in `prim`
+            float sphere[4];
+            sphere[3] = world_sphere(*inst, sphere);
+            std::memcpy(rec + 28, sphere, 16);
         }
         if (!data.empty())
             wgpuQueueWriteBuffer(queue, instance_buf.get(), 0, data.data(), data.size() * 4);
@@ -1011,11 +1313,11 @@ struct Renderer::Impl {
         return std::fabs(len[1] - len[0]) <= tol && std::fabs(len[2] - len[0]) <= tol;
     }
 
-    // The instance's bounding sphere is inside or crossing the frustum `planes` (world space).
-    bool instance_in_view(const Instance &inst, const std::array<std::array<float, 4>, 6> &planes) const {
+    // The instance's bounding sphere in world space: its centre into `c`, returns the radius.
+    float world_sphere(const Instance &inst, float c[3]) const {
         const Geometry &g = *geometries[inst.geometry];
         const Mat4 &m = inst.desc.model;
-        float c[3], scale = 0.0f;
+        float scale = 0.0f;
         for (int k = 0; k < 3; ++k) {
             c[k] = m[k] * g.sphere[0] + m[4 + k] * g.sphere[1] + m[8 + k] * g.sphere[2] + m[12 + k];
             scale = std::max(scale, m[k * 4] * m[k * 4] + m[k * 4 + 1] * m[k * 4 + 1] + m[k * 4 + 2] * m[k * 4 + 2]);
@@ -1023,7 +1325,13 @@ struct Renderer::Impl {
         float r = g.sphere[3];
         if (g.has_morph && inst.desc.morph_influence != 0.0f)
             r += std::fabs(inst.desc.morph_influence) * g.morph_extent;
-        r *= std::sqrt(scale);
+        return r * std::sqrt(scale);
+    }
+
+    // The instance's bounding sphere is inside or crossing the frustum `planes` (world space).
+    bool instance_in_view(const Instance &inst, const std::array<std::array<float, 4>, 6> &planes) const {
+        float c[3];
+        const float r = world_sphere(inst, c);
         for (const auto &p : planes)
             if (p[0] * c[0] + p[1] * c[1] + p[2] * c[2] + p[3] < -r)
                 return false;
@@ -1063,8 +1371,9 @@ struct Renderer::Impl {
             }
         }
 
-        const bool cone =
-            cull_cone && !ortho && !morph && !(inst.desc.flags & (kDoubleSided | kTransparent)) && det3(model) > 0.0f;
+        // A capped solid keeps its back-facing clusters: the stencil count needs every face.
+        const bool cone = cull_cone && !ortho && !morph && !(inst.desc.flags & (kDoubleSided | kTransparent)) &&
+                          det3(model) > 0.0f && !cap_source(inst, g);
         float cam[3] = {0, 0, 0};
         if (cone) {
             Mat4 inv;
@@ -1112,16 +1421,21 @@ struct Renderer::Impl {
         st.clusters_drawn += n;
     }
 
-    // view x projection in WebGPU clip space: OpenGL clip z [-w, w] -> [0, w], z' = 0.5 z + 0.5 w.
-    Mat4 webgpu_view_proj() const {
+    // The projection in WebGPU clip space: OpenGL clip z [-w, w] -> [0, w], z' = 0.5 z + 0.5 w.
+    Mat4 webgpu_proj() const {
         Mat4 proj_wgpu = proj;
         for (int c = 0; c < 4; ++c)
             proj_wgpu[c * 4 + 2] = 0.5f * proj[c * 4 + 2] + 0.5f * proj[c * 4 + 3];
-        return mul(proj_wgpu, view);
+        return proj_wgpu;
+    }
+    Mat4 webgpu_view_proj() const {
+        return mul(webgpu_proj(), view);
     }
 
-    // The Frame uniform for `view_proj` into `buf`; returns the camera position in `cam`.
-    void write_frame(WGPUBuffer buf, const Mat4 &view_proj, float cam[3]) {
+    // The Frame uniform for `view_proj` into `buf`; returns the camera position in `cam`. `cap_plane`: the
+    // section plane a cap pass works on, + 1. `pick`: for the pick pass, whose 1 x 1 target is one pixel of
+    // the image, so a pixel is the whole of clip space there.
+    void write_frame(WGPUBuffer buf, const Mat4 &view_proj, float cam[3], uint32_t cap_plane = 0, bool pick = false) {
         float fwd[3];
         for (int i = 0; i < 3; ++i) {
             cam[i] = -(view[i * 4 + 0] * view[12] + view[i * 4 + 1] * view[13] + view[i * 4 + 2] * view[14]);
@@ -1138,11 +1452,12 @@ struct Renderer::Impl {
         frame[22] = fwd[2];
         frame[24] = ambient;
         frame[25] = diffuse;
-        frame[26] = float(std::max(target_w, 1u));
-        frame[27] = float(std::max(target_h, 1u));
-        const uint32_t clip_count = uint32_t(clip_planes.size() / 4);
-        std::memcpy(frame + 28, &clip_count, 4);
+        frame[26] = pick ? 1.0f : float(std::max(target_w, 1u));
+        frame[27] = pick ? 1.0f : float(std::max(target_h, 1u));
+        const uint32_t clip_info[3] = {uint32_t(clip_planes.size() / 4), cap_plane, pick ? kPickPointPixels : 0u};
+        std::memcpy(frame + 28, clip_info, sizeof(clip_info));
         std::copy(clip_planes.begin(), clip_planes.end(), frame + 32);
+        std::copy(cap_color, cap_color + 4, frame + 56);
         wgpuQueueWriteBuffer(queue, buf, 0, frame, sizeof(frame));
     }
 
@@ -1174,7 +1489,7 @@ struct Renderer::Impl {
         pm[13] = -float(h) * cy;
         const Mat4 view_proj = mul(pm, webgpu_view_proj());
         float cam[3];
-        write_frame(pick_frame_buf.get(), view_proj, cam);
+        write_frame(pick_frame_buf.get(), view_proj, cam, 0, true);
 
         RenderStats scratch;
         for (Instance *inst : order) {
@@ -1224,6 +1539,19 @@ struct Renderer::Impl {
             wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
             wgpuRenderPassEncoderDraw(pass, inst->vis_count * kClusterMaxTriangles * 3, 1,
                                       inst->vis_base * kClusterMaxTriangles * 3, 0);
+        }
+        // Points, as the squares they are drawn as (never smaller than kPickPointPixels), against the
+        // triangles' depth.
+        for (Instance *inst : order) {
+            const Geometry &g = geometry(inst->geometry);
+            if (g.topology != Topology::Points || (inst->desc.flags & (kHidden | kNoPick)) || g.list_count == 0)
+                continue;
+            if (bound != pick_points.get()) {
+                wgpuRenderPassEncoderSetPipeline(pass, pick_points.get());
+                bound = pick_points.get();
+            }
+            wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
+            wgpuRenderPassEncoderDraw(pass, g.list_count * 6, 1, 0, inst->gpu_index);
         }
         wgpuRenderPassEncoderEnd(pass);
         wgpuRenderPassEncoderRelease(pass);
@@ -1275,6 +1603,7 @@ struct Renderer::Impl {
                     r.instance = p->ids[id[0] - 1];
                     r.triangle = id[1];
                     r.segment = id[2];
+                    r.topology = id[3];
                     r.world[0] = pos[0];
                     r.world[1] = pos[1];
                     r.world[2] = pos[2];
@@ -1301,6 +1630,12 @@ struct Renderer::Impl {
         da.depthLoadOp = clear_targets ? WGPULoadOp_Clear : WGPULoadOp_Load;
         da.depthStoreOp = resolve ? WGPUStoreOp_Discard : WGPUStoreOp_Store;
         da.depthClearValue = 1.0f;
+        if (depth_format == kDepthStencilFormat) {
+            // The caps leave the stencil zeroed and are all drawn within one pass: nothing to carry over.
+            da.stencilLoadOp = WGPULoadOp_Clear;
+            da.stencilStoreOp = WGPUStoreOp_Discard;
+            da.stencilClearValue = 0;
+        }
         WGPURenderPassDescriptor rp = WGPU_RENDER_PASS_DESCRIPTOR_INIT;
         rp.label = sv(label);
         rp.colorAttachmentCount = 1;
@@ -1322,60 +1657,223 @@ struct Renderer::Impl {
                 bound = p.get();
             }
         }
+        // One triangle instance, from the GPU-culled indirect `args` or its CPU-culled clusters.
+        void tri(Instance *inst, const Geometry &g, WGPUBuffer args) {
+            const uint32_t flags = inst->desc.flags;
+            const bool front = flags & kDepthOffset;
+            const bool back = !front && (flags & kDepthBack);
+            const bool cull = (flags & kCullBack) && !(flags & kDoubleSided);
+            if (flags & kOnTop)
+                use((flags & kTransparent)   ? (cull ? r.top_blend_cull : r.top_blend)
+                    : (flags & kDoubleSided) ? r.top_double
+                                             : r.top_single);
+            else if (flags & kTransparent && cull)
+                use(front ? r.tri_blend_cull_front : back ? r.tri_blend_cull_back : r.tri_blend_cull);
+            else if (flags & kTransparent)
+                use(front ? r.tri_blend_front : back ? r.tri_blend_back : r.tri_blend);
+            else if (flags & kDoubleSided)
+                use(front ? r.tri_double_front : back ? r.tri_double_back : r.tri_double);
+            else
+                use(front ? r.tri_single_front : back ? r.tri_single_back : r.tri_single);
+            wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
+            if (args)
+                wgpuRenderPassEncoderDrawIndirect(pass, args, uint64_t(inst->gpu_index) * 16);
+            else
+                wgpuRenderPassEncoderDraw(pass, inst->vis_count * kClusterMaxTriangles * 3, 1,
+                                          inst->vis_base * kClusterMaxTriangles * 3, 0);
+            st.draw_calls++;
+        }
         void tris(bool transparent, WGPUBuffer args, const std::vector<char> *in_view) {
             for (Instance *inst : r.order) {
                 const Geometry &g = r.geometry(inst->geometry);
-                if (g.topology != Topology::Triangles || (inst->desc.flags & kHidden) || g.clusters.empty())
+                if (g.topology != Topology::Triangles || (inst->desc.flags & (kHidden | kOnTop)) || g.clusters.empty())
                     continue;
                 if (bool(inst->desc.flags & kTransparent) != transparent)
                     continue;
                 if (args ? !(*in_view)[inst->gpu_index] : inst->vis_count == 0)
                     continue;
-                const bool front = inst->desc.flags & kDepthOffset;
-                const bool back = !front && (inst->desc.flags & kDepthBack);
-                if (transparent)
-                    use(front ? r.tri_blend_front : back ? r.tri_blend_back : r.tri_blend);
-                else if (inst->desc.flags & kDoubleSided)
-                    use(front ? r.tri_double_front : back ? r.tri_double_back : r.tri_double);
-                else
-                    use(front ? r.tri_single_front : back ? r.tri_single_back : r.tri_single);
-                wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
-                if (args)
-                    wgpuRenderPassEncoderDrawIndirect(pass, args, uint64_t(inst->gpu_index) * 16);
-                else
-                    wgpuRenderPassEncoderDraw(pass, inst->vis_count * kClusterMaxTriangles * 3, 1,
-                                              inst->vis_base * kClusterMaxTriangles * 3, 0);
-                st.draw_calls++;
+                tri(inst, g, args);
             }
+        }
+        // One line / point instance.
+        void list(Instance *inst, const Geometry &g) {
+            const bool transparent = inst->desc.flags & kTransparent;
+            const bool top = inst->desc.flags & kOnTop;
+            wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
+            if (inst->desc.line_width > 1.0f) {
+                if (top)
+                    use(transparent ? r.top_wide_blend : r.top_wide);
+                else
+                    use(transparent ? r.wide_blend : r.wide);
+                const uint32_t items = g.topology == Topology::Points ? g.list_count : g.list_count / 2;
+                wgpuRenderPassEncoderDraw(pass, items * 6, 1, 0, inst->gpu_index);
+            } else {
+                if (g.topology == Topology::Points)
+                    use(top ? r.top_points : r.points);
+                else if (top)
+                    use(transparent ? r.top_lines_blend : r.top_lines);
+                else
+                    use(transparent ? r.lines_blend : r.lines);
+                wgpuRenderPassEncoderDraw(pass, g.list_count, 1, 0, inst->gpu_index);
+            }
+            st.draw_calls++;
         }
         // `underlay`: only the kUnderlay lines, opaque or not (drawn before the faces); otherwise every other
         // line of the given transparency (drawn after them, so edges on a face win).
         void lists(bool pass_transparent, bool underlay = false) {
             for (Instance *inst : r.order) {
                 const Geometry &g = r.geometry(inst->geometry);
-                if (g.topology == Topology::Triangles || (inst->desc.flags & kHidden))
+                if (g.topology == Topology::Triangles || (inst->desc.flags & (kHidden | kOnTop)))
                     continue;
                 if (bool(inst->desc.flags & kUnderlay) != underlay)
                     continue;
-                const bool transparent = inst->desc.flags & kTransparent;
-                if (!underlay && transparent != pass_transparent)
+                if (!underlay && bool(inst->desc.flags & kTransparent) != pass_transparent)
                     continue;
-                wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
-                if (inst->desc.line_width > 1.0f) {
-                    use(transparent ? r.wide_blend : r.wide);
-                    const uint32_t items = g.topology == Topology::Points ? g.list_count : g.list_count / 2;
-                    wgpuRenderPassEncoderDraw(pass, items * 6, 1, 0, inst->gpu_index);
-                } else {
-                    if (g.topology == Topology::Points)
-                        use(r.points);
-                    else
-                        use(transparent ? r.lines_blend : r.lines);
-                    wgpuRenderPassEncoderDraw(pass, g.list_count, 1, 0, inst->gpu_index);
-                }
-                st.draw_calls++;
+                list(inst, g);
+            }
+        }
+        // The kOnTop instances, whatever they are made of, in instance order; triangles from their CPU-culled
+        // clusters (the frame bound must be the one over `visible_buf`).
+        void on_top() {
+            for (Instance *inst : r.order) {
+                const Geometry &g = r.geometry(inst->geometry);
+                if ((inst->desc.flags & (kHidden | kOnTop)) != kOnTop)
+                    continue;
+                if (g.topology != Topology::Triangles)
+                    list(inst, g);
+                else if (inst->vis_count != 0)
+                    tri(inst, g, nullptr);
             }
         }
     };
+
+    // The section caps of every capped solid, plane by plane (see vs_cap), from the CPU-culled clusters in
+    // `visible_buf`. Leaves the caps' frame bound: the caller binds its own again.
+    void draw_caps(Drawer &d, const Mat4 &view_proj) {
+        if (!caps_active())
+            return;
+        for (uint32_t k = 0; k < clip_planes.size() / 4; ++k) {
+            const float *pl = &clip_planes[k * 4];
+            const float len = std::sqrt(pl[0] * pl[0] + pl[1] * pl[1] + pl[2] * pl[2]);
+            bool any = false;
+            for (Instance *inst : order) {
+                const Geometry &g = geometry(inst->geometry);
+                if (!cap_source(*inst, g) || inst->vis_count == 0 || len <= 0.0f)
+                    continue;
+                // No cut face unless the plane runs through the solid.
+                float c[3];
+                const float r = world_sphere(*inst, c);
+                if (std::fabs(pl[0] * c[0] + pl[1] * c[1] + pl[2] * c[2] + pl[3]) >= r * len)
+                    continue;
+                if (!any) {
+                    float cam[3];
+                    write_frame(cap_frame_bufs[k].get(), view_proj, cam, k + 1);
+                    wgpuRenderPassEncoderSetBindGroup(d.pass, 0, cap_binds[k].get(), 0, nullptr);
+                    any = true;
+                }
+                wgpuRenderPassEncoderSetBindGroup(d.pass, 1, g.bind.get(), 0, nullptr);
+                d.use(cap_count);
+                wgpuRenderPassEncoderDraw(d.pass, inst->vis_count * kClusterMaxTriangles * 3, 1,
+                                          inst->vis_base * kClusterMaxTriangles * 3, 0);
+                d.use(cap_fill);
+                wgpuRenderPassEncoderDraw(d.pass, 6, 1, 0, inst->gpu_index);
+                d.st.draw_calls += 2;
+            }
+            if (any) {
+                d.use(cap_reset);
+                wgpuRenderPassEncoderDraw(d.pass, 3, 1, 0, 0);
+                d.st.draw_calls++;
+            }
+        }
+    }
+
+    // The sprites, last in the frame: sorted as three.js sorts transparent objects (render order, then back
+    // to front, then id), one draw each since each has its own texture.
+    void draw_sprites(WGPURenderPassEncoder pass, RenderStats &st) {
+        struct Item {
+            float order, depth;
+            uint32_t id;
+        };
+        std::vector<Item> items;
+        for (uint32_t id = 0; id < sprites.size(); ++id) {
+            if (!sprites[id] || (sprites[id]->flags & kSpriteHidden))
+                continue;
+            const SpriteDesc &d = *sprites[id];
+            if (d.texture != kNoTexture && (d.texture >= textures.size() || !textures[d.texture]))
+                continue;
+            // View-space z of the anchor: more negative is farther away.
+            const float z = view[2] * d.position[0] + view[6] * d.position[1] + view[10] * d.position[2] + view[14];
+            items.push_back({d.render_order, z, id});
+        }
+        if (items.empty())
+            return;
+        std::stable_sort(items.begin(), items.end(), [](const Item &a, const Item &b) {
+            return a.order != b.order ? a.order < b.order : a.depth < b.depth;
+        });
+
+        constexpr size_t words = kSpriteBytes / 4;
+        std::vector<uint32_t> data(items.size() * words, 0);
+        for (size_t i = 0; i < items.size(); ++i) {
+            const SpriteDesc &d = *sprites[items[i].id];
+            const float f[12] = {d.position[0], d.position[1], d.position[2], d.rotation, d.scale[0], d.scale[1],
+                                 d.center[0],   d.center[1],   d.color[0],    d.color[1], d.color[2], d.color[3]};
+            std::memcpy(data.data() + i * words, f, sizeof(f));
+            data[i * words + 12] = d.flags;
+        }
+        if (data.size() * 4 > sprite_cap || !sprite_buf) {
+            sprite_cap = std::max<size_t>(data.size() * 4 * 2, 1024);
+            sprite_buf = make_buffer(sprite_cap, WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst, "adacpp.sprites");
+            WGPUBindGroupEntry smp = WGPU_BIND_GROUP_ENTRY_INIT;
+            smp.sampler = sprite_sampler.get();
+            sprite_bind = make_bind(sprite_frame_layout,
+                                    {buffer_entry(sprite_frame_buf.get()), buffer_entry(sprite_buf.get()), smp},
+                                    "adacpp.sprites");
+        }
+        wgpuQueueWriteBuffer(queue, sprite_buf.get(), 0, data.data(), data.size() * 4);
+
+        float frame[kSpriteFrameBytes / 4] = {};
+        std::memcpy(frame, view.data(), 64);
+        const Mat4 proj_wgpu = webgpu_proj();
+        std::memcpy(frame + 16, proj_wgpu.data(), 64);
+        const uint32_t clip_count = uint32_t(clip_planes.size() / 4);
+        std::memcpy(frame + 32, &clip_count, 4);
+        std::copy(clip_planes.begin(), clip_planes.end(), frame + 36);
+        wgpuQueueWriteBuffer(queue, sprite_frame_buf.get(), 0, frame, sizeof(frame));
+
+        wgpuRenderPassEncoderSetBindGroup(pass, 0, sprite_bind.get(), 0, nullptr);
+        WGPURenderPipeline bound = nullptr;
+        for (uint32_t i = 0; i < items.size(); ++i) {
+            const SpriteDesc &d = *sprites[items[i].id];
+            WGPURenderPipeline p = (d.flags & kSpriteDepthTest) ? sprite_tested.get() : sprite_untested.get();
+            if (p != bound) {
+                wgpuRenderPassEncoderSetPipeline(pass, p);
+                bound = p;
+            }
+            const Texture &t = d.texture == kNoTexture ? white : *textures[d.texture];
+            wgpuRenderPassEncoderSetBindGroup(pass, 1, t.bind.get(), 0, nullptr);
+            wgpuRenderPassEncoderDraw(pass, 6, 1, 0, i);
+            st.draw_calls++;
+        }
+    }
+
+    // GPU culling: the clusters of the instances drawn outside the indirect lists (capped solids, which need
+    // every face in view, occluded or not, and kOnTop triangles, which nothing occludes), culled on the CPU
+    // into `visible_buf`.
+    void cull_direct(const Mat4 &view_proj, const float cam[3]) {
+        RenderStats scratch;
+        bool any = false;
+        for (Instance *inst : order) {
+            inst->vis_count = 0;
+            const Geometry &g = geometry(inst->geometry);
+            const bool top = g.topology == Topology::Triangles && (inst->desc.flags & (kHidden | kOnTop)) == kOnTop;
+            if (top || cap_source(*inst, g)) {
+                cull(*inst, view_proj, cam, scratch);
+                any = true;
+            }
+        }
+        if (any)
+            wgpuQueueWriteBuffer(queue, visible_buf.get(), 0, visible.data(), visible.size() * 4);
+    }
 
     static void end_pass(WGPURenderPassEncoder pass) {
         wgpuRenderPassEncoderEnd(pass);
@@ -1443,8 +1941,12 @@ struct Renderer::Impl {
         d.lists(false, true);
         d.tris(false, nullptr, nullptr);
         d.lists(false);
+        draw_caps(d, view_proj);
+        wgpuRenderPassEncoderSetBindGroup(pass, 0, frame_bind.get(), 0, nullptr);
         d.tris(true, nullptr, nullptr);
         d.lists(true);
+        d.on_top();
+        draw_sprites(pass, st);
         end_pass(pass);
     }
 
@@ -1477,6 +1979,7 @@ struct Renderer::Impl {
         std::vector<char> in_view(order.size(), 0);
         for (Instance *inst : order)
             in_view[inst->gpu_index] = !cull_frustum || instance_in_view(*inst, planes);
+        cull_direct(view_proj, cam);
         st.cull_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 
         const uint32_t groups = (item_count + 63) / 64;
@@ -1519,8 +2022,13 @@ struct Renderer::Impl {
         Drawer late{*this, pass, st};
         late.tris(false, args_late_buf.get(), &in_view);
         late.lists(false);
+        draw_caps(late, view_proj);
+        wgpuRenderPassEncoderSetBindGroup(pass, 0, frame_bind_late.get(), 0, nullptr);
         late.tris(true, args_late_buf.get(), &in_view);
         late.lists(true);
+        wgpuRenderPassEncoderSetBindGroup(pass, 0, frame_bind.get(), 0, nullptr);
+        late.on_top();
+        draw_sprites(pass, st);
         end_pass(pass);
     }
 
@@ -1665,9 +2173,61 @@ void Renderer::remove_instance(uint32_t instance) {
     impl_->structure_dirty = true;
 }
 
+uint32_t Renderer::add_texture(const uint8_t *rgba, uint32_t width, uint32_t height) {
+    auto t = std::make_unique<Impl::Texture>();
+    impl_->set_texture(*t, rgba, width, height);
+    auto &list = impl_->textures;
+    for (uint32_t id = 0; id < list.size(); ++id) {
+        if (!list[id]) {
+            list[id] = std::move(t);
+            return id;
+        }
+    }
+    list.push_back(std::move(t));
+    return uint32_t(list.size() - 1);
+}
+
+void Renderer::update_texture(uint32_t texture, const uint8_t *rgba, uint32_t width, uint32_t height) {
+    if (texture >= impl_->textures.size() || !impl_->textures[texture])
+        throw std::out_of_range("adacpp.render: unknown texture " + std::to_string(texture));
+    impl_->set_texture(*impl_->textures[texture], rgba, width, height);
+}
+
+void Renderer::remove_texture(uint32_t texture) {
+    if (texture >= impl_->textures.size() || !impl_->textures[texture])
+        throw std::out_of_range("adacpp.render: unknown texture " + std::to_string(texture));
+    impl_->textures[texture].reset();
+}
+
+uint32_t Renderer::add_sprite() {
+    auto &list = impl_->sprites;
+    for (uint32_t id = 0; id < list.size(); ++id) {
+        if (!list[id]) {
+            list[id] = std::make_unique<SpriteDesc>();
+            return id;
+        }
+    }
+    list.push_back(std::make_unique<SpriteDesc>());
+    return uint32_t(list.size() - 1);
+}
+
+void Renderer::set_sprite(uint32_t sprite, const SpriteDesc &desc) {
+    if (sprite >= impl_->sprites.size() || !impl_->sprites[sprite])
+        throw std::out_of_range("adacpp.render: unknown sprite " + std::to_string(sprite));
+    *impl_->sprites[sprite] = desc;
+}
+
+void Renderer::remove_sprite(uint32_t sprite) {
+    if (sprite >= impl_->sprites.size() || !impl_->sprites[sprite])
+        throw std::out_of_range("adacpp.render: unknown sprite " + std::to_string(sprite));
+    impl_->sprites[sprite].reset();
+}
+
 void Renderer::clear() {
     impl_->instances.clear();
     impl_->geometries.clear();
+    impl_->sprites.clear();
+    impl_->textures.clear();
     impl_->structure_dirty = true;
 }
 
@@ -1687,6 +2247,17 @@ void Renderer::set_background(float r, float g, float b, float a) {
 void Renderer::set_clip_planes(const float *planes, size_t count) {
     count = std::min(count, kMaxClipPlanes);
     impl_->clip_planes.assign(planes, planes + count * 4);
+}
+
+void Renderer::set_section_caps(bool enabled) {
+    impl_->set_section_caps(enabled);
+}
+
+void Renderer::set_section_cap_color(float r, float g, float b, float a) {
+    impl_->cap_color[0] = r;
+    impl_->cap_color[1] = g;
+    impl_->cap_color[2] = b;
+    impl_->cap_color[3] = a;
 }
 
 void Renderer::set_lighting(float ambient, float diffuse) {

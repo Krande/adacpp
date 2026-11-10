@@ -71,6 +71,7 @@ ADACPP_RENDER_HANDLE(ComputePipeline, wgpuComputePipelineRelease)
 ADACPP_RENDER_HANDLE(ShaderModule, wgpuShaderModuleRelease)
 ADACPP_RENDER_HANDLE(Texture, wgpuTextureRelease)
 ADACPP_RENDER_HANDLE(TextureView, wgpuTextureViewRelease)
+ADACPP_RENDER_HANDLE(Sampler, wgpuSamplerRelease)
 
 #undef ADACPP_RENDER_HANDLE
 

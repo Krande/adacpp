@@ -22,6 +22,10 @@
 // every other cluster is tested against that pyramid before the second pass draws the ones still visible.
 // Smaller scenes, scenes with occlusion culling switched off, and picking are culled on the CPU (frustum +
 // cone).
+//
+// After the opaque model: section caps (the cut faces of kCapped solids, by stencil counting). After the
+// transparent one: kOnTop instances, which ignore depth, and last of all sprites, camera-facing textured
+// quads sorted back to front.
 #pragma once
 
 #include <array>
@@ -50,6 +54,13 @@ enum InstanceFlags : uint32_t {
     kDepthOffset = 1u << 12,  // triangles pulled in front of coplanar faces and lines (negative polygonOffset)
     kDepthBack = 1u << 14,    // triangles pushed behind coplanar lines, so edges on them win (positive polygonOffset)
     kUnderlay = 1u << 15,     // lines / points drawn before the faces (a ground grid): a coplanar face hides them
+    kCapped = 1u << 16,       // a closed solid whose cut by the section planes is filled (set_section_caps)
+    // Drawn over the model: after the opaque and transparent passes and the section caps, before the sprites,
+    // in instance-id order, with no depth test or write (a transform gizmo: three.js' depthTest false).
+    kOnTop = 1u << 17,
+    // A transparent instance that still culls its back faces (three.js' single-sided transparent material).
+    // Without it a transparent instance draws both sides. No effect on opaque instances.
+    kCullBack = 1u << 18,
 };
 
 // Segment state flags (second u32 of a segment's state pair).
@@ -58,6 +69,34 @@ enum SegmentFlags : uint32_t {
     // The colour override is a matte surface (metalness 0, roughness 1: three.js' default
     // MeshStandardMaterial, e.g. the selection highlight), not the instance's own material.
     kSegmentMatte = 1u << 1,
+};
+
+// Sprite flags. Keep in step with the WGSL constants in shaders.h and with the TypeScript bridge.
+enum SpriteFlags : uint32_t {
+    kSpriteSizeAttenuation = 1u << 0, // three.js' sizeAttenuation; clear, a perspective camera scales it by its depth
+    kSpriteDepthTest = 1u << 1,       // hidden behind the model (sprites never write depth)
+    kSpriteHidden = 1u << 2,
+    kSpriteClipped = 1u << 3, // cut by the section planes
+};
+
+// SpriteDesc::texture for an untextured sprite: a quad of the tint colour.
+inline constexpr uint32_t kNoTexture = 0xFFFFFFFFu;
+
+// A camera-facing textured quad: three.js' Sprite, with SpriteMaterial's parameters.
+struct SpriteDesc {
+    uint32_t texture = kNoTexture;          // as returned by add_texture()
+    std::array<float, 3> position{0, 0, 0}; // world anchor
+    // three.js' sprite.scale: width and height in world units. Without kSpriteSizeAttenuation a perspective
+    // camera multiplies them by the anchor's view depth (a constant size on screen: the size at depth 1); an
+    // orthographic one leaves them as they are. Exactly three.js' sprite vertex shader.
+    std::array<float, 2> scale{1, 1};
+    std::array<float, 2> center{0.5f,
+                                0.5f}; // three.js' sprite.center: where the anchor is in the quad, (0, 0) bottom-left
+    float rotation = 0.0f;             // radians, counter-clockwise on screen (SpriteMaterial.rotation)
+    std::array<float, 4> color{1, 1, 1, 1}; // tint multiplied into the texture: linear RGB, alpha = opacity
+    uint32_t flags = kSpriteSizeAttenuation | kSpriteDepthTest;
+    // Draw order follows three.js: by render_order (ascending), then back to front, then by id.
+    float render_order = 0.0f;
 };
 
 struct GeometryDesc {
@@ -92,12 +131,15 @@ struct InstanceDesc {
     float gap = 0.0f;
 };
 
-// What is under a pixel: the nearest pickable triangle there.
+// What is under a pixel: the nearest pickable triangle or point there.
 struct PickResult {
     bool hit = false;
     uint32_t instance = 0; // instance id, as returned by add_instance()
     uint32_t segment = 0;  // segment index within the instance's geometry
-    uint32_t triangle = 0; // triangle index in the geometry's original index list (index position / 3)
+    // Triangles: triangle index in the geometry's original index list (index position / 3). Points: the
+    // point's position in the index list (its vertex index when the geometry has no indices).
+    uint32_t triangle = 0;
+    uint32_t topology = 0; // what was hit, as Topology: 0 a triangle, 2 a point
     float world[3] = {0, 0, 0};
 };
 
@@ -141,7 +183,7 @@ public:
     // Two u32 per segment: RGBA8 colour override (alpha 0 = no override) and SegmentFlags.
     void set_segment_states(uint32_t instance, const uint32_t *packed, size_t segment_count);
     void remove_instance(uint32_t instance);
-    void clear();
+    void clear(); // every geometry, instance, sprite and texture
 
     // `proj_gl` is an OpenGL-convention projection (clip z in [-1, 1], e.g. three.js); it is remapped to
     // WebGPU's [0, 1] here. Matrices are column-major.
@@ -156,13 +198,32 @@ public:
     // point p of a kClipped instance is cut away where dot(n, p) + constant < 0 for any plane.
     static constexpr size_t kMaxClipPlanes = 6;
     void set_clip_planes(const float *planes, size_t count);
+    // Section caps (default off): the cut through every kCapped | kClipped, single-sided instance is filled
+    // with a lit face on each section plane, as three.js' stencil capping does. The instance must be a closed
+    // solid: back faces minus front faces on the kept side of a plane count the solid's interior there.
+    void set_section_caps(bool enabled);
+    // One colour for every cap (linear RGB); alpha 0 (the default) gives each cap its instance's base colour.
+    void set_section_cap_color(float r, float g, float b, float a = 1.0f);
+
+    // Textures for sprites: width x height RGBA8 texels, top row first, sRGB-encoded with straight alpha (canvas
+    // pixels). update_texture() may change the size.
+    uint32_t add_texture(const uint8_t *rgba, uint32_t width, uint32_t height);
+    void update_texture(uint32_t texture, const uint8_t *rgba, uint32_t width, uint32_t height);
+    void remove_texture(uint32_t texture); // sprites still using it are not drawn
+
+    // Sprites are drawn after everything else, alpha-blended and sorted; pick() never returns them.
+    uint32_t add_sprite();
+    void set_sprite(uint32_t sprite, const SpriteDesc &desc);
+    void remove_sprite(uint32_t sprite);
 
     void render(WGPUTextureView target, uint32_t width, uint32_t height);
 
     // GPU picking at pixel (x, y) of a width x height target (origin top-left), with the camera of the
     // last set_camera(). Renders only that pixel (a pick matrix narrows the frustum, so cluster culling
     // drops nearly everything), reads it back asynchronously and calls `done` -- from the browser's
-    // event loop on the web; natively once the device is polled.
+    // event loop on the web; natively once the device is polled. Points are found as squares of their drawn
+    // size, at least kPickPointPixels across, unless a triangle is in front; lines are not pickable.
+    static constexpr uint32_t kPickPointPixels = 6;
     void pick(uint32_t x, uint32_t y, uint32_t width, uint32_t height, std::function<void(const PickResult &)> done);
     const RenderStats &stats() const {
         return stats_;

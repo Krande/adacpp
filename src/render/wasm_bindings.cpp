@@ -221,8 +221,53 @@ public:
         renderer_->set_clip_planes(ptr<float>(planes), count);
     }
 
+    // Fill the cut through kCapped instances (see Renderer::set_section_caps).
+    void set_section_caps(bool enabled) {
+        renderer_->set_section_caps(enabled);
+    }
+    // One linear RGB colour for every cap; `a` 0 = each instance's base colour.
+    void set_section_cap_color(float r, float g, float b, float a) {
+        renderer_->set_section_cap_color(r, g, b, a);
+    }
+
+    // Sprite textures: `rgba` points at width x height RGBA8 texels in the wasm heap, top row first,
+    // sRGB-encoded with straight alpha (ImageData of a canvas).
+    uint32_t add_texture(uintptr_t rgba, uint32_t width, uint32_t height) {
+        return renderer_->add_texture(ptr<uint8_t>(rgba), width, height);
+    }
+    void update_texture(uint32_t texture, uintptr_t rgba, uint32_t width, uint32_t height) {
+        renderer_->update_texture(texture, ptr<uint8_t>(rgba), width, height);
+    }
+    void remove_texture(uint32_t texture) {
+        renderer_->remove_texture(texture);
+    }
+
+    uint32_t add_sprite() {
+        return renderer_->add_sprite();
+    }
+    // three.js' Sprite: `texture` 0xFFFFFFFF = none (a quad of the tint), world anchor, sprite.scale,
+    // sprite.center, material.rotation, tint (linear rgb, opacity), SpriteFlags, renderOrder.
+    void set_sprite(uint32_t sprite, uint32_t texture, float x, float y, float z, float scale_x, float scale_y,
+                    float center_x, float center_y, float rotation, float r, float g, float b, float a, uint32_t flags,
+                    float render_order) {
+        SpriteDesc d;
+        d.texture = texture;
+        d.position = {x, y, z};
+        d.scale = {scale_x, scale_y};
+        d.center = {center_x, center_y};
+        d.rotation = rotation;
+        d.color = {r, g, b, a};
+        d.flags = flags;
+        d.render_order = render_order;
+        renderer_->set_sprite(sprite, d);
+    }
+    void remove_sprite(uint32_t sprite) {
+        renderer_->remove_sprite(sprite);
+    }
+
     // GPU pick at canvas pixel (x, y) of a width x height drawing buffer; `callback(result)` runs once the
-    // readback lands: {hit, instance, segment, triangle, world: [x, y, z]}.
+    // readback lands: {hit, instance, segment, triangle, topology, world: [x, y, z]}; `topology` 0 = a
+    // triangle, 2 = a point, whose index (position in the index list) is in `triangle`.
     void pick(uint32_t x, uint32_t y, uint32_t width, uint32_t height, emscripten::val callback) {
         renderer_->pick(x, y, width, height, [callback](const PickResult &r) {
             auto o = emscripten::val::object();
@@ -230,6 +275,7 @@ public:
             o.set("instance", r.instance);
             o.set("segment", r.segment);
             o.set("triangle", r.triangle);
+            o.set("topology", r.topology);
             auto w = emscripten::val::array();
             for (int i = 0; i < 3; ++i)
                 w.call<void>("push", r.world[i]);
@@ -301,6 +347,14 @@ EMSCRIPTEN_BINDINGS(adacpp_render) {
         .function("setLighting", &WebRenderer::set_lighting)
         .function("setCulling", &WebRenderer::set_culling)
         .function("setClipPlanes", &WebRenderer::set_clip_planes)
+        .function("setSectionCaps", &WebRenderer::set_section_caps)
+        .function("setSectionCapColor", &WebRenderer::set_section_cap_color)
+        .function("addTexture", &WebRenderer::add_texture)
+        .function("updateTexture", &WebRenderer::update_texture)
+        .function("removeTexture", &WebRenderer::remove_texture)
+        .function("addSprite", &WebRenderer::add_sprite)
+        .function("setSprite", &WebRenderer::set_sprite)
+        .function("removeSprite", &WebRenderer::remove_sprite)
         .function("pick", &WebRenderer::pick)
         .function("stats", &WebRenderer::stats)
         .function("readCullStats", &WebRenderer::read_cull_stats);

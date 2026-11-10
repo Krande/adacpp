@@ -140,10 +140,10 @@ int main(int argc, char **argv) {
             });
             while (!done)
                 dev.process_events();
-            std::printf("{\"pick\":{\"hit\":%s,\"instance\":%u,\"segment\":%u,\"triangle\":%u,"
+            std::printf("{\"pick\":{\"hit\":%s,\"instance\":%u,\"segment\":%u,\"triangle\":%u,\"topology\":%u,"
                         "\"world\":[%.4f,%.4f,%.4f]}}\n",
-                        hit.hit ? "true" : "false", hit.instance, hit.segment, hit.triangle, hit.world[0], hit.world[1],
-                        hit.world[2]);
+                        hit.hit ? "true" : "false", hit.instance, hit.segment, hit.triangle, hit.topology, hit.world[0],
+                        hit.world[1], hit.world[2]);
         }
         if (print_stats) {
             RenderStats st;
