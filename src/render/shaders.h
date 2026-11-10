@@ -55,6 +55,7 @@ const FLAG_DASHED: u32 = 8192u; // internal: dashed lines
 const SEGMENT_MATTE: u32 = 2u; // segment state flag: the colour override is a matte surface
 const FLAG_UNDERLAY: u32 = 32768u; // lines under the model (a ground grid): drawn first and pushed back
 const FLAG_CAPPED: u32 = 65536u; // its cut is capped; the renderer picks the instances, the shaders do not read it
+const FLAG_ON_TOP: u32 = 131072u; // drawn last with no depth test; the renderer picks the pipeline, as above
 const FLAG_CAP: u32 = 1073741824u; // internal, set by vs_cap: a fragment of the cap on plane clip_info.y - 1
 
 // An underlay line a hair farther away than the face on its plane, so the face wins even where the two

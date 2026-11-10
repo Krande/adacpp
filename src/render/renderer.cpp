@@ -256,7 +256,10 @@ struct Renderer::Impl {
     // overlays pulled in front of the faces and lines they lie on. Plain faces have no bias, as in three.js.
     RenderPipelineRef tri_double_back, tri_single_back, tri_blend_back;
     RenderPipelineRef tri_double_front, tri_single_front, tri_blend_front;
-    RenderPipelineRef wide, wide_blend;         // lines / points wider than a pixel, as quads (vs_wide)
+    RenderPipelineRef wide, wide_blend; // lines / points wider than a pixel, as quads (vs_wide)
+    // kOnTop instances: the same without a depth test or write.
+    RenderPipelineRef top_double, top_single, top_blend, top_lines, top_lines_blend, top_points, top_wide,
+        top_wide_blend;
     RenderPipelineRef pick_double, pick_single; // id + world-position targets, 1 sample
     RenderPipelineRef pick_points;              // points as squares (vs_wide)
     // Section caps (see vs_cap): made with the stencil depth format, the first time caps are switched on.
@@ -420,7 +423,7 @@ struct Renderer::Impl {
     enum class Stencil { None, Count, Fill, Reset };
 
     RenderPipelineRef make_pipeline(const char *label, const char *vs, WGPUPrimitiveTopology topo, WGPUCullMode cull,
-                                    bool blend, int depth_bias, Stencil stencil = Stencil::None) {
+                                    bool blend, int depth_bias, Stencil stencil = Stencil::None, bool on_top = false) {
         WGPUBlendState bs = WGPU_BLEND_STATE_INIT;
         bs.color.srcFactor = WGPUBlendFactor_SrcAlpha;
         bs.color.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
@@ -443,8 +446,9 @@ struct Renderer::Impl {
 
         WGPUDepthStencilState ds = WGPU_DEPTH_STENCIL_STATE_INIT;
         ds.format = depth_format;
-        ds.depthWriteEnabled = blend || stencil_only ? WGPUOptionalBool_False : WGPUOptionalBool_True;
-        ds.depthCompare = stencil_only ? WGPUCompareFunction_Always : WGPUCompareFunction_LessEqual;
+        const bool no_depth = stencil_only || on_top;
+        ds.depthWriteEnabled = blend || no_depth ? WGPUOptionalBool_False : WGPUOptionalBool_True;
+        ds.depthCompare = no_depth ? WGPUCompareFunction_Always : WGPUCompareFunction_LessEqual;
         auto ops = [](WGPUStencilFaceState &f, WGPUCompareFunction compare, WGPUStencilOperation op) {
             f.compare = compare;
             f.failOp = op;
@@ -686,6 +690,19 @@ struct Renderer::Impl {
             make_pipeline("adacpp.points", "vs_list", WGPUPrimitiveTopology_PointList, WGPUCullMode_None, false, 0);
         wide = make_pipeline("adacpp.wide", "vs_wide", tri, WGPUCullMode_None, false, 0);
         wide_blend = make_pipeline("adacpp.wide_blend", "vs_wide", tri, WGPUCullMode_None, true, 0);
+        const auto top = [&](const char *label, const char *vs, WGPUPrimitiveTopology topo, WGPUCullMode cull,
+                             bool blend) {
+            return make_pipeline(label, vs, topo, cull, blend, 0, Stencil::None, true);
+        };
+        top_double = top("adacpp.top_double", "vs_tri", tri, WGPUCullMode_None, false);
+        top_single = top("adacpp.top_single", "vs_tri", tri, WGPUCullMode_Back, false);
+        top_blend = top("adacpp.top_blend", "vs_tri", tri, WGPUCullMode_None, true);
+        top_lines = top("adacpp.top_lines", "vs_list", WGPUPrimitiveTopology_LineList, WGPUCullMode_None, false);
+        top_lines_blend =
+            top("adacpp.top_lines_blend", "vs_list", WGPUPrimitiveTopology_LineList, WGPUCullMode_None, true);
+        top_points = top("adacpp.top_points", "vs_list", WGPUPrimitiveTopology_PointList, WGPUCullMode_None, false);
+        top_wide = top("adacpp.top_wide", "vs_wide", tri, WGPUCullMode_None, false);
+        top_wide_blend = top("adacpp.top_wide_blend", "vs_wide", tri, WGPUCullMode_None, true);
         sprite_tested = make_sprite_pipeline("adacpp.sprite_tested", true);
         sprite_untested = make_sprite_pipeline("adacpp.sprite_untested", false);
         if (depth_format == kDepthStencilFormat) {
@@ -720,7 +737,7 @@ struct Renderer::Impl {
     bool cap_source(const Instance &inst, const Geometry &g) const {
         const uint32_t f = inst.desc.flags;
         return caps_active() && g.topology == Topology::Triangles && (f & kCapped) && (f & kClipped) &&
-               !(f & (kDoubleSided | kHidden));
+               !(f & (kDoubleSided | kHidden | kOnTop));
     }
 
     BindGroupRef make_frame_bind(WGPUBuffer frame, WGPUBuffer vis, const char *label) {
@@ -1634,57 +1651,87 @@ struct Renderer::Impl {
                 bound = p.get();
             }
         }
+        // One triangle instance, from the GPU-culled indirect `args` or its CPU-culled clusters.
+        void tri(Instance *inst, const Geometry &g, WGPUBuffer args) {
+            const uint32_t flags = inst->desc.flags;
+            const bool front = flags & kDepthOffset;
+            const bool back = !front && (flags & kDepthBack);
+            if (flags & kOnTop)
+                use((flags & kTransparent) ? r.top_blend : (flags & kDoubleSided) ? r.top_double : r.top_single);
+            else if (flags & kTransparent)
+                use(front ? r.tri_blend_front : back ? r.tri_blend_back : r.tri_blend);
+            else if (flags & kDoubleSided)
+                use(front ? r.tri_double_front : back ? r.tri_double_back : r.tri_double);
+            else
+                use(front ? r.tri_single_front : back ? r.tri_single_back : r.tri_single);
+            wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
+            if (args)
+                wgpuRenderPassEncoderDrawIndirect(pass, args, uint64_t(inst->gpu_index) * 16);
+            else
+                wgpuRenderPassEncoderDraw(pass, inst->vis_count * kClusterMaxTriangles * 3, 1,
+                                          inst->vis_base * kClusterMaxTriangles * 3, 0);
+            st.draw_calls++;
+        }
         void tris(bool transparent, WGPUBuffer args, const std::vector<char> *in_view) {
             for (Instance *inst : r.order) {
                 const Geometry &g = r.geometry(inst->geometry);
-                if (g.topology != Topology::Triangles || (inst->desc.flags & kHidden) || g.clusters.empty())
+                if (g.topology != Topology::Triangles || (inst->desc.flags & (kHidden | kOnTop)) || g.clusters.empty())
                     continue;
                 if (bool(inst->desc.flags & kTransparent) != transparent)
                     continue;
                 if (args ? !(*in_view)[inst->gpu_index] : inst->vis_count == 0)
                     continue;
-                const bool front = inst->desc.flags & kDepthOffset;
-                const bool back = !front && (inst->desc.flags & kDepthBack);
-                if (transparent)
-                    use(front ? r.tri_blend_front : back ? r.tri_blend_back : r.tri_blend);
-                else if (inst->desc.flags & kDoubleSided)
-                    use(front ? r.tri_double_front : back ? r.tri_double_back : r.tri_double);
-                else
-                    use(front ? r.tri_single_front : back ? r.tri_single_back : r.tri_single);
-                wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
-                if (args)
-                    wgpuRenderPassEncoderDrawIndirect(pass, args, uint64_t(inst->gpu_index) * 16);
-                else
-                    wgpuRenderPassEncoderDraw(pass, inst->vis_count * kClusterMaxTriangles * 3, 1,
-                                              inst->vis_base * kClusterMaxTriangles * 3, 0);
-                st.draw_calls++;
+                tri(inst, g, args);
             }
+        }
+        // One line / point instance.
+        void list(Instance *inst, const Geometry &g) {
+            const bool transparent = inst->desc.flags & kTransparent;
+            const bool top = inst->desc.flags & kOnTop;
+            wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
+            if (inst->desc.line_width > 1.0f) {
+                if (top)
+                    use(transparent ? r.top_wide_blend : r.top_wide);
+                else
+                    use(transparent ? r.wide_blend : r.wide);
+                const uint32_t items = g.topology == Topology::Points ? g.list_count : g.list_count / 2;
+                wgpuRenderPassEncoderDraw(pass, items * 6, 1, 0, inst->gpu_index);
+            } else {
+                if (g.topology == Topology::Points)
+                    use(top ? r.top_points : r.points);
+                else if (top)
+                    use(transparent ? r.top_lines_blend : r.top_lines);
+                else
+                    use(transparent ? r.lines_blend : r.lines);
+                wgpuRenderPassEncoderDraw(pass, g.list_count, 1, 0, inst->gpu_index);
+            }
+            st.draw_calls++;
         }
         // `underlay`: only the kUnderlay lines, opaque or not (drawn before the faces); otherwise every other
         // line of the given transparency (drawn after them, so edges on a face win).
         void lists(bool pass_transparent, bool underlay = false) {
             for (Instance *inst : r.order) {
                 const Geometry &g = r.geometry(inst->geometry);
-                if (g.topology == Topology::Triangles || (inst->desc.flags & kHidden))
+                if (g.topology == Topology::Triangles || (inst->desc.flags & (kHidden | kOnTop)))
                     continue;
                 if (bool(inst->desc.flags & kUnderlay) != underlay)
                     continue;
-                const bool transparent = inst->desc.flags & kTransparent;
-                if (!underlay && transparent != pass_transparent)
+                if (!underlay && bool(inst->desc.flags & kTransparent) != pass_transparent)
                     continue;
-                wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
-                if (inst->desc.line_width > 1.0f) {
-                    use(transparent ? r.wide_blend : r.wide);
-                    const uint32_t items = g.topology == Topology::Points ? g.list_count : g.list_count / 2;
-                    wgpuRenderPassEncoderDraw(pass, items * 6, 1, 0, inst->gpu_index);
-                } else {
-                    if (g.topology == Topology::Points)
-                        use(r.points);
-                    else
-                        use(transparent ? r.lines_blend : r.lines);
-                    wgpuRenderPassEncoderDraw(pass, g.list_count, 1, 0, inst->gpu_index);
-                }
-                st.draw_calls++;
+                list(inst, g);
+            }
+        }
+        // The kOnTop instances, whatever they are made of, in instance order; triangles from their CPU-culled
+        // clusters (the frame bound must be the one over `visible_buf`).
+        void on_top() {
+            for (Instance *inst : r.order) {
+                const Geometry &g = r.geometry(inst->geometry);
+                if ((inst->desc.flags & (kHidden | kOnTop)) != kOnTop)
+                    continue;
+                if (g.topology != Topology::Triangles)
+                    list(inst, g);
+                else if (inst->vis_count != 0)
+                    tri(inst, g, nullptr);
             }
         }
     };
@@ -1799,13 +1846,16 @@ struct Renderer::Impl {
     }
 
     // GPU culling: the clusters of the instances drawn outside the indirect lists (capped solids, which need
-    // every face in view, occluded or not), culled on the CPU into `visible_buf`.
+    // every face in view, occluded or not, and kOnTop triangles, which nothing occludes), culled on the CPU
+    // into `visible_buf`.
     void cull_direct(const Mat4 &view_proj, const float cam[3]) {
         RenderStats scratch;
         bool any = false;
         for (Instance *inst : order) {
             inst->vis_count = 0;
-            if (cap_source(*inst, geometry(inst->geometry))) {
+            const Geometry &g = geometry(inst->geometry);
+            const bool top = g.topology == Topology::Triangles && (inst->desc.flags & (kHidden | kOnTop)) == kOnTop;
+            if (top || cap_source(*inst, g)) {
                 cull(*inst, view_proj, cam, scratch);
                 any = true;
             }
@@ -1884,6 +1934,7 @@ struct Renderer::Impl {
         wgpuRenderPassEncoderSetBindGroup(pass, 0, frame_bind.get(), 0, nullptr);
         d.tris(true, nullptr, nullptr);
         d.lists(true);
+        d.on_top();
         draw_sprites(pass, st);
         end_pass(pass);
     }
@@ -1964,6 +2015,8 @@ struct Renderer::Impl {
         wgpuRenderPassEncoderSetBindGroup(pass, 0, frame_bind_late.get(), 0, nullptr);
         late.tris(true, args_late_buf.get(), &in_view);
         late.lists(true);
+        wgpuRenderPassEncoderSetBindGroup(pass, 0, frame_bind.get(), 0, nullptr);
+        late.on_top();
         draw_sprites(pass, st);
         end_pass(pass);
     }

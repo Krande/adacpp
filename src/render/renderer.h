@@ -23,8 +23,9 @@
 // Smaller scenes, scenes with occlusion culling switched off, and picking are culled on the CPU (frustum +
 // cone).
 //
-// After the opaque model: section caps (the cut faces of kCapped solids, by stencil counting). Last of all:
-// sprites, camera-facing textured quads sorted back to front.
+// After the opaque model: section caps (the cut faces of kCapped solids, by stencil counting). After the
+// transparent one: kOnTop instances, which ignore depth, and last of all sprites, camera-facing textured
+// quads sorted back to front.
 #pragma once
 
 #include <array>
@@ -54,6 +55,9 @@ enum InstanceFlags : uint32_t {
     kDepthBack = 1u << 14,    // triangles pushed behind coplanar lines, so edges on them win (positive polygonOffset)
     kUnderlay = 1u << 15,     // lines / points drawn before the faces (a ground grid): a coplanar face hides them
     kCapped = 1u << 16,       // a closed solid whose cut by the section planes is filled (set_section_caps)
+    // Drawn over the model: after the opaque and transparent passes and the section caps, before the sprites,
+    // in instance-id order, with no depth test or write (a transform gizmo: three.js' depthTest false).
+    kOnTop = 1u << 17,
 };
 
 // Segment state flags (second u32 of a segment's state pair).

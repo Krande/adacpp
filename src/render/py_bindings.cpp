@@ -89,7 +89,7 @@ public:
                       const std::string &topology, std::array<float, 4> color, float metalness, float roughness,
                       bool specular, bool double_sided, bool unlit, float line_width, float morph_influence,
                       bool morph_relative, std::optional<Array<float>> model, bool depth_offset,
-                      std::optional<Array<float>> distances, float dash, float gap, bool capped) {
+                      std::optional<Array<float>> distances, float dash, float gap, bool capped, bool on_top) {
         const size_t nv = positions.size() / 3;
         if (positions.size() % 3 != 0 || nv == 0)
             throw std::invalid_argument("positions: expected (N, 3) floats");
@@ -154,6 +154,8 @@ public:
         d.flags |= kClipped; // cut by set_clip_planes, when any are set
         if (depth_offset)
             d.flags |= kDepthOffset;
+        if (on_top)
+            d.flags |= kOnTop; // drawn over the model, with no depth test
         if (capped)
             d.flags |= kCapped; // a closed solid: its cut is filled, with set_section_caps(True)
         if (gd.colors)
@@ -391,7 +393,8 @@ NB_MODULE(_render, m) {
              "topology"_a = "triangles", "color"_a = std::array<float, 4>{1, 1, 1, 1}, "metalness"_a = 0.0f,
              "roughness"_a = 1.0f, "specular"_a = true, "double_sided"_a = false, "unlit"_a = false,
              "line_width"_a = 1.0f, "morph_influence"_a = 0.0f, "morph_relative"_a = true, "model"_a = nb::none(),
-             "depth_offset"_a = false, "distances"_a = nb::none(), "dash"_a = 0.0f, "gap"_a = 0.0f, "capped"_a = false)
+             "depth_offset"_a = false, "distances"_a = nb::none(), "dash"_a = 0.0f, "gap"_a = 0.0f, "capped"_a = false,
+             "on_top"_a = false)
         .def("set_morph_influence", &OffscreenRenderer::set_morph_influence, "instance"_a, "influence"_a)
         .def("set_visible", &OffscreenRenderer::set_visible, "instance"_a, "visible"_a)
         .def("update_colors", &OffscreenRenderer::update_colors, "instance"_a, "colors"_a)
