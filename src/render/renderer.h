@@ -124,12 +124,15 @@ struct InstanceDesc {
     float gap = 0.0f;
 };
 
-// What is under a pixel: the nearest pickable triangle there.
+// What is under a pixel: the nearest pickable triangle or point there.
 struct PickResult {
     bool hit = false;
     uint32_t instance = 0; // instance id, as returned by add_instance()
     uint32_t segment = 0;  // segment index within the instance's geometry
-    uint32_t triangle = 0; // triangle index in the geometry's original index list (index position / 3)
+    // Triangles: triangle index in the geometry's original index list (index position / 3). Points: the
+    // point's position in the index list (its vertex index when the geometry has no indices).
+    uint32_t triangle = 0;
+    uint32_t topology = 0; // what was hit, as Topology: 0 a triangle, 2 a point
     float world[3] = {0, 0, 0};
 };
 
@@ -211,7 +214,9 @@ public:
     // GPU picking at pixel (x, y) of a width x height target (origin top-left), with the camera of the
     // last set_camera(). Renders only that pixel (a pick matrix narrows the frustum, so cluster culling
     // drops nearly everything), reads it back asynchronously and calls `done` -- from the browser's
-    // event loop on the web; natively once the device is polled.
+    // event loop on the web; natively once the device is polled. Points are found as squares of their drawn
+    // size, at least kPickPointPixels across, unless a triangle is in front; lines are not pickable.
+    static constexpr uint32_t kPickPointPixels = 6;
     void pick(uint32_t x, uint32_t y, uint32_t width, uint32_t height, std::function<void(const PickResult &)> done);
     const RenderStats &stats() const {
         return stats_;

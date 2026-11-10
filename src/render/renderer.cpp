@@ -258,6 +258,7 @@ struct Renderer::Impl {
     RenderPipelineRef tri_double_front, tri_single_front, tri_blend_front;
     RenderPipelineRef wide, wide_blend;         // lines / points wider than a pixel, as quads (vs_wide)
     RenderPipelineRef pick_double, pick_single; // id + world-position targets, 1 sample
+    RenderPipelineRef pick_points;              // points as squares (vs_wide)
     // Section caps (see vs_cap): made with the stencil depth format, the first time caps are switched on.
     RenderPipelineRef cap_count, cap_fill, cap_reset;
     WGPUTextureFormat depth_format = kDepthFormat;
@@ -620,7 +621,7 @@ struct Renderer::Impl {
         }
     }
 
-    RenderPipelineRef make_pick_pipeline(const char *label, WGPUCullMode cull) {
+    RenderPipelineRef make_pick_pipeline(const char *label, WGPUCullMode cull, const char *vs = "vs_tri") {
         WGPUColorTargetState ct[2] = {WGPU_COLOR_TARGET_STATE_INIT, WGPU_COLOR_TARGET_STATE_INIT};
         ct[0].format = kPickIdFormat;
         ct[0].writeMask = WGPUColorWriteMask_All;
@@ -639,7 +640,7 @@ struct Renderer::Impl {
         d.label = sv(label);
         d.layout = pipeline_layout.get();
         d.vertex.module = shader.get();
-        d.vertex.entryPoint = sv("vs_tri");
+        d.vertex.entryPoint = sv(vs);
         d.primitive.topology = WGPUPrimitiveTopology_TriangleList;
         d.primitive.frontFace = WGPUFrontFace_CCW;
         d.primitive.cullMode = cull;
@@ -697,6 +698,7 @@ struct Renderer::Impl {
     void create_pick_pipelines() {
         pick_double = make_pick_pipeline("adacpp.pick_double", WGPUCullMode_None);
         pick_single = make_pick_pipeline("adacpp.pick_single", WGPUCullMode_Back);
+        pick_points = make_pick_pipeline("adacpp.pick_points", WGPUCullMode_None, "vs_wide");
     }
 
     // Section caps need a stencil, which the depth target only gets once they are asked for: a viewer that
@@ -1408,8 +1410,9 @@ struct Renderer::Impl {
     }
 
     // The Frame uniform for `view_proj` into `buf`; returns the camera position in `cam`. `cap_plane`: the
-    // section plane a cap pass works on, + 1.
-    void write_frame(WGPUBuffer buf, const Mat4 &view_proj, float cam[3], uint32_t cap_plane = 0) {
+    // section plane a cap pass works on, + 1. `pick`: for the pick pass, whose 1 x 1 target is one pixel of
+    // the image, so a pixel is the whole of clip space there.
+    void write_frame(WGPUBuffer buf, const Mat4 &view_proj, float cam[3], uint32_t cap_plane = 0, bool pick = false) {
         float fwd[3];
         for (int i = 0; i < 3; ++i) {
             cam[i] = -(view[i * 4 + 0] * view[12] + view[i * 4 + 1] * view[13] + view[i * 4 + 2] * view[14]);
@@ -1426,9 +1429,9 @@ struct Renderer::Impl {
         frame[22] = fwd[2];
         frame[24] = ambient;
         frame[25] = diffuse;
-        frame[26] = float(std::max(target_w, 1u));
-        frame[27] = float(std::max(target_h, 1u));
-        const uint32_t clip_info[2] = {uint32_t(clip_planes.size() / 4), cap_plane};
+        frame[26] = pick ? 1.0f : float(std::max(target_w, 1u));
+        frame[27] = pick ? 1.0f : float(std::max(target_h, 1u));
+        const uint32_t clip_info[3] = {uint32_t(clip_planes.size() / 4), cap_plane, pick ? kPickPointPixels : 0u};
         std::memcpy(frame + 28, clip_info, sizeof(clip_info));
         std::copy(clip_planes.begin(), clip_planes.end(), frame + 32);
         std::copy(cap_color, cap_color + 4, frame + 56);
@@ -1463,7 +1466,7 @@ struct Renderer::Impl {
         pm[13] = -float(h) * cy;
         const Mat4 view_proj = mul(pm, webgpu_view_proj());
         float cam[3];
-        write_frame(pick_frame_buf.get(), view_proj, cam);
+        write_frame(pick_frame_buf.get(), view_proj, cam, 0, true);
 
         RenderStats scratch;
         for (Instance *inst : order) {
@@ -1513,6 +1516,19 @@ struct Renderer::Impl {
             wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
             wgpuRenderPassEncoderDraw(pass, inst->vis_count * kClusterMaxTriangles * 3, 1,
                                       inst->vis_base * kClusterMaxTriangles * 3, 0);
+        }
+        // Points, as the squares they are drawn as (never smaller than kPickPointPixels), against the
+        // triangles' depth.
+        for (Instance *inst : order) {
+            const Geometry &g = geometry(inst->geometry);
+            if (g.topology != Topology::Points || (inst->desc.flags & (kHidden | kNoPick)) || g.list_count == 0)
+                continue;
+            if (bound != pick_points.get()) {
+                wgpuRenderPassEncoderSetPipeline(pass, pick_points.get());
+                bound = pick_points.get();
+            }
+            wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
+            wgpuRenderPassEncoderDraw(pass, g.list_count * 6, 1, 0, inst->gpu_index);
         }
         wgpuRenderPassEncoderEnd(pass);
         wgpuRenderPassEncoderRelease(pass);
@@ -1564,6 +1580,7 @@ struct Renderer::Impl {
                     r.instance = p->ids[id[0] - 1];
                     r.triangle = id[1];
                     r.segment = id[2];
+                    r.topology = id[3];
                     r.world[0] = pos[0];
                     r.world[1] = pos[1];
                     r.world[2] = pos[2];

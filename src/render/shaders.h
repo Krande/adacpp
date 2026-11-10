@@ -26,7 +26,9 @@ struct Frame {
     cam_pos: vec4<f32>,
     light_dir: vec4<f32>,
     params: vec4<f32>, // ambient, headlight, target width, target height (pixels)
-    clip_info: vec4<u32>, // x: section plane count, y: the plane being capped + 1 (cap passes, else 0)
+    // x: section plane count, y: the plane being capped + 1 (cap passes, else 0), z: the least size of a
+    // point in pixels (the pick pass, else 0)
+    clip_info: vec4<u32>,
     clip: array<vec4<f32>, 6>, // section planes (normal, constant): cut where dot(n, p) + constant < 0
     cap_color: vec4<f32>, // section caps: linear rgb for every cap; a = 0: each instance's base colour
 };
@@ -82,7 +84,7 @@ struct VOut {
     @location(2) color: vec4<f32>,
     @location(3) @interpolate(flat) flags: u32,
     @location(4) @interpolate(flat) material: vec4<f32>,
-    @location(5) @interpolate(flat) pick: vec4<u32>, // instance + 1, primitive, segment, -
+    @location(5) @interpolate(flat) pick: vec4<u32>, // instance + 1, primitive, segment, topology (0 or 2)
     @location(6) dist: f32, // lines: distance along the line
 };
 
@@ -120,7 +122,7 @@ fn shade_vertex(inst: Instance, vi: u32, seg: i32, ii: u32, primitive: u32) -> V
     out.color = c;
     out.flags = inst.flags;
     out.material = material;
-    out.pick = vec4<u32>(ii + 1u, primitive, u32(max(seg, 0)), 0u);
+    out.pick = vec4<u32>(ii + 1u, primitive, u32(max(seg, 0)), select(0u, 2u, (inst.flags & FLAG_POINTS) != 0u));
     out.dist = vtx[vi * 6u + 3u];
     return out;
 }
@@ -200,7 +202,7 @@ fn vs_wide(@builtin(vertex_index) vid: u32, @builtin(instance_index) ii: u32) ->
     } else if (cb.z < 0.0) {
         cb = mix(cb, ca, cb.z / (cb.z - ca.z));
     }
-    let half_px = 0.5 * max(inst.material.x, 1.0);
+    let half_px = 0.5 * max(inst.material.x, max(1.0, f32(frame.clip_info.z)));
     let viewport = frame.params.zw;
     var out = va;
     var c = ca;
@@ -221,6 +223,11 @@ fn vs_wide(@builtin(vertex_index) vid: u32, @builtin(instance_index) ii: u32) ->
     }
     // Pixels -> clip space at this vertex's depth.
     c = vec4<f32>(c.xy + offset * 2.0 / viewport * c.w, c.z, c.w);
+    if (points && frame.clip_info.z > 0u) {
+        // Picking: the square is flat at the point's depth, so a point lying on a face would lose half of
+        // itself to that face. Nearer by 0.2% of its distance (perspective) or 0.02% of the depth range.
+        c.z = c.z - select(2e-4, 2e-3 * (c.w - c.z), frame.cam_pos.w > 0.5);
+    }
     out.pos = underlay(inst, c);
     return out;
 }

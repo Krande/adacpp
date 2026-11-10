@@ -266,7 +266,8 @@ public:
     }
 
     // GPU pick at canvas pixel (x, y) of a width x height drawing buffer; `callback(result)` runs once the
-    // readback lands: {hit, instance, segment, triangle, world: [x, y, z]}.
+    // readback lands: {hit, instance, segment, triangle, topology, world: [x, y, z]}; `topology` 0 = a
+    // triangle, 2 = a point, whose index (position in the index list) is in `triangle`.
     void pick(uint32_t x, uint32_t y, uint32_t width, uint32_t height, emscripten::val callback) {
         renderer_->pick(x, y, width, height, [callback](const PickResult &r) {
             auto o = emscripten::val::object();
@@ -274,6 +275,7 @@ public:
             o.set("instance", r.instance);
             o.set("segment", r.segment);
             o.set("triangle", r.triangle);
+            o.set("topology", r.topology);
             auto w = emscripten::val::array();
             for (int i = 0; i < 3; ++i)
                 w.call<void>("push", r.world[i]);

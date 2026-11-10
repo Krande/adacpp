@@ -318,6 +318,7 @@ public:
         d["instance"] = hit.instance;
         d["segment"] = hit.segment;
         d["triangle"] = hit.triangle;
+        d["topology"] = hit.topology; // 0 a triangle, 2 a point (its index is in "triangle")
         d["world"] = std::array<float, 3>{hit.world[0], hit.world[1], hit.world[2]};
         return d;
     }
