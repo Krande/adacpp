@@ -2,6 +2,15 @@
 
 
 
+## v0.40.0 (2026-11-10)
+
+### Feature
+
+* feat: the GLB reader can mark solids so their section cut is filled (#80)
+
+Co-authored-by: Claude Fable 5.2 &lt;noreply@anthropic.com&gt; ([`aaf67cc`](https://github.com/Krande/adacpp/commit/aaf67ccf031585af5b6fa6a1390b39ad62abac85))
+
+
 ## v0.39.0 (2026-11-10)
 
 ### Feature
