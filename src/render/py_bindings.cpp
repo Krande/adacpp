@@ -43,7 +43,9 @@ class OffscreenRenderer {
 public:
     OffscreenRenderer(uint32_t width, uint32_t height, const std::string &backend)
         : device_(backend), renderer_(device_.device(), OffscreenTarget::kFormat),
-          target_(std::make_unique<OffscreenTarget>(device_, width, height)) {}
+          target_(std::make_unique<OffscreenTarget>(device_, width, height)) {
+        renderer_.camera().set_viewport(width, height);
+    }
 
     nb::dict adapter() const {
         const auto &i = device_.info();
@@ -59,6 +61,7 @@ public:
     void resize(uint32_t width, uint32_t height) {
         if (width != target_->width() || height != target_->height())
             target_ = std::make_unique<OffscreenTarget>(device_, width, height);
+        renderer_.camera().set_viewport(width, height);
     }
     std::array<uint32_t, 2> size() const {
         return {target_->width(), target_->height()};
@@ -268,6 +271,13 @@ public:
         renderer_.set_camera(view.data(), proj.data(), orthographic);
         std::memcpy(view_, view.data(), sizeof(view_));
     }
+    // The renderer's own camera; with set_camera_controlled(True) render() and pick() draw from it.
+    CameraController &camera() {
+        return renderer_.camera();
+    }
+    void set_camera_controlled(bool controlled) {
+        renderer_.set_camera_controlled(controlled);
+    }
     // The gizmo / legend drawn over every render (overlay_json.h for the spec); None removes it.
     void set_overlay(std::optional<std::string> spec_json) {
         overlay_.reset();
@@ -330,6 +340,8 @@ public:
         {
             nb::gil_scoped_release release;
             renderer_.render(target_->view(), target_->width(), target_->height());
+            if (renderer_.camera_controlled()) // the gizmo turns with the camera that drew the frame
+                std::memcpy(view_, renderer_.camera().view().data(), sizeof(view_));
             rgba = target_->read_rgba();
             if (overlay_)
                 draw_overlay(rgba.data(), target_->width(), target_->height(), view_, *overlay_);
@@ -345,6 +357,8 @@ public:
         {
             nb::gil_scoped_release release;
             renderer_.render(target_->view(), target_->width(), target_->height());
+            if (renderer_.camera_controlled()) // the gizmo turns with the camera that drew the frame
+                std::memcpy(view_, renderer_.camera().view().data(), sizeof(view_));
             auto rgba = target_->read_rgba();
             if (overlay_)
                 draw_overlay(rgba.data(), target_->width(), target_->height(), view_, *overlay_);
@@ -432,8 +446,81 @@ private:
 } // namespace adacpp::render
 
 NB_MODULE(_render, m) {
+    using adacpp::render::CameraController;
+    using adacpp::render::CameraPose;
     using adacpp::render::OffscreenRenderer;
+    using adacpp::render::UpAxis;
     m.doc() = "adacpp WebGPU renderer, headless (wgpu-native)";
+    // camera_controller.h, method for method: angles in degrees, pixels x right / y down from the top-left.
+    nb::class_<CameraController>(m, "CameraController")
+        .def(nb::init<>())
+        .def("set_viewport", &CameraController::set_viewport, "width"_a, "height"_a)
+        .def_prop_ro("aspect", &CameraController::aspect)
+        .def_prop_rw(
+            "up_axis", [](const CameraController &c) { return c.up_axis() == UpAxis::Y ? "y" : "z"; },
+            [](CameraController &c, const std::string &axis) {
+                if (axis != "z" && axis != "y")
+                    throw std::invalid_argument("up_axis must be 'z' or 'y'");
+                c.set_up_axis(axis == "y" ? UpAxis::Y : UpAxis::Z);
+            })
+        .def_prop_rw("fov", &CameraController::fov, &CameraController::set_fov)
+        .def_prop_rw("orthographic", &CameraController::orthographic, &CameraController::set_orthographic)
+        .def("set_scene_bounds", &CameraController::set_scene_bounds, "bounds"_a)
+        .def("orbit", &CameraController::orbit, "dx"_a, "dy"_a)
+        .def("pan", &CameraController::pan, "dx"_a, "dy"_a)
+        .def("zoom", &CameraController::zoom, "factor"_a, "Below 1 moves in, above 1 moves out.")
+        .def("zoom_at", &CameraController::zoom_at, "factor"_a, "x"_a, "y"_a)
+        .def("roll", &CameraController::roll, "angle_deg"_a)
+        .def(
+            "fit",
+            [](CameraController &c, const std::array<float, 6> &bounds, double margin, double seconds,
+               std::optional<double> aspect) {
+                if (aspect)
+                    c.fit_aspect(bounds, *aspect, margin, seconds);
+                else
+                    c.fit(bounds, margin, seconds);
+            },
+            "bounds"_a, "margin"_a = CameraController::kDefaultFitMargin, "seconds"_a = 0.0, "aspect"_a = nb::none(),
+            "Frame the box (min xyz, max xyz) for the viewport's aspect, or the one given.")
+        .def("set_view", &CameraController::set_view, "name"_a, "seconds"_a = 0.0,
+             "'top', 'bottom', 'front', 'back', 'left', 'right' or 'iso'; False for any other name.")
+        .def("set_orientation", &CameraController::set_orientation, "azimuth_deg"_a, "elevation_deg"_a,
+             "roll_deg"_a = 0.0, "seconds"_a = 0.0)
+        .def(
+            "set_pose",
+            [](CameraController &c, std::array<double, 3> eye, std::array<double, 3> target, std::array<double, 3> up,
+               double fov_deg, bool orthographic, double ortho_height, double seconds) {
+                c.set_pose(CameraPose{eye, target, up, fov_deg, orthographic, ortho_height}, seconds);
+            },
+            "eye"_a, "target"_a, "up"_a = std::array<double, 3>{0, 0, 1}, "fov_deg"_a = 45.0, "orthographic"_a = false,
+            "ortho_height"_a = 0.0, "seconds"_a = 0.0)
+        .def("pose",
+             [](const CameraController &c) {
+                 const CameraPose p = c.pose();
+                 nb::dict d;
+                 d["eye"] = p.eye;
+                 d["target"] = p.target;
+                 d["up"] = p.up;
+                 d["fov_deg"] = p.fov_deg;
+                 d["orthographic"] = p.orthographic;
+                 d["ortho_height"] = p.ortho_height;
+                 return d;
+             })
+        .def("set_orbit_pivot", &CameraController::set_orbit_pivot, "point"_a)
+        .def("clear_orbit_pivot", &CameraController::clear_orbit_pivot)
+        .def("set_damping", &CameraController::set_damping, "inertia"_a)
+        .def("update", &CameraController::update, "dt"_a,
+             "Advance a transition and the damping by dt seconds; True while the camera is still moving.")
+        .def_prop_ro("moving", &CameraController::moving)
+        .def("view", &CameraController::view, "Column-major 4x4 as 16 floats.")
+        .def("projection", &CameraController::projection, "aspect"_a,
+             "Column-major 4x4 as 16 floats, OpenGL clip space (what set_camera takes).")
+        .def_prop_ro("target", &CameraController::target)
+        .def_prop_ro("azimuth", &CameraController::azimuth)
+        .def_prop_ro("elevation", &CameraController::elevation)
+        .def_prop_ro("roll_angle", &CameraController::roll_angle)
+        .def_prop_ro("distance", &CameraController::distance)
+        .def_prop_ro("ortho_height", &CameraController::ortho_height);
     nb::class_<OffscreenRenderer>(m, "OffscreenRenderer")
         .def(nb::init<uint32_t, uint32_t, const std::string &>(), "width"_a, "height"_a, "backend"_a = "auto")
         .def_prop_ro("adapter", &OffscreenRenderer::adapter)
@@ -456,6 +543,10 @@ NB_MODULE(_render, m) {
         .def("remove", &OffscreenRenderer::remove, "instance"_a)
         .def("clear", &OffscreenRenderer::clear)
         .def("set_camera", &OffscreenRenderer::set_camera, "view"_a, "proj"_a, "orthographic"_a = false)
+        .def_prop_ro("camera", &OffscreenRenderer::camera, nb::rv_policy::reference_internal,
+                     "The renderer's own CameraController.")
+        .def("set_camera_controlled", &OffscreenRenderer::set_camera_controlled, "controlled"_a,
+             "Draw and pick from `camera` instead of set_camera()'s matrices.")
         .def("set_overlay", &OffscreenRenderer::set_overlay, "spec_json"_a.none(),
              "Gizmo / colour legend drawn over every render: a JSON spec (see adacpp src/render/overlay_json.h), "
              "or None.")

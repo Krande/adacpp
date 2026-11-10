@@ -2275,12 +2275,26 @@ void Renderer::read_cull_stats(std::function<void(const RenderStats &)> done) {
     impl_->read_cull_stats(stats_, std::move(done));
 }
 
+// The controller's matrices for a width x height target, as set_camera() would have been given them.
+void Renderer::apply_controlled_camera(uint32_t width, uint32_t height) {
+    camera_.set_viewport(width, height);
+    // Near and far follow what is in the scene now, helpers and all: nothing drawn falls outside them.
+    camera_.set_scene_bounds(bounds());
+    impl_->view = camera_.view();
+    impl_->proj = camera_.projection(camera_.aspect());
+    impl_->ortho = camera_.orthographic();
+}
+
 void Renderer::render(WGPUTextureView target, uint32_t width, uint32_t height) {
+    if (camera_controlled_)
+        apply_controlled_camera(width, height);
     impl_->render(target, width, height, stats_);
 }
 
 void Renderer::pick(uint32_t x, uint32_t y, uint32_t width, uint32_t height,
                     std::function<void(const PickResult &)> done) {
+    if (camera_controlled_)
+        apply_controlled_camera(width, height);
     impl_->pick(x, y, width, height, std::move(done));
 }
 

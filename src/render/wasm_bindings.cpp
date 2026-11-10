@@ -92,6 +92,7 @@ public:
             return;
         width_ = width;
         height_ = height;
+        renderer_->camera().set_viewport(width, height); // what the camera's pixel arguments are measured in
         if (!width || !height)
             return;
         WGPUSurfaceConfiguration c = WGPU_SURFACE_CONFIGURATION_INIT;
@@ -273,6 +274,114 @@ public:
     void set_camera(uintptr_t view, uintptr_t proj, bool orthographic) {
         renderer_->set_camera(ptr<float>(view), ptr<float>(proj), orthographic);
     }
+
+    // The renderer's own camera (camera_controller.h). The page maps its pointer, wheel and key events to
+    // these; with setCameraControlled(true) render() and pick() draw from it and setCamera() is ignored.
+    // Pixels are drawing-buffer pixels as in pick() (x right, y down, origin top-left), angles degrees.
+    void set_camera_controlled(bool controlled) {
+        renderer_->set_camera_controlled(controlled);
+    }
+    void camera_orbit(double dx, double dy) {
+        renderer_->camera().orbit(dx, dy);
+    }
+    void camera_pan(double dx, double dy) {
+        renderer_->camera().pan(dx, dy);
+    }
+    // Below 1 moves in, above 1 moves out.
+    void camera_zoom(double factor) {
+        renderer_->camera().zoom(factor);
+    }
+    void camera_zoom_at(double factor, double x, double y) {
+        renderer_->camera().zoom_at(factor, x, y);
+    }
+    void camera_roll(double angle_deg) {
+        renderer_->camera().roll(angle_deg);
+    }
+    // Frame the box (min xyz, max xyz); `margin` 0 = the default (1.15); `seconds` 0 = at once.
+    void camera_fit(float x0, float y0, float z0, float x1, float y1, float z1, double margin, double seconds) {
+        renderer_->camera().fit({x0, y0, z0, x1, y1, z1}, margin, seconds);
+    }
+    // "top" | "bottom" | "front" | "back" | "left" | "right" | "iso"; false for any other name.
+    bool camera_view(const std::string &name, double seconds) {
+        return renderer_->camera().set_view(name, seconds);
+    }
+    void camera_set_orientation(double azimuth_deg, double elevation_deg, double roll_deg, double seconds) {
+        renderer_->camera().set_orientation(azimuth_deg, elevation_deg, roll_deg, seconds);
+    }
+    // `ortho_height` 0 = what the perspective view shows at the target.
+    void camera_set_pose(double ex, double ey, double ez, double tx, double ty, double tz, double ux, double uy,
+                         double uz, double fov_deg, bool orthographic, double ortho_height, double seconds) {
+        CameraPose p;
+        p.eye = {ex, ey, ez};
+        p.target = {tx, ty, tz};
+        p.up = {ux, uy, uz};
+        p.fov_deg = fov_deg;
+        p.orthographic = orthographic;
+        p.ortho_height = ortho_height;
+        renderer_->camera().set_pose(p, seconds);
+    }
+    // {eye: [3], target: [3], up: [3], fov, orthographic, orthoHeight, azimuth, elevation, roll, distance}:
+    // the first six are what cameraSetPose takes, the rest the same pose as the controller holds it.
+    emscripten::val camera_pose() const {
+        const CameraController &c = renderer_->camera();
+        const CameraPose p = c.pose();
+        auto vec = [](const std::array<double, 3> &v) {
+            auto a = emscripten::val::array();
+            for (double x : v)
+                a.call<void>("push", x);
+            return a;
+        };
+        auto o = emscripten::val::object();
+        o.set("eye", vec(p.eye));
+        o.set("target", vec(p.target));
+        o.set("up", vec(p.up));
+        o.set("fov", p.fov_deg);
+        o.set("orthographic", p.orthographic);
+        o.set("orthoHeight", p.ortho_height);
+        o.set("azimuth", c.azimuth());
+        o.set("elevation", c.elevation());
+        o.set("roll", c.roll_angle());
+        o.set("distance", c.distance());
+        return o;
+    }
+    // {view, proj}: the controller's matrices for the canvas as it is now, as Float32Array(16), column-major,
+    // the projection in OpenGL clip space (what setCamera takes), for a page that projects points itself.
+    emscripten::val camera_matrices() const {
+        const CameraController &c = renderer_->camera();
+        const std::array<float, 16> view = c.view(), proj = c.projection(c.aspect());
+        auto o = emscripten::val::object();
+        o.set("view", emscripten::val::global("Float32Array").new_(emscripten::typed_memory_view(16, view.data())));
+        o.set("proj", emscripten::val::global("Float32Array").new_(emscripten::typed_memory_view(16, proj.data())));
+        return o;
+    }
+    void camera_set_orthographic(bool orthographic) {
+        renderer_->camera().set_orthographic(orthographic);
+    }
+    void camera_set_fov(double fov_deg) {
+        renderer_->camera().set_fov(fov_deg);
+    }
+    // "z" (the default) or "y".
+    void camera_set_up_axis(const std::string &axis) {
+        renderer_->camera().set_up_axis(axis == "y" || axis == "Y" ? UpAxis::Y : UpAxis::Z);
+    }
+    // Inertia of orbit and pan, 0 (off) to below 1; needs cameraUpdate every frame.
+    void camera_set_damping(double inertia) {
+        renderer_->camera().set_damping(inertia);
+    }
+    void camera_set_pivot(double x, double y, double z) {
+        renderer_->camera().set_orbit_pivot({x, y, z});
+    }
+    void camera_clear_pivot() {
+        renderer_->camera().clear_orbit_pivot();
+    }
+    // Advance a transition and the damping by `dt` seconds; true while the page should keep drawing.
+    bool camera_update(double dt) {
+        return renderer_->camera().update(dt);
+    }
+    bool camera_moving() const {
+        return renderer_->camera().moving();
+    }
+
     void set_background(float r, float g, float b) {
         renderer_->set_background(r, g, b, 1.0f);
     }
@@ -409,6 +518,26 @@ EMSCRIPTEN_BINDINGS(adacpp_render) {
         .function("removeInstance", &WebRenderer::remove_instance)
         .function("clear", &WebRenderer::clear)
         .function("setCamera", &WebRenderer::set_camera)
+        .function("setCameraControlled", &WebRenderer::set_camera_controlled)
+        .function("cameraOrbit", &WebRenderer::camera_orbit)
+        .function("cameraPan", &WebRenderer::camera_pan)
+        .function("cameraZoom", &WebRenderer::camera_zoom)
+        .function("cameraZoomAt", &WebRenderer::camera_zoom_at)
+        .function("cameraRoll", &WebRenderer::camera_roll)
+        .function("cameraFit", &WebRenderer::camera_fit)
+        .function("cameraView", &WebRenderer::camera_view)
+        .function("cameraSetOrientation", &WebRenderer::camera_set_orientation)
+        .function("cameraSetPose", &WebRenderer::camera_set_pose)
+        .function("cameraPose", &WebRenderer::camera_pose)
+        .function("cameraMatrices", &WebRenderer::camera_matrices)
+        .function("cameraSetOrthographic", &WebRenderer::camera_set_orthographic)
+        .function("cameraSetFov", &WebRenderer::camera_set_fov)
+        .function("cameraSetUpAxis", &WebRenderer::camera_set_up_axis)
+        .function("cameraSetDamping", &WebRenderer::camera_set_damping)
+        .function("cameraSetPivot", &WebRenderer::camera_set_pivot)
+        .function("cameraClearPivot", &WebRenderer::camera_clear_pivot)
+        .function("cameraUpdate", &WebRenderer::camera_update)
+        .function("cameraMoving", &WebRenderer::camera_moving)
         .function("setBackground", &WebRenderer::set_background)
         .function("setLighting", &WebRenderer::set_lighting)
         .function("setCulling", &WebRenderer::set_culling)
