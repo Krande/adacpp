@@ -121,7 +121,7 @@ public:
 
     // A GLB (its bytes at `bytes`, `length` long) added to the scene through the same reader the Python
     // offscreen renderer uses (glb_scene.cpp), so a model draws as its poster does. `opts` (all optional):
-    // {yUp, lineWidth, memberWidth, pointSize, lineColor: [r, g, b, a] linear, doubleSided,
+    // {yUp, lineWidth, memberWidth, pointSize, lineColor: [r, g, b, a] linear, doubleSided, sectionCaps,
     //  featureEdgeAngleDeg, keepPositions}. Returns {bounds: [6], featureEdges, geometries: [{geometry,
     // instance, topology, vertexCount, vertexColors, featureEdges, segmentObjects: Int32Array,
     // positions?: Float32Array, indices?: Uint32Array}]} (positions and indices with keepPositions), and the
@@ -149,6 +149,7 @@ public:
             o.member_width = num("memberWidth", 1.0f);
             o.point_size = num("pointSize", 1.0f);
             o.double_sided = flag("doubleSided");
+            o.section_caps = flag("sectionCaps");
             o.feature_edge_angle_deg = num("featureEdgeAngleDeg", 0.0f);
             o.keep_positions = flag("keepPositions");
             const emscripten::val c = opts["lineColor"];

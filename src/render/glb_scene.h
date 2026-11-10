@@ -85,6 +85,10 @@ struct GlbOptions {
     std::array<float, 4> line_color{0, 0, 0, 0};
     // Draw every surface double-sided, whatever its material says (thin shells seen from behind).
     bool double_sided = false;
+    // Mark every single-sided surface as a closed solid (kCapped), so its cut by the section planes is
+    // filled once Renderer::set_section_caps is on. Surfaces drawn double-sided (by their material or by
+    // `double_sided`) are thin shells and are left hollow.
+    bool section_caps = false;
     // Above 0: also draw the surfaces' feature edges as Ada Studio's viewer does with tessellation edges
     // hidden (its default) -- vertices welded by position, then every boundary edge and every edge whose
     // two faces meet at more than this angle (degrees; the viewer's is 30), in `line_color` at

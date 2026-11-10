@@ -68,7 +68,8 @@ public:
     }
 
     nb::dict load_glb(const std::string &path, bool y_up, float line_width, float member_width, float point_size,
-                      std::optional<std::array<float, 4>> line_color, bool double_sided, float feature_edge_angle_deg) {
+                      std::optional<std::array<float, 4>> line_color, bool double_sided, float feature_edge_angle_deg,
+                      bool section_caps) {
         GlbOptions o;
         o.y_up_to_z_up = y_up;
         o.line_width = line_width;
@@ -78,6 +79,7 @@ public:
             o.line_color = *line_color;
         o.double_sided = double_sided;
         o.feature_edge_angle_deg = feature_edge_angle_deg;
+        o.section_caps = section_caps;
         GlbLoadResult r;
         {
             nb::gil_scoped_release release;
@@ -528,7 +530,7 @@ NB_MODULE(_render, m) {
         .def("resize", &OffscreenRenderer::resize, "width"_a, "height"_a)
         .def("load_glb", &OffscreenRenderer::load_glb, "path"_a, "y_up"_a = false, "line_width"_a = 1.0f,
              "member_width"_a = 1.0f, "point_size"_a = 1.0f, "line_color"_a = nb::none(), "double_sided"_a = false,
-             "feature_edge_angle_deg"_a = 0.0f)
+             "feature_edge_angle_deg"_a = 0.0f, "section_caps"_a = false)
         .def("add_mesh", &OffscreenRenderer::add_mesh, "positions"_a, "indices"_a = nb::none(),
              "normals"_a = nb::none(), "colors"_a = nb::none(), "morph"_a = nb::none(), "segments"_a = nb::none(),
              "topology"_a = "triangles", "color"_a = std::array<float, 4>{1, 1, 1, 1}, "metalness"_a = 0.0f,
