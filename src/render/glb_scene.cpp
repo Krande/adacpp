@@ -767,6 +767,8 @@ private:
             desc.line_width = options_.point_size;
         } else if (options_.double_sided) {
             desc.flags |= kDoubleSided;
+        } else if (options_.section_caps && !(desc.flags & kDoubleSided)) {
+            desc.flags |= kCapped;
         }
         r_.set_instance(inst, desc);
         res_.geometries++;
