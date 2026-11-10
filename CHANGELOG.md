@@ -2,6 +2,15 @@
 
 
 
+## v0.38.0 (2026-11-10)
+
+### Feature
+
+* feat: section caps, sprites, point picking and on-top drawing in the WebGPU renderer (#78)
+
+Co-authored-by: Claude Fable 5.2 &lt;noreply@anthropic.com&gt; ([`1d902ed`](https://github.com/Krande/adacpp/commit/1d902eda5b72905a8709914c480ce91385d3042c))
+
+
 ## v0.37.0 (2026-11-08)
 
 ### Feature
