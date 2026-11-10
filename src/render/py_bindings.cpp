@@ -89,7 +89,7 @@ public:
                       const std::string &topology, std::array<float, 4> color, float metalness, float roughness,
                       bool specular, bool double_sided, bool unlit, float line_width, float morph_influence,
                       bool morph_relative, std::optional<Array<float>> model, bool depth_offset,
-                      std::optional<Array<float>> distances, float dash, float gap) {
+                      std::optional<Array<float>> distances, float dash, float gap, bool capped) {
         const size_t nv = positions.size() / 3;
         if (positions.size() % 3 != 0 || nv == 0)
             throw std::invalid_argument("positions: expected (N, 3) floats");
@@ -154,6 +154,8 @@ public:
         d.flags |= kClipped; // cut by set_clip_planes, when any are set
         if (depth_offset)
             d.flags |= kDepthOffset;
+        if (capped)
+            d.flags |= kCapped; // a closed solid: its cut is filled, with set_section_caps(True)
         if (gd.colors)
             d.flags |= kVertexColors;
         if (double_sided)
@@ -230,6 +232,12 @@ public:
         if (planes.size() % 4 != 0)
             throw std::invalid_argument("planes: expected (n, 4) floats");
         renderer_.set_clip_planes(planes.data(), planes.size() / 4);
+    }
+    void set_section_caps(bool enabled) {
+        renderer_.set_section_caps(enabled);
+    }
+    void set_section_cap_color(float r, float g, float b, float a) {
+        renderer_.set_section_cap_color(r, g, b, a);
     }
     std::array<float, 6> bounds() const {
         return renderer_.bounds();
@@ -357,7 +365,7 @@ NB_MODULE(_render, m) {
              "topology"_a = "triangles", "color"_a = std::array<float, 4>{1, 1, 1, 1}, "metalness"_a = 0.0f,
              "roughness"_a = 1.0f, "specular"_a = true, "double_sided"_a = false, "unlit"_a = false,
              "line_width"_a = 1.0f, "morph_influence"_a = 0.0f, "morph_relative"_a = true, "model"_a = nb::none(),
-             "depth_offset"_a = false, "distances"_a = nb::none(), "dash"_a = 0.0f, "gap"_a = 0.0f)
+             "depth_offset"_a = false, "distances"_a = nb::none(), "dash"_a = 0.0f, "gap"_a = 0.0f, "capped"_a = false)
         .def("set_morph_influence", &OffscreenRenderer::set_morph_influence, "instance"_a, "influence"_a)
         .def("set_visible", &OffscreenRenderer::set_visible, "instance"_a, "visible"_a)
         .def("update_colors", &OffscreenRenderer::update_colors, "instance"_a, "colors"_a)
@@ -372,6 +380,10 @@ NB_MODULE(_render, m) {
         .def("set_lighting", &OffscreenRenderer::set_lighting, "ambient"_a, "headlight"_a)
         .def("set_culling", &OffscreenRenderer::set_culling, "frustum"_a = true, "cone"_a = true, "occlusion"_a = true)
         .def("set_clip_planes", &OffscreenRenderer::set_clip_planes, "planes"_a)
+        .def("set_section_caps", &OffscreenRenderer::set_section_caps, "enabled"_a,
+             "Fill the cut through meshes added with capped=True (closed solids) on every clip plane.")
+        .def("set_section_cap_color", &OffscreenRenderer::set_section_cap_color, "r"_a, "g"_a, "b"_a, "a"_a = 1.0f,
+             "One linear RGB colour for every cap; a = 0 gives each cap its mesh's base colour.")
         .def("bounds", &OffscreenRenderer::bounds)
         .def("render", &OffscreenRenderer::render)
         .def("render_png", &OffscreenRenderer::render_png)

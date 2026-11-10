@@ -4,9 +4,9 @@
 namespace adacpp::render {
 
 // Layout contract with renderer.cpp:
-//   Frame     uniform, 224 bytes (with the section planes)
-//   Instance  storage, 112 bytes each (model, colour, flags, segment base, morph influence, visible base,
-//             material: metalness, roughness, specular on/off)
+//   Frame     uniform, 240 bytes (with the section planes)
+//   Instance  storage, 128 bytes each (model, colour, flags, segment base, morph influence, visible base,
+//             material: metalness, roughness, specular on/off; world-space bounding sphere)
 //   segstate  2 x u32 per segment: RGBA8 colour override (alpha 0 = none), flags (1 hidden, 2 matte override)
 //   visible   visible clusters as (instance, cluster) pairs, one region per instance starting at
 //             Instance.vis_base; a draw starts at vertex vis_base x CLUSTER_VERTS, so vs_tri finds its
@@ -26,8 +26,9 @@ struct Frame {
     cam_pos: vec4<f32>,
     light_dir: vec4<f32>,
     params: vec4<f32>, // ambient, headlight, target width, target height (pixels)
-    clip_info: vec4<u32>, // x: section plane count
+    clip_info: vec4<u32>, // x: section plane count, y: the plane being capped + 1 (cap passes, else 0)
     clip: array<vec4<f32>, 6>, // section planes (normal, constant): cut where dot(n, p) + constant < 0
+    cap_color: vec4<f32>, // section caps: linear rgb for every cap; a = 0: each instance's base colour
 };
 
 struct Instance {
@@ -39,6 +40,7 @@ struct Instance {
     vis_base: u32,
     material: vec4<f32>, // metalness, roughness, specular (0 = Lambert), lines/points: segment-id offset (u32 bits)
                          // lines/points: x = width / diameter in pixels; dashed lines: y = dash, z = gap
+    bounds: vec4<f32>,   // world-space bounding sphere: centre, radius
 };
 
 const FLAG_VERTEX_COLORS: u32 = 1u;
@@ -50,6 +52,8 @@ const FLAG_CLIPPED: u32 = 2048u;
 const FLAG_DASHED: u32 = 8192u; // internal: dashed lines
 const SEGMENT_MATTE: u32 = 2u; // segment state flag: the colour override is a matte surface
 const FLAG_UNDERLAY: u32 = 32768u; // lines under the model (a ground grid): drawn first and pushed back
+const FLAG_CAPPED: u32 = 65536u; // its cut is capped; the renderer picks the instances, the shaders do not read it
+const FLAG_CAP: u32 = 1073741824u; // internal, set by vs_cap: a fragment of the cap on plane clip_info.y - 1
 
 // An underlay line a hair farther away than the face on its plane, so the face wins even where the two
 // rasterise to slightly different depths (WebGPU's depth bias applies to triangles only).
@@ -221,6 +225,47 @@ fn vs_wide(@builtin(vertex_index) vid: u32, @builtin(instance_index) ii: u32) ->
     return out;
 }
 
+// Section caps, as three.js' stencil capping (webgl_clipping_stencil). Per plane and capped solid:
+//   vs_tri + fs_stencil   the solid cut by that plane alone, no colour or depth: back faces increment the
+//                         stencil and front faces decrement it, leaving non-zero where the plane runs
+//                         through the solid's interior
+//   vs_cap + fs_main      a quad in the plane over the solid's bounding sphere, drawn where the stencil is
+//                         non-zero (and zeroing it), cut by the other planes, lit as three.js'
+//                         MeshStandardMaterial(metalness 0.1, roughness 0.75)
+// vs_reset zeroes what an open mesh's unbalanced faces left outside the quads before the next plane.
+@vertex
+fn vs_cap(@builtin(vertex_index) vid: u32, @builtin(instance_index) ii: u32) -> VOut {
+    let inst = instances[ii];
+    let pl = frame.clip[frame.clip_info.y - 1u];
+    let len = max(length(pl.xyz), 1e-20);
+    let n = pl.xyz / len;
+    let dist = (dot(pl.xyz, inst.bounds.xyz) + pl.w) / len;
+    // The plane cuts the bounding sphere in a disc of this radius around the centre's projection.
+    let half = sqrt(max(inst.bounds.w * inst.bounds.w - dist * dist, 0.0));
+    let centre = inst.bounds.xyz - dist * n;
+    let u = normalize(cross(n, select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(n.x) > 0.7)));
+    let v = cross(n, u);
+    let corner = vid % 6u;
+    let x = select(-1.0, 1.0, corner == 1u || corner == 2u || corner == 4u);
+    let y = select(-1.0, 1.0, corner == 2u || corner == 4u || corner == 5u);
+    let wp = centre + (x * u + y * v) * half;
+    var out: VOut;
+    out.pos = frame.view_proj * vec4<f32>(wp, 1.0);
+    out.world = wp;
+    out.normal = n;
+    out.color = vec4<f32>(select(inst.color.rgb, frame.cap_color.rgb, frame.cap_color.a > 0.0), 1.0);
+    out.flags = FLAG_CLIPPED | FLAG_CAP;
+    out.material = vec4<f32>(0.1, 0.75, 1.0, 0.0);
+    return out;
+}
+
+@vertex
+fn vs_reset(@builtin(vertex_index) vid: u32) -> VOut {
+    var out: VOut;
+    out.pos = vec4<f32>(f32(vid & 1u) * 4.0 - 1.0, f32(vid >> 1u) * 4.0 - 1.0, 0.0, 1.0);
+    return out;
+}
+
 const PI: f32 = 3.141592653589793;
 
 // three.js MeshStandardMaterial's direct-light BRDF (lights_physical_pars_fragment): GGX distribution,
@@ -252,9 +297,11 @@ fn clipped(in: VOut) -> bool {
     if ((in.flags & FLAG_CLIPPED) == 0u) {
         return false;
     }
+    // A cap lies in its own plane: only the other planes cut it.
+    let own = select(0u, frame.clip_info.y, (in.flags & FLAG_CAP) != 0u);
     for (var i = 0u; i < min(frame.clip_info.x, 6u); i = i + 1u) {
         let pl = frame.clip[i];
-        if (dot(pl.xyz, in.world) + pl.w < 0.0) {
+        if (i + 1u != own && dot(pl.xyz, in.world) + pl.w < 0.0) {
             return true;
         }
     }
@@ -270,6 +317,19 @@ fn fs_pick(in: VOut) -> PickOut {
     o.id = in.pick;
     o.world = vec4<f32>(in.world, 1.0);
     return o;
+}
+
+// Stencil-only draws: nothing reaches the colour target (its write mask is empty).
+@fragment
+fn fs_stencil(in: VOut) -> @location(0) vec4<f32> {
+    let own = frame.clip_info.y;
+    if (own > 0u && (in.flags & FLAG_CLIPPED) != 0u) {
+        let pl = frame.clip[own - 1u];
+        if (dot(pl.xyz, in.world) + pl.w < 0.0) {
+            discard;
+        }
+    }
+    return vec4<f32>(0.0);
 }
 
 fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
@@ -346,6 +406,7 @@ struct Instance {
     morph: f32,
     vis_base: u32,
     material: vec4<f32>,
+    bounds: vec4<f32>,
 };
 
 struct CullFrame {

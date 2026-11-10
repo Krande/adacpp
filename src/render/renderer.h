@@ -22,6 +22,8 @@
 // every other cluster is tested against that pyramid before the second pass draws the ones still visible.
 // Smaller scenes, scenes with occlusion culling switched off, and picking are culled on the CPU (frustum +
 // cone).
+//
+// After the opaque model: section caps (the cut faces of kCapped solids, by stencil counting).
 #pragma once
 
 #include <array>
@@ -50,6 +52,7 @@ enum InstanceFlags : uint32_t {
     kDepthOffset = 1u << 12,  // triangles pulled in front of coplanar faces and lines (negative polygonOffset)
     kDepthBack = 1u << 14,    // triangles pushed behind coplanar lines, so edges on them win (positive polygonOffset)
     kUnderlay = 1u << 15,     // lines / points drawn before the faces (a ground grid): a coplanar face hides them
+    kCapped = 1u << 16,       // a closed solid whose cut by the section planes is filled (set_section_caps)
 };
 
 // Segment state flags (second u32 of a segment's state pair).
@@ -156,6 +159,12 @@ public:
     // point p of a kClipped instance is cut away where dot(n, p) + constant < 0 for any plane.
     static constexpr size_t kMaxClipPlanes = 6;
     void set_clip_planes(const float *planes, size_t count);
+    // Section caps (default off): the cut through every kCapped | kClipped, single-sided instance is filled
+    // with a lit face on each section plane, as three.js' stencil capping does. The instance must be a closed
+    // solid: back faces minus front faces on the kept side of a plane count the solid's interior there.
+    void set_section_caps(bool enabled);
+    // One colour for every cap (linear RGB); alpha 0 (the default) gives each cap its instance's base colour.
+    void set_section_cap_color(float r, float g, float b, float a = 1.0f);
 
     void render(WGPUTextureView target, uint32_t width, uint32_t height);
 

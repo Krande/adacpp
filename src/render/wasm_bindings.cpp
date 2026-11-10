@@ -221,6 +221,15 @@ public:
         renderer_->set_clip_planes(ptr<float>(planes), count);
     }
 
+    // Fill the cut through kCapped instances (see Renderer::set_section_caps).
+    void set_section_caps(bool enabled) {
+        renderer_->set_section_caps(enabled);
+    }
+    // One linear RGB colour for every cap; `a` 0 = each instance's base colour.
+    void set_section_cap_color(float r, float g, float b, float a) {
+        renderer_->set_section_cap_color(r, g, b, a);
+    }
+
     // GPU pick at canvas pixel (x, y) of a width x height drawing buffer; `callback(result)` runs once the
     // readback lands: {hit, instance, segment, triangle, world: [x, y, z]}.
     void pick(uint32_t x, uint32_t y, uint32_t width, uint32_t height, emscripten::val callback) {
@@ -301,6 +310,8 @@ EMSCRIPTEN_BINDINGS(adacpp_render) {
         .function("setLighting", &WebRenderer::set_lighting)
         .function("setCulling", &WebRenderer::set_culling)
         .function("setClipPlanes", &WebRenderer::set_clip_planes)
+        .function("setSectionCaps", &WebRenderer::set_section_caps)
+        .function("setSectionCapColor", &WebRenderer::set_section_cap_color)
         .function("pick", &WebRenderer::pick)
         .function("stats", &WebRenderer::stats)
         .function("readCullStats", &WebRenderer::read_cull_stats);
