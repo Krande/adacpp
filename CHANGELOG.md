@@ -2,6 +2,15 @@
 
 
 
+## v0.39.0 (2026-11-10)
+
+### Feature
+
+* feat: scene graph from the GLB reader and a camera controller in the WebGPU renderer (#79)
+
+Co-authored-by: Claude Fable 5.2 &lt;noreply@anthropic.com&gt; ([`a70d320`](https://github.com/Krande/adacpp/commit/a70d3207707c45f9bd72fe2b7e6869295841c582))
+
+
 ## v0.38.0 (2026-11-10)
 
 ### Feature
