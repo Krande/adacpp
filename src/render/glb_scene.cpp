@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <map>
 #include <tuple>
 #include <stdexcept>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -131,37 +133,322 @@ uint32_t pack_rgba8(const float *c) {
     return q(c[0]) | (q(c[1]) << 8) | (q(c[2]) << 16) | (q(c[3]) << 24);
 }
 
+// The model's objects while the scene is read (GlbLoadResult::objects): filled in the order the GLB gives
+// them, then put parents first by finish().
+class ObjectTable {
+public:
+    // adapy's "id_hierarchy": {id: [name, parent id]}, the parent of a root being "*".
+    void add_hierarchy(const tinygltf::Value &hierarchy) {
+        std::vector<std::string> parents;
+        for (const auto &id : hierarchy.Keys()) {
+            const auto &v = hierarchy.Get(id);
+            const int32_t at = by_id(id);
+            parents.resize(objects_.size());
+            if (!v.IsArray() || v.ArrayLen() < 1)
+                continue;
+            objects_[at].name = text(v.Get(0));
+            if (v.ArrayLen() > 1)
+                parents[at] = text(v.Get(1));
+        }
+        for (size_t i = 0; i < parents.size(); ++i)
+            if (auto it = index_.find(parents[i]); it != index_.end() && it->second != int32_t(i))
+                objects_[i].parent = it->second;
+        sort_by_id_ = true;
+    }
+
+    // The object with this id; one the hierarchy does not list becomes a root named by its id.
+    int32_t by_id(const std::string &id) {
+        auto [it, fresh] = index_.try_emplace(id, int32_t(objects_.size()));
+        if (fresh) {
+            GlbObject o;
+            o.id = o.name = id;
+            objects_.push_back(std::move(o));
+        }
+        return it->second;
+    }
+
+    // The object of a glTF node, under its parent node's.
+    int32_t for_node(const tinygltf::Model &model, int node_index, int32_t parent) {
+        auto [it, fresh] = index_.try_emplace(std::to_string(node_index), int32_t(objects_.size()));
+        if (fresh) {
+            const auto &node = model.nodes.at(node_index);
+            GlbObject o;
+            o.id = it->first;
+            o.name = !node.name.empty() || node.mesh < 0 ? node.name : model.meshes.at(node.mesh).name;
+            o.parent = parent;
+            objects_.push_back(std::move(o));
+        }
+        return it->second;
+    }
+
+    void add_segment(int32_t object, uint32_t instance, uint32_t segment, const float bounds[6], uint32_t triangles) {
+        GlbObject &o = objects_[object];
+        o.segments.push_back({instance, segment});
+        o.triangles += triangles;
+        for (int k = 0; k < 3; ++k) {
+            o.bounds[k] = std::min(o.bounds[k], bounds[k]);
+            o.bounds[3 + k] = std::max(o.bounds[3 + k], bounds[3 + k]);
+        }
+    }
+
+    // Moves the objects into `res` parents first, and points every geometry's segments at their new places.
+    void finish(GlbLoadResult &res) {
+        const size_t n = objects_.size();
+        std::vector<int32_t> order(n);
+        for (size_t i = 0; i < n; ++i)
+            order[i] = int32_t(i);
+        if (sort_by_id_)
+            std::sort(order.begin(), order.end(),
+                      [&](int32_t a, int32_t b) { return id_less(objects_[a].id, objects_[b].id); });
+        std::vector<std::vector<int32_t>> children(n);
+        std::vector<int32_t> roots;
+        for (int32_t i : order)
+            (objects_[i].parent >= 0 ? children[objects_[i].parent] : roots).push_back(i);
+        std::vector<int32_t> place(n, -1), stack;
+        int32_t next = 0;
+        auto descend = [&](int32_t root) {
+            stack.assign(1, root);
+            while (!stack.empty()) {
+                const int32_t i = stack.back();
+                stack.pop_back();
+                if (place[i] >= 0)
+                    continue;
+                place[i] = next++;
+                for (auto c = children[i].rbegin(); c != children[i].rend(); ++c)
+                    stack.push_back(*c);
+            }
+        };
+        for (int32_t r : roots)
+            descend(r);
+        // What no root reaches is a cycle of parents: cut it at its first object.
+        for (int32_t i : order)
+            if (place[i] < 0) {
+                objects_[i].parent = -1;
+                descend(i);
+            }
+        res.objects.resize(n);
+        for (size_t i = 0; i < n; ++i) {
+            GlbObject &o = objects_[i];
+            if (o.parent >= 0)
+                o.parent = place[o.parent];
+            res.objects[place[i]] = std::move(o);
+        }
+        // Children sit after their parent: one pass from the end sums every subtree into its root.
+        for (size_t i = n; i-- > 0;) {
+            const GlbObject &o = res.objects[i];
+            if (o.parent < 0)
+                continue;
+            GlbObject &up = res.objects[o.parent];
+            up.triangles += o.triangles;
+            for (int k = 0; k < 3; ++k) {
+                up.bounds[k] = std::min(up.bounds[k], o.bounds[k]);
+                up.bounds[3 + k] = std::max(up.bounds[3 + k], o.bounds[3 + k]);
+            }
+        }
+        for (GlbGeometry &g : res.loaded)
+            for (int32_t &object : g.segment_objects)
+                if (object >= 0)
+                    object = place[object];
+        objects_.clear();
+        index_.clear();
+    }
+
+private:
+    static std::string text(const tinygltf::Value &v) {
+        if (v.IsString())
+            return v.Get<std::string>();
+        if (v.IsInt())
+            return std::to_string(v.Get<int>());
+        if (v.IsReal())
+            return std::to_string(int64_t(v.Get<double>()));
+        return {};
+    }
+
+    // Numbers by value ("9" before "10"), anything else as text after them.
+    static bool id_less(const std::string &a, const std::string &b) {
+        auto digits = [](const std::string &s) {
+            return !s.empty() && std::all_of(s.begin(), s.end(), [](char c) { return c >= '0' && c <= '9'; });
+        };
+        const bool da = digits(a), db = digits(b);
+        if (da != db)
+            return da;
+        if (da && a.size() != b.size())
+            return a.size() < b.size();
+        return a < b;
+    }
+
+    std::vector<GlbObject> objects_;
+    std::unordered_map<std::string, int32_t> index_;
+    bool sort_by_id_ = false;
+};
+
+struct RangeSegment {
+    uint32_t start, count;
+    int32_t object; // ObjectTable index; -1 = a gap no range covers
+};
+
 // adapy writes each merged node's per-object index ranges into the scene extras as
 // "draw_ranges_<node name>": {object id: [start, count]}. They become the geometry's segments, as in the
 // viewer, so clusters and culling here behave as they do in the browser.
-std::vector<uint32_t> segments_from_extras(const tinygltf::Value *ranges, size_t index_count) {
-    std::vector<std::pair<uint32_t, uint32_t>> rs;
+std::vector<RangeSegment> segments_from_extras(const tinygltf::Value *ranges, size_t index_count,
+                                               ObjectTable &objects) {
+    struct Range {
+        uint32_t start, count;
+        const std::string *id;
+    };
+    std::vector<Range> rs;
+    std::vector<std::string> keys;
     if (ranges && ranges->IsObject()) {
-        for (const auto &key : ranges->Keys()) {
+        keys = ranges->Keys();
+        for (const auto &key : keys) {
             const auto &v = ranges->Get(key);
             if (!v.IsArray() || v.ArrayLen() < 2)
                 continue;
             auto num = [](const tinygltf::Value &x) {
                 return x.IsInt() ? double(x.Get<int>()) : x.IsReal() ? x.Get<double>() : 0.0;
             };
-            rs.emplace_back(uint32_t(num(v.Get(0))), uint32_t(num(v.Get(1))));
+            rs.push_back({uint32_t(num(v.Get(0))), uint32_t(num(v.Get(1))), &key});
         }
     }
-    std::sort(rs.begin(), rs.end());
-    std::vector<uint32_t> out;
+    std::stable_sort(rs.begin(), rs.end(), [](const Range &a, const Range &b) {
+        return a.start != b.start ? a.start < b.start : a.count < b.count;
+    });
+    std::vector<RangeSegment> out;
     uint32_t cursor = 0;
-    for (const auto &[start, count] : rs) {
-        if (start >= index_count || count == 0)
+    for (const Range &r : rs) {
+        if (r.start >= index_count || r.count == 0)
             continue;
-        if (start > cursor)
-            out.insert(out.end(), {cursor, start - cursor});
-        const uint32_t c = std::min<uint32_t>(count, uint32_t(index_count) - start);
-        out.insert(out.end(), {start, c});
-        cursor = std::max(cursor, start + c);
+        if (r.start > cursor)
+            out.push_back({cursor, r.start - cursor, -1});
+        const uint32_t c = std::min<uint32_t>(r.count, uint32_t(index_count) - r.start);
+        out.push_back({r.start, c, objects.by_id(*r.id)});
+        cursor = std::max(cursor, r.start + c);
     }
     if (!out.empty() && cursor < index_count)
-        out.insert(out.end(), {cursor, uint32_t(index_count) - cursor});
+        out.push_back({cursor, uint32_t(index_count) - cursor, -1});
     return out;
+}
+
+// A value inside JSON text, found by skipping over what is in the way: the scene extras of a large model
+// run to megabytes, and a host wants them as they were written, not parsed and written again.
+struct JsonSpan {
+    const char *begin = nullptr, *end = nullptr;
+    explicit operator bool() const {
+        return begin != nullptr;
+    }
+};
+
+const char *json_skip_space(const char *p, const char *end) {
+    while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r'))
+        ++p;
+    return p;
+}
+
+// `p` at the opening quote; the position after the closing one, or null.
+const char *json_skip_string(const char *p, const char *end) {
+    for (++p; p < end; ++p) {
+        if (*p == '\\')
+            ++p;
+        else if (*p == '"')
+            return p + 1;
+    }
+    return nullptr;
+}
+
+// The position after the value starting at `p`, or null when the text ends inside it.
+const char *json_skip_value(const char *p, const char *end) {
+    if (p >= end)
+        return nullptr;
+    if (*p == '"')
+        return json_skip_string(p, end);
+    if (*p != '{' && *p != '[') {
+        while (p < end && *p != ',' && *p != '}' && *p != ']' && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r')
+            ++p;
+        return p;
+    }
+    int depth = 0;
+    while (p < end) {
+        if (*p == '"') {
+            p = json_skip_string(p, end);
+            if (!p)
+                return nullptr;
+            continue;
+        }
+        if (*p == '{' || *p == '[')
+            ++depth;
+        else if ((*p == '}' || *p == ']') && --depth == 0)
+            return p + 1;
+        ++p;
+    }
+    return nullptr;
+}
+
+JsonSpan json_member(JsonSpan object, std::string_view key) {
+    if (!object || object.end - object.begin < 2 || *object.begin != '{')
+        return {};
+    const char *p = object.begin + 1, *end = object.end;
+    while (true) {
+        p = json_skip_space(p, end);
+        if (p >= end || *p != '"')
+            return {};
+        const char *key_end = json_skip_string(p, end);
+        if (!key_end)
+            return {};
+        const bool match = std::string_view(p + 1, size_t(key_end - p - 2)) == key;
+        p = json_skip_space(key_end, end);
+        if (p >= end || *p != ':')
+            return {};
+        const char *value = json_skip_space(p + 1, end);
+        p = json_skip_value(value, end);
+        if (!p)
+            return {};
+        if (match)
+            return {value, p};
+        p = json_skip_space(p, end);
+        if (p >= end || *p != ',')
+            return {};
+        ++p;
+    }
+}
+
+JsonSpan json_element(JsonSpan array, size_t index) {
+    if (!array || array.end - array.begin < 2 || *array.begin != '[')
+        return {};
+    const char *p = array.begin + 1, *end = array.end;
+    for (size_t i = 0;; ++i) {
+        const char *value = json_skip_space(p, end);
+        if (value >= end || *value == ']')
+            return {};
+        p = json_skip_value(value, end);
+        if (!p)
+            return {};
+        if (i == index)
+            return {value, p};
+        p = json_skip_space(p, end);
+        if (p >= end || *p != ',')
+            return {};
+        ++p;
+    }
+}
+
+// GlbLoadResult::extras and ::ada_ext_data, from the GLB as it was handed in.
+void read_passthrough(const std::vector<unsigned char> &glb, GlbLoadResult &res) {
+    auto u32 = [&](size_t at) {
+        uint32_t v;
+        std::memcpy(&v, glb.data() + at, 4);
+        return v;
+    };
+    if (glb.size() < 20 || u32(0) != 0x46546C67u || u32(16) != 0x4E4F534Au || 20 + size_t(u32(12)) > glb.size())
+        return;
+    const char *begin = reinterpret_cast<const char *>(glb.data()) + 20;
+    JsonSpan root{json_skip_space(begin, begin + u32(12)), begin + u32(12)};
+    size_t scene = 0;
+    if (const JsonSpan s = json_member(root, "scene"))
+        scene = size_t(std::max(0L, std::strtol(std::string(s.begin, s.end).c_str(), nullptr, 10)));
+    if (const JsonSpan e = json_member(json_element(json_member(root, "scenes"), scene), "extras"))
+        res.extras.assign(e.begin, e.end);
+    if (const JsonSpan e = json_member(json_member(root, "extensions"), "ADA_EXT_data"))
+        res.ada_ext_data.assign(e.begin, e.end);
 }
 
 // EXT_meshopt_compression / KHR_meshopt_compression (what adapy's GLB writer emits with compression on):
@@ -339,10 +626,12 @@ InstanceDesc material_desc(const tinygltf::Model &model, int material, bool vert
 // Each primitive -- or each adapy draw range in it -- stays a segment, so picking still names the object.
 class Batcher {
 public:
-    Batcher(Renderer &r, const tinygltf::Model &model, GlbLoadResult &res, const GlbOptions &options)
-        : r_(r), model_(model), res_(res), options_(options) {}
+    Batcher(Renderer &r, const tinygltf::Model &model, GlbLoadResult &res, const GlbOptions &options,
+            ObjectTable &objects)
+        : r_(r), model_(model), res_(res), options_(options), objects_(objects) {}
 
-    void add(const tinygltf::Primitive &prim, const Mat4 &world, const tinygltf::Value *ranges) {
+    // `object`: what the primitive is when no draw ranges split it (-1 = nothing).
+    void add(const tinygltf::Primitive &prim, const Mat4 &world, const tinygltf::Value *ranges, int32_t object) {
         Topology topo;
         if (prim.mode == TINYGLTF_MODE_TRIANGLES || prim.mode == -1)
             topo = Topology::Triangles;
@@ -419,13 +708,15 @@ public:
                 src = i % 3 == 1 ? i + 1 : i - 1;
             b.indices.push_back(base + indices[src]);
         }
-        auto segments =
-            topo == Topology::Triangles ? segments_from_extras(ranges, indices.size()) : std::vector<uint32_t>{};
+        auto segments = topo == Topology::Triangles ? segments_from_extras(ranges, indices.size(), objects_)
+                                                    : std::vector<RangeSegment>{};
         if (segments.empty())
-            segments = {0, uint32_t(indices.size())};
-        for (size_t k = 0; k < segments.size(); k += 2)
-            b.segments.insert(b.segments.end(), {first + segments[k], segments[k + 1]});
-        res_.segments += segments.size() / 2;
+            segments = {{0, uint32_t(indices.size()), object}};
+        for (const RangeSegment &seg : segments) {
+            b.segments.insert(b.segments.end(), {first + seg.start, seg.count});
+            b.segment_objects.push_back(seg.object);
+        }
+        res_.segments += segments.size();
         res_.vertices += nv;
         if (topo == Topology::Triangles)
             res_.triangles += indices.size() / 3;
@@ -445,6 +736,7 @@ private:
         int material = -1;
         std::vector<float> positions, normals;
         std::vector<uint32_t> colors, indices, segments;
+        std::vector<int32_t> segment_objects; // per segment, its ObjectTable index or -1
         bool any_normals = false, any_colors = false;
         size_t vertex_count() const {
             return positions.size() / 3;
@@ -489,6 +781,23 @@ private:
             rec.positions = b.positions;
             rec.indices = b.indices;
         }
+        // Each object's share of the batch: its segments, and the bounds and triangles they cover.
+        for (size_t k = 0; k < b.segment_objects.size(); ++k) {
+            if (b.segment_objects[k] < 0)
+                continue;
+            const uint32_t start = b.segments[k * 2], count = b.segments[k * 2 + 1];
+            float bounds[6] = {3.4e38f, 3.4e38f, 3.4e38f, -3.4e38f, -3.4e38f, -3.4e38f};
+            for (uint32_t i = start; i < start + count; ++i) {
+                const float *p = &b.positions[size_t(b.indices[i]) * 3];
+                for (int c = 0; c < 3; ++c) {
+                    bounds[c] = std::min(bounds[c], p[c]);
+                    bounds[3 + c] = std::max(bounds[3 + c], p[c]);
+                }
+            }
+            objects_.add_segment(b.segment_objects[k], inst, uint32_t(k), bounds,
+                                 b.topology == Topology::Triangles ? count / 3 : 0);
+        }
+        rec.segment_objects = b.segment_objects;
         res_.loaded.push_back(std::move(rec));
         if (b.topology == Topology::Triangles && options_.feature_edge_angle_deg > 0.0f)
             add_feature_edges(b);
@@ -525,6 +834,7 @@ private:
         rec.topology = Topology::Lines;
         rec.vertex_count = uint32_t(lines.size() / 3);
         rec.feature_edges = true;
+        rec.segment_objects = {-1};
         res_.loaded.push_back(std::move(rec));
     }
 
@@ -532,24 +842,34 @@ private:
     const tinygltf::Model &model_;
     GlbLoadResult &res_;
     GlbOptions options_;
+    ObjectTable &objects_;
     std::map<std::tuple<int, int, bool>, Batch> batches_;
 };
 
-void walk(Batcher &batcher, const tinygltf::Model &model, int node_index, const Mat4 &parent,
-          const tinygltf::Value &scene_extras) {
-    const auto &node = model.nodes.at(node_index);
-    const Mat4 world = mul(parent, node_matrix(node));
-    if (node.mesh >= 0) {
-        const auto &prims = model.meshes.at(node.mesh).primitives;
-        const std::string key = "draw_ranges_" + node.name;
-        const tinygltf::Value *ranges =
-            prims.size() == 1 && scene_extras.IsObject() && scene_extras.Has(key) ? &scene_extras.Get(key) : nullptr;
-        for (const auto &prim : prims)
-            batcher.add(prim, world, ranges);
+struct Walk {
+    Batcher &batcher;
+    const tinygltf::Model &model;
+    const tinygltf::Value &scene_extras;
+    ObjectTable &objects;
+    bool node_objects; // every node is an object (no adapy extras to name them)
+
+    void node(int node_index, const Mat4 &parent, int32_t parent_object) {
+        const auto &n = model.nodes.at(node_index);
+        const Mat4 world = mul(parent, node_matrix(n));
+        const int32_t object = node_objects ? objects.for_node(model, node_index, parent_object) : -1;
+        if (n.mesh >= 0) {
+            const auto &prims = model.meshes.at(n.mesh).primitives;
+            const std::string key = "draw_ranges_" + n.name;
+            const tinygltf::Value *ranges = prims.size() == 1 && scene_extras.IsObject() && scene_extras.Has(key)
+                                                ? &scene_extras.Get(key)
+                                                : nullptr;
+            for (const auto &prim : prims)
+                batcher.add(prim, world, ranges, object);
+        }
+        for (int child : n.children)
+            node(child, world, object);
     }
-    for (int child : node.children)
-        walk(batcher, model, child, world, scene_extras);
-}
+};
 
 } // namespace
 
@@ -573,6 +893,8 @@ GlbLoadResult load_glb_bytes(Renderer &renderer, std::vector<unsigned char> byte
     loader.SetImageLoader([](tinygltf::Image *, const int, std::string *, std::string *, int, int,
                              const unsigned char *, int, void *) { return true; },
                           nullptr);
+    GlbLoadResult res;
+    read_passthrough(bytes, res);
     bytes = decode_meshopt_glb(std::move(bytes));
     const bool ok = loader.LoadBinaryFromMemory(&model, &err, &warn, bytes.data(), unsigned(bytes.size()));
     bytes.clear();
@@ -586,17 +908,32 @@ GlbLoadResult load_glb_bytes(Renderer &renderer, std::vector<unsigned char> byte
     // glTF y-up -> z-up: rotate +90 degrees about x.
     const Mat4 root = options.y_up_to_z_up ? Mat4{1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1}
                                            : Mat4{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-    GlbLoadResult res;
-    Batcher batcher(renderer, model, res, options);
     const int scene = model.defaultScene >= 0 ? model.defaultScene : 0;
+    const tinygltf::Value no_extras;
+    const tinygltf::Value &extras = model.scenes.empty() ? no_extras : model.scenes.at(scene).extras;
+    // adapy names the objects in the scene extras; without them the nodes are the objects.
+    ObjectTable objects;
+    bool adapy = false;
+    if (extras.IsObject()) {
+        if (extras.Has("id_hierarchy") && extras.Get("id_hierarchy").IsObject()) {
+            objects.add_hierarchy(extras.Get("id_hierarchy"));
+            adapy = true;
+        }
+        for (const auto &key : extras.Keys())
+            adapy |= key.rfind("draw_ranges_", 0) == 0;
+    }
+    res.node_objects = !adapy;
+    Batcher batcher(renderer, model, res, options, objects);
+    Walk walk{batcher, model, extras, objects, res.node_objects};
     if (!model.scenes.empty()) {
         for (int n : model.scenes.at(scene).nodes)
-            walk(batcher, model, n, root, model.scenes.at(scene).extras);
+            walk.node(n, root, -1);
     } else {
         for (size_t n = 0; n < model.nodes.size(); ++n)
-            walk(batcher, model, int(n), root, tinygltf::Value());
+            walk.node(int(n), root, -1);
     }
     batcher.finish();
+    objects.finish(res);
     return res;
 }
 

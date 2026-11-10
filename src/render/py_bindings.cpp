@@ -11,6 +11,7 @@
 #include <nanobind/stl/array.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
@@ -27,6 +28,15 @@ namespace adacpp::render {
 namespace {
 
 template <class T> using Array = nb::ndarray<const T, nb::c_contig, nb::device::cpu>;
+
+// A numpy array that owns `data`; `columns` above 1 makes it (N, columns).
+template <class T> nb::object owned_array(std::vector<T> data, size_t columns = 1) {
+    auto *held = new std::vector<T>(std::move(data));
+    nb::capsule owner(held, [](void *p) noexcept { delete static_cast<std::vector<T> *>(p); });
+    if (columns > 1)
+        return nb::cast(nb::ndarray<nb::numpy, T>(held->data(), {held->size() / columns, columns}, owner));
+    return nb::cast(nb::ndarray<nb::numpy, T>(held->data(), {held->size()}, owner));
+}
 
 // One device, renderer and colour target: render() draws the scene and reads it back.
 class OffscreenRenderer {
@@ -77,6 +87,50 @@ public:
         d["triangles"] = r.triangles;
         d["segments"] = r.segments;
         d["feature_edges"] = r.feature_edges;
+        d["bounds"] = r.bounds;
+        // What was added, and the model's objects (GlbLoadResult::objects) as tables, row i being object i:
+        // a pick's (instance, segment) names an object through that instance's "segment_objects".
+        nb::list loaded;
+        for (GlbGeometry &g : r.loaded) {
+            nb::dict e;
+            e["geometry"] = g.geometry;
+            e["instance"] = g.instance;
+            e["topology"] = uint32_t(g.topology);
+            e["vertex_count"] = g.vertex_count;
+            e["vertex_colors"] = g.vertex_colors;
+            e["feature_edges"] = g.feature_edges;
+            e["segment_objects"] = owned_array(std::move(g.segment_objects));
+            loaded.append(e);
+        }
+        d["loaded"] = loaded;
+        const size_t n = r.objects.size();
+        std::vector<std::string> ids(n), names(n);
+        std::vector<int32_t> parents(n);
+        std::vector<float> bounds(n * 6);
+        std::vector<uint32_t> triangles(n), offsets(n + 1, 0), segments;
+        for (size_t i = 0; i < n; ++i) {
+            GlbObject &o = r.objects[i];
+            ids[i] = std::move(o.id);
+            names[i] = std::move(o.name);
+            parents[i] = o.parent;
+            std::copy(o.bounds.begin(), o.bounds.end(), bounds.begin() + i * 6);
+            triangles[i] = o.triangles;
+            for (const auto &pair : o.segments)
+                segments.insert(segments.end(), pair.begin(), pair.end());
+            offsets[i + 1] = uint32_t(segments.size() / 2);
+        }
+        nb::dict objects;
+        objects["ids"] = ids;
+        objects["names"] = names;
+        objects["parents"] = owned_array(std::move(parents));
+        objects["bounds"] = owned_array(std::move(bounds), 6);
+        objects["triangles"] = owned_array(std::move(triangles));
+        objects["segment_offsets"] = owned_array(std::move(offsets));
+        objects["segments"] = owned_array(std::move(segments), 2);
+        d["objects"] = objects;
+        d["node_objects"] = r.node_objects;
+        d["extras"] = r.extras;
+        d["ada_ext_data"] = r.ada_ext_data;
         return d;
     }
 
