@@ -24,6 +24,25 @@ struct GlbGeometry {
     // them), when GlbOptions::keep_positions.
     std::vector<float> positions;
     std::vector<uint32_t> indices;
+    // Per segment of the geometry (what PickResult::segment indexes): the GlbLoadResult::objects entry it
+    // draws, or -1 for a gap between draw ranges and for a primitive that is no object. A feature-edge
+    // overlay is no object.
+    std::vector<int32_t> segment_objects;
+};
+
+// One model object of the GLB: something a user selects, hides or reads the name of.
+struct GlbObject {
+    std::string id;      // as the GLB names it: see GlbLoadResult::objects
+    std::string name;    // for display; not unique
+    int32_t parent = -1; // index into GlbLoadResult::objects; -1 = a root
+    // World-space bounds (min xyz, max xyz) and triangle count of the object's own segments and of every
+    // object below it, so a grouping object has the union of its children. Inverted (min > max) when
+    // nothing under it was drawn.
+    std::array<float, 6> bounds{3.4e38f, 3.4e38f, 3.4e38f, -3.4e38f, -3.4e38f, -3.4e38f};
+    uint32_t triangles = 0;
+    // The object's own segments as (instance id, segment index), the pair a pick reports. Empty for an
+    // object that only groups others.
+    std::vector<std::array<uint32_t, 2>> segments;
 };
 
 struct GlbLoadResult {
@@ -36,6 +55,20 @@ struct GlbLoadResult {
     // World-space bounds of what was loaded: min xyz, max xyz (inverted when nothing was).
     std::array<float, 6> bounds{3.4e38f, 3.4e38f, 3.4e38f, -3.4e38f, -3.4e38f, -3.4e38f};
     std::vector<GlbGeometry> loaded;
+    // The model's objects, parents before their children (depth first, so a subtree is one contiguous run).
+    //  - A GLB with adapy's scene extras ("id_hierarchy": {id: [name, parent id]} and/or
+    //    "draw_ranges_<node>": {id: [start, count]}): one object per id of the hierarchy, plus any id only
+    //    the draw ranges name (a root, named by its id). `id` is that id. Siblings are in id order. Only
+    //    draw ranges make segments objects: a primitive without them (edge lines, points) is none.
+    //  - Any other GLB (`node_objects`): one object per node of the scene, `id` its node index in decimal,
+    //    named as the node (else its mesh, else empty), under its parent node. Every primitive of a node's
+    //    mesh is a segment of it.
+    std::vector<GlbObject> objects;
+    bool node_objects = false;
+    // The default scene's "extras" and the root "ADA_EXT_data" extension, as the bytes of JSON text the GLB
+    // holds them in (empty when absent), for a host that reads design or FEA metadata from them.
+    std::string extras;
+    std::string ada_ext_data;
 };
 
 // Adds every mesh primitive of the GLB's default scene as one geometry + instance, with node transforms

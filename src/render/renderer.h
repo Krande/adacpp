@@ -35,6 +35,7 @@
 #include <memory>
 #include <vector>
 
+#include "camera_controller.h"
 #include "gpu.h"
 
 namespace adacpp::render {
@@ -188,6 +189,23 @@ public:
     // `proj_gl` is an OpenGL-convention projection (clip z in [-1, 1], e.g. three.js); it is remapped to
     // WebGPU's [0, 1] here. Matrices are column-major.
     void set_camera(const float view[16], const float proj_gl[16], bool orthographic);
+    // The renderer's own camera (camera_controller.h): the host maps its input to orbit / pan / zoom / fit
+    // and the matrices follow. Off by default, when set_camera() is the camera. Switched on, render() and
+    // pick() take the view and the projection from the controller instead, for the aspect of the target
+    // they are given, with near and far around bounds(); set_camera() is then ignored until it is switched
+    // off again. The controller can be driven either way, e.g. framed before it is switched on.
+    CameraController &camera() {
+        return camera_;
+    }
+    const CameraController &camera() const {
+        return camera_;
+    }
+    void set_camera_controlled(bool controlled) {
+        camera_controlled_ = controlled;
+    }
+    bool camera_controlled() const {
+        return camera_controlled_;
+    }
     void set_background(float r, float g, float b, float a = 1.0f); // sRGB-encoded, as written to the target
     // Ambient irradiance and headlight intensity, in three.js units (AmbientLight / DirectionalLight).
     void set_lighting(float ambient, float headlight);
@@ -219,9 +237,9 @@ public:
     void render(WGPUTextureView target, uint32_t width, uint32_t height);
 
     // GPU picking at pixel (x, y) of a width x height target (origin top-left), with the camera of the
-    // last set_camera(). Renders only that pixel (a pick matrix narrows the frustum, so cluster culling
-    // drops nearly everything), reads it back asynchronously and calls `done` -- from the browser's
-    // event loop on the web; natively once the device is polled. Points are found as squares of their drawn
+    // last set_camera() (or the controller's, see camera()). Renders only that pixel (a pick matrix narrows the
+    // frustum, so cluster culling drops nearly everything), reads it back asynchronously and calls `done` -- from the
+    // browser's event loop on the web; natively once the device is polled. Points are found as squares of their drawn
     // size, at least kPickPointPixels across, unless a triangle is in front; lines are not pickable.
     static constexpr uint32_t kPickPointPixels = 6;
     void pick(uint32_t x, uint32_t y, uint32_t width, uint32_t height, std::function<void(const PickResult &)> done);
@@ -237,8 +255,12 @@ public:
 
 private:
     struct Impl;
+    void apply_controlled_camera(uint32_t width, uint32_t height);
+
     std::unique_ptr<Impl> impl_;
     RenderStats stats_;
+    CameraController camera_;
+    bool camera_controlled_ = false;
 };
 
 } // namespace adacpp::render

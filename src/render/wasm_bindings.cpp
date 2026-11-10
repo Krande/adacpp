@@ -9,6 +9,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "glb_scene.h"
 #include "renderer.h"
@@ -27,6 +28,37 @@ WGPUTextureFormat parse_format(const std::string &f) {
     if (f == "rgba8unorm")
         return WGPUTextureFormat_RGBA8Unorm;
     return WGPUTextureFormat_BGRA8Unorm;
+}
+
+// A JS typed array holding a copy of `data` (a view of the heap would dangle once `data` goes).
+template <typename T> emscripten::val typed_copy(const char *type, const std::vector<T> &data) {
+    return emscripten::val::global(type).new_(emscripten::typed_memory_view(data.size(), data.data()));
+}
+
+// A JS array of strings in one crossing: per-element calls cost too much for tens of thousands of names.
+template <typename Get> emscripten::val string_array(const std::vector<GlbObject> &objects, Get get) {
+    std::string json = "[";
+    for (const GlbObject &o : objects) {
+        if (json.size() > 1)
+            json += ',';
+        json += '"';
+        for (const unsigned char c : get(o)) {
+            if (c == '"' || c == '\\') {
+                json += '\\';
+                json += char(c);
+            } else if (c < 0x20) {
+                static const char hex[] = "0123456789abcdef";
+                json += "\\u00";
+                json += hex[c >> 4];
+                json += hex[c & 15];
+            } else {
+                json += char(c);
+            }
+        }
+        json += '"';
+    }
+    json += ']';
+    return emscripten::val::global("JSON").call<emscripten::val>("parse", json);
 }
 
 } // namespace
@@ -60,6 +92,7 @@ public:
             return;
         width_ = width;
         height_ = height;
+        renderer_->camera().set_viewport(width, height); // what the camera's pixel arguments are measured in
         if (!width || !height)
             return;
         WGPUSurfaceConfiguration c = WGPU_SURFACE_CONFIGURATION_INIT;
@@ -90,8 +123,16 @@ public:
     // offscreen renderer uses (glb_scene.cpp), so a model draws as its poster does. `opts` (all optional):
     // {yUp, lineWidth, memberWidth, pointSize, lineColor: [r, g, b, a] linear, doubleSided,
     //  featureEdgeAngleDeg, keepPositions}. Returns {bounds: [6], featureEdges, geometries: [{geometry,
-    // instance, topology, vertexCount, vertexColors, featureEdges, positions?: Float32Array,
-    // indices?: Uint32Array}]} (positions and indices with keepPositions).
+    // instance, topology, vertexCount, vertexColors, featureEdges, segmentObjects: Int32Array,
+    // positions?: Float32Array, indices?: Uint32Array}]} (positions and indices with keepPositions), and the
+    // model's objects (GlbLoadResult::objects) as tables, row i being object i:
+    //   objects: {count, ids: string[], names: string[], parents: Int32Array, bounds: Float32Array (6 per
+    //             object), triangles: Uint32Array, segmentOffsets: Uint32Array (count + 1),
+    //             segments: Uint32Array (instance, segment pairs)}
+    // Object i's own segments are pairs segmentOffsets[i] .. segmentOffsets[i + 1] of `segments`; a
+    // geometry's segmentObjects[s] is the object segment s draws (-1 = none), which is how a pick's
+    // (instance, segment) names an object. nodeObjects: the objects are glTF nodes, not adapy ids. extras /
+    // adaExtData: the scene extras and the ADA_EXT_data extension as JSON text ("" when absent).
     emscripten::val load_glb(uintptr_t bytes, uint32_t length, emscripten::val opts) {
         auto num = [&](const char *k, float d) {
             const emscripten::val v = opts[k];
@@ -132,15 +173,41 @@ public:
             e.set("vertexCount", g.vertex_count);
             e.set("vertexColors", g.vertex_colors);
             e.set("featureEdges", g.feature_edges);
-            if (!g.positions.empty()) // copies: the views would dangle once `r` goes
-                e.set("positions", emscripten::val::global("Float32Array")
-                                       .new_(emscripten::typed_memory_view(g.positions.size(), g.positions.data())));
+            e.set("segmentObjects", typed_copy("Int32Array", g.segment_objects));
+            if (!g.positions.empty())
+                e.set("positions", typed_copy("Float32Array", g.positions));
             if (!g.indices.empty())
-                e.set("indices", emscripten::val::global("Uint32Array")
-                                     .new_(emscripten::typed_memory_view(g.indices.size(), g.indices.data())));
+                e.set("indices", typed_copy("Uint32Array", g.indices));
             list.call<void>("push", e);
         }
         out.set("geometries", list);
+
+        const size_t n = r.objects.size();
+        std::vector<int32_t> parents(n);
+        std::vector<float> object_bounds(n * 6);
+        std::vector<uint32_t> triangles(n), offsets(n + 1, 0), segments;
+        for (size_t i = 0; i < n; ++i) {
+            const GlbObject &o = r.objects[i];
+            parents[i] = o.parent;
+            std::copy(o.bounds.begin(), o.bounds.end(), object_bounds.begin() + i * 6);
+            triangles[i] = o.triangles;
+            for (const auto &pair : o.segments)
+                segments.insert(segments.end(), pair.begin(), pair.end());
+            offsets[i + 1] = uint32_t(segments.size() / 2);
+        }
+        emscripten::val objects = emscripten::val::object();
+        objects.set("count", double(n));
+        objects.set("ids", string_array(r.objects, [](const GlbObject &o) -> const std::string & { return o.id; }));
+        objects.set("names", string_array(r.objects, [](const GlbObject &o) -> const std::string & { return o.name; }));
+        objects.set("parents", typed_copy("Int32Array", parents));
+        objects.set("bounds", typed_copy("Float32Array", object_bounds));
+        objects.set("triangles", typed_copy("Uint32Array", triangles));
+        objects.set("segmentOffsets", typed_copy("Uint32Array", offsets));
+        objects.set("segments", typed_copy("Uint32Array", segments));
+        out.set("objects", objects);
+        out.set("nodeObjects", r.node_objects);
+        out.set("extras", r.extras);
+        out.set("adaExtData", r.ada_ext_data);
         return out;
     }
 
@@ -207,6 +274,114 @@ public:
     void set_camera(uintptr_t view, uintptr_t proj, bool orthographic) {
         renderer_->set_camera(ptr<float>(view), ptr<float>(proj), orthographic);
     }
+
+    // The renderer's own camera (camera_controller.h). The page maps its pointer, wheel and key events to
+    // these; with setCameraControlled(true) render() and pick() draw from it and setCamera() is ignored.
+    // Pixels are drawing-buffer pixels as in pick() (x right, y down, origin top-left), angles degrees.
+    void set_camera_controlled(bool controlled) {
+        renderer_->set_camera_controlled(controlled);
+    }
+    void camera_orbit(double dx, double dy) {
+        renderer_->camera().orbit(dx, dy);
+    }
+    void camera_pan(double dx, double dy) {
+        renderer_->camera().pan(dx, dy);
+    }
+    // Below 1 moves in, above 1 moves out.
+    void camera_zoom(double factor) {
+        renderer_->camera().zoom(factor);
+    }
+    void camera_zoom_at(double factor, double x, double y) {
+        renderer_->camera().zoom_at(factor, x, y);
+    }
+    void camera_roll(double angle_deg) {
+        renderer_->camera().roll(angle_deg);
+    }
+    // Frame the box (min xyz, max xyz); `margin` 0 = the default (1.15); `seconds` 0 = at once.
+    void camera_fit(float x0, float y0, float z0, float x1, float y1, float z1, double margin, double seconds) {
+        renderer_->camera().fit({x0, y0, z0, x1, y1, z1}, margin, seconds);
+    }
+    // "top" | "bottom" | "front" | "back" | "left" | "right" | "iso"; false for any other name.
+    bool camera_view(const std::string &name, double seconds) {
+        return renderer_->camera().set_view(name, seconds);
+    }
+    void camera_set_orientation(double azimuth_deg, double elevation_deg, double roll_deg, double seconds) {
+        renderer_->camera().set_orientation(azimuth_deg, elevation_deg, roll_deg, seconds);
+    }
+    // `ortho_height` 0 = what the perspective view shows at the target.
+    void camera_set_pose(double ex, double ey, double ez, double tx, double ty, double tz, double ux, double uy,
+                         double uz, double fov_deg, bool orthographic, double ortho_height, double seconds) {
+        CameraPose p;
+        p.eye = {ex, ey, ez};
+        p.target = {tx, ty, tz};
+        p.up = {ux, uy, uz};
+        p.fov_deg = fov_deg;
+        p.orthographic = orthographic;
+        p.ortho_height = ortho_height;
+        renderer_->camera().set_pose(p, seconds);
+    }
+    // {eye: [3], target: [3], up: [3], fov, orthographic, orthoHeight, azimuth, elevation, roll, distance}:
+    // the first six are what cameraSetPose takes, the rest the same pose as the controller holds it.
+    emscripten::val camera_pose() const {
+        const CameraController &c = renderer_->camera();
+        const CameraPose p = c.pose();
+        auto vec = [](const std::array<double, 3> &v) {
+            auto a = emscripten::val::array();
+            for (double x : v)
+                a.call<void>("push", x);
+            return a;
+        };
+        auto o = emscripten::val::object();
+        o.set("eye", vec(p.eye));
+        o.set("target", vec(p.target));
+        o.set("up", vec(p.up));
+        o.set("fov", p.fov_deg);
+        o.set("orthographic", p.orthographic);
+        o.set("orthoHeight", p.ortho_height);
+        o.set("azimuth", c.azimuth());
+        o.set("elevation", c.elevation());
+        o.set("roll", c.roll_angle());
+        o.set("distance", c.distance());
+        return o;
+    }
+    // {view, proj}: the controller's matrices for the canvas as it is now, as Float32Array(16), column-major,
+    // the projection in OpenGL clip space (what setCamera takes), for a page that projects points itself.
+    emscripten::val camera_matrices() const {
+        const CameraController &c = renderer_->camera();
+        const std::array<float, 16> view = c.view(), proj = c.projection(c.aspect());
+        auto o = emscripten::val::object();
+        o.set("view", emscripten::val::global("Float32Array").new_(emscripten::typed_memory_view(16, view.data())));
+        o.set("proj", emscripten::val::global("Float32Array").new_(emscripten::typed_memory_view(16, proj.data())));
+        return o;
+    }
+    void camera_set_orthographic(bool orthographic) {
+        renderer_->camera().set_orthographic(orthographic);
+    }
+    void camera_set_fov(double fov_deg) {
+        renderer_->camera().set_fov(fov_deg);
+    }
+    // "z" (the default) or "y".
+    void camera_set_up_axis(const std::string &axis) {
+        renderer_->camera().set_up_axis(axis == "y" || axis == "Y" ? UpAxis::Y : UpAxis::Z);
+    }
+    // Inertia of orbit and pan, 0 (off) to below 1; needs cameraUpdate every frame.
+    void camera_set_damping(double inertia) {
+        renderer_->camera().set_damping(inertia);
+    }
+    void camera_set_pivot(double x, double y, double z) {
+        renderer_->camera().set_orbit_pivot({x, y, z});
+    }
+    void camera_clear_pivot() {
+        renderer_->camera().clear_orbit_pivot();
+    }
+    // Advance a transition and the damping by `dt` seconds; true while the page should keep drawing.
+    bool camera_update(double dt) {
+        return renderer_->camera().update(dt);
+    }
+    bool camera_moving() const {
+        return renderer_->camera().moving();
+    }
+
     void set_background(float r, float g, float b) {
         renderer_->set_background(r, g, b, 1.0f);
     }
@@ -343,6 +518,26 @@ EMSCRIPTEN_BINDINGS(adacpp_render) {
         .function("removeInstance", &WebRenderer::remove_instance)
         .function("clear", &WebRenderer::clear)
         .function("setCamera", &WebRenderer::set_camera)
+        .function("setCameraControlled", &WebRenderer::set_camera_controlled)
+        .function("cameraOrbit", &WebRenderer::camera_orbit)
+        .function("cameraPan", &WebRenderer::camera_pan)
+        .function("cameraZoom", &WebRenderer::camera_zoom)
+        .function("cameraZoomAt", &WebRenderer::camera_zoom_at)
+        .function("cameraRoll", &WebRenderer::camera_roll)
+        .function("cameraFit", &WebRenderer::camera_fit)
+        .function("cameraView", &WebRenderer::camera_view)
+        .function("cameraSetOrientation", &WebRenderer::camera_set_orientation)
+        .function("cameraSetPose", &WebRenderer::camera_set_pose)
+        .function("cameraPose", &WebRenderer::camera_pose)
+        .function("cameraMatrices", &WebRenderer::camera_matrices)
+        .function("cameraSetOrthographic", &WebRenderer::camera_set_orthographic)
+        .function("cameraSetFov", &WebRenderer::camera_set_fov)
+        .function("cameraSetUpAxis", &WebRenderer::camera_set_up_axis)
+        .function("cameraSetDamping", &WebRenderer::camera_set_damping)
+        .function("cameraSetPivot", &WebRenderer::camera_set_pivot)
+        .function("cameraClearPivot", &WebRenderer::camera_clear_pivot)
+        .function("cameraUpdate", &WebRenderer::camera_update)
+        .function("cameraMoving", &WebRenderer::camera_moving)
         .function("setBackground", &WebRenderer::set_background)
         .function("setLighting", &WebRenderer::set_lighting)
         .function("setCulling", &WebRenderer::set_culling)

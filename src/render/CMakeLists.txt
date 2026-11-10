@@ -12,7 +12,13 @@ set(ADACPP_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 set(MESHOPT_DIR ${ADACPP_ROOT}/third_party/meshoptimizer/src)
 file(GLOB MESHOPT_SOURCES ${MESHOPT_DIR}/*.cpp)
 
-add_library(adacpp_render_core STATIC renderer.cpp ${MESHOPT_SOURCES})
+add_library(
+    adacpp_render_core
+    STATIC
+    renderer.cpp
+    camera_controller.cpp
+    ${MESHOPT_SOURCES}
+)
 target_include_directories(
     adacpp_render_core
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${MESHOPT_DIR}
@@ -101,6 +107,26 @@ else()
             adacpp_render
             PROPERTIES BUILD_RPATH "$ENV{CONDA_PREFIX}/lib"
         )
+    endif()
+
+    # The camera controller has no GPU in it, so its test runs anywhere: ctest --test-dir <build dir>
+    # (pixi run -e render test-render). Skipped where the tests are not shipped with the sources.
+    option(ADACPP_RENDER_TESTS "Build the renderer's tests" ON)
+    set(ADACPP_RENDER_CAMERA_TEST
+        ${ADACPP_ROOT}/tests/cpp/test_camera_controller.cpp
+    )
+    if(ADACPP_RENDER_TESTS AND EXISTS ${ADACPP_RENDER_CAMERA_TEST})
+        enable_testing()
+        add_executable(
+            adacpp_render_camera_test
+            ${ADACPP_RENDER_CAMERA_TEST}
+            camera_controller.cpp
+        )
+        target_include_directories(
+            adacpp_render_camera_test
+            PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+        )
+        add_test(NAME camera_controller COMMAND adacpp_render_camera_test)
     endif()
 
     # adacpp._render, the Python module (nanobind). Its own small extension, so headless rendering does not
