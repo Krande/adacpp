@@ -381,6 +381,96 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
 }
 )WGSL";
 
+// Sprites: camera-facing textured quads, three.js' Sprite (its vertex shader, sprite.glsl.js, is reproduced
+// here). One draw of 6 vertices per sprite, in sorted order; the instance index is its slot in `sprites`.
+//
+// Layout contract with renderer.cpp:
+//   SpriteFrame  uniform, 240 bytes
+//   Sprite       storage, 64 bytes each
+//   tex          rgba8unorm-srgb with straight alpha, row 0 at the top of the quad
+inline constexpr const char *kSpriteWGSL = R"WGSL(
+struct SpriteFrame {
+    view: mat4x4<f32>,
+    proj: mat4x4<f32>, // WebGPU clip space (z in [0, w])
+    clip_info: vec4<u32>, // x: section plane count
+    clip: array<vec4<f32>, 6>,
+};
+
+struct Sprite {
+    anchor: vec4<f32>, // world position, rotation (radians)
+    shape: vec4<f32>,  // scale x y, centre x y
+    tint: vec4<f32>,   // linear rgb, opacity
+    flags: vec4<u32>,  // x: SpriteFlags
+};
+
+const SPRITE_SIZE_ATTENUATION: u32 = 1u;
+const SPRITE_DEPTH_TEST: u32 = 2u; // picks the pipeline; the shader does not read it
+const SPRITE_HIDDEN: u32 = 4u;     // dropped by the renderer
+const SPRITE_CLIPPED: u32 = 8u;
+
+@group(0) @binding(0) var<uniform> sf: SpriteFrame;
+@group(0) @binding(1) var<storage, read> sprites: array<Sprite>;
+@group(0) @binding(2) var samp: sampler;
+@group(1) @binding(0) var tex: texture_2d<f32>;
+
+struct SOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) world: vec3<f32>,
+    @location(2) @interpolate(flat) tint: vec4<f32>,
+    @location(3) @interpolate(flat) flags: u32,
+};
+
+@vertex
+fn vs_sprite(@builtin(vertex_index) vid: u32, @builtin(instance_index) ii: u32) -> SOut {
+    let s = sprites[ii];
+    let corner = vid % 6u;
+    let p = vec2<f32>(select(-0.5, 0.5, corner == 1u || corner == 2u || corner == 4u),
+                      select(-0.5, 0.5, corner == 2u || corner == 4u || corner == 5u));
+    var mv = sf.view * vec4<f32>(s.anchor.xyz, 1.0);
+    var scale = s.shape.xy;
+    // three.js: without size attenuation a perspective camera (projectionMatrix[2][3] == -1) scales the
+    // sprite by its depth, which the perspective divide then cancels; an orthographic one changes nothing.
+    if ((s.flags.x & SPRITE_SIZE_ATTENUATION) == 0u && sf.proj[2][3] == -1.0) {
+        scale = scale * -mv.z;
+    }
+    let aligned = (p - (s.shape.zw - vec2<f32>(0.5))) * scale;
+    let c = cos(s.anchor.w);
+    let sn = sin(s.anchor.w);
+    let rotated = vec2<f32>(c * aligned.x - sn * aligned.y, sn * aligned.x + c * aligned.y);
+    mv = vec4<f32>(mv.xy + rotated, mv.zw);
+    var out: SOut;
+    out.pos = sf.proj * mv;
+    out.uv = vec2<f32>(p.x + 0.5, 0.5 - p.y);
+    // Back to world space for the section planes: the view matrix is a rotation and a translation.
+    let rot = mat3x3<f32>(sf.view[0].xyz, sf.view[1].xyz, sf.view[2].xyz);
+    out.world = transpose(rot) * (mv.xyz - sf.view[3].xyz);
+    out.tint = s.tint;
+    out.flags = s.flags.x;
+    return out;
+}
+
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055;
+    return select(hi, lo, c <= vec3<f32>(0.0031308));
+}
+
+@fragment
+fn fs_sprite(in: SOut) -> @location(0) vec4<f32> {
+    let texel = textureSample(tex, samp, in.uv); // sampled first: derivatives need uniform control flow
+    if ((in.flags & SPRITE_CLIPPED) != 0u) {
+        for (var i = 0u; i < min(sf.clip_info.x, 6u); i = i + 1u) {
+            if (dot(sf.clip[i].xyz, in.world) + sf.clip[i].w < 0.0) {
+                discard;
+            }
+        }
+    }
+    let c = texel * in.tint;
+    return vec4<f32>(linear_to_srgb(c.rgb), c.a);
+}
+)WGSL";
+
 // GPU cluster culling with two-pass occlusion culling (the "previous frame's visible set" scheme):
 //   cs_early   draws clusters that were visible last frame and still pass the frustum / cone tests
 //   hzb_*      build a max-depth pyramid from what the early pass drew

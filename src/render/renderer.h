@@ -23,7 +23,8 @@
 // Smaller scenes, scenes with occlusion culling switched off, and picking are culled on the CPU (frustum +
 // cone).
 //
-// After the opaque model: section caps (the cut faces of kCapped solids, by stencil counting).
+// After the opaque model: section caps (the cut faces of kCapped solids, by stencil counting). Last of all:
+// sprites, camera-facing textured quads sorted back to front.
 #pragma once
 
 #include <array>
@@ -61,6 +62,34 @@ enum SegmentFlags : uint32_t {
     // The colour override is a matte surface (metalness 0, roughness 1: three.js' default
     // MeshStandardMaterial, e.g. the selection highlight), not the instance's own material.
     kSegmentMatte = 1u << 1,
+};
+
+// Sprite flags. Keep in step with the WGSL constants in shaders.h and with the TypeScript bridge.
+enum SpriteFlags : uint32_t {
+    kSpriteSizeAttenuation = 1u << 0, // three.js' sizeAttenuation; clear, a perspective camera scales it by its depth
+    kSpriteDepthTest = 1u << 1,       // hidden behind the model (sprites never write depth)
+    kSpriteHidden = 1u << 2,
+    kSpriteClipped = 1u << 3, // cut by the section planes
+};
+
+// SpriteDesc::texture for an untextured sprite: a quad of the tint colour.
+inline constexpr uint32_t kNoTexture = 0xFFFFFFFFu;
+
+// A camera-facing textured quad: three.js' Sprite, with SpriteMaterial's parameters.
+struct SpriteDesc {
+    uint32_t texture = kNoTexture;          // as returned by add_texture()
+    std::array<float, 3> position{0, 0, 0}; // world anchor
+    // three.js' sprite.scale: width and height in world units. Without kSpriteSizeAttenuation a perspective
+    // camera multiplies them by the anchor's view depth (a constant size on screen: the size at depth 1); an
+    // orthographic one leaves them as they are. Exactly three.js' sprite vertex shader.
+    std::array<float, 2> scale{1, 1};
+    std::array<float, 2> center{0.5f,
+                                0.5f}; // three.js' sprite.center: where the anchor is in the quad, (0, 0) bottom-left
+    float rotation = 0.0f;             // radians, counter-clockwise on screen (SpriteMaterial.rotation)
+    std::array<float, 4> color{1, 1, 1, 1}; // tint multiplied into the texture: linear RGB, alpha = opacity
+    uint32_t flags = kSpriteSizeAttenuation | kSpriteDepthTest;
+    // Draw order follows three.js: by render_order (ascending), then back to front, then by id.
+    float render_order = 0.0f;
 };
 
 struct GeometryDesc {
@@ -144,7 +173,7 @@ public:
     // Two u32 per segment: RGBA8 colour override (alpha 0 = no override) and SegmentFlags.
     void set_segment_states(uint32_t instance, const uint32_t *packed, size_t segment_count);
     void remove_instance(uint32_t instance);
-    void clear();
+    void clear(); // every geometry, instance, sprite and texture
 
     // `proj_gl` is an OpenGL-convention projection (clip z in [-1, 1], e.g. three.js); it is remapped to
     // WebGPU's [0, 1] here. Matrices are column-major.
@@ -165,6 +194,17 @@ public:
     void set_section_caps(bool enabled);
     // One colour for every cap (linear RGB); alpha 0 (the default) gives each cap its instance's base colour.
     void set_section_cap_color(float r, float g, float b, float a = 1.0f);
+
+    // Textures for sprites: width x height RGBA8 texels, top row first, sRGB-encoded with straight alpha (canvas
+    // pixels). update_texture() may change the size.
+    uint32_t add_texture(const uint8_t *rgba, uint32_t width, uint32_t height);
+    void update_texture(uint32_t texture, const uint8_t *rgba, uint32_t width, uint32_t height);
+    void remove_texture(uint32_t texture); // sprites still using it are not drawn
+
+    // Sprites are drawn after everything else, alpha-blended and sorted; pick() never returns them.
+    uint32_t add_sprite();
+    void set_sprite(uint32_t sprite, const SpriteDesc &desc);
+    void remove_sprite(uint32_t sprite);
 
     void render(WGPUTextureView target, uint32_t width, uint32_t height);
 

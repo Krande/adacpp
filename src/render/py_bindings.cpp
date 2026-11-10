@@ -239,6 +239,31 @@ public:
     void set_section_cap_color(float r, float g, float b, float a) {
         renderer_.set_section_cap_color(r, g, b, a);
     }
+    // A sprite texture from (H, W, 4) uint8: sRGB-encoded, straight alpha, top row first.
+    uint32_t add_texture(nb::ndarray<const uint8_t, nb::shape<-1, -1, 4>, nb::c_contig, nb::device::cpu> rgba) {
+        return renderer_.add_texture(rgba.data(), uint32_t(rgba.shape(1)), uint32_t(rgba.shape(0)));
+    }
+    // A camera-facing quad (three.js' Sprite); `texture` None draws the plain tint. Returns the sprite id.
+    uint32_t add_sprite(std::optional<uint32_t> texture, std::array<float, 3> position, std::array<float, 2> scale,
+                        std::array<float, 2> center, float rotation, std::array<float, 4> color, bool size_attenuation,
+                        bool depth_test, bool clipped, float render_order) {
+        SpriteDesc d;
+        d.texture = texture.value_or(kNoTexture);
+        d.position = position;
+        d.scale = scale;
+        d.center = center;
+        d.rotation = rotation;
+        d.color = color;
+        d.flags = (size_attenuation ? kSpriteSizeAttenuation : 0u) | (depth_test ? kSpriteDepthTest : 0u) |
+                  (clipped ? kSpriteClipped : 0u);
+        d.render_order = render_order;
+        const uint32_t id = renderer_.add_sprite();
+        renderer_.set_sprite(id, d);
+        return id;
+    }
+    void remove_sprite(uint32_t sprite) {
+        renderer_.remove_sprite(sprite);
+    }
     std::array<float, 6> bounds() const {
         return renderer_.bounds();
     }
@@ -384,6 +409,14 @@ NB_MODULE(_render, m) {
              "Fill the cut through meshes added with capped=True (closed solids) on every clip plane.")
         .def("set_section_cap_color", &OffscreenRenderer::set_section_cap_color, "r"_a, "g"_a, "b"_a, "a"_a = 1.0f,
              "One linear RGB colour for every cap; a = 0 gives each cap its mesh's base colour.")
+        .def("add_texture", &OffscreenRenderer::add_texture, "rgba"_a,
+             "A sprite texture from (H, W, 4) uint8: sRGB-encoded, straight alpha, top row first.")
+        .def("add_sprite", &OffscreenRenderer::add_sprite, "texture"_a = nb::none(),
+             "position"_a = std::array<float, 3>{0, 0, 0}, "scale"_a = std::array<float, 2>{1, 1},
+             "center"_a = std::array<float, 2>{0.5f, 0.5f}, "rotation"_a = 0.0f,
+             "color"_a = std::array<float, 4>{1, 1, 1, 1}, "size_attenuation"_a = true, "depth_test"_a = true,
+             "clipped"_a = false, "render_order"_a = 0.0f)
+        .def("remove_sprite", &OffscreenRenderer::remove_sprite, "sprite"_a)
         .def("bounds", &OffscreenRenderer::bounds)
         .def("render", &OffscreenRenderer::render)
         .def("render_png", &OffscreenRenderer::render_png)

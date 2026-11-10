@@ -16,15 +16,17 @@ namespace adacpp::render {
 
 namespace {
 
-constexpr uint32_t kHasMorph = 1u << 6; // internal: set when the instance's geometry carries a morph target
-constexpr uint32_t kConeOk = 1u << 9;   // internal: cone culling is exact for this instance (GPU culling)
-constexpr uint32_t kPoints = 1u << 10;  // internal: a points instance, for vs_wide
-constexpr uint32_t kDashed = 1u << 13;  // internal: a dashed lines instance (material.y dash, .z gap)
-constexpr size_t kInstanceBytes = 128;  // WGSL `Instance`
-constexpr size_t kFrameBytes = 240;     // WGSL `Frame`
-constexpr size_t kItemWords = 16;       // WGSL `Item` (cull shader)
-constexpr size_t kCullFrameBytes = 208; // WGSL `CullFrame`
-constexpr size_t kCounters = 8;         // cull counters, see kCullWGSL
+constexpr uint32_t kHasMorph = 1u << 6;   // internal: set when the instance's geometry carries a morph target
+constexpr uint32_t kConeOk = 1u << 9;     // internal: cone culling is exact for this instance (GPU culling)
+constexpr uint32_t kPoints = 1u << 10;    // internal: a points instance, for vs_wide
+constexpr uint32_t kDashed = 1u << 13;    // internal: a dashed lines instance (material.y dash, .z gap)
+constexpr size_t kInstanceBytes = 128;    // WGSL `Instance`
+constexpr size_t kFrameBytes = 240;       // WGSL `Frame`
+constexpr size_t kItemWords = 16;         // WGSL `Item` (cull shader)
+constexpr size_t kCullFrameBytes = 208;   // WGSL `CullFrame`
+constexpr size_t kSpriteBytes = 64;       // WGSL `Sprite`
+constexpr size_t kSpriteFrameBytes = 240; // WGSL `SpriteFrame`
+constexpr size_t kCounters = 8;           // cull counters, see kCullWGSL
 // Two-pass occlusion culling costs ~0.35 ms a frame where nothing is hidden (an extra render pass, the
 // multisampled targets stored and reloaded, the depth pyramid) and saves tens of ms where most of a big
 // model is (a 62M-triangle crane: 93 -> 17 ms). Below this many triangles the CPU culls instead.
@@ -160,6 +162,52 @@ TriKey tri_key(uint32_t a, uint32_t b, uint32_t c) {
     return {a, b, c};
 }
 
+// Sprite textures arrive sRGB-encoded with straight alpha. Their mip chain is filtered in linear light,
+// weighted by alpha so that transparent texels (whatever colour they hold) do not darken a label's edge.
+float srgb8_to_linear(uint8_t v) {
+    static const std::array<float, 256> table = [] {
+        std::array<float, 256> t{};
+        for (int i = 0; i < 256; ++i) {
+            const float c = float(i) / 255.0f;
+            t[i] = c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+        }
+        return t;
+    }();
+    return table[v];
+}
+
+uint8_t linear_to_srgb8(float c) {
+    c = std::clamp(c, 0.0f, 1.0f);
+    const float e = c <= 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
+    return uint8_t(std::lround(e * 255.0f));
+}
+
+// The next mip level (half size, rounded down, at least 1) of a w x h RGBA8 image.
+std::vector<uint8_t> half_mip(const std::vector<uint8_t> &src, uint32_t w, uint32_t h) {
+    const uint32_t mw = std::max(1u, w / 2), mh = std::max(1u, h / 2);
+    std::vector<uint8_t> dst(size_t(mw) * mh * 4);
+    for (uint32_t y = 0; y < mh; ++y)
+        for (uint32_t x = 0; x < mw; ++x) {
+            float rgb[3] = {0, 0, 0}, plain[3] = {0, 0, 0}, alpha = 0.0f;
+            for (uint32_t k = 0; k < 4; ++k) {
+                const uint32_t sx = std::min(x * 2 + (k & 1), w - 1), sy = std::min(y * 2 + (k >> 1), h - 1);
+                const uint8_t *t = &src[(size_t(sy) * w + sx) * 4];
+                const float a = float(t[3]) / 255.0f;
+                for (int c = 0; c < 3; ++c) {
+                    const float lin = srgb8_to_linear(t[c]);
+                    rgb[c] += lin * a;
+                    plain[c] += lin;
+                }
+                alpha += a;
+            }
+            uint8_t *o = &dst[(size_t(y) * mw + x) * 4];
+            for (int c = 0; c < 3; ++c)
+                o[c] = linear_to_srgb8(alpha > 0.0f ? rgb[c] / alpha : plain[c] * 0.25f);
+            o[3] = uint8_t(std::lround(alpha * 0.25f * 255.0f));
+        }
+    return dst;
+}
+
 constexpr WGPUTextureFormat kPickIdFormat = WGPUTextureFormat_RGBA32Uint;
 constexpr WGPUTextureFormat kPickPosFormat = WGPUTextureFormat_RGBA32Float;
 
@@ -188,6 +236,13 @@ struct Renderer::Impl {
         uint32_t id = 0, gpu_index = 0, seg_base = 0, vis_base = 0, vis_count = 0;
     };
 
+    struct Texture {
+        uint32_t width = 0, height = 0;
+        TextureRef tex;
+        TextureViewRef view;
+        BindGroupRef bind;
+    };
+
     WGPUDevice device;
     WGPUQueue queue;
     WGPUTextureFormat color_format;
@@ -210,6 +265,19 @@ struct Renderer::Impl {
     float cap_color[4] = {0, 0, 0, 0};
     BufferRef cap_frame_bufs[kMaxClipPlanes]; // the Frame of each plane's cap draws
     BindGroupRef cap_binds[kMaxClipPlanes];
+
+    // Sprites: their own shader and layouts (a texture per draw), see kSpriteWGSL.
+    BindGroupLayoutRef sprite_frame_layout, sprite_texture_layout;
+    PipelineLayoutRef sprite_pipeline_layout;
+    ShaderModuleRef sprite_shader;
+    RenderPipelineRef sprite_tested, sprite_untested; // with / without the depth test
+    SamplerRef sprite_sampler;
+    BufferRef sprite_frame_buf, sprite_buf;
+    size_t sprite_cap = 0;
+    BindGroupRef sprite_bind;
+    Texture white; // what a kNoTexture sprite samples
+    std::vector<std::unique_ptr<Texture>> textures;
+    std::vector<std::unique_ptr<SpriteDesc>> sprites;
     BufferRef dummy;
 
     // GPU culling: per-(instance, cluster) items, last frame's visibility, the early / late visible lists and
@@ -263,6 +331,7 @@ struct Renderer::Impl {
     Impl(WGPUDevice dev, WGPUTextureFormat fmt) : device(dev), queue(wgpuDeviceGetQueue(dev)), color_format(fmt) {
         wgpuDeviceAddRef(device);
         create_layouts();
+        create_sprite_resources();
         create_pipelines();
         create_pick_pipelines();
         dummy = make_buffer(16, WGPUBufferUsage_Storage, "adacpp.dummy");
@@ -277,6 +346,7 @@ struct Renderer::Impl {
     ~Impl() {
         geometries.clear();
         instances.clear();
+        textures.clear();
         wgpuQueueRelease(queue);
         wgpuDeviceRelease(device);
     }
@@ -417,6 +487,139 @@ struct Renderer::Impl {
         return RenderPipelineRef(wgpuDeviceCreateRenderPipeline(device, &d));
     }
 
+    void create_sprite_resources() {
+        WGPUBindGroupLayoutEntry fe[3] = {WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT, WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT,
+                                          WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT};
+        fe[0].binding = 0;
+        fe[0].visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
+        fe[0].buffer.type = WGPUBufferBindingType_Uniform;
+        fe[1].binding = 1;
+        fe[1].visibility = WGPUShaderStage_Vertex;
+        fe[1].buffer.type = WGPUBufferBindingType_ReadOnlyStorage;
+        fe[2].binding = 2;
+        fe[2].visibility = WGPUShaderStage_Fragment;
+        fe[2].sampler.type = WGPUSamplerBindingType_Filtering;
+        WGPUBindGroupLayoutDescriptor fd = WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
+        fd.label = sv("adacpp.sprite_frame_layout");
+        fd.entryCount = 3;
+        fd.entries = fe;
+        sprite_frame_layout.reset(wgpuDeviceCreateBindGroupLayout(device, &fd));
+
+        WGPUBindGroupLayoutEntry te = WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT;
+        te.binding = 0;
+        te.visibility = WGPUShaderStage_Fragment;
+        te.texture.sampleType = WGPUTextureSampleType_Float;
+        te.texture.viewDimension = WGPUTextureViewDimension_2D;
+        WGPUBindGroupLayoutDescriptor td = WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
+        td.label = sv("adacpp.sprite_texture_layout");
+        td.entryCount = 1;
+        td.entries = &te;
+        sprite_texture_layout.reset(wgpuDeviceCreateBindGroupLayout(device, &td));
+
+        WGPUBindGroupLayout layouts[2] = {sprite_frame_layout.get(), sprite_texture_layout.get()};
+        WGPUPipelineLayoutDescriptor pd = WGPU_PIPELINE_LAYOUT_DESCRIPTOR_INIT;
+        pd.label = sv("adacpp.sprite_pipeline_layout");
+        pd.bindGroupLayoutCount = 2;
+        pd.bindGroupLayouts = layouts;
+        sprite_pipeline_layout.reset(wgpuDeviceCreatePipelineLayout(device, &pd));
+
+        WGPUShaderSourceWGSL src = WGPU_SHADER_SOURCE_WGSL_INIT;
+        src.code = sv(kSpriteWGSL);
+        WGPUShaderModuleDescriptor sd = WGPU_SHADER_MODULE_DESCRIPTOR_INIT;
+        sd.nextInChain = &src.chain;
+        sd.label = sv("adacpp.sprite_shader");
+        sprite_shader.reset(wgpuDeviceCreateShaderModule(device, &sd));
+
+        // As three.js samples a CanvasTexture: trilinear, clamped.
+        WGPUSamplerDescriptor smp = WGPU_SAMPLER_DESCRIPTOR_INIT;
+        smp.label = sv("adacpp.sprite_sampler");
+        smp.addressModeU = WGPUAddressMode_ClampToEdge;
+        smp.addressModeV = WGPUAddressMode_ClampToEdge;
+        smp.magFilter = WGPUFilterMode_Linear;
+        smp.minFilter = WGPUFilterMode_Linear;
+        smp.mipmapFilter = WGPUMipmapFilterMode_Linear;
+        sprite_sampler.reset(wgpuDeviceCreateSampler(device, &smp));
+
+        sprite_frame_buf =
+            make_buffer(kSpriteFrameBytes, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst, "adacpp.sprite_frame");
+        const uint8_t texel[4] = {255, 255, 255, 255};
+        set_texture(white, texel, 1, 1);
+    }
+
+    RenderPipelineRef make_sprite_pipeline(const char *label, bool depth_test) {
+        WGPUBlendState bs = WGPU_BLEND_STATE_INIT;
+        bs.color.srcFactor = WGPUBlendFactor_SrcAlpha;
+        bs.color.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
+        bs.color.operation = WGPUBlendOperation_Add;
+        bs.alpha.srcFactor = WGPUBlendFactor_One;
+        bs.alpha.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
+        bs.alpha.operation = WGPUBlendOperation_Add;
+        WGPUColorTargetState ct = WGPU_COLOR_TARGET_STATE_INIT;
+        ct.format = color_format;
+        ct.blend = &bs;
+        ct.writeMask = WGPUColorWriteMask_All;
+        WGPUFragmentState fs = WGPU_FRAGMENT_STATE_INIT;
+        fs.module = sprite_shader.get();
+        fs.entryPoint = sv("fs_sprite");
+        fs.targetCount = 1;
+        fs.targets = &ct;
+        WGPUDepthStencilState ds = WGPU_DEPTH_STENCIL_STATE_INIT;
+        ds.format = depth_format;
+        ds.depthWriteEnabled = WGPUOptionalBool_False;
+        ds.depthCompare = depth_test ? WGPUCompareFunction_LessEqual : WGPUCompareFunction_Always;
+        WGPURenderPipelineDescriptor d = WGPU_RENDER_PIPELINE_DESCRIPTOR_INIT;
+        d.label = sv(label);
+        d.layout = sprite_pipeline_layout.get();
+        d.vertex.module = sprite_shader.get();
+        d.vertex.entryPoint = sv("vs_sprite");
+        d.primitive.topology = WGPUPrimitiveTopology_TriangleList;
+        d.primitive.frontFace = WGPUFrontFace_CCW;
+        d.primitive.cullMode = WGPUCullMode_None;
+        d.depthStencil = &ds;
+        d.multisample.count = kSampleCount;
+        d.multisample.mask = 0xFFFFFFFFu;
+        d.fragment = &fs;
+        return RenderPipelineRef(wgpuDeviceCreateRenderPipeline(device, &d));
+    }
+
+    // (Re)fill a sprite texture with its mip chain; a new size makes a new texture.
+    void set_texture(Texture &t, const uint8_t *rgba, uint32_t w, uint32_t h) {
+        if (!rgba || w == 0 || h == 0)
+            throw std::invalid_argument("adacpp.render: texture without pixels");
+        uint32_t levels = 1;
+        while ((std::max(w, h) >> levels) > 0)
+            ++levels;
+        if (!t.tex || t.width != w || t.height != h) {
+            WGPUTextureDescriptor d = WGPU_TEXTURE_DESCRIPTOR_INIT;
+            d.label = sv("adacpp.sprite_texture");
+            d.size = {w, h, 1};
+            d.format = WGPUTextureFormat_RGBA8UnormSrgb;
+            d.mipLevelCount = levels;
+            d.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst;
+            t.tex.reset(wgpuDeviceCreateTexture(device, &d));
+            t.view.reset(wgpuTextureCreateView(t.tex.get(), nullptr));
+            t.bind = make_bind(sprite_texture_layout, {view_entry(t.view.get())}, "adacpp.sprite_texture");
+            t.width = w;
+            t.height = h;
+        }
+        std::vector<uint8_t> mip(rgba, rgba + size_t(w) * h * 4);
+        for (uint32_t l = 0; l < levels; ++l) {
+            WGPUTexelCopyTextureInfo dst = WGPU_TEXEL_COPY_TEXTURE_INFO_INIT;
+            dst.texture = t.tex.get();
+            dst.mipLevel = l;
+            WGPUTexelCopyBufferLayout layout = WGPU_TEXEL_COPY_BUFFER_LAYOUT_INIT;
+            layout.bytesPerRow = w * 4;
+            layout.rowsPerImage = h;
+            const WGPUExtent3D size = {w, h, 1};
+            wgpuQueueWriteTexture(queue, &dst, mip.data(), mip.size(), &layout, &size);
+            if (l + 1 < levels) {
+                mip = half_mip(mip, w, h);
+                w = std::max(1u, w / 2);
+                h = std::max(1u, h / 2);
+            }
+        }
+    }
+
     RenderPipelineRef make_pick_pipeline(const char *label, WGPUCullMode cull) {
         WGPUColorTargetState ct[2] = {WGPU_COLOR_TARGET_STATE_INIT, WGPU_COLOR_TARGET_STATE_INIT};
         ct[0].format = kPickIdFormat;
@@ -482,6 +685,8 @@ struct Renderer::Impl {
             make_pipeline("adacpp.points", "vs_list", WGPUPrimitiveTopology_PointList, WGPUCullMode_None, false, 0);
         wide = make_pipeline("adacpp.wide", "vs_wide", tri, WGPUCullMode_None, false, 0);
         wide_blend = make_pipeline("adacpp.wide_blend", "vs_wide", tri, WGPUCullMode_None, true, 0);
+        sprite_tested = make_sprite_pipeline("adacpp.sprite_tested", true);
+        sprite_untested = make_sprite_pipeline("adacpp.sprite_untested", false);
         if (depth_format == kDepthStencilFormat) {
             cap_count = make_pipeline("adacpp.cap_count", "vs_tri", tri, WGPUCullMode_None, false, 0, Stencil::Count);
             cap_fill = make_pipeline("adacpp.cap_fill", "vs_cap", tri, WGPUCullMode_None, false, 0, Stencil::Fill);
@@ -1191,12 +1396,15 @@ struct Renderer::Impl {
         st.clusters_drawn += n;
     }
 
-    // view x projection in WebGPU clip space: OpenGL clip z [-w, w] -> [0, w], z' = 0.5 z + 0.5 w.
-    Mat4 webgpu_view_proj() const {
+    // The projection in WebGPU clip space: OpenGL clip z [-w, w] -> [0, w], z' = 0.5 z + 0.5 w.
+    Mat4 webgpu_proj() const {
         Mat4 proj_wgpu = proj;
         for (int c = 0; c < 4; ++c)
             proj_wgpu[c * 4 + 2] = 0.5f * proj[c * 4 + 2] + 0.5f * proj[c * 4 + 3];
-        return mul(proj_wgpu, view);
+        return proj_wgpu;
+    }
+    Mat4 webgpu_view_proj() const {
+        return mul(webgpu_proj(), view);
     }
 
     // The Frame uniform for `view_proj` into `buf`; returns the camera position in `cam`. `cap_plane`: the
@@ -1504,6 +1712,75 @@ struct Renderer::Impl {
         }
     }
 
+    // The sprites, last in the frame: sorted as three.js sorts transparent objects (render order, then back
+    // to front, then id), one draw each since each has its own texture.
+    void draw_sprites(WGPURenderPassEncoder pass, RenderStats &st) {
+        struct Item {
+            float order, depth;
+            uint32_t id;
+        };
+        std::vector<Item> items;
+        for (uint32_t id = 0; id < sprites.size(); ++id) {
+            if (!sprites[id] || (sprites[id]->flags & kSpriteHidden))
+                continue;
+            const SpriteDesc &d = *sprites[id];
+            if (d.texture != kNoTexture && (d.texture >= textures.size() || !textures[d.texture]))
+                continue;
+            // View-space z of the anchor: more negative is farther away.
+            const float z = view[2] * d.position[0] + view[6] * d.position[1] + view[10] * d.position[2] + view[14];
+            items.push_back({d.render_order, z, id});
+        }
+        if (items.empty())
+            return;
+        std::stable_sort(items.begin(), items.end(), [](const Item &a, const Item &b) {
+            return a.order != b.order ? a.order < b.order : a.depth < b.depth;
+        });
+
+        constexpr size_t words = kSpriteBytes / 4;
+        std::vector<uint32_t> data(items.size() * words, 0);
+        for (size_t i = 0; i < items.size(); ++i) {
+            const SpriteDesc &d = *sprites[items[i].id];
+            const float f[12] = {d.position[0], d.position[1], d.position[2], d.rotation, d.scale[0], d.scale[1],
+                                 d.center[0],   d.center[1],   d.color[0],    d.color[1], d.color[2], d.color[3]};
+            std::memcpy(data.data() + i * words, f, sizeof(f));
+            data[i * words + 12] = d.flags;
+        }
+        if (data.size() * 4 > sprite_cap || !sprite_buf) {
+            sprite_cap = std::max<size_t>(data.size() * 4 * 2, 1024);
+            sprite_buf = make_buffer(sprite_cap, WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst, "adacpp.sprites");
+            WGPUBindGroupEntry smp = WGPU_BIND_GROUP_ENTRY_INIT;
+            smp.sampler = sprite_sampler.get();
+            sprite_bind = make_bind(sprite_frame_layout,
+                                    {buffer_entry(sprite_frame_buf.get()), buffer_entry(sprite_buf.get()), smp},
+                                    "adacpp.sprites");
+        }
+        wgpuQueueWriteBuffer(queue, sprite_buf.get(), 0, data.data(), data.size() * 4);
+
+        float frame[kSpriteFrameBytes / 4] = {};
+        std::memcpy(frame, view.data(), 64);
+        const Mat4 proj_wgpu = webgpu_proj();
+        std::memcpy(frame + 16, proj_wgpu.data(), 64);
+        const uint32_t clip_count = uint32_t(clip_planes.size() / 4);
+        std::memcpy(frame + 32, &clip_count, 4);
+        std::copy(clip_planes.begin(), clip_planes.end(), frame + 36);
+        wgpuQueueWriteBuffer(queue, sprite_frame_buf.get(), 0, frame, sizeof(frame));
+
+        wgpuRenderPassEncoderSetBindGroup(pass, 0, sprite_bind.get(), 0, nullptr);
+        WGPURenderPipeline bound = nullptr;
+        for (uint32_t i = 0; i < items.size(); ++i) {
+            const SpriteDesc &d = *sprites[items[i].id];
+            WGPURenderPipeline p = (d.flags & kSpriteDepthTest) ? sprite_tested.get() : sprite_untested.get();
+            if (p != bound) {
+                wgpuRenderPassEncoderSetPipeline(pass, p);
+                bound = p;
+            }
+            const Texture &t = d.texture == kNoTexture ? white : *textures[d.texture];
+            wgpuRenderPassEncoderSetBindGroup(pass, 1, t.bind.get(), 0, nullptr);
+            wgpuRenderPassEncoderDraw(pass, 6, 1, 0, i);
+            st.draw_calls++;
+        }
+    }
+
     // GPU culling: the clusters of the instances drawn outside the indirect lists (capped solids, which need
     // every face in view, occluded or not), culled on the CPU into `visible_buf`.
     void cull_direct(const Mat4 &view_proj, const float cam[3]) {
@@ -1590,6 +1867,7 @@ struct Renderer::Impl {
         wgpuRenderPassEncoderSetBindGroup(pass, 0, frame_bind.get(), 0, nullptr);
         d.tris(true, nullptr, nullptr);
         d.lists(true);
+        draw_sprites(pass, st);
         end_pass(pass);
     }
 
@@ -1669,6 +1947,7 @@ struct Renderer::Impl {
         wgpuRenderPassEncoderSetBindGroup(pass, 0, frame_bind_late.get(), 0, nullptr);
         late.tris(true, args_late_buf.get(), &in_view);
         late.lists(true);
+        draw_sprites(pass, st);
         end_pass(pass);
     }
 
@@ -1813,9 +2092,61 @@ void Renderer::remove_instance(uint32_t instance) {
     impl_->structure_dirty = true;
 }
 
+uint32_t Renderer::add_texture(const uint8_t *rgba, uint32_t width, uint32_t height) {
+    auto t = std::make_unique<Impl::Texture>();
+    impl_->set_texture(*t, rgba, width, height);
+    auto &list = impl_->textures;
+    for (uint32_t id = 0; id < list.size(); ++id) {
+        if (!list[id]) {
+            list[id] = std::move(t);
+            return id;
+        }
+    }
+    list.push_back(std::move(t));
+    return uint32_t(list.size() - 1);
+}
+
+void Renderer::update_texture(uint32_t texture, const uint8_t *rgba, uint32_t width, uint32_t height) {
+    if (texture >= impl_->textures.size() || !impl_->textures[texture])
+        throw std::out_of_range("adacpp.render: unknown texture " + std::to_string(texture));
+    impl_->set_texture(*impl_->textures[texture], rgba, width, height);
+}
+
+void Renderer::remove_texture(uint32_t texture) {
+    if (texture >= impl_->textures.size() || !impl_->textures[texture])
+        throw std::out_of_range("adacpp.render: unknown texture " + std::to_string(texture));
+    impl_->textures[texture].reset();
+}
+
+uint32_t Renderer::add_sprite() {
+    auto &list = impl_->sprites;
+    for (uint32_t id = 0; id < list.size(); ++id) {
+        if (!list[id]) {
+            list[id] = std::make_unique<SpriteDesc>();
+            return id;
+        }
+    }
+    list.push_back(std::make_unique<SpriteDesc>());
+    return uint32_t(list.size() - 1);
+}
+
+void Renderer::set_sprite(uint32_t sprite, const SpriteDesc &desc) {
+    if (sprite >= impl_->sprites.size() || !impl_->sprites[sprite])
+        throw std::out_of_range("adacpp.render: unknown sprite " + std::to_string(sprite));
+    *impl_->sprites[sprite] = desc;
+}
+
+void Renderer::remove_sprite(uint32_t sprite) {
+    if (sprite >= impl_->sprites.size() || !impl_->sprites[sprite])
+        throw std::out_of_range("adacpp.render: unknown sprite " + std::to_string(sprite));
+    impl_->sprites[sprite].reset();
+}
+
 void Renderer::clear() {
     impl_->instances.clear();
     impl_->geometries.clear();
+    impl_->sprites.clear();
+    impl_->textures.clear();
     impl_->structure_dirty = true;
 }
 
