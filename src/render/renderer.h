@@ -58,6 +58,9 @@ enum InstanceFlags : uint32_t {
     // Drawn over the model: after the opaque and transparent passes and the section caps, before the sprites,
     // in instance-id order, with no depth test or write (a transform gizmo: three.js' depthTest false).
     kOnTop = 1u << 17,
+    // A transparent instance that still culls its back faces (three.js' single-sided transparent material).
+    // Without it a transparent instance draws both sides. No effect on opaque instances.
+    kCullBack = 1u << 18,
 };
 
 // Segment state flags (second u32 of a segment's state pair).

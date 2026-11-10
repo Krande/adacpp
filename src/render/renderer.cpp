@@ -260,6 +260,8 @@ struct Renderer::Impl {
     // kOnTop instances: the same without a depth test or write.
     RenderPipelineRef top_double, top_single, top_blend, top_lines, top_lines_blend, top_points, top_wide,
         top_wide_blend;
+    // kCullBack: transparent, back faces culled.
+    RenderPipelineRef tri_blend_cull, tri_blend_cull_back, tri_blend_cull_front, top_blend_cull;
     RenderPipelineRef pick_double, pick_single; // id + world-position targets, 1 sample
     RenderPipelineRef pick_points;              // points as squares (vs_wide)
     // Section caps (see vs_cap): made with the stencil depth format, the first time caps are switched on.
@@ -683,6 +685,9 @@ struct Renderer::Impl {
         tri_double_front = make_pipeline("adacpp.tri_double_front", "vs_tri", tri, WGPUCullMode_None, false, -1);
         tri_single_front = make_pipeline("adacpp.tri_single_front", "vs_tri", tri, WGPUCullMode_Back, false, -1);
         tri_blend_front = make_pipeline("adacpp.tri_blend_front", "vs_tri", tri, WGPUCullMode_None, true, -1);
+        tri_blend_cull = make_pipeline("adacpp.tri_blend_cull", "vs_tri", tri, WGPUCullMode_Back, true, 0);
+        tri_blend_cull_back = make_pipeline("adacpp.tri_blend_cull_back", "vs_tri", tri, WGPUCullMode_Back, true, 1);
+        tri_blend_cull_front = make_pipeline("adacpp.tri_blend_cull_front", "vs_tri", tri, WGPUCullMode_Back, true, -1);
         lines = make_pipeline("adacpp.lines", "vs_list", WGPUPrimitiveTopology_LineList, WGPUCullMode_None, false, 0);
         lines_blend =
             make_pipeline("adacpp.lines_blend", "vs_list", WGPUPrimitiveTopology_LineList, WGPUCullMode_None, true, 0);
@@ -697,6 +702,7 @@ struct Renderer::Impl {
         top_double = top("adacpp.top_double", "vs_tri", tri, WGPUCullMode_None, false);
         top_single = top("adacpp.top_single", "vs_tri", tri, WGPUCullMode_Back, false);
         top_blend = top("adacpp.top_blend", "vs_tri", tri, WGPUCullMode_None, true);
+        top_blend_cull = top("adacpp.top_blend_cull", "vs_tri", tri, WGPUCullMode_Back, true);
         top_lines = top("adacpp.top_lines", "vs_list", WGPUPrimitiveTopology_LineList, WGPUCullMode_None, false);
         top_lines_blend =
             top("adacpp.top_lines_blend", "vs_list", WGPUPrimitiveTopology_LineList, WGPUCullMode_None, true);
@@ -1656,8 +1662,13 @@ struct Renderer::Impl {
             const uint32_t flags = inst->desc.flags;
             const bool front = flags & kDepthOffset;
             const bool back = !front && (flags & kDepthBack);
+            const bool cull = (flags & kCullBack) && !(flags & kDoubleSided);
             if (flags & kOnTop)
-                use((flags & kTransparent) ? r.top_blend : (flags & kDoubleSided) ? r.top_double : r.top_single);
+                use((flags & kTransparent)   ? (cull ? r.top_blend_cull : r.top_blend)
+                    : (flags & kDoubleSided) ? r.top_double
+                                             : r.top_single);
+            else if (flags & kTransparent && cull)
+                use(front ? r.tri_blend_cull_front : back ? r.tri_blend_cull_back : r.tri_blend_cull);
             else if (flags & kTransparent)
                 use(front ? r.tri_blend_front : back ? r.tri_blend_back : r.tri_blend);
             else if (flags & kDoubleSided)
