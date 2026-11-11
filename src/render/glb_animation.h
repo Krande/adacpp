@@ -22,7 +22,8 @@ struct GlbAnimations::Data {
         int32_t parent = -1;           // into `nodes`; -1 = under the merged part of the scene, at `base`
         Mat4 base = detail::kIdentity; // the world transform of what is above it (parent -1)
         Mat4 rest = detail::kIdentity; // its own transform as the GLB holds it
-        float t[3] = {0, 0, 0}, r[4] = {0, 0, 0, 1}, s[3] = {1, 1, 1}; // the same, for a channel to replace
+        double t[3] = {0, 0, 0};       // the same, for a channel to replace
+        float r[4] = {0, 0, 0, 1}, s[3] = {1, 1, 1};
         std::vector<uint32_t> instances;
     };
     struct Channel {
@@ -40,7 +41,7 @@ struct GlbAnimations::Data {
     std::vector<Node> nodes;
     std::vector<int32_t> gltf_nodes; // nodes[i].gltf_node
     std::vector<Clip> clips;
-    std::vector<Mat4> world; // per node, as the last apply() left it
+    std::vector<Mat4> world; // per node, as the last apply() left it (GlbOptions::offset in)
 
     // `width` values of `ch` at `time` into `out`.
     static void sample(const Channel &ch, float time, float *out);

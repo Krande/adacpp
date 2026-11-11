@@ -1,8 +1,7 @@
-// The parts of the renderer that need a GPU to check: GLB animations (glb_scene.h GlbAnimations), Draco
-// decoding in the GLB reader, and textured quads (renderer.h QuadDesc). Every GLB is built here, in memory,
-// and every image is drawn into an offscreen target and read back.
-// Built and registered with ctest by src/render/CMakeLists.txt (pixi run -e render test-render); skipped
-// where there is no adapter to draw with.
+// The parts of the renderer that need a GPU to check: GLB animations (glb_scene.h GlbAnimations), the GLB
+// offset and glb_bounds_bytes, Draco decoding in the GLB reader, and textured quads (renderer.h QuadDesc). Every GLB is
+// built here, in memory, and every image is drawn into an offscreen target and read back. Built and registered with
+// ctest by src/render/CMakeLists.txt (pixi run -e render test-render); skipped where there is no adapter to draw with.
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -63,15 +62,28 @@ struct GlbBuilder {
         return view_count++;
     }
     // `view` -1: an accessor that only describes data held elsewhere (a Draco-compressed primitive's).
-    int accessor(int view, int component_type, size_t count, const char *type) {
+    // `extra`: more members of the accessor, each with its leading comma.
+    int accessor(int view, int component_type, size_t count, const char *type, const std::string &extra = "") {
         accessors += std::string(accessor_count ? "," : "") + "{" +
                      (view >= 0 ? "\"bufferView\":" + std::to_string(view) + "," : std::string()) +
                      "\"componentType\":" + std::to_string(component_type) + ",\"count\":" + std::to_string(count) +
-                     ",\"type\":\"" + type + "\"}";
+                     ",\"type\":\"" + type + "\"" + extra + "}";
         return accessor_count++;
     }
     int floats(const std::vector<float> &v, const char *type, int comps) {
         return accessor(view(v.data(), v.size() * 4), 5126, v.size() / comps, type);
+    }
+    // VEC3 positions with the min and max glTF asks of them.
+    int bounded_positions(const std::vector<float> &v) {
+        float lo[3] = {3.4e38f, 3.4e38f, 3.4e38f}, hi[3] = {-3.4e38f, -3.4e38f, -3.4e38f};
+        for (size_t i = 0; i < v.size(); ++i) {
+            lo[i % 3] = std::min(lo[i % 3], v[i]);
+            hi[i % 3] = std::max(hi[i % 3], v[i]);
+        }
+        char extra[256];
+        std::snprintf(extra, sizeof extra, ",\"min\":[%.9g,%.9g,%.9g],\"max\":[%.9g,%.9g,%.9g]", lo[0], lo[1], lo[2],
+                      hi[0], hi[1], hi[2]);
+        return accessor(view(v.data(), v.size() * 4), 5126, v.size() / 3, "VEC3", extra);
     }
     int indices(const std::vector<uint32_t> &v) {
         return accessor(view(v.data(), v.size() * 4), 5125, v.size(), "SCALAR");
@@ -172,7 +184,8 @@ const float kS = std::sqrt(0.5f);
 //   0 "move"    arm slides to y = 4 over 2 s (LINEAR); hand turns a quarter about z over 1 s
 //   1 "step"    arm jumps to y = 2 at 1 s (STEP)
 //   2 "spline"  arm eases to y = 2 over 1 s (CUBICSPLINE, flat tangents)
-Bytes animated_glb() {
+// `root` ("x,y,z"): all of it hangs under a node with that translation instead.
+Bytes animated_glb(const std::string &root = "") {
     GlbBuilder b;
     const float h = 0.4f;
     const int positions = b.floats({-h, -h, 0, h, -h, 0, h, h, 0, -h, h, 0}, "VEC3", 3);
@@ -184,10 +197,14 @@ Bytes animated_glb() {
     const int jump = b.floats({2, 0, 0, 2, 2, 0}, "VEC3", 3);
     const int ease = b.floats({0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 0, 0, 0, 0}, "VEC3", 3);
     CHECK(positions == 0 && indices == 1 && t02 == 2 && slide == 3 && t01 == 4 && turn == 5 && jump == 6 && ease == 7);
-    return b.finish(R"("scene":0,"scenes":[{"nodes":[0,1]}],
-        "nodes":[{"name":"base","mesh":0},
+    const std::string scene =
+        root.empty() ? R"("scene":0,"scenes":[{"nodes":[0,1]}],)" : R"("scene":0,"scenes":[{"nodes":[3]}],)";
+    const std::string root_node =
+        root.empty() ? "" : R"(,{"name":"root","translation":[)" + root + R"(],"children":[0,1]})";
+    return b.finish(scene + R"("nodes":[{"name":"base","mesh":0},
                  {"name":"arm","mesh":0,"translation":[2,0,0],"children":[2]},
-                 {"name":"hand","mesh":0,"translation":[1,0,0]}],
+                 {"name":"hand","mesh":0,"translation":[1,0,0]})" +
+                    root_node + R"(],
         "meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1,"material":0}]}],
         "materials":[{"pbrMetallicRoughness":{"baseColorFactor":[1,0,0,1]},"doubleSided":true,
                       "extensions":{"KHR_materials_unlit":{}}}],
@@ -351,6 +368,167 @@ void test_animation(NativeDevice &dev) {
     CHECK(edge_overlays == 1);
 }
 
+// A translation far from the origin, as text for a GLB and as the double it parses to.
+const char *kFarText = "1234567.891,-2345678.123,345678.5";
+const double kFar[3] = {1234567.891, -2345678.123, 345678.5};
+const std::vector<float> kFarTriangle = {0.3127f, 0.6473f, 0.1189f, 1.4381f, 0.2219f,
+                                         0.0713f, 0.5531f, 1.3097f, 0.9257f};
+
+// One triangle near the origin of a node at kFar; `bounded`: its positions carry min and max.
+Bytes far_glb(bool bounded) {
+    GlbBuilder b;
+    const int pos = bounded ? b.bounded_positions(kFarTriangle) : b.floats(kFarTriangle, "VEC3", 3);
+    const int idx = b.indices({0, 1, 2});
+    return b.finish(
+        std::string(R"("scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"name":"far","mesh":0,"translation":[)") +
+        kFarText + R"(]}],"meshes":[{"primitives":[{"attributes":{"POSITION":)" + std::to_string(pos) +
+        R"(},"indices":)" + std::to_string(idx) + "}]}]");
+}
+
+// glTF y-up -> z-up, as GlbOptions::y_up_to_z_up turns the model.
+std::array<double, 3> z_up(double x, double y, double z) {
+    return {x, -z, y};
+}
+
+void test_offset(NativeDevice &dev) {
+    // Moved to the origin before anything is a float: the triangle keeps its own coordinates. Loaded where
+    // it is and moved back afterwards, in float, it is off by up to half the float spacing out there.
+    {
+        Stage s(dev, -1, 2, -1, 2);
+        GlbOptions o;
+        o.keep_positions = true;
+        o.offset = {-kFar[0], -kFar[1], -kFar[2]};
+        const GlbLoadResult res = load_glb_bytes(s.r, far_glb(false), o);
+        Stage t(dev, -1, 2, -1, 2);
+        GlbOptions plain;
+        plain.keep_positions = true;
+        const GlbLoadResult far = load_glb_bytes(t.r, far_glb(false), plain);
+        CHECK(res.loaded.size() == 1 && far.loaded.size() == 1);
+        if (res.loaded.size() != 1 || far.loaded.size() != 1)
+            return;
+        const std::vector<float> &p = res.loaded[0].positions, &q = far.loaded[0].positions;
+        CHECK(p.size() == 9 && q.size() == 9);
+        double worst = 0, worst_float = 0;
+        for (size_t i = 0; i < p.size() && i < q.size(); ++i) {
+            worst = std::max(worst, std::fabs(double(p[i]) - kFarTriangle[i]));
+            worst_float = std::max(worst_float, std::fabs(double(q[i] - float(kFar[i % 3])) - kFarTriangle[i]));
+        }
+        std::printf("offset: worst error %g with the offset, %g moved afterwards in float\n", worst, worst_float);
+        CHECK(worst < 1e-6);
+        CHECK(worst_float > 1e-2);
+        // Bounds are in the offset frame.
+        CHECK(close(res.bounds[0], 0.3127f, 1e-6f) && close(res.bounds[1], 0.2219f, 1e-6f) &&
+              close(res.bounds[2], 0.0713f, 1e-6f) && close(res.bounds[3], 1.4381f, 1e-6f) &&
+              close(res.bounds[4], 1.3097f, 1e-6f) && close(res.bounds[5], 0.9257f, 1e-6f));
+        CHECK(res.objects.size() == 1 && res.objects[0].bounds == res.bounds);
+        s.draw();
+        const auto c = s.at(0.768f, 0.726f); // the triangle's centroid
+        CHECK(c[0] != 10 || c[1] != 20 || c[2] != 30);
+    }
+
+    // y-up: the offset is in the turned (z-up) frame.
+    {
+        Stage s(dev, -1, 2, -1, 2);
+        GlbOptions o;
+        o.keep_positions = true;
+        o.y_up_to_z_up = true;
+        const auto t = z_up(kFar[0], kFar[1], kFar[2]);
+        o.offset = {-t[0], -t[1], -t[2]};
+        const GlbLoadResult res = load_glb_bytes(s.r, far_glb(true), o);
+        CHECK(res.loaded.size() == 1 && res.loaded[0].positions.size() == 9);
+        double worst = 0;
+        if (res.loaded.size() == 1)
+            for (size_t v = 0; v < 3 && v * 3 + 2 < res.loaded[0].positions.size(); ++v) {
+                const auto e = z_up(kFarTriangle[v * 3], kFarTriangle[v * 3 + 1], kFarTriangle[v * 3 + 2]);
+                for (int k = 0; k < 3; ++k)
+                    worst = std::max(worst, std::fabs(double(res.loaded[0].positions[v * 3 + k]) - e[k]));
+            }
+        CHECK(worst < 1e-6);
+    }
+
+    // glb_bounds_bytes: exact in double, from the accessors' min / max or from the data without them.
+    for (const bool bounded : {false, true})
+        for (const bool y_up : {false, true}) {
+            const auto b = glb_bounds_bytes(far_glb(bounded), y_up);
+            std::array<double, 6> e{3.4e38, 3.4e38, 3.4e38, -3.4e38, -3.4e38, -3.4e38};
+            for (size_t v = 0; v < 3; ++v) {
+                const double x = double(kFarTriangle[v * 3]) + kFar[0], y = double(kFarTriangle[v * 3 + 1]) + kFar[1],
+                             z = double(kFarTriangle[v * 3 + 2]) + kFar[2];
+                const auto w = y_up ? z_up(x, y, z) : std::array<double, 3>{x, y, z};
+                for (int k = 0; k < 3; ++k) {
+                    e[k] = std::min(e[k], w[k]);
+                    e[3 + k] = std::max(e[3 + k], w[k]);
+                }
+            }
+            double worst = 0;
+            for (int k = 0; k < 6; ++k)
+                worst = std::max(worst, std::fabs(b[k] - e[k]));
+            if (worst >= 1e-6)
+                std::fprintf(stderr, "  glb_bounds (bounded %d, y_up %d) off by %g\n", bounded, y_up, worst);
+            CHECK(worst < 1e-6);
+            // ... and what load_glb reports, with the offset as without it.
+            for (const bool offset : {false, true}) {
+                Stage s(dev, -1, 1, -1, 1);
+                GlbOptions o;
+                o.y_up_to_z_up = y_up;
+                if (offset)
+                    o.offset = {-b[0], -b[1], -b[2]};
+                const GlbLoadResult res = load_glb_bytes(s.r, far_glb(bounded), o);
+                for (int k = 0; k < 6; ++k)
+                    CHECK(close(res.bounds[k], float(b[k] + o.offset[k % 3]), offset ? 1e-6f : 0.25f));
+            }
+        }
+    {
+        const Bytes glb = animated_glb();
+        Stage s(dev, -1, 1, -1, 1);
+        const GlbLoadResult res = load_glb_bytes(s.r, glb);
+        const auto b = glb_bounds_bytes(glb, false);
+        for (int k = 0; k < 6; ++k)
+            CHECK(close(res.bounds[k], float(b[k]), 1e-6f));
+        // At rest, whatever the animations do.
+        CHECK(close(float(b[3]), 3.4f, 1e-6f) && close(float(b[4]), 0.4f, 1e-6f));
+    }
+    {
+        // Nothing drawable (a strip is not read): inverted.
+        GlbBuilder g;
+        const int pos = g.floats(kFarTriangle, "VEC3", 3);
+        const auto b = glb_bounds_bytes(g.finish(R"("scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],
+            "meshes":[{"primitives":[{"attributes":{"POSITION":)" +
+                                                 std::to_string(pos) + R"(},"mode":5}]}])"),
+                                        false);
+        CHECK(b[0] > b[3] && b[1] > b[4] && b[2] > b[5]);
+    }
+
+    // The animated path: the offset is in every node's world matrix before it is a float.
+    Stage s(dev, -1, 7, -2, 6);
+    GlbOptions options;
+    options.animations = true;
+    options.offset = {-kFar[0], -kFar[1], -kFar[2]};
+    const GlbLoadResult res = load_glb_bytes(s.r, animated_glb(kFarText), options);
+    const GlbGeometry *base = geometry_of_node(res, -1), *arm = geometry_of_node(res, 1),
+                      *hand = geometry_of_node(res, 2);
+    CHECK(base && arm && hand && res.animations.count() == 3);
+    if (!base || !arm || !hand || res.animations.count() != 3)
+        return;
+    auto at = [&](const GlbGeometry *g, float x, float y) {
+        const Mat4 m = s.r.instance_desc(g->instance).model;
+        const bool ok = close(m[12], x, 1e-6f) && close(m[13], y, 1e-6f) && close(m[14], 0, 1e-6f);
+        if (!ok)
+            std::fprintf(stderr, "  node %d is at (%.9g, %.9g, %.9g), expected (%g, %g, 0)\n", g->node, m[12], m[13],
+                         m[14], x, y);
+        return ok;
+    };
+    CHECK(at(arm, 2, 0) && at(hand, 3, 0));
+    CHECK(close(res.bounds[0], -0.4f, 1e-6f) && res.bounds[4] >= 4.4f && res.bounds[4] < 4.8f);
+    res.animations.apply(s.r, 0, 1.0f);
+    CHECK(at(arm, 2, 2) && at(hand, 3, 2));
+    CHECK(res.animations.node_matrix(0) == s.r.instance_desc(arm->instance).model);
+    res.animations.apply(s.r, 0, 2.0f);
+    s.draw();
+    CHECK(s.shows(0, 0, 255, 0, 0) && s.shows(2, 4, 255, 0, 0) && s.shows(3, 4, 255, 0, 0));
+    CHECK(s.background(2, 0) && s.background(3, 0));
+}
+
 #ifdef ADACPP_RENDER_DRACO
 // A bumpy n x n grid over [-2, 2]^2, as an indexed mesh.
 void grid(int n, std::vector<float> &positions, std::vector<uint32_t> &indices) {
@@ -416,6 +594,12 @@ void test_draco(NativeDevice &dev) {
     CHECK(draco_res.vertices == 17 * 17 && draco_res.geometries == 1);
     for (int k = 0; k < 6; ++k)
         CHECK(close(plain_res.bounds[k], draco_res.bounds[k], 1e-3f));
+    // Without the accessors' min / max, glb_bounds_bytes reads the Draco data.
+    const auto draco_bounds = glb_bounds_bytes(draco_glb(encoded.data(), encoded.size(), unique_id), false);
+    const auto plain_bounds = glb_bounds_bytes(plain_glb, false);
+    for (int k = 0; k < 6; ++k)
+        CHECK(close(float(draco_bounds[k]), draco_res.bounds[k], 1e-6f) &&
+              close(float(plain_bounds[k]), plain_res.bounds[k], 1e-6f));
     CHECK(draco_res.objects.size() == 1 && draco_res.objects[0].triangles == 512);
     // The same picture, but for the 14-bit positions.
     a.draw();
@@ -639,6 +823,7 @@ int main() {
     }
     std::printf("adapter: %s (%s)\n", dev->info().device.c_str(), dev->info().backend.c_str());
     test_animation(*dev);
+    test_offset(*dev);
 #ifdef ADACPP_RENDER_DRACO
     test_draco(*dev);
 #else

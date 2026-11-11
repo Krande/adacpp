@@ -92,17 +92,17 @@ void Batcher::add(const tinygltf::Primitive &prim, const Mat4 &world, const tiny
     // flips the winding, as glTF requires.
     // An animated node's vertices stay in its space; only a mirroring rest pose still turns the winding.
     const Mat4 &m = animated >= 0 ? kIdentity : world;
-    const float cof[9] = {m[5] * m[10] - m[6] * m[9], m[6] * m[8] - m[4] * m[10], m[4] * m[9] - m[5] * m[8],
-                          m[2] * m[9] - m[1] * m[10], m[0] * m[10] - m[2] * m[8], m[1] * m[8] - m[0] * m[9],
-                          m[1] * m[6] - m[2] * m[5],  m[2] * m[4] - m[0] * m[6],  m[0] * m[5] - m[1] * m[4]};
-    const float det = m[0] * cof[0] + m[4] * cof[1] + m[8] * cof[2];
-    const float sign = det < 0.0f ? -1.0f : 1.0f;
-    const bool mirrored = animated >= 0 ? det3(world) < 0.0f : det < 0.0f;
+    const double cof[9] = {m[5] * m[10] - m[6] * m[9], m[6] * m[8] - m[4] * m[10], m[4] * m[9] - m[5] * m[8],
+                           m[2] * m[9] - m[1] * m[10], m[0] * m[10] - m[2] * m[8], m[1] * m[8] - m[0] * m[9],
+                           m[1] * m[6] - m[2] * m[5],  m[2] * m[4] - m[0] * m[6],  m[0] * m[5] - m[1] * m[4]};
+    const double det = m[0] * cof[0] + m[4] * cof[1] + m[8] * cof[2];
+    const double sign = det < 0.0 ? -1.0 : 1.0;
+    const bool mirrored = animated >= 0 ? det3(world) < 0.0 : det < 0.0;
     const uint32_t base = uint32_t(b.vertex_count());
     for (size_t v = 0; v < nv; ++v) {
         const float *p = &positions[v * 3];
         for (int k = 0; k < 3; ++k) {
-            const float w = m[k] * p[0] + m[4 + k] * p[1] + m[8 + k] * p[2] + m[12 + k];
+            const float w = float(m[k] * p[0] + m[4 + k] * p[1] + m[8 + k] * p[2] + m[12 + k]);
             b.positions.push_back(w);
             if (animated < 0) { // an animated batch joins the bounds once flushed, over its motion
                 res_.bounds[k] = std::min(res_.bounds[k], w);
@@ -113,7 +113,7 @@ void Batcher::add(const tinygltf::Primitive &prim, const Mat4 &world, const tiny
         if (!normals.empty()) {
             const float *s = &normals[v * 3];
             for (int k = 0; k < 3; ++k)
-                n[k] = sign * (cof[k * 3] * s[0] + cof[k * 3 + 1] * s[1] + cof[k * 3 + 2] * s[2]);
+                n[k] = float(sign * (cof[k * 3] * s[0] + cof[k * 3 + 1] * s[1] + cof[k * 3 + 2] * s[2]));
             normalize(n);
         }
         b.normals.insert(b.normals.end(), n, n + 3);
@@ -173,7 +173,7 @@ void Batcher::flush(Batch &b) {
         desc.flags |= kCapped;
     }
     if (b.animated >= 0) {
-        desc.model = animation_->rest_world(b.animated);
+        desc.model = to_float(animation_->rest_world(b.animated));
         animation_->add_instance(b.animated, inst);
     }
     r_.set_instance(inst, desc);
@@ -247,7 +247,7 @@ void Batcher::add_feature_edges(const Batch &b) {
     desc.color = options_.line_color[3] > 0.0f ? options_.line_color : std::array<float, 4>{0, 0, 0, 1};
     desc.line_width = options_.line_width;
     if (b.animated >= 0) {
-        desc.model = animation_->rest_world(b.animated);
+        desc.model = to_float(animation_->rest_world(b.animated));
         animation_->add_instance(b.animated, inst);
     }
     r_.set_instance(inst, desc);

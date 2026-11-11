@@ -59,7 +59,8 @@ void GlbAnimations::Data::sample(const Channel &ch, float time, float *out) {
 
 void GlbAnimations::Data::pose(const Clip *clip, float time, size_t count, std::vector<Mat4> &out) const {
     struct Trs {
-        float t[3], r[4], s[3];
+        double t[3];
+        float r[4], s[3];
         bool moved;
     };
     std::vector<Trs> trs(clip ? count : 0);
@@ -75,7 +76,13 @@ void GlbAnimations::Data::pose(const Clip *clip, float time, size_t count, std::
             if (ch.node >= count || ch.times.empty())
                 continue;
             Trs &x = trs[ch.node];
-            sample(ch, time, ch.path == Translation ? x.t : ch.path == Rotation ? x.r : x.s);
+            if (ch.path == Translation) {
+                float t[3];
+                sample(ch, time, t);
+                std::copy_n(t, 3, x.t);
+            } else {
+                sample(ch, time, ch.path == Rotation ? x.r : x.s);
+            }
             x.moved = true;
         }
     }
@@ -111,7 +118,7 @@ void GlbAnimations::apply(Renderer &renderer, int animation, float time) const {
     data_->pose(animation < 0 ? nullptr : &data_->clips[animation], time, data_->nodes.size(), data_->world);
     for (size_t i = 0; i < data_->nodes.size(); ++i)
         for (const uint32_t instance : data_->nodes[i].instances)
-            renderer.set_instance_model(instance, data_->world[i].data());
+            renderer.set_instance_model(instance, detail::to_float(data_->world[i]).data());
 }
 
 const std::vector<int32_t> &GlbAnimations::nodes() const {
@@ -122,7 +129,7 @@ const std::vector<int32_t> &GlbAnimations::nodes() const {
 std::array<float, 16> GlbAnimations::node_matrix(size_t i) const {
     if (!data_ || i >= data_->world.size())
         throw std::out_of_range("adacpp.render: unknown animated node " + std::to_string(i));
-    return data_->world[i];
+    return detail::to_float(data_->world[i]);
 }
 
 namespace detail {
@@ -177,7 +184,7 @@ int32_t AnimationBuilder::add_node(const tinygltf::Node &n, int gltf_node, int32
     node.base = base;
     node.rest = node_matrix(n);
     for (size_t i = 0; i < n.translation.size() && i < 3; ++i)
-        node.t[i] = float(n.translation[i]);
+        node.t[i] = n.translation[i];
     for (size_t i = 0; i < n.rotation.size() && i < 4; ++i)
         node.r[i] = float(n.rotation[i]);
     for (size_t i = 0; i < n.scale.size() && i < 3; ++i)

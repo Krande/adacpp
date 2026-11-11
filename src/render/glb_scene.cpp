@@ -1,5 +1,6 @@
 #include "glb_scene.h"
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <memory>
@@ -48,6 +49,70 @@ struct Walk {
     }
 };
 
+// Above every node: glTF y-up -> z-up (+90 degrees about x) when asked, then the offset.
+Mat4 root_matrix(bool y_up_to_z_up, const std::array<double, 3> &offset) {
+    Mat4 m = y_up_to_z_up ? Mat4{1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1} : kIdentity;
+    for (int k = 0; k < 3; ++k)
+        m[12 + k] = offset[k];
+    return m;
+}
+
+// The default scene's nodes; every node for a GLB without scenes.
+std::vector<int> scene_roots(const tinygltf::Model &model) {
+    if (!model.scenes.empty())
+        return model.scenes.at(model.defaultScene >= 0 ? model.defaultScene : 0).nodes;
+    std::vector<int> all(model.nodes.size());
+    for (size_t n = 0; n < all.size(); ++n)
+        all[n] = int(n);
+    return all;
+}
+
+// What a primitive of a node at `world` adds to the box glb_bounds_bytes reports.
+void grow_primitive_bounds(const tinygltf::Model &model, const tinygltf::Primitive &prim, const Mat4 &world,
+                           double out[6]) {
+    if (prim.mode != -1 && prim.mode != TINYGLTF_MODE_TRIANGLES && prim.mode != TINYGLTF_MODE_LINE &&
+        prim.mode != TINYGLTF_MODE_POINTS)
+        return; // not drawn (Batcher::add)
+    const auto pos = prim.attributes.find("POSITION");
+    if (pos == prim.attributes.end())
+        return;
+    const auto &acc = model.accessors.at(pos->second);
+    double box[6] = {3.4e38, 3.4e38, 3.4e38, -3.4e38, -3.4e38, -3.4e38};
+    // min / max as glTF requires them of positions; what is read is what a load reads otherwise.
+    if (acc.minValues.size() == 3 && acc.maxValues.size() == 3 && !acc.normalized &&
+        acc.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT) {
+        for (int k = 0; k < 3; ++k) {
+            box[k] = acc.minValues[k];
+            box[3 + k] = acc.maxValues[k];
+        }
+    } else {
+        std::vector<float> positions, normals, colors;
+        std::vector<uint32_t> indices;
+        if (!read_draco(model, prim, positions, normals, colors, indices)) {
+            if (acc.bufferView < 0)
+                return;
+            positions = read_floats(model, pos->second, 3);
+        }
+        if (positions.empty())
+            return;
+        for (size_t i = 0; i < positions.size(); ++i) {
+            box[i % 3] = std::min(box[i % 3], double(positions[i]));
+            box[3 + i % 3] = std::max(box[3 + i % 3], double(positions[i]));
+        }
+    }
+    grow_bounds(out, world, box);
+}
+
+void grow_node_bounds(const tinygltf::Model &model, int node_index, const Mat4 &parent, double out[6]) {
+    const auto &n = model.nodes.at(node_index);
+    const Mat4 world = mul(parent, node_matrix(n));
+    if (n.mesh >= 0)
+        for (const auto &prim : model.meshes.at(n.mesh).primitives)
+            grow_primitive_bounds(model, prim, world, out);
+    for (int child : n.children)
+        grow_node_bounds(model, child, world, out);
+}
+
 } // namespace
 
 GlbLoadResult load_glb(Renderer &renderer, const std::string &path, const GlbOptions &options) {
@@ -67,9 +132,7 @@ GlbLoadResult load_glb_bytes(Renderer &renderer, std::vector<unsigned char> byte
     read_passthrough(bytes, res);
     const tinygltf::Model model = parse_glb(std::move(bytes), name);
 
-    // glTF y-up -> z-up: rotate +90 degrees about x.
-    const Mat4 root = options.y_up_to_z_up ? Mat4{1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1}
-                                           : Mat4{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    const Mat4 root = root_matrix(options.y_up_to_z_up, options.offset);
     const int scene = model.defaultScene >= 0 ? model.defaultScene : 0;
     const tinygltf::Value no_extras;
     const tinygltf::Value &extras = model.scenes.empty() ? no_extras : model.scenes.at(scene).extras;
@@ -90,18 +153,22 @@ GlbLoadResult load_glb_bytes(Renderer &renderer, std::vector<unsigned char> byte
         animation = std::make_unique<AnimationBuilder>(model);
     Batcher batcher(renderer, model, res, options, objects, animation.get());
     Walk walk{batcher, model, extras, objects, res.node_objects, animation.get()};
-    if (!model.scenes.empty()) {
-        for (int n : model.scenes.at(scene).nodes)
-            walk.node(n, root, -1);
-    } else {
-        for (size_t n = 0; n < model.nodes.size(); ++n)
-            walk.node(int(n), root, -1);
-    }
+    for (int n : scene_roots(model))
+        walk.node(n, root, -1);
     batcher.finish();
     objects.finish(res);
     if (animation)
         res.animations = animation->finish();
     return res;
+}
+
+std::array<double, 6> glb_bounds_bytes(const std::vector<unsigned char> &bytes, bool y_up_to_z_up) {
+    const tinygltf::Model model = parse_glb(bytes, "GLB");
+    std::array<double, 6> out{3.4e38, 3.4e38, 3.4e38, -3.4e38, -3.4e38, -3.4e38};
+    const Mat4 root = root_matrix(y_up_to_z_up, {0, 0, 0});
+    for (int n : scene_roots(model))
+        grow_node_bounds(model, n, root, out.data());
+    return out;
 }
 
 Camera look_at(const float eye[3], const float target[3], std::array<float, 3> up, float fov_y_deg, float aspect,

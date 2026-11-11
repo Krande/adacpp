@@ -69,7 +69,7 @@ public:
 
     nb::dict load_glb(const std::string &path, bool y_up, float line_width, float member_width, float point_size,
                       std::optional<std::array<float, 4>> line_color, bool double_sided, float feature_edge_angle_deg,
-                      bool section_caps, bool animations) {
+                      bool section_caps, bool animations, std::array<double, 3> offset) {
         GlbOptions o;
         o.y_up_to_z_up = y_up;
         o.line_width = line_width;
@@ -81,6 +81,7 @@ public:
         o.feature_edge_angle_deg = feature_edge_angle_deg;
         o.section_caps = section_caps;
         o.animations = animations;
+        o.offset = offset;
         GlbLoadResult r;
         {
             nb::gil_scoped_release release;
@@ -539,6 +540,15 @@ NB_MODULE(_render, m) {
     using adacpp::render::OffscreenRenderer;
     using adacpp::render::UpAxis;
     m.doc() = "adacpp WebGPU renderer, headless (wgpu-native)";
+    m.def(
+        "glb_bounds",
+        [](nb::bytes glb, bool y_up) {
+            const auto *p = static_cast<const unsigned char *>(glb.data());
+            return adacpp::render::glb_bounds_bytes(std::vector<unsigned char>(p, p + glb.size()), y_up);
+        },
+        "glb"_a, "y_up"_a = false,
+        "World box (min xyz, max xyz) of a GLB's bytes, in double, as load_glb places it with no offset, "
+        "without loading it; min > max when nothing is drawable.");
     // camera_controller.h, method for method: angles in degrees, pixels x right / y down from the top-left.
     nb::class_<CameraController>(m, "CameraController")
         .def(nb::init<>())
@@ -616,7 +626,10 @@ NB_MODULE(_render, m) {
         .def("resize", &OffscreenRenderer::resize, "width"_a, "height"_a)
         .def("load_glb", &OffscreenRenderer::load_glb, "path"_a, "y_up"_a = false, "line_width"_a = 1.0f,
              "member_width"_a = 1.0f, "point_size"_a = 1.0f, "line_color"_a = nb::none(), "double_sided"_a = false,
-             "feature_edge_angle_deg"_a = 0.0f, "section_caps"_a = false, "animations"_a = false)
+             "feature_edge_angle_deg"_a = 0.0f, "section_caps"_a = false, "animations"_a = false,
+             "offset"_a = std::array<double, 3>{0, 0, 0},
+             "offset: added to every world position in double before it is a float (after y_up, so z-up); "
+             "bounds, positions and matrices include it.")
         .def("set_animation_time", &OffscreenRenderer::set_animation_time, "animation_set"_a, "animation"_a.none(),
              "time"_a,
              "Pose what load_glb(animations=True) kept apart: animation index (None = the rest pose) at time "

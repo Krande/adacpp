@@ -7,6 +7,7 @@
 #include <emscripten/bind.h>
 #include <emscripten/val.h>
 
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
@@ -59,6 +60,18 @@ template <typename Get> emscripten::val string_array(const std::vector<GlbObject
     }
     json += ']';
     return emscripten::val::global("JSON").call<emscripten::val>("parse", json);
+}
+
+// The world box of a GLB (its bytes at `bytes`, `length` long) without loading it: [min x, y, z, max x, y, z]
+// as doubles, as load_glb_bytes would place it with no offset (glb_bounds_bytes; min > max when nothing
+// is drawable). For choosing loadGlb's `offset` before the load.
+emscripten::val glb_bounds(uintptr_t bytes, uint32_t length, bool y_up) {
+    const auto *p = ptr<unsigned char>(bytes);
+    const std::array<double, 6> b = glb_bounds_bytes(std::vector<unsigned char>(p, p + length), y_up);
+    emscripten::val out = emscripten::val::array();
+    for (double v : b)
+        out.call<void>("push", v);
+    return out;
 }
 
 } // namespace
@@ -122,7 +135,8 @@ public:
     // A GLB (its bytes at `bytes`, `length` long) added to the scene through the same reader the Python
     // offscreen renderer uses (glb_scene.h), so a model draws as its poster does. `opts` (all optional):
     // {yUp, lineWidth, memberWidth, pointSize, lineColor: [r, g, b, a] linear, doubleSided, sectionCaps,
-    //  featureEdgeAngleDeg, keepPositions, animations}. Returns {bounds: [6], featureEdges, geometries:
+    //  featureEdgeAngleDeg, keepPositions, animations, offset: [x, y, z] (GlbOptions::offset, as doubles;
+    //  bounds, positions and matrices below include it)}. Returns {bounds: [6], featureEdges, geometries:
     // [{geometry, instance, topology, vertexCount, vertexColors, featureEdges, node, segmentObjects:
     // Int32Array, positions?: Float32Array, indices?: Uint32Array}]} (positions and indices with
     // keepPositions; node: the glTF node placing an animated geometry, else -1), and the
@@ -161,6 +175,10 @@ public:
             if (c.isArray())
                 for (int i = 0; i < 4; ++i)
                     o.line_color[i] = c[i].as<float>();
+            const emscripten::val offset = opts["offset"];
+            if (offset.isArray())
+                for (int i = 0; i < 3; ++i)
+                    o.offset[i] = offset[i].as<double>();
         }
         const auto *p = ptr<unsigned char>(bytes);
         GlbLoadResult r = load_glb_bytes(*renderer_, std::vector<unsigned char>(p, p + length), o);
@@ -608,6 +626,7 @@ private:
 
 EMSCRIPTEN_BINDINGS(adacpp_render) {
     using adacpp::render::WebRenderer;
+    emscripten::function("glbBounds", &adacpp::render::glb_bounds);
     emscripten::class_<WebRenderer>("WebRenderer")
         .constructor<const std::string &, const std::string &>()
         .function("resize", &WebRenderer::resize)
