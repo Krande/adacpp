@@ -26,6 +26,7 @@ constexpr size_t kItemWords = 16;         // WGSL `Item` (cull shader)
 constexpr size_t kCullFrameBytes = 208;   // WGSL `CullFrame`
 constexpr size_t kSpriteBytes = 64;       // WGSL `Sprite`
 constexpr size_t kSpriteFrameBytes = 240; // WGSL `SpriteFrame`
+constexpr size_t kQuadBytes = 96;         // WGSL `Quad`
 constexpr size_t kCounters = 8;           // cull counters, see kCullWGSL
 // Two-pass occlusion culling costs ~0.35 ms a frame where nothing is hidden (an extra render pass, the
 // multisampled targets stored and reloaded, the depth pyramid) and saves tens of ms where most of a big
@@ -238,6 +239,7 @@ struct Renderer::Impl {
 
     struct Texture {
         uint32_t width = 0, height = 0;
+        bool mipmaps = true;
         TextureRef tex;
         TextureViewRef view;
         BindGroupRef bind;
@@ -284,6 +286,21 @@ struct Renderer::Impl {
     Texture white; // what a kNoTexture sprite samples
     std::vector<std::unique_ptr<Texture>> textures;
     std::vector<std::unique_ptr<SpriteDesc>> sprites;
+    // Quads (QuadDesc): the sprites' layouts with their own shader, made when the first quad is drawn, so a
+    // scene without quads pays nothing for them.
+    ShaderModuleRef quad_shader;
+    RenderPipelineRef quad_tested, quad_front, quad_untested; // depth-tested, the same pulled forward, kOnTop
+    SamplerRef nearest_sampler;
+    BufferRef quad_buf;
+    size_t quad_cap = 0;
+    BindGroupRef quad_bind, quad_bind_nearest;
+    std::vector<std::unique_ptr<QuadDesc>> quads;
+    struct QuadItem {
+        float order, depth;
+        uint32_t id;
+    };
+    std::vector<QuadItem> quad_items; // this frame's quads in draw order: the depth-tested, then the kOnTop
+    size_t quad_tested_count = 0;
     BufferRef dummy;
 
     // GPU culling: per-(instance, cluster) items, last frame's visibility, the early / late visible lists and
@@ -554,6 +571,11 @@ struct Renderer::Impl {
     }
 
     RenderPipelineRef make_sprite_pipeline(const char *label, bool depth_test) {
+        return make_sprite_pipeline(label, depth_test, sprite_shader.get(), "vs_sprite", "fs_sprite", 0);
+    }
+
+    RenderPipelineRef make_sprite_pipeline(const char *label, bool depth_test, WGPUShaderModule module, const char *vs,
+                                           const char *fragment, int depth_bias) {
         WGPUBlendState bs = WGPU_BLEND_STATE_INIT;
         bs.color.srcFactor = WGPUBlendFactor_SrcAlpha;
         bs.color.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
@@ -566,19 +588,23 @@ struct Renderer::Impl {
         ct.blend = &bs;
         ct.writeMask = WGPUColorWriteMask_All;
         WGPUFragmentState fs = WGPU_FRAGMENT_STATE_INIT;
-        fs.module = sprite_shader.get();
-        fs.entryPoint = sv("fs_sprite");
+        fs.module = module;
+        fs.entryPoint = sv(fragment);
         fs.targetCount = 1;
         fs.targets = &ct;
         WGPUDepthStencilState ds = WGPU_DEPTH_STENCIL_STATE_INIT;
         ds.format = depth_format;
         ds.depthWriteEnabled = WGPUOptionalBool_False;
         ds.depthCompare = depth_test ? WGPUCompareFunction_LessEqual : WGPUCompareFunction_Always;
+        if (depth_bias != 0) {
+            ds.depthBias = depth_bias;
+            ds.depthBiasSlopeScale = float(depth_bias);
+        }
         WGPURenderPipelineDescriptor d = WGPU_RENDER_PIPELINE_DESCRIPTOR_INIT;
         d.label = sv(label);
         d.layout = sprite_pipeline_layout.get();
-        d.vertex.module = sprite_shader.get();
-        d.vertex.entryPoint = sv("vs_sprite");
+        d.vertex.module = module;
+        d.vertex.entryPoint = sv(vs);
         d.primitive.topology = WGPUPrimitiveTopology_TriangleList;
         d.primitive.frontFace = WGPUFrontFace_CCW;
         d.primitive.cullMode = WGPUCullMode_None;
@@ -589,12 +615,12 @@ struct Renderer::Impl {
         return RenderPipelineRef(wgpuDeviceCreateRenderPipeline(device, &d));
     }
 
-    // (Re)fill a sprite texture with its mip chain; a new size makes a new texture.
+    // (Re)fill a texture, with its mip chain when it has one; a new size makes a new texture.
     void set_texture(Texture &t, const uint8_t *rgba, uint32_t w, uint32_t h) {
         if (!rgba || w == 0 || h == 0)
             throw std::invalid_argument("adacpp.render: texture without pixels");
         uint32_t levels = 1;
-        while ((std::max(w, h) >> levels) > 0)
+        while (t.mipmaps && (std::max(w, h) >> levels) > 0)
             ++levels;
         if (!t.tex || t.width != w || t.height != h) {
             WGPUTextureDescriptor d = WGPU_TEXTURE_DESCRIPTOR_INIT;
@@ -609,7 +635,8 @@ struct Renderer::Impl {
             t.width = w;
             t.height = h;
         }
-        std::vector<uint8_t> mip(rgba, rgba + size_t(w) * h * 4);
+        std::vector<uint8_t> mip;
+        const uint8_t *texels = rgba; // level 0 goes up as it was handed in
         for (uint32_t l = 0; l < levels; ++l) {
             WGPUTexelCopyTextureInfo dst = WGPU_TEXEL_COPY_TEXTURE_INFO_INIT;
             dst.texture = t.tex.get();
@@ -618,9 +645,12 @@ struct Renderer::Impl {
             layout.bytesPerRow = w * 4;
             layout.rowsPerImage = h;
             const WGPUExtent3D size = {w, h, 1};
-            wgpuQueueWriteTexture(queue, &dst, mip.data(), mip.size(), &layout, &size);
+            wgpuQueueWriteTexture(queue, &dst, texels, size_t(w) * h * 4, &layout, &size);
             if (l + 1 < levels) {
+                if (l == 0)
+                    mip.assign(rgba, rgba + size_t(w) * h * 4);
                 mip = half_mip(mip, w, h);
+                texels = mip.data();
                 w = std::max(1u, w / 2);
                 h = std::max(1u, h / 2);
             }
@@ -711,6 +741,7 @@ struct Renderer::Impl {
         top_wide_blend = top("adacpp.top_wide_blend", "vs_wide", tri, WGPUCullMode_None, true);
         sprite_tested = make_sprite_pipeline("adacpp.sprite_tested", true);
         sprite_untested = make_sprite_pipeline("adacpp.sprite_untested", false);
+        quad_tested.reset(); // made again, for this depth format, by the next frame that draws a quad
         if (depth_format == kDepthStencilFormat) {
             cap_count = make_pipeline("adacpp.cap_count", "vs_tri", tri, WGPUCullMode_None, false, 0, Stencil::Count);
             cap_fill = make_pipeline("adacpp.cap_fill", "vs_cap", tri, WGPUCullMode_None, false, 0, Stencil::Fill);
@@ -1787,6 +1818,128 @@ struct Renderer::Impl {
         }
     }
 
+    // The camera and the section planes as the sprite and quad shaders read them.
+    void write_sprite_frame() {
+        float frame[kSpriteFrameBytes / 4] = {};
+        std::memcpy(frame, view.data(), 64);
+        const Mat4 proj_wgpu = webgpu_proj();
+        std::memcpy(frame + 16, proj_wgpu.data(), 64);
+        const uint32_t clip_count = uint32_t(clip_planes.size() / 4);
+        std::memcpy(frame + 32, &clip_count, 4);
+        std::copy(clip_planes.begin(), clip_planes.end(), frame + 36);
+        wgpuQueueWriteBuffer(queue, sprite_frame_buf.get(), 0, frame, sizeof(frame));
+    }
+
+    // This frame's quads into `quad_items` and the GPU, sorted as three.js sorts transparent objects (render
+    // order, then back to front, then id), the depth-tested ones before the kOnTop ones. Once per frame,
+    // before the pass that draws them.
+    void prepare_quads() {
+        quad_items.clear();
+        quad_tested_count = 0;
+        if (quads.empty())
+            return;
+        for (uint32_t id = 0; id < quads.size(); ++id) {
+            if (!quads[id] || (quads[id]->flags & kHidden))
+                continue;
+            const QuadDesc &d = *quads[id];
+            if (d.texture != kNoTexture && (d.texture >= textures.size() || !textures[d.texture]))
+                continue;
+            // View-space z of the square's centre: more negative is farther away.
+            const float z = view[2] * d.model[12] + view[6] * d.model[13] + view[10] * d.model[14] + view[14];
+            quad_items.push_back({d.render_order, z, id});
+            quad_tested_count += (d.flags & kOnTop) ? 0 : 1;
+        }
+        if (quad_items.empty())
+            return;
+        std::stable_sort(quad_items.begin(), quad_items.end(), [&](const QuadItem &a, const QuadItem &b) {
+            const bool ta = quads[a.id]->flags & kOnTop, tb = quads[b.id]->flags & kOnTop;
+            if (ta != tb)
+                return tb;
+            return a.order != b.order ? a.order < b.order : a.depth < b.depth;
+        });
+
+        if (!quad_shader) {
+            WGPUShaderSourceWGSL src = WGPU_SHADER_SOURCE_WGSL_INIT;
+            src.code = sv(kQuadWGSL);
+            WGPUShaderModuleDescriptor sd = WGPU_SHADER_MODULE_DESCRIPTOR_INIT;
+            sd.nextInChain = &src.chain;
+            sd.label = sv("adacpp.quad_shader");
+            quad_shader.reset(wgpuDeviceCreateShaderModule(device, &sd));
+            // The base level's nearest texel, whatever mip chain the texture has.
+            WGPUSamplerDescriptor smp = WGPU_SAMPLER_DESCRIPTOR_INIT;
+            smp.label = sv("adacpp.nearest_sampler");
+            smp.addressModeU = WGPUAddressMode_ClampToEdge;
+            smp.addressModeV = WGPUAddressMode_ClampToEdge;
+            smp.magFilter = WGPUFilterMode_Nearest;
+            smp.minFilter = WGPUFilterMode_Nearest;
+            smp.mipmapFilter = WGPUMipmapFilterMode_Nearest;
+            smp.lodMaxClamp = 0.0f;
+            nearest_sampler.reset(wgpuDeviceCreateSampler(device, &smp));
+        }
+        if (!quad_tested) {
+            auto make = [&](const char *label, bool depth_test, int depth_bias) {
+                return make_sprite_pipeline(label, depth_test, quad_shader.get(), "vs_quad", "fs_quad", depth_bias);
+            };
+            quad_tested = make("adacpp.quad_tested", true, 0);
+            quad_front = make("adacpp.quad_front", true, -1);
+            quad_untested = make("adacpp.quad_untested", false, 0);
+        }
+
+        constexpr size_t words = kQuadBytes / 4;
+        std::vector<uint32_t> data(quad_items.size() * words, 0);
+        for (size_t i = 0; i < quad_items.size(); ++i) {
+            const QuadDesc &d = *quads[quad_items[i].id];
+            std::memcpy(data.data() + i * words, d.model.data(), 64);
+            std::memcpy(data.data() + i * words + 16, d.color.data(), 16);
+            data[i * words + 20] = d.flags;
+        }
+        if (data.size() * 4 > quad_cap || !quad_buf) {
+            quad_cap = std::max<size_t>(data.size() * 4 * 2, 1024);
+            quad_buf = make_buffer(quad_cap, WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst, "adacpp.quads");
+            WGPUBindGroupEntry smp = WGPU_BIND_GROUP_ENTRY_INIT;
+            smp.sampler = sprite_sampler.get();
+            quad_bind =
+                make_bind(sprite_frame_layout,
+                          {buffer_entry(sprite_frame_buf.get()), buffer_entry(quad_buf.get()), smp}, "adacpp.quads");
+            smp.sampler = nearest_sampler.get();
+            quad_bind_nearest = make_bind(sprite_frame_layout,
+                                          {buffer_entry(sprite_frame_buf.get()), buffer_entry(quad_buf.get()), smp},
+                                          "adacpp.quads_nearest");
+        }
+        wgpuQueueWriteBuffer(queue, quad_buf.get(), 0, data.data(), data.size() * 4);
+        write_sprite_frame();
+    }
+
+    // The depth-tested quads (after the transparent instances) or the kOnTop ones (after the kOnTop
+    // instances): one draw each, since each has its own texture. Leaves its own bind groups set.
+    bool draw_quads(WGPURenderPassEncoder pass, RenderStats &st, bool on_top) {
+        const size_t first = on_top ? quad_tested_count : 0, last = on_top ? quad_items.size() : quad_tested_count;
+        if (first == last)
+            return false;
+        WGPURenderPipeline bound = nullptr;
+        WGPUBindGroup bound_group = nullptr;
+        for (size_t i = first; i < last; ++i) {
+            const QuadDesc &d = *quads[quad_items[i].id];
+            WGPURenderPipeline p = on_top                     ? quad_untested.get()
+                                   : (d.flags & kDepthOffset) ? quad_front.get()
+                                                              : quad_tested.get();
+            if (p != bound) {
+                wgpuRenderPassEncoderSetPipeline(pass, p);
+                bound = p;
+            }
+            WGPUBindGroup group = (d.flags & kNearest) ? quad_bind_nearest.get() : quad_bind.get();
+            if (group != bound_group) {
+                wgpuRenderPassEncoderSetBindGroup(pass, 0, group, 0, nullptr);
+                bound_group = group;
+            }
+            const Texture &t = d.texture == kNoTexture ? white : *textures[d.texture];
+            wgpuRenderPassEncoderSetBindGroup(pass, 1, t.bind.get(), 0, nullptr);
+            wgpuRenderPassEncoderDraw(pass, 6, 1, 0, uint32_t(i));
+            st.draw_calls++;
+        }
+        return true;
+    }
+
     // The sprites, last in the frame: sorted as three.js sorts transparent objects (render order, then back
     // to front, then id), one draw each since each has its own texture.
     void draw_sprites(WGPURenderPassEncoder pass, RenderStats &st) {
@@ -1830,15 +1983,7 @@ struct Renderer::Impl {
                                     "adacpp.sprites");
         }
         wgpuQueueWriteBuffer(queue, sprite_buf.get(), 0, data.data(), data.size() * 4);
-
-        float frame[kSpriteFrameBytes / 4] = {};
-        std::memcpy(frame, view.data(), 64);
-        const Mat4 proj_wgpu = webgpu_proj();
-        std::memcpy(frame + 16, proj_wgpu.data(), 64);
-        const uint32_t clip_count = uint32_t(clip_planes.size() / 4);
-        std::memcpy(frame + 32, &clip_count, 4);
-        std::copy(clip_planes.begin(), clip_planes.end(), frame + 36);
-        wgpuQueueWriteBuffer(queue, sprite_frame_buf.get(), 0, frame, sizeof(frame));
+        write_sprite_frame();
 
         wgpuRenderPassEncoderSetBindGroup(pass, 0, sprite_bind.get(), 0, nullptr);
         WGPURenderPipeline bound = nullptr;
@@ -1912,6 +2057,7 @@ struct Renderer::Impl {
         }
         for (auto &g : geometries)
             st.geometries += g ? 1 : 0;
+        prepare_quads();
 
         WGPUCommandEncoderDescriptor ed = WGPU_COMMAND_ENCODER_DESCRIPTOR_INIT;
         WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(device, &ed);
@@ -1945,7 +2091,12 @@ struct Renderer::Impl {
         wgpuRenderPassEncoderSetBindGroup(pass, 0, frame_bind.get(), 0, nullptr);
         d.tris(true, nullptr, nullptr);
         d.lists(true);
+        if (draw_quads(pass, st, false)) {
+            d.bound = nullptr;
+            wgpuRenderPassEncoderSetBindGroup(pass, 0, frame_bind.get(), 0, nullptr);
+        }
         d.on_top();
+        draw_quads(pass, st, true);
         draw_sprites(pass, st);
         end_pass(pass);
     }
@@ -2026,8 +2177,11 @@ struct Renderer::Impl {
         wgpuRenderPassEncoderSetBindGroup(pass, 0, frame_bind_late.get(), 0, nullptr);
         late.tris(true, args_late_buf.get(), &in_view);
         late.lists(true);
+        if (draw_quads(pass, st, false))
+            late.bound = nullptr;
         wgpuRenderPassEncoderSetBindGroup(pass, 0, frame_bind.get(), 0, nullptr);
         late.on_top();
+        draw_quads(pass, st, true);
         draw_sprites(pass, st);
         end_pass(pass);
     }
@@ -2160,6 +2314,15 @@ void Renderer::set_instance(uint32_t instance, const InstanceDesc &desc) {
     impl_->instances_dirty = true;
 }
 
+void Renderer::set_instance_model(uint32_t instance, const float model[16]) {
+    std::copy(model, model + 16, impl_->instance(instance).desc.model.begin());
+    impl_->instances_dirty = true;
+}
+
+const InstanceDesc &Renderer::instance_desc(uint32_t instance) const {
+    return impl_->instance(instance).desc;
+}
+
 void Renderer::set_segment_states(uint32_t instance, const uint32_t *packed, size_t segment_count) {
     auto &inst = impl_->instance(instance);
     const size_t n = std::min(segment_count * 2, inst.segstate.size());
@@ -2173,8 +2336,9 @@ void Renderer::remove_instance(uint32_t instance) {
     impl_->structure_dirty = true;
 }
 
-uint32_t Renderer::add_texture(const uint8_t *rgba, uint32_t width, uint32_t height) {
+uint32_t Renderer::add_texture(const uint8_t *rgba, uint32_t width, uint32_t height, bool mipmaps) {
     auto t = std::make_unique<Impl::Texture>();
+    t->mipmaps = mipmaps;
     impl_->set_texture(*t, rgba, width, height);
     auto &list = impl_->textures;
     for (uint32_t id = 0; id < list.size(); ++id) {
@@ -2223,10 +2387,34 @@ void Renderer::remove_sprite(uint32_t sprite) {
     impl_->sprites[sprite].reset();
 }
 
+uint32_t Renderer::add_quad() {
+    auto &list = impl_->quads;
+    for (uint32_t id = 0; id < list.size(); ++id)
+        if (!list[id]) {
+            list[id] = std::make_unique<QuadDesc>();
+            return id;
+        }
+    list.push_back(std::make_unique<QuadDesc>());
+    return uint32_t(list.size() - 1);
+}
+
+void Renderer::set_quad(uint32_t quad, const QuadDesc &desc) {
+    if (quad >= impl_->quads.size() || !impl_->quads[quad])
+        throw std::out_of_range("adacpp.render: unknown quad " + std::to_string(quad));
+    *impl_->quads[quad] = desc;
+}
+
+void Renderer::remove_quad(uint32_t quad) {
+    if (quad >= impl_->quads.size() || !impl_->quads[quad])
+        throw std::out_of_range("adacpp.render: unknown quad " + std::to_string(quad));
+    impl_->quads[quad].reset();
+}
+
 void Renderer::clear() {
     impl_->instances.clear();
     impl_->geometries.clear();
     impl_->sprites.clear();
+    impl_->quads.clear();
     impl_->textures.clear();
     impl_->structure_dirty = true;
 }
@@ -2310,6 +2498,20 @@ std::array<float, 6> Renderer::bounds() const {
             float p[3] = {g.aabb[(corner & 1) ? 3 : 0], g.aabb[(corner & 2) ? 4 : 1], g.aabb[(corner & 4) ? 5 : 2]};
             for (int k = 0; k < 3; ++k) {
                 float w = m[k] * p[0] + m[4 + k] * p[1] + m[8 + k] * p[2] + m[12 + k];
+                b[k] = std::min(b[k], w);
+                b[3 + k] = std::max(b[3 + k], w);
+            }
+        }
+        any = true;
+    }
+    for (auto &quad : impl_->quads) {
+        if (!quad || (quad->flags & kHidden))
+            continue;
+        const auto &m = quad->model;
+        for (int corner = 0; corner < 4; ++corner) {
+            const float x = (corner & 1) ? 0.5f : -0.5f, y = (corner & 2) ? 0.5f : -0.5f;
+            for (int k = 0; k < 3; ++k) {
+                const float w = m[k] * x + m[4 + k] * y + m[12 + k];
                 b[k] = std::min(b[k], w);
                 b[3 + k] = std::max(b[3 + k], w);
             }

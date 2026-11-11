@@ -24,8 +24,8 @@
 // cone).
 //
 // After the opaque model: section caps (the cut faces of kCapped solids, by stencil counting). After the
-// transparent one: kOnTop instances, which ignore depth, and last of all sprites, camera-facing textured
-// quads sorted back to front.
+// transparent one: textured quads lying in the world, kOnTop instances (and quads), which ignore depth, and
+// last of all sprites, camera-facing textured quads sorted back to front.
 #pragma once
 
 #include <array>
@@ -62,6 +62,9 @@ enum InstanceFlags : uint32_t {
     // A transparent instance that still culls its back faces (three.js' single-sided transparent material).
     // Without it a transparent instance draws both sides. No effect on opaque instances.
     kCullBack = 1u << 18,
+    // Quads (set_quad) only: the texture is sampled at its nearest texel, so the cells of a grid keep hard
+    // edges. Clear, it is filtered (trilinear when the texture has a mip chain).
+    kNearest = 1u << 19,
 };
 
 // Segment state flags (second u32 of a segment's state pair).
@@ -97,6 +100,25 @@ struct SpriteDesc {
     std::array<float, 4> color{1, 1, 1, 1}; // tint multiplied into the texture: linear RGB, alpha = opacity
     uint32_t flags = kSpriteSizeAttenuation | kSpriteDepthTest;
     // Draw order follows three.js: by render_order (ascending), then back to front, then by id.
+    float render_order = 0.0f;
+};
+
+// A textured quad lying in the world: three.js' Mesh of a PlaneGeometry(1, 1) with a MeshBasicMaterial that
+// has a map. Unlit, alpha-blended, double-sided, never written to depth and never returned by pick().
+struct QuadDesc {
+    uint32_t texture = kNoTexture; // as returned by add_texture(); kNoTexture draws the tint alone
+    // Places the unit square (x and y in [-0.5, 0.5], z = 0) in the world; column-major. The texture's top
+    // row lies along the square's y = +0.5 edge and its left column along x = -0.5 (an image stands upright
+    // seen from +z with y up): for a grid whose first row is at the low y edge, give y a negative scale.
+    std::array<float, 16> model{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    std::array<float, 4> color{1, 1, 1, 1}; // tint multiplied into the texture: linear RGB, alpha = opacity
+    // InstanceFlags, of which a quad reads: kHidden, kClipped (cut by the section planes), kOnTop (drawn
+    // over the model with no depth test; clear, the model hides it where it is in front), kDepthOffset
+    // (pulled in front of a face it lies on) and kNearest.
+    uint32_t flags = 0;
+    // Draw order among quads, as three.js: by render_order (ascending), then back to front (by the square's
+    // centre), then by id. Depth-tested quads are drawn after the transparent instances, kOnTop quads after
+    // the kOnTop instances; sprites come after both.
     float render_order = 0.0f;
 };
 
@@ -181,10 +203,14 @@ public:
 
     uint32_t add_instance(uint32_t geometry);
     void set_instance(uint32_t instance, const InstanceDesc &desc);
+    // The instance's model matrix alone (column-major), everything else as it was last set: what an
+    // animation moves each frame.
+    void set_instance_model(uint32_t instance, const float model[16]);
+    const InstanceDesc &instance_desc(uint32_t instance) const;
     // Two u32 per segment: RGBA8 colour override (alpha 0 = no override) and SegmentFlags.
     void set_segment_states(uint32_t instance, const uint32_t *packed, size_t segment_count);
     void remove_instance(uint32_t instance);
-    void clear(); // every geometry, instance, sprite and texture
+    void clear(); // every geometry, instance, sprite, quad and texture
 
     // `proj_gl` is an OpenGL-convention projection (clip z in [-1, 1], e.g. three.js); it is remapped to
     // WebGPU's [0, 1] here. Matrices are column-major.
@@ -223,16 +249,25 @@ public:
     // One colour for every cap (linear RGB); alpha 0 (the default) gives each cap its instance's base colour.
     void set_section_cap_color(float r, float g, float b, float a = 1.0f);
 
-    // Textures for sprites: width x height RGBA8 texels, top row first, sRGB-encoded with straight alpha (canvas
-    // pixels). update_texture() may change the size.
-    uint32_t add_texture(const uint8_t *rgba, uint32_t width, uint32_t height);
+    // Textures for sprites and quads: width x height RGBA8 texels, top row first, sRGB-encoded with straight
+    // alpha (canvas pixels). `mipmaps` builds the mip chain a label needs to stay sharp when drawn small; off,
+    // the texture is the one level, which is what an image replaced often wants (nothing is filtered on the
+    // CPU). update_texture() with the size the texture has writes into it in place -- no allocation, and for
+    // a texture without mipmaps a single upload, cheap enough for every frame -- and with another size makes
+    // the texture again; the id, and whether it has mipmaps, stay.
+    uint32_t add_texture(const uint8_t *rgba, uint32_t width, uint32_t height, bool mipmaps = true);
     void update_texture(uint32_t texture, const uint8_t *rgba, uint32_t width, uint32_t height);
-    void remove_texture(uint32_t texture); // sprites still using it are not drawn
+    void remove_texture(uint32_t texture); // sprites and quads still using it are not drawn
 
     // Sprites are drawn after everything else, alpha-blended and sorted; pick() never returns them.
     uint32_t add_sprite();
     void set_sprite(uint32_t sprite, const SpriteDesc &desc);
     void remove_sprite(uint32_t sprite);
+
+    // Textured quads in the world (QuadDesc): a map, a grid of values or an image laid on a plane.
+    uint32_t add_quad();
+    void set_quad(uint32_t quad, const QuadDesc &desc);
+    void remove_quad(uint32_t quad);
 
     void render(WGPUTextureView target, uint32_t width, uint32_t height);
 
@@ -250,7 +285,7 @@ public:
     // clusters). Asynchronous like pick(); with CPU culling it calls back with stats() as they are.
     void read_cull_stats(std::function<void(const RenderStats &)> done);
 
-    // World-space bounds of all visible instances: min xyz, max xyz. Empty scene -> all zeros.
+    // World-space bounds of all visible instances and quads: min xyz, max xyz. Empty scene -> all zeros.
     std::array<float, 6> bounds() const;
 
 private:
