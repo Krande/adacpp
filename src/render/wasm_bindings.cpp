@@ -409,8 +409,9 @@ public:
         p.ortho_height = ortho_height;
         renderer_->camera().set_pose(p, seconds);
     }
-    // {eye: [3], target: [3], up: [3], fov, orthographic, orthoHeight, azimuth, elevation, roll, distance}:
-    // the first six are what cameraSetPose takes, the rest the same pose as the controller holds it.
+    // {eye: [3], target: [3], up: [3], fov, orthographic, orthoHeight, azimuth, elevation, roll, distance, near,
+    // far}: the first six are what cameraSetPose takes, then the same pose as the controller holds it, and the
+    // clip planes the projection uses (cameraSetClipRange's, or the automatic ones).
     emscripten::val camera_pose() const {
         const CameraController &c = renderer_->camera();
         const CameraPose p = c.pose();
@@ -431,6 +432,9 @@ public:
         o.set("elevation", c.elevation());
         o.set("roll", c.roll_angle());
         o.set("distance", c.distance());
+        const std::array<double, 2> clip = c.clip_range();
+        o.set("near", clip[0]);
+        o.set("far", clip[1]);
         return o;
     }
     // {view, proj}: the controller's matrices for the canvas as it is now, as Float32Array(16), column-major,
@@ -442,6 +446,11 @@ public:
         o.set("view", emscripten::val::global("Float32Array").new_(emscripten::typed_memory_view(16, view.data())));
         o.set("proj", emscripten::val::global("Float32Array").new_(emscripten::typed_memory_view(16, proj.data())));
         return o;
+    }
+    // Near and far planes for the projection to use as they are; (0, 0) = the automatic ones that wrap the
+    // scene (the default). Either projection; clip space stays OpenGL's, z in [-1, 1].
+    void camera_set_clip_range(double near_z, double far_z) {
+        renderer_->camera().set_clip_range(near_z, far_z);
     }
     void camera_set_orthographic(bool orthographic) {
         renderer_->camera().set_orthographic(orthographic);
@@ -663,6 +672,7 @@ EMSCRIPTEN_BINDINGS(adacpp_render) {
         .function("cameraSetPose", &WebRenderer::camera_set_pose)
         .function("cameraPose", &WebRenderer::camera_pose)
         .function("cameraMatrices", &WebRenderer::camera_matrices)
+        .function("cameraSetClipRange", &WebRenderer::camera_set_clip_range)
         .function("cameraSetOrthographic", &WebRenderer::camera_set_orthographic)
         .function("cameraSetFov", &WebRenderer::camera_set_fov)
         .function("cameraSetUpAxis", &WebRenderer::camera_set_up_axis)

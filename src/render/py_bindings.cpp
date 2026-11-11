@@ -564,6 +564,9 @@ NB_MODULE(_render, m) {
         .def_prop_rw("fov", &CameraController::fov, &CameraController::set_fov)
         .def_prop_rw("orthographic", &CameraController::orthographic, &CameraController::set_orthographic)
         .def("set_scene_bounds", &CameraController::set_scene_bounds, "bounds"_a)
+        .def("set_clip_range", &CameraController::set_clip_range, "near"_a, "far"_a,
+             "Near and far planes for the projection to use as they are; (0, 0) = the automatic ones (the default).")
+        .def_prop_ro("clip_range", &CameraController::clip_range, "(near, far) the projection uses now.")
         .def("orbit", &CameraController::orbit, "dx"_a, "dy"_a)
         .def("pan", &CameraController::pan, "dx"_a, "dy"_a)
         .def("zoom", &CameraController::zoom, "factor"_a, "Below 1 moves in, above 1 moves out.")

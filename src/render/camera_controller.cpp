@@ -146,17 +146,33 @@ std::array<float, 16> CameraController::view() const {
     return v;
 }
 
-std::array<float, 16> CameraController::projection(double aspect) const {
-    const double a = std::max(aspect, 1e-3);
+void CameraController::set_clip_range(double near_z, double far_z) {
+    clip_ = near_z > 0.0 && far_z > near_z ? std::array<double, 2>{near_z, far_z} : std::array<double, 2>{0, 0};
+}
+
+std::array<double, 2> CameraController::clip_range() const {
+    if (clip_[0] > 0.0)
+        return clip_;
     // Near and far hug the scene's bounding sphere, measured along the viewing direction from where the
     // camera is now, so the depth range stays tight after a pan or a zoom onto a detail.
     const bool scene = scene_radius_ > 0.0;
     const double radius = scene ? scene_radius_ : std::max(state_.distance, kMinRadius);
     const Vec3 center = scene ? scene_center_ : state_.target;
     const double depth = dot(sub(center, eye(state_, up_axis_)), basis(state_, up_axis_).forward);
+    if (ortho_)
+        return {depth - radius * kDepthRadii, depth + radius * kDepthRadii};
+    const double near_z = std::max({depth - radius * kDepthRadii, state_.distance * 1e-3, 1e-4});
+    double far_z = depth + radius * kDepthRadii;
+    if (far_z <= near_z) // the whole scene is behind the camera: any valid range will do
+        far_z = near_z * 2.0;
+    return {near_z, far_z};
+}
+
+std::array<float, 16> CameraController::projection(double aspect) const {
+    const double a = std::max(aspect, 1e-3);
+    const auto [near_z, far_z] = clip_range();
     std::array<float, 16> p{};
     if (ortho_) {
-        const double near_z = depth - radius * kDepthRadii, far_z = depth + radius * kDepthRadii;
         p[0] = float(2.0 / (state_.ortho_height * a));
         p[5] = float(2.0 / state_.ortho_height);
         p[10] = float(-2.0 / (far_z - near_z));
@@ -164,10 +180,6 @@ std::array<float, 16> CameraController::projection(double aspect) const {
         p[15] = 1.0f;
         return p;
     }
-    const double near_z = std::max({depth - radius * kDepthRadii, state_.distance * 1e-3, 1e-4});
-    double far_z = depth + radius * kDepthRadii;
-    if (far_z <= near_z) // the whole scene is behind the camera: any valid range will do
-        far_z = near_z * 2.0;
     const double t = 1.0 / tan_half(state_.fov);
     p[0] = float(t / a);
     p[5] = float(t);
