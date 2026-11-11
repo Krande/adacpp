@@ -2,6 +2,15 @@
 
 
 
+## v0.41.0 (2026-11-11)
+
+### Feature
+
+* feat: node animation, Draco meshes and textured world-space quads in the WebGPU renderer (#81)
+
+Co-authored-by: Claude Fable 5.2 &lt;noreply@anthropic.com&gt; ([`cccbc2e`](https://github.com/Krande/adacpp/commit/cccbc2e6861d5ff7840b8103abcba0f3eefc0bbe))
+
+
 ## v0.40.0 (2026-11-10)
 
 ### Feature
