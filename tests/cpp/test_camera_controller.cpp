@@ -624,6 +624,44 @@ void test_depth_range() {
         CHECK(std::isfinite(x));
 }
 
+void test_clip_range() {
+    // Set planes are what the projection uses, whatever the camera does; (0, 0) gives the automatic ones back.
+    CameraController c = framed();
+    const Mat4 automatic = c.projection(1.5);
+    const auto range = c.clip_range();
+    CHECK(range[0] > 0 && range[1] > range[0]);
+    CHECK(close(range[0], automatic[14] / (automatic[10] - 1), 1e-3 * range[0]));
+    CHECK(close(range[1], automatic[14] / (automatic[10] + 1), 1e-3 * range[1]));
+    auto planes = [&](double aspect) {
+        const Mat4 p = c.projection(aspect);
+        if (c.orthographic())
+            return std::array<double, 2>{(p[14] + 1.0) / p[10], (p[14] - 1.0) / p[10]};
+        return std::array<double, 2>{p[14] / (p[10] - 1.0), p[14] / (p[10] + 1.0)};
+    };
+    c.set_clip_range(0.0125, 4000.0);
+    for (int step = 0; step < 3; ++step) {
+        const auto np = planes(1.5);
+        CHECK(close(np[0], 0.0125, 1e-6) && close(np[1], 4000.0, 4000.0 * 1e-5));
+        CHECK(c.clip_range() == (std::array<double, 2>{0.0125, 4000.0}));
+        c.zoom(0.1);
+        c.pan(300, -200);
+    }
+    c.set_orthographic(true);
+    const auto op = planes(1.5);
+    // An orthographic near comes back from the float matrix to about 1e-4 here (it cancels against 1).
+    CHECK(close(op[0], 0.0125, 1e-3) && close(op[1], 4000.0, 4000.0 * 1e-5));
+    CHECK(c.clip_range() == (std::array<double, 2>{0.0125, 4000.0}));
+    c.set_orthographic(false);
+    // Only both above 0 set it.
+    c.set_clip_range(0.5, 0.0);
+    CHECK(c.clip_range()[0] != 0.5);
+    c = framed();
+    c.set_clip_range(0.0125, 4000.0);
+    c.set_clip_range(0.0, 0.0);
+    CHECK(c.projection(1.5) == automatic);
+    CHECK(c.clip_range() == range);
+}
+
 } // namespace
 
 int main() {
@@ -640,6 +678,7 @@ int main() {
     test_damping();
     test_orthographic();
     test_depth_range();
+    test_clip_range();
     std::printf("camera controller: %d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

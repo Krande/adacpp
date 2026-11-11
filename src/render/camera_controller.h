@@ -54,6 +54,12 @@ public:
     }
     // What near and far wrap (min xyz, max xyz), and what limits zoom. Until it is set, fit() sets it.
     void set_scene_bounds(const std::array<float, 6> &bounds);
+    // Near and far planes (distances along the view direction) for the projection to use as they are, in
+    // either projection, wherever the camera goes. Both above 0 with far beyond near sets them; anything
+    // else, (0, 0) say, gives back the automatic planes that wrap the scene bounds (the default).
+    void set_clip_range(double near_z, double far_z);
+    // The near and far planes the projection uses now, set or automatic.
+    std::array<double, 2> clip_range() const;
 
     // Drag by (dx, dy) pixels. A drag over the viewport's height turns 180 degrees; dragging right turns
     // the near side of the model right, dragging down tips its top towards the viewer. Elevation stops at
@@ -152,6 +158,8 @@ private:
     bool has_scene_ = false;
     Vec3 scene_center_{0, 0, 0};
     double scene_radius_ = 0.0; // 0: no bounds yet
+
+    std::array<double, 2> clip_{0, 0}; // set_clip_range(); 0: automatic
 
     bool has_pivot_ = false;
     Vec3 pivot_{0, 0, 0};

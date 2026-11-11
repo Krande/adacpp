@@ -7,6 +7,7 @@
 #include <emscripten/bind.h>
 #include <emscripten/val.h>
 
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
@@ -59,6 +60,18 @@ template <typename Get> emscripten::val string_array(const std::vector<GlbObject
     }
     json += ']';
     return emscripten::val::global("JSON").call<emscripten::val>("parse", json);
+}
+
+// The world box of a GLB (its bytes at `bytes`, `length` long) without loading it: [min x, y, z, max x, y, z]
+// as doubles, as load_glb_bytes would place it with no offset (glb_bounds_bytes; min > max when nothing
+// is drawable). For choosing loadGlb's `offset` before the load.
+emscripten::val glb_bounds(uintptr_t bytes, uint32_t length, bool y_up) {
+    const auto *p = ptr<unsigned char>(bytes);
+    const std::array<double, 6> b = glb_bounds_bytes(std::vector<unsigned char>(p, p + length), y_up);
+    emscripten::val out = emscripten::val::array();
+    for (double v : b)
+        out.call<void>("push", v);
+    return out;
 }
 
 } // namespace
@@ -120,9 +133,10 @@ public:
     }
 
     // A GLB (its bytes at `bytes`, `length` long) added to the scene through the same reader the Python
-    // offscreen renderer uses (glb_scene.cpp), so a model draws as its poster does. `opts` (all optional):
+    // offscreen renderer uses (glb_scene.h), so a model draws as its poster does. `opts` (all optional):
     // {yUp, lineWidth, memberWidth, pointSize, lineColor: [r, g, b, a] linear, doubleSided, sectionCaps,
-    //  featureEdgeAngleDeg, keepPositions, animations}. Returns {bounds: [6], featureEdges, geometries:
+    //  featureEdgeAngleDeg, keepPositions, animations, offset: [x, y, z] (GlbOptions::offset, as doubles;
+    //  bounds, positions and matrices below include it)}. Returns {bounds: [6], featureEdges, geometries:
     // [{geometry, instance, topology, vertexCount, vertexColors, featureEdges, node, segmentObjects:
     // Int32Array, positions?: Float32Array, indices?: Uint32Array}]} (positions and indices with
     // keepPositions; node: the glTF node placing an animated geometry, else -1), and the
@@ -161,6 +175,10 @@ public:
             if (c.isArray())
                 for (int i = 0; i < 4; ++i)
                     o.line_color[i] = c[i].as<float>();
+            const emscripten::val offset = opts["offset"];
+            if (offset.isArray())
+                for (int i = 0; i < 3; ++i)
+                    o.offset[i] = offset[i].as<double>();
         }
         const auto *p = ptr<unsigned char>(bytes);
         GlbLoadResult r = load_glb_bytes(*renderer_, std::vector<unsigned char>(p, p + length), o);
@@ -391,8 +409,9 @@ public:
         p.ortho_height = ortho_height;
         renderer_->camera().set_pose(p, seconds);
     }
-    // {eye: [3], target: [3], up: [3], fov, orthographic, orthoHeight, azimuth, elevation, roll, distance}:
-    // the first six are what cameraSetPose takes, the rest the same pose as the controller holds it.
+    // {eye: [3], target: [3], up: [3], fov, orthographic, orthoHeight, azimuth, elevation, roll, distance, near,
+    // far}: the first six are what cameraSetPose takes, then the same pose as the controller holds it, and the
+    // clip planes the projection uses (cameraSetClipRange's, or the automatic ones).
     emscripten::val camera_pose() const {
         const CameraController &c = renderer_->camera();
         const CameraPose p = c.pose();
@@ -413,6 +432,9 @@ public:
         o.set("elevation", c.elevation());
         o.set("roll", c.roll_angle());
         o.set("distance", c.distance());
+        const std::array<double, 2> clip = c.clip_range();
+        o.set("near", clip[0]);
+        o.set("far", clip[1]);
         return o;
     }
     // {view, proj}: the controller's matrices for the canvas as it is now, as Float32Array(16), column-major,
@@ -424,6 +446,11 @@ public:
         o.set("view", emscripten::val::global("Float32Array").new_(emscripten::typed_memory_view(16, view.data())));
         o.set("proj", emscripten::val::global("Float32Array").new_(emscripten::typed_memory_view(16, proj.data())));
         return o;
+    }
+    // Near and far planes for the projection to use as they are; (0, 0) = the automatic ones that wrap the
+    // scene (the default). Either projection; clip space stays OpenGL's, z in [-1, 1].
+    void camera_set_clip_range(double near_z, double far_z) {
+        renderer_->camera().set_clip_range(near_z, far_z);
     }
     void camera_set_orthographic(bool orthographic) {
         renderer_->camera().set_orthographic(orthographic);
@@ -608,6 +635,7 @@ private:
 
 EMSCRIPTEN_BINDINGS(adacpp_render) {
     using adacpp::render::WebRenderer;
+    emscripten::function("glbBounds", &adacpp::render::glb_bounds);
     emscripten::class_<WebRenderer>("WebRenderer")
         .constructor<const std::string &, const std::string &>()
         .function("resize", &WebRenderer::resize)
@@ -644,6 +672,7 @@ EMSCRIPTEN_BINDINGS(adacpp_render) {
         .function("cameraSetPose", &WebRenderer::camera_set_pose)
         .function("cameraPose", &WebRenderer::camera_pose)
         .function("cameraMatrices", &WebRenderer::camera_matrices)
+        .function("cameraSetClipRange", &WebRenderer::camera_set_clip_range)
         .function("cameraSetOrthographic", &WebRenderer::camera_set_orthographic)
         .function("cameraSetFov", &WebRenderer::camera_set_fov)
         .function("cameraSetUpAxis", &WebRenderer::camera_set_up_axis)

@@ -32,8 +32,9 @@ struct GlbGeometry {
     std::vector<float> positions;
     std::vector<uint32_t> indices;
     // Per segment of the geometry (what PickResult::segment indexes): the GlbLoadResult::objects entry it
-    // draws, or -1 for a gap between draw ranges and for a primitive that is no object. A feature-edge
-    // overlay is no object.
+    // draws, or -1 for a gap between draw ranges and for a primitive that is no object. Each segment of a
+    // feature-edge overlay outlines one segment of the faces, and names its object (not in
+    // GlbObject::segments, which are the faces a pick reports).
     std::vector<int32_t> segment_objects;
 };
 
@@ -138,7 +139,8 @@ struct GlbOptions {
     // Above 0: also draw the surfaces' feature edges as Ada Studio's viewer does with tessellation edges
     // hidden (its default) -- vertices welded by position, then every boundary edge and every edge whose
     // two faces meet at more than this angle (degrees; the viewer's is 30), in `line_color` at
-    // `line_width`. 0 draws only the lines the GLB carries.
+    // `line_width`. Worked out per segment, as the viewer does per draw range, so an object's edges can be
+    // hidden with it. 0 draws only the lines the GLB carries.
     float feature_edge_angle_deg = 0.0f;
     // Keep each added geometry's world-space positions and indices in GlbLoadResult::loaded (for a caller
     // that builds more geometry on the same vertices, e.g. an FEA mesh's element edges).
@@ -151,11 +153,20 @@ struct GlbOptions {
     // instance's segments name objects as any other's do. A model of many small animated nodes becomes as
     // many draws.
     bool animations = false;
+    // Added to the world position of everything loaded (after `y_up_to_z_up`, so in the renderer's z-up
+    // world), in double before any vertex or matrix becomes a float: a model far from the origin, offset by
+    // minus a point on it, arrives near the origin with the precision float coordinates out there would
+    // lose. Every position, matrix and bounds the load reports includes it.
+    std::array<double, 3> offset{0, 0, 0};
 };
 GlbLoadResult load_glb(Renderer &renderer, const std::string &path, const GlbOptions &options = {});
 // The same from the GLB's bytes (the browser has no file to name). `name` labels errors.
 GlbLoadResult load_glb_bytes(Renderer &renderer, std::vector<unsigned char> bytes, const GlbOptions &options = {},
                              const std::string &name = "GLB");
+// The world box (min xyz, max xyz) of what load_glb_bytes would draw with GlbOptions::offset 0, in double and
+// without loading anything: each primitive's POSITION min / max (or its data where they are absent) through
+// its node's world matrix, in the rest pose. Inverted (min > max) when nothing is drawable.
+std::array<double, 6> glb_bounds_bytes(const std::vector<unsigned char> &bytes, bool y_up_to_z_up = false);
 
 // Feature edges of a triangle mesh (positions: 3 per vertex; indices: 3 per triangle), as segment endpoint
 // positions (6 floats per edge): see GlbOptions::feature_edge_angle_deg.
