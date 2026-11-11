@@ -120,7 +120,7 @@ public:
     }
 
     // A GLB (its bytes at `bytes`, `length` long) added to the scene through the same reader the Python
-    // offscreen renderer uses (glb_scene.cpp), so a model draws as its poster does. `opts` (all optional):
+    // offscreen renderer uses (glb_scene.h), so a model draws as its poster does. `opts` (all optional):
     // {yUp, lineWidth, memberWidth, pointSize, lineColor: [r, g, b, a] linear, doubleSided, sectionCaps,
     //  featureEdgeAngleDeg, keepPositions, animations}. Returns {bounds: [6], featureEdges, geometries:
     // [{geometry, instance, topology, vertexCount, vertexColors, featureEdges, node, segmentObjects:

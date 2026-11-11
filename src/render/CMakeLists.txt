@@ -24,6 +24,16 @@ target_include_directories(
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${MESHOPT_DIR}
 )
 
+# The GLB reader (glb_scene.h): the same sources in the browser and the headless hosts.
+set(ADACPP_RENDER_GLB_SOURCES
+    glb_scene.cpp
+    glb_parse.cpp
+    glb_math.cpp
+    glb_objects.cpp
+    glb_animation.cpp
+    glb_batcher.cpp
+)
+
 # KHR_draco_mesh_compression in the GLB reader. OFF builds a reader that refuses Draco-compressed GLBs.
 option(
     ADACPP_RENDER_DRACO
@@ -33,9 +43,9 @@ option(
 
 if(EMSCRIPTEN)
     target_compile_options(adacpp_render_core PUBLIC --use-port=emdawnwebgpu)
-    # glb_scene.cpp: the GLB reader the Python offscreen renderer uses, so the browser reads models the
-    # same way. tinygltf (+ json.hpp) is vendored for this build; the native one takes conda's.
-    add_executable(adacpp_render wasm_bindings.cpp glb_scene.cpp)
+    # The GLB reader the Python offscreen renderer uses, so the browser reads models the same way.
+    # tinygltf (+ json.hpp) is vendored for this build; the native one takes conda's.
+    add_executable(adacpp_render wasm_bindings.cpp ${ADACPP_RENDER_GLB_SOURCES})
     target_include_directories(
         adacpp_render
         PRIVATE ${ADACPP_ROOT}/third_party/tinygltf
@@ -150,7 +160,7 @@ else()
         adacpp_render_headless
         STATIC
         native_device.cpp
-        glb_scene.cpp
+        ${ADACPP_RENDER_GLB_SOURCES}
         overlay.cpp
         overlay_json.cpp
     )
