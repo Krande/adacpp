@@ -311,7 +311,8 @@ void append_feature_edges(const std::vector<float> &positions, const uint32_t *i
     const size_t nt = index_count / 3;
     std::vector<float> normal(nt * 3, 0.0f);
     for (size_t t = 0; t < nt; ++t) {
-        const float *a = &positions[id[t * 3] * 3], *b = &positions[id[t * 3 + 1] * 3], *c = &positions[id[t * 3 + 2] * 3];
+        const float *a = &positions[id[t * 3] * 3], *b = &positions[id[t * 3 + 1] * 3],
+                    *c = &positions[id[t * 3 + 2] * 3];
         const float u[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, w[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
         float n[3] = {u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]};
         normalize(n);

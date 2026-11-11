@@ -1,7 +1,8 @@
 // The parts of the renderer that need a GPU to check: GLB animations (glb_scene.h GlbAnimations), feature edges
-// per object, the GLB offset and glb_bounds_bytes, Draco decoding in the GLB reader, and textured quads (renderer.h QuadDesc). Every GLB is
-// built here, in memory, and every image is drawn into an offscreen target and read back. Built and registered with
-// ctest by src/render/CMakeLists.txt (pixi run -e render test-render); skipped where there is no adapter to draw with.
+// per object, the GLB offset and glb_bounds_bytes, Draco decoding in the GLB reader, and textured quads (renderer.h
+// QuadDesc). Every GLB is built here, in memory, and every image is drawn into an offscreen target and read back. Built
+// and registered with ctest by src/render/CMakeLists.txt (pixi run -e render test-render); skipped where there is no
+// adapter to draw with.
 #include <algorithm>
 #include <array>
 #include <cmath>
