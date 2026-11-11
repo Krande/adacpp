@@ -4,7 +4,9 @@
 #pragma once
 
 #include <array>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "renderer.h"
@@ -20,8 +22,13 @@ struct GlbGeometry {
     uint32_t vertex_count = 0;
     bool vertex_colors = false;
     bool feature_edges = false; // the overlay GlbOptions::feature_edge_angle_deg added
-    // World-space positions (3 per vertex), in the geometry's vertex order, and its index buffer (into
-    // them), when GlbOptions::keep_positions.
+    // The glTF node whose transform places the geometry, when it was kept apart to be animated
+    // (GlbOptions::animations): its vertices are then in that node's space and its instance's model matrix
+    // is the node's world transform, which GlbAnimations::apply moves. -1: merged in world space, the
+    // instance's matrix the identity.
+    int32_t node = -1;
+    // World-space positions (3 per vertex; the node's space for an animated geometry), in the geometry's
+    // vertex order, and its index buffer (into them), when GlbOptions::keep_positions.
     std::vector<float> positions;
     std::vector<uint32_t> indices;
     // Per segment of the geometry (what PickResult::segment indexes): the GlbLoadResult::objects entry it
@@ -43,6 +50,38 @@ struct GlbObject {
     // The object's own segments as (instance id, segment index), the pair a pick reports. Empty for an
     // object that only groups others.
     std::vector<std::array<uint32_t, 2>> segments;
+};
+
+// The animations of a GLB loaded with GlbOptions::animations, and the instances they move. Sampled here, as
+// three.js' AnimationMixer samples a clip: translation, rotation and scale channels (morph weights are not
+// read) with LINEAR (rotations by spherical interpolation), STEP and CUBICSPLINE interpolation; a node under
+// an animated node follows it. Empty (count() 0) for a GLB without animations and when the option is off.
+// A copy shares the data. The instances are the renderer's: once it is cleared, or they are removed, drop
+// this too.
+class GlbAnimations {
+public:
+    struct Data;
+    GlbAnimations() = default;
+    explicit GlbAnimations(std::shared_ptr<Data> data) : data_(std::move(data)) {}
+
+    size_t count() const;
+    const std::string &name(size_t animation) const; // as the GLB names it; may be empty
+    // Seconds: the time of its last keyframe.
+    float duration(size_t animation) const;
+    // Puts every animated instance where `animation` has it at `time` seconds: before a channel's first
+    // keyframe its first value holds, after its last the last (the caller wraps the time to loop). Nodes
+    // the animation does not move are at rest; `animation` -1 puts everything back in the rest pose (the
+    // node transforms the GLB holds, which is how the model is loaded). One animation at a time: they are
+    // not blended.
+    void apply(Renderer &renderer, int animation, float time) const;
+    // The glTF nodes kept apart (each animated node and every node below one), parents first, and the
+    // world matrix (column-major) apply() last gave node i of them -- the rest pose before any apply --
+    // for a host that hangs something of its own on a moving node.
+    const std::vector<int32_t> &nodes() const;
+    std::array<float, 16> node_matrix(size_t i) const;
+
+private:
+    std::shared_ptr<Data> data_;
 };
 
 struct GlbLoadResult {
@@ -69,11 +108,18 @@ struct GlbLoadResult {
     // holds them in (empty when absent), for a host that reads design or FEA metadata from them.
     std::string extras;
     std::string ada_ext_data;
+    // With GlbOptions::animations: the GLB's animations (see GlbAnimations). `bounds` and the objects'
+    // bounds then cover the motion: the rest pose and every animation sampled at 33 evenly spaced times,
+    // each animated segment's box carried as a box (so a little generous, and a fast swing between two
+    // samples can reach past it).
+    GlbAnimations animations;
 };
 
 // Adds every mesh primitive of the GLB's default scene as one geometry + instance, with node transforms
-// applied. adapy writes its z-up coordinates into the GLB as they are (the viewer only turns the camera's
-// up axis), so nothing is rotated by default; `y_up_to_z_up` rotates a conventional y-up glTF instead.
+// applied. Reads EXT_/KHR_meshopt_compression and, where the build has Draco (ADACPP_RENDER_DRACO, on by
+// default), KHR_draco_mesh_compression. adapy writes its z-up coordinates into the GLB as they are (the viewer only
+// turns the camera's up axis), so nothing is rotated by default; `y_up_to_z_up` rotates a conventional y-up glTF
+// instead.
 struct GlbOptions {
     bool y_up_to_z_up = false;
     // Pixels (see InstanceDesc::line_width). Lines without vertex colours are wireframes / feature edges;
@@ -97,6 +143,14 @@ struct GlbOptions {
     // Keep each added geometry's world-space positions and indices in GlbLoadResult::loaded (for a caller
     // that builds more geometry on the same vertices, e.g. an FEA mesh's element edges).
     bool keep_positions = false;
+    // Keep what the GLB's animations move apart, so it can be moved: every node an animation channel
+    // targets, and every node below one, gets its own geometries (batched per node, in the node's space)
+    // and instances, placed by their model matrix, and GlbLoadResult::animations plays them. The rest of
+    // the model is merged as always. Off (the default), and for a GLB without animations, everything is
+    // merged in its rest pose. Objects, segments and picking are the same either way: an animated
+    // instance's segments name objects as any other's do. A model of many small animated nodes becomes as
+    // many draws.
+    bool animations = false;
 };
 GlbLoadResult load_glb(Renderer &renderer, const std::string &path, const GlbOptions &options = {});
 // The same from the GLB's bytes (the browser has no file to name). `name` labels errors.
