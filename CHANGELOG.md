@@ -2,6 +2,15 @@
 
 
 
+## v0.42.0 (2026-11-11)
+
+### Feature
+
+* feat(render): GLB offset applied in double before float, glbBounds, a camera clip range, and the GLB reader split into modules (#82)
+
+Co-authored-by: Claude Opus 5.5 &lt;noreply@anthropic.com&gt; ([`5465ef6`](https://github.com/Krande/adacpp/commit/5465ef6aac9fdc26120fd99dce754b87b5c54310))
+
+
 ## v0.41.0 (2026-11-11)
 
 ### Feature
