@@ -122,9 +122,10 @@ public:
     // A GLB (its bytes at `bytes`, `length` long) added to the scene through the same reader the Python
     // offscreen renderer uses (glb_scene.cpp), so a model draws as its poster does. `opts` (all optional):
     // {yUp, lineWidth, memberWidth, pointSize, lineColor: [r, g, b, a] linear, doubleSided, sectionCaps,
-    //  featureEdgeAngleDeg, keepPositions}. Returns {bounds: [6], featureEdges, geometries: [{geometry,
-    // instance, topology, vertexCount, vertexColors, featureEdges, segmentObjects: Int32Array,
-    // positions?: Float32Array, indices?: Uint32Array}]} (positions and indices with keepPositions), and the
+    //  featureEdgeAngleDeg, keepPositions, animations}. Returns {bounds: [6], featureEdges, geometries:
+    // [{geometry, instance, topology, vertexCount, vertexColors, featureEdges, node, segmentObjects:
+    // Int32Array, positions?: Float32Array, indices?: Uint32Array}]} (positions and indices with
+    // keepPositions; node: the glTF node placing an animated geometry, else -1), and the
     // model's objects (GlbLoadResult::objects) as tables, row i being object i:
     //   objects: {count, ids: string[], names: string[], parents: Int32Array, bounds: Float32Array (6 per
     //             object), triangles: Uint32Array, segmentOffsets: Uint32Array (count + 1),
@@ -133,6 +134,9 @@ public:
     // geometry's segmentObjects[s] is the object segment s draws (-1 = none), which is how a pick's
     // (instance, segment) names an object. nodeObjects: the objects are glTF nodes, not adapy ids. extras /
     // adaExtData: the scene extras and the ADA_EXT_data extension as JSON text ("" when absent).
+    // With `animations` (GlbOptions::animations): animationSet, the handle setAnimationTime takes (-1 when
+    // the GLB has no animations), animations: [{name, duration}] and animatedNodes: Int32Array, the glTF
+    // nodes kept apart, in the order animationNodeMatrices reports them.
     emscripten::val load_glb(uintptr_t bytes, uint32_t length, emscripten::val opts) {
         auto num = [&](const char *k, float d) {
             const emscripten::val v = opts[k];
@@ -152,6 +156,7 @@ public:
             o.section_caps = flag("sectionCaps");
             o.feature_edge_angle_deg = num("featureEdgeAngleDeg", 0.0f);
             o.keep_positions = flag("keepPositions");
+            o.animations = flag("animations");
             const emscripten::val c = opts["lineColor"];
             if (c.isArray())
                 for (int i = 0; i < 4; ++i)
@@ -174,6 +179,7 @@ public:
             e.set("vertexCount", g.vertex_count);
             e.set("vertexColors", g.vertex_colors);
             e.set("featureEdges", g.feature_edges);
+            e.set("node", g.node);
             e.set("segmentObjects", typed_copy("Int32Array", g.segment_objects));
             if (!g.positions.empty())
                 e.set("positions", typed_copy("Float32Array", g.positions));
@@ -209,7 +215,61 @@ public:
         out.set("nodeObjects", r.node_objects);
         out.set("extras", r.extras);
         out.set("adaExtData", r.ada_ext_data);
+        emscripten::val clips = emscripten::val::array();
+        for (size_t i = 0; i < r.animations.count(); ++i) {
+            emscripten::val c = emscripten::val::object();
+            c.set("name", r.animations.name(i));
+            c.set("duration", r.animations.duration(i));
+            clips.call<void>("push", c);
+        }
+        out.set("animations", clips);
+        out.set("animatedNodes", typed_copy("Int32Array", r.animations.nodes()));
+        int set = -1;
+        if (r.animations.count() > 0) {
+            // A freed slot first, so a page that loads and unloads models does not grow the list.
+            for (size_t i = 0; i < animation_sets_.size() && set < 0; ++i)
+                if (animation_sets_[i].count() == 0)
+                    set = int(i);
+            if (set < 0) {
+                set = int(animation_sets_.size());
+                animation_sets_.emplace_back();
+            }
+            animation_sets_[set] = r.animations;
+        }
+        out.set("animationSet", set);
         return out;
+    }
+
+    // The animations of a loadGlb with `animations` (its animationSet). setAnimationTime poses the instances
+    // that load kept apart: `animation` -1 = the rest pose, else that animation at `seconds`, held at its
+    // first / last keyframe outside its range (the page wraps the time to loop). Not blended: one animation
+    // of a set at a time.
+    uint32_t animation_count(int set) const {
+        return uint32_t(animation_set(set).count());
+    }
+    std::string animation_name(int set, uint32_t animation) const {
+        return animation_set(set).name(animation);
+    }
+    float animation_duration(int set, uint32_t animation) const {
+        return animation_set(set).duration(animation);
+    }
+    void set_animation_time(int set, int animation, float seconds) {
+        animation_set(set).apply(*renderer_, animation, seconds);
+    }
+    // Float32Array, 16 per node of the load's animatedNodes: each one's world matrix as last posed.
+    emscripten::val animation_node_matrices(int set) const {
+        const GlbAnimations &a = animation_set(set);
+        std::vector<float> out;
+        for (size_t i = 0; i < a.nodes().size(); ++i) {
+            const auto m = a.node_matrix(i);
+            out.insert(out.end(), m.begin(), m.end());
+        }
+        return typed_copy("Float32Array", out);
+    }
+    // Forget a set (its instances are the page's to remove); clear() forgets them all.
+    void remove_animations(int set) {
+        animation_set(set);
+        animation_sets_[set] = GlbAnimations();
     }
 
     uint32_t add_geometry(uint32_t topology, uintptr_t positions, uint32_t vertex_count, uintptr_t normals,
@@ -262,6 +322,15 @@ public:
         d.gap = gap;
         renderer_->set_instance(instance, d);
     }
+    // The instance's matrix alone (16 floats in the heap), the rest of setInstance's values kept.
+    void set_instance_matrix(uint32_t instance, uintptr_t matrix) {
+        renderer_->set_instance_model(instance, ptr<float>(matrix));
+    }
+    // Float32Array(16): the instance's matrix as it is now (where an animation has put it).
+    emscripten::val instance_matrix(uint32_t instance) const {
+        const auto &m = renderer_->instance_desc(instance).model;
+        return emscripten::val::global("Float32Array").new_(emscripten::typed_memory_view(16, m.data()));
+    }
     void set_segment_states(uint32_t instance, uintptr_t packed, uint32_t count) {
         renderer_->set_segment_states(instance, ptr<uint32_t>(packed), count);
     }
@@ -270,6 +339,7 @@ public:
     }
     void clear() {
         renderer_->clear();
+        animation_sets_.clear();
     }
 
     void set_camera(uintptr_t view, uintptr_t proj, bool orthographic) {
@@ -417,6 +487,34 @@ public:
     void remove_texture(uint32_t texture) {
         renderer_->remove_texture(texture);
     }
+    // As addTexture, without a mip chain: for an image replaced often (updateTexture is then one upload,
+    // in place when the size is unchanged), drawn near its own resolution or with InstanceFlag Nearest.
+    uint32_t add_plain_texture(uintptr_t rgba, uint32_t width, uint32_t height) {
+        return renderer_->add_texture(ptr<uint8_t>(rgba), width, height, false);
+    }
+
+    // Textured quads in the world (Renderer QuadDesc): unlit, alpha-blended, never picked.
+    uint32_t add_quad() {
+        return renderer_->add_quad();
+    }
+    // `matrix` (16 floats in the heap, column-major) places the unit square (x, y in [-0.5, 0.5], z = 0),
+    // the texture's top row at y = +0.5; `texture` 0xFFFFFFFF = none (the tint alone); tint linear rgb with
+    // `a` the opacity; `flags` are InstanceFlags: Hidden, Clipped, OnTop (no depth test), DepthOffset and
+    // Nearest (1 << 19); `renderOrder` as three.js'.
+    void set_quad(uint32_t quad, uint32_t texture, uintptr_t matrix, float r, float g, float b, float a, uint32_t flags,
+                  float render_order) {
+        QuadDesc d;
+        d.texture = texture;
+        const float *m = ptr<float>(matrix);
+        std::copy(m, m + 16, d.model.begin());
+        d.color = {r, g, b, a};
+        d.flags = flags;
+        d.render_order = render_order;
+        renderer_->set_quad(quad, d);
+    }
+    void remove_quad(uint32_t quad) {
+        renderer_->remove_quad(quad);
+    }
 
     uint32_t add_sprite() {
         return renderer_->add_sprite();
@@ -485,6 +583,12 @@ private:
         return o;
     }
 
+    const GlbAnimations &animation_set(int set) const {
+        if (set < 0 || size_t(set) >= animation_sets_.size() || animation_sets_[set].count() == 0)
+            throw std::out_of_range("adacpp.render: unknown animation set " + std::to_string(set));
+        return animation_sets_[set];
+    }
+
     const char *selector_storage(const std::string &s) {
         selector_ = s;
         return selector_.c_str();
@@ -496,6 +600,7 @@ private:
     WGPUInstance instance_ = nullptr;
     WGPUSurface surface_ = nullptr;
     std::unique_ptr<Renderer> renderer_;
+    std::vector<GlbAnimations> animation_sets_; // by loadGlb's animationSet; an empty one is a free slot
     uint32_t width_ = 0, height_ = 0;
 };
 
@@ -515,6 +620,14 @@ EMSCRIPTEN_BINDINGS(adacpp_render) {
         .function("segmentCount", &WebRenderer::segment_count)
         .function("addInstance", &WebRenderer::add_instance)
         .function("setInstance", &WebRenderer::set_instance)
+        .function("setInstanceMatrix", &WebRenderer::set_instance_matrix)
+        .function("instanceMatrix", &WebRenderer::instance_matrix)
+        .function("animationCount", &WebRenderer::animation_count)
+        .function("animationName", &WebRenderer::animation_name)
+        .function("animationDuration", &WebRenderer::animation_duration)
+        .function("setAnimationTime", &WebRenderer::set_animation_time)
+        .function("animationNodeMatrices", &WebRenderer::animation_node_matrices)
+        .function("removeAnimations", &WebRenderer::remove_animations)
         .function("setSegmentStates", &WebRenderer::set_segment_states)
         .function("removeInstance", &WebRenderer::remove_instance)
         .function("clear", &WebRenderer::clear)
@@ -548,6 +661,10 @@ EMSCRIPTEN_BINDINGS(adacpp_render) {
         .function("addTexture", &WebRenderer::add_texture)
         .function("updateTexture", &WebRenderer::update_texture)
         .function("removeTexture", &WebRenderer::remove_texture)
+        .function("addPlainTexture", &WebRenderer::add_plain_texture)
+        .function("addQuad", &WebRenderer::add_quad)
+        .function("setQuad", &WebRenderer::set_quad)
+        .function("removeQuad", &WebRenderer::remove_quad)
         .function("addSprite", &WebRenderer::add_sprite)
         .function("setSprite", &WebRenderer::set_sprite)
         .function("removeSprite", &WebRenderer::remove_sprite)

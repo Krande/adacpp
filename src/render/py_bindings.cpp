@@ -69,7 +69,7 @@ public:
 
     nb::dict load_glb(const std::string &path, bool y_up, float line_width, float member_width, float point_size,
                       std::optional<std::array<float, 4>> line_color, bool double_sided, float feature_edge_angle_deg,
-                      bool section_caps) {
+                      bool section_caps, bool animations) {
         GlbOptions o;
         o.y_up_to_z_up = y_up;
         o.line_width = line_width;
@@ -80,6 +80,7 @@ public:
         o.double_sided = double_sided;
         o.feature_edge_angle_deg = feature_edge_angle_deg;
         o.section_caps = section_caps;
+        o.animations = animations;
         GlbLoadResult r;
         {
             nb::gil_scoped_release release;
@@ -104,6 +105,7 @@ public:
             e["vertex_count"] = g.vertex_count;
             e["vertex_colors"] = g.vertex_colors;
             e["feature_edges"] = g.feature_edges;
+            e["node"] = g.node; // the glTF node that places it when it is animated, else -1
             e["segment_objects"] = owned_array(std::move(g.segment_objects));
             loaded.append(e);
         }
@@ -136,7 +138,43 @@ public:
         d["node_objects"] = r.node_objects;
         d["extras"] = r.extras;
         d["ada_ext_data"] = r.ada_ext_data;
+        // With animations=True: the GLB's animations, played with set_animation_time(animation_set, ...).
+        nb::list clips;
+        for (size_t i = 0; i < r.animations.count(); ++i) {
+            nb::dict c;
+            c["name"] = r.animations.name(i);
+            c["duration"] = r.animations.duration(i);
+            clips.append(c);
+        }
+        d["animations"] = clips;
+        d["animated_nodes"] = owned_array(std::vector<int32_t>(r.animations.nodes()));
+        if (r.animations.count() > 0) {
+            d["animation_set"] = animation_sets_.size();
+            animation_sets_.push_back(r.animations);
+        } else {
+            d["animation_set"] = nb::none();
+        }
         return d;
+    }
+
+    const GlbAnimations &animation_set(size_t set) const {
+        if (set >= animation_sets_.size())
+            throw std::out_of_range("unknown animation set " + std::to_string(set));
+        return animation_sets_[set];
+    }
+    // Pose what a load_glb(animations=True) kept apart: `animation` None = the rest pose.
+    void set_animation_time(size_t set, std::optional<int> animation, float time) {
+        animation_set(set).apply(renderer_, animation.value_or(-1), time);
+    }
+    // (N, 16): the world matrix (column-major) of each of the load's "animated_nodes" as last posed.
+    nb::object animation_node_matrices(size_t set) const {
+        const GlbAnimations &a = animation_set(set);
+        std::vector<float> out;
+        for (size_t i = 0; i < a.nodes().size(); ++i) {
+            const auto m = a.node_matrix(i);
+            out.insert(out.end(), m.begin(), m.end());
+        }
+        return owned_array(std::move(out), 16);
     }
 
     // One geometry + one instance of it; returns the instance id. `colors`: linear RGBA8 per vertex.
@@ -264,6 +302,7 @@ public:
         renderer_.clear();
         geometry_of_.clear();
         descs_.clear();
+        animation_sets_.clear();
     }
 
     // Column-major 4x4s; `proj` in the OpenGL convention (clip z in [-1, 1]), as three.js builds it.
@@ -307,9 +346,55 @@ public:
     void set_section_cap_color(float r, float g, float b, float a) {
         renderer_.set_section_cap_color(r, g, b, a);
     }
-    // A sprite texture from (H, W, 4) uint8: sRGB-encoded, straight alpha, top row first.
-    uint32_t add_texture(nb::ndarray<const uint8_t, nb::shape<-1, -1, 4>, nb::c_contig, nb::device::cpu> rgba) {
-        return renderer_.add_texture(rgba.data(), uint32_t(rgba.shape(1)), uint32_t(rgba.shape(0)));
+    // A texture (for sprites and quads) from (H, W, 4) uint8: sRGB-encoded, straight alpha, top row first.
+    // `mipmaps` False: one level, for an image that is replaced often.
+    using Pixels = nb::ndarray<const uint8_t, nb::shape<-1, -1, 4>, nb::c_contig, nb::device::cpu>;
+    uint32_t add_texture(Pixels rgba, bool mipmaps) {
+        return renderer_.add_texture(rgba.data(), uint32_t(rgba.shape(1)), uint32_t(rgba.shape(0)), mipmaps);
+    }
+    // New pixels for a texture: written in place when the size is the one it has.
+    void update_texture(uint32_t texture, Pixels rgba) {
+        renderer_.update_texture(texture, rgba.data(), uint32_t(rgba.shape(1)), uint32_t(rgba.shape(0)));
+    }
+    void remove_texture(uint32_t texture) {
+        renderer_.remove_texture(texture);
+    }
+    // A textured quad in the world (Renderer QuadDesc): the unit square (x, y in [-0.5, 0.5], z = 0) placed
+    // by `model` (16 floats, column-major), the texture's top row at y = +0.5. Returns the quad id.
+    static QuadDesc quad_desc(std::optional<uint32_t> texture, std::optional<Array<float>> model,
+                              std::array<float, 4> color, bool depth_test, bool clipped, bool nearest,
+                              bool depth_offset, bool visible, float render_order) {
+        QuadDesc d;
+        d.texture = texture.value_or(kNoTexture);
+        if (model) {
+            if (model->size() != 16)
+                throw std::invalid_argument("model: expected 16 floats (column-major 4x4)");
+            std::memcpy(d.model.data(), model->data(), 64);
+        }
+        d.color = color;
+        d.flags = (depth_test ? 0u : uint32_t(kOnTop)) | (clipped ? uint32_t(kClipped) : 0u) |
+                  (nearest ? uint32_t(kNearest) : 0u) | (depth_offset ? uint32_t(kDepthOffset) : 0u) |
+                  (visible ? 0u : uint32_t(kHidden));
+        d.render_order = render_order;
+        return d;
+    }
+    uint32_t add_quad(std::optional<uint32_t> texture, std::optional<Array<float>> model, std::array<float, 4> color,
+                      bool depth_test, bool clipped, bool nearest, bool depth_offset, bool visible,
+                      float render_order) {
+        const QuadDesc d =
+            quad_desc(texture, model, color, depth_test, clipped, nearest, depth_offset, visible, render_order);
+        const uint32_t id = renderer_.add_quad();
+        renderer_.set_quad(id, d);
+        return id;
+    }
+    void set_quad(uint32_t quad, std::optional<uint32_t> texture, std::optional<Array<float>> model,
+                  std::array<float, 4> color, bool depth_test, bool clipped, bool nearest, bool depth_offset,
+                  bool visible, float render_order) {
+        renderer_.set_quad(
+            quad, quad_desc(texture, model, color, depth_test, clipped, nearest, depth_offset, visible, render_order));
+    }
+    void remove_quad(uint32_t quad) {
+        renderer_.remove_quad(quad);
     }
     // A camera-facing quad (three.js' Sprite); `texture` None draws the plain tint. Returns the sprite id.
     uint32_t add_sprite(std::optional<uint32_t> texture, std::array<float, 3> position, std::array<float, 2> scale,
@@ -440,6 +525,7 @@ private:
     std::unique_ptr<OffscreenTarget> target_;
     std::map<uint32_t, uint32_t> geometry_of_;
     std::map<uint32_t, InstanceDesc> descs_;
+    std::vector<GlbAnimations> animation_sets_; // one per load_glb that found animations
     float view_[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     std::unique_ptr<Overlay> overlay_;
 };
@@ -530,7 +616,13 @@ NB_MODULE(_render, m) {
         .def("resize", &OffscreenRenderer::resize, "width"_a, "height"_a)
         .def("load_glb", &OffscreenRenderer::load_glb, "path"_a, "y_up"_a = false, "line_width"_a = 1.0f,
              "member_width"_a = 1.0f, "point_size"_a = 1.0f, "line_color"_a = nb::none(), "double_sided"_a = false,
-             "feature_edge_angle_deg"_a = 0.0f, "section_caps"_a = false)
+             "feature_edge_angle_deg"_a = 0.0f, "section_caps"_a = false, "animations"_a = false)
+        .def("set_animation_time", &OffscreenRenderer::set_animation_time, "animation_set"_a, "animation"_a.none(),
+             "time"_a,
+             "Pose what load_glb(animations=True) kept apart: animation index (None = the rest pose) at time "
+             "seconds, held at the first / last keyframe outside the animation. `animation_set` is the load's.")
+        .def("animation_node_matrices", &OffscreenRenderer::animation_node_matrices, "animation_set"_a,
+             "(N, 16) world matrices (column-major) of the load's animated_nodes, as last posed.")
         .def("add_mesh", &OffscreenRenderer::add_mesh, "positions"_a, "indices"_a = nb::none(),
              "normals"_a = nb::none(), "colors"_a = nb::none(), "morph"_a = nb::none(), "segments"_a = nb::none(),
              "topology"_a = "triangles", "color"_a = std::array<float, 4>{1, 1, 1, 1}, "metalness"_a = 0.0f,
@@ -560,8 +652,22 @@ NB_MODULE(_render, m) {
              "Fill the cut through meshes added with capped=True (closed solids) on every clip plane.")
         .def("set_section_cap_color", &OffscreenRenderer::set_section_cap_color, "r"_a, "g"_a, "b"_a, "a"_a = 1.0f,
              "One linear RGB colour for every cap; a = 0 gives each cap its mesh's base colour.")
-        .def("add_texture", &OffscreenRenderer::add_texture, "rgba"_a,
-             "A sprite texture from (H, W, 4) uint8: sRGB-encoded, straight alpha, top row first.")
+        .def("add_texture", &OffscreenRenderer::add_texture, "rgba"_a, "mipmaps"_a = true,
+             "A texture for sprites and quads from (H, W, 4) uint8: sRGB-encoded, straight alpha, top row first. "
+             "mipmaps=False keeps one level: for an image that is replaced often.")
+        .def("update_texture", &OffscreenRenderer::update_texture, "texture"_a, "rgba"_a,
+             "New pixels for a texture; written in place when the size is unchanged.")
+        .def("remove_texture", &OffscreenRenderer::remove_texture, "texture"_a)
+        .def("add_quad", &OffscreenRenderer::add_quad, "texture"_a = nb::none(), "model"_a = nb::none(),
+             "color"_a = std::array<float, 4>{1, 1, 1, 1}, "depth_test"_a = true, "clipped"_a = false,
+             "nearest"_a = false, "depth_offset"_a = false, "visible"_a = true, "render_order"_a = 0.0f,
+             "A textured quad in the world, unlit and never picked: the unit square (x, y in [-0.5, 0.5], z = 0) "
+             "placed by `model` (16 floats, column-major), the texture's top row at y = +0.5. `color` tints it "
+             "(linear rgb, alpha = opacity); depth_test=False draws it over the model. Returns the quad id.")
+        .def("set_quad", &OffscreenRenderer::set_quad, "quad"_a, "texture"_a = nb::none(), "model"_a = nb::none(),
+             "color"_a = std::array<float, 4>{1, 1, 1, 1}, "depth_test"_a = true, "clipped"_a = false,
+             "nearest"_a = false, "depth_offset"_a = false, "visible"_a = true, "render_order"_a = 0.0f)
+        .def("remove_quad", &OffscreenRenderer::remove_quad, "quad"_a)
         .def("add_sprite", &OffscreenRenderer::add_sprite, "texture"_a = nb::none(),
              "position"_a = std::array<float, 3>{0, 0, 0}, "scale"_a = std::array<float, 2>{1, 1},
              "center"_a = std::array<float, 2>{0.5f, 0.5f}, "rotation"_a = 0.0f,
