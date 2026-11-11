@@ -55,6 +55,9 @@ requirements:
     # run dependency; webgpu-headers carries webgpu.h.
     - wgpu-native >=29,<30
     - webgpu-headers
+    # KHR_draco_mesh_compression in the renderer's GLB reader; linked statically where the package
+    # ships a static library.
+    - draco >=1.5.7,<2
     - pip
     - setuptools
     - wheel

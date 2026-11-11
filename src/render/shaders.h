@@ -479,6 +479,74 @@ fn fs_sprite(in: SOut) -> @location(0) vec4<f32> {
 }
 )WGSL";
 
+// Textured quads in the world (QuadDesc): the unit square placed by a model matrix, sampled and blended as a
+// sprite is. Shares the sprites' layouts: SpriteFrame, then one 96-byte record per quad drawn.
+inline constexpr const char *kQuadWGSL = R"WGSL(
+struct SpriteFrame {
+    view: mat4x4<f32>,
+    proj: mat4x4<f32>, // WebGPU clip space (z in [0, w])
+    clip_info: vec4<u32>, // x: section plane count
+    clip: array<vec4<f32>, 6>,
+};
+
+struct Quad {
+    model: mat4x4<f32>,
+    tint: vec4<f32>,  // linear rgb, opacity
+    flags: vec4<u32>, // x: InstanceFlags
+};
+
+const FLAG_CLIPPED: u32 = 2048u;
+
+@group(0) @binding(0) var<uniform> sf: SpriteFrame;
+@group(0) @binding(1) var<storage, read> quads: array<Quad>;
+@group(0) @binding(2) var samp: sampler;
+@group(1) @binding(0) var tex: texture_2d<f32>;
+
+struct QOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) world: vec3<f32>,
+    @location(2) @interpolate(flat) tint: vec4<f32>,
+    @location(3) @interpolate(flat) flags: u32,
+};
+
+@vertex
+fn vs_quad(@builtin(vertex_index) vid: u32, @builtin(instance_index) ii: u32) -> QOut {
+    let q = quads[ii];
+    let corner = vid % 6u;
+    let p = vec2<f32>(select(-0.5, 0.5, corner == 1u || corner == 2u || corner == 4u),
+                      select(-0.5, 0.5, corner == 2u || corner == 4u || corner == 5u));
+    let world = q.model * vec4<f32>(p, 0.0, 1.0);
+    var out: QOut;
+    out.pos = sf.proj * (sf.view * world);
+    out.uv = vec2<f32>(p.x + 0.5, 0.5 - p.y); // the texture's top row at y = +0.5
+    out.world = world.xyz;
+    out.tint = q.tint;
+    out.flags = q.flags.x;
+    return out;
+}
+
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055;
+    return select(hi, lo, c <= vec3<f32>(0.0031308));
+}
+
+@fragment
+fn fs_quad(in: QOut) -> @location(0) vec4<f32> {
+    let texel = textureSample(tex, samp, in.uv); // sampled first: derivatives need uniform control flow
+    if ((in.flags & FLAG_CLIPPED) != 0u) {
+        for (var i = 0u; i < min(sf.clip_info.x, 6u); i = i + 1u) {
+            if (dot(sf.clip[i].xyz, in.world) + sf.clip[i].w < 0.0) {
+                discard;
+            }
+        }
+    }
+    let c = texel * in.tint;
+    return vec4<f32>(linear_to_srgb(c.rgb), c.a);
+}
+)WGSL";
+
 // GPU cluster culling with two-pass occlusion culling (the "previous frame's visible set" scheme):
 //   cs_early   draws clusters that were visible last frame and still pass the frustum / cone tests
 //   hzb_*      build a max-depth pyramid from what the early pass drew

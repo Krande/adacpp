@@ -6,6 +6,7 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <tuple>
 #include <stdexcept>
 #include <string_view>
@@ -23,6 +24,12 @@
 #define STB_IMAGE_IMPLEMENTATION
 #endif
 #include <tiny_gltf.h>
+
+#ifdef ADACPP_RENDER_DRACO
+#include <draco/compression/decode.h>
+#include <draco/core/decoder_buffer.h>
+#include <draco/mesh/mesh.h>
+#endif
 
 #include <meshoptimizer.h>
 
@@ -95,6 +102,16 @@ std::vector<float> read_floats(const tinygltf::Model &model, int accessor_index,
             case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT:
                 v = reinterpret_cast<const uint16_t *>(e)[c] / (acc.normalized || comps == 4 ? 65535.0f : 1.0f);
                 break;
+            case TINYGLTF_COMPONENT_TYPE_BYTE: {
+                const float b = float(reinterpret_cast<const int8_t *>(e)[c]);
+                v = acc.normalized ? std::max(b / 127.0f, -1.0f) : b;
+                break;
+            }
+            case TINYGLTF_COMPONENT_TYPE_SHORT: {
+                const float b = float(reinterpret_cast<const int16_t *>(e)[c]);
+                v = acc.normalized ? std::max(b / 32767.0f, -1.0f) : b;
+                break;
+            }
             default:
                 throw std::runtime_error("adacpp.render: unsupported accessor component type");
             }
@@ -126,6 +143,74 @@ std::vector<uint32_t> read_indices(const tinygltf::Model &model, int accessor_in
         }
     }
     return out;
+}
+
+// A primitive compressed with KHR_draco_mesh_compression: its vertices and triangles from the Draco data
+// (the accessors of such a primitive only describe them). False for a primitive without the extension.
+bool read_draco(const tinygltf::Model &model, const tinygltf::Primitive &prim, std::vector<float> &positions,
+                std::vector<float> &normals, std::vector<float> &colors, std::vector<uint32_t> &indices) {
+    const auto ext = prim.extensions.find("KHR_draco_mesh_compression");
+    if (ext == prim.extensions.end())
+        return false;
+#ifdef ADACPP_RENDER_DRACO
+    const tinygltf::Value &view_index = ext->second.Get("bufferView"), &ids = ext->second.Get("attributes");
+    if (!view_index.IsInt() || !ids.IsObject())
+        throw std::runtime_error("adacpp.render: malformed KHR_draco_mesh_compression");
+    const auto &view = model.bufferViews.at(view_index.Get<int>());
+    const auto &buf = model.buffers.at(view.buffer);
+    if (view.byteOffset + view.byteLength > buf.data.size())
+        throw std::runtime_error("adacpp.render: Draco data outside its buffer");
+    draco::DecoderBuffer in;
+    in.Init(reinterpret_cast<const char *>(buf.data.data()) + view.byteOffset, view.byteLength);
+    draco::Decoder decoder;
+    auto decoded = decoder.DecodeMeshFromBuffer(&in);
+    if (!decoded.ok())
+        throw std::runtime_error("adacpp.render: Draco decode failed: " + decoded.status().error_msg_string());
+    const std::unique_ptr<draco::Mesh> mesh = std::move(decoded).value();
+    const size_t points = mesh->num_points();
+
+    // `comps` floats per point, as read_floats gives them: a missing component is 1, colours are 0..1.
+    auto attribute = [&](const char *name, int comps, bool color, std::vector<float> &out) {
+        if (!ids.Has(name) || !ids.Get(name).IsInt())
+            return;
+        const draco::PointAttribute *att = mesh->GetAttributeByUniqueId(uint32_t(ids.Get(name).Get<int>()));
+        if (!att)
+            throw std::runtime_error(std::string("adacpp.render: Draco data has no ") + name);
+        const int have = std::min<int>(att->num_components(), comps);
+        float scale = 1.0f;
+        if (color && !att->normalized()) {
+            if (att->data_type() == draco::DT_UINT8)
+                scale = 1.0f / 255.0f;
+            else if (att->data_type() == draco::DT_UINT16)
+                scale = 1.0f / 65535.0f;
+        }
+        out.assign(points * comps, 1.0f);
+        float v[4];
+        for (draco::PointIndex i(0); i < points; ++i) {
+            if (!att->ConvertValue<float>(att->mapped_index(i), int8_t(have), v))
+                throw std::runtime_error(std::string("adacpp.render: Draco ") + name + " cannot be read");
+            for (int c = 0; c < have; ++c)
+                out[size_t(i.value()) * comps + c] = v[c] * scale;
+        }
+    };
+    attribute("POSITION", 3, false, positions);
+    attribute("NORMAL", 3, false, normals);
+    attribute("COLOR_0", 4, true, colors);
+    if (positions.empty())
+        throw std::runtime_error("adacpp.render: Draco data has no POSITION");
+    indices.resize(size_t(mesh->num_faces()) * 3);
+    for (draco::FaceIndex f(0); f < mesh->num_faces(); ++f)
+        for (int c = 0; c < 3; ++c)
+            indices[size_t(f.value()) * 3 + c] = mesh->face(f)[c].value();
+    return true;
+#else
+    (void) positions, (void) normals, (void) colors, (void) indices;
+    // The uncompressed copy a GLB may carry beside the Draco data is read like any primitive.
+    const auto pos = prim.attributes.find("POSITION");
+    if (pos != prim.attributes.end() && model.accessors.at(pos->second).bufferView >= 0)
+        return false;
+    throw std::runtime_error("adacpp.render: KHR_draco_mesh_compression is not supported by this build");
+#endif
 }
 
 uint32_t pack_rgba8(const float *c) {
@@ -586,6 +671,340 @@ std::vector<unsigned char> decode_meshopt_glb(std::vector<unsigned char> glb) {
     return out;
 }
 
+const Mat4 kIdentity{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+
+Mat4 compose(const float t[3], const float q[4], const float s[3]) {
+    const double x = q[0], y = q[1], z = q[2], w = q[3];
+    const double r[9] = {1 - 2 * (y * y + z * z), 2 * (x * y + z * w),     2 * (x * z - y * w),
+                         2 * (x * y - z * w),     1 - 2 * (x * x + z * z), 2 * (y * z + x * w),
+                         2 * (x * z + y * w),     2 * (y * z - x * w),     1 - 2 * (x * x + y * y)};
+    Mat4 m = kIdentity;
+    for (int c = 0; c < 3; ++c)
+        for (int row = 0; row < 3; ++row)
+            m[c * 4 + row] = float(r[c * 3 + row] * s[c]);
+    m[12] = t[0];
+    m[13] = t[1];
+    m[14] = t[2];
+    return m;
+}
+
+float det3(const Mat4 &m) {
+    return m[0] * (m[5] * m[10] - m[6] * m[9]) - m[4] * (m[1] * m[10] - m[2] * m[9]) +
+           m[8] * (m[1] * m[6] - m[2] * m[5]);
+}
+
+// `box` (min xyz, max xyz) under `m`, as the box around its eight corners, added to `out`.
+void grow_bounds(float out[6], const Mat4 &m, const float box[6]) {
+    for (int corner = 0; corner < 8; ++corner) {
+        const float p[3] = {box[(corner & 1) ? 3 : 0], box[(corner & 2) ? 4 : 1], box[(corner & 4) ? 5 : 2]};
+        for (int k = 0; k < 3; ++k) {
+            const float w = m[k] * p[0] + m[4 + k] * p[1] + m[8 + k] * p[2] + m[12 + k];
+            out[k] = std::min(out[k], w);
+            out[3 + k] = std::max(out[3 + k], w);
+        }
+    }
+}
+
+} // namespace
+
+// What GlbAnimations plays: the nodes kept apart, parents first, and each animation's channels.
+struct GlbAnimations::Data {
+    enum Path { Translation = 0, Rotation = 1, Scale = 2 };
+    enum Interpolation { Linear = 0, Step = 1, CubicSpline = 2 };
+    struct Node {
+        int32_t gltf_node = -1;
+        int32_t parent = -1;   // into `nodes`; -1 = under the merged part of the scene, at `base`
+        Mat4 base = kIdentity; // the world transform of what is above it (parent -1)
+        Mat4 rest = kIdentity; // its own transform as the GLB holds it
+        float t[3] = {0, 0, 0}, r[4] = {0, 0, 0, 1}, s[3] = {1, 1, 1}; // the same, for a channel to replace
+        std::vector<uint32_t> instances;
+    };
+    struct Channel {
+        uint32_t node = 0; // into `nodes`
+        Path path = Translation;
+        Interpolation interpolation = Linear;
+        std::vector<float> times;  // seconds, ascending
+        std::vector<float> values; // 3 or 4 per keyframe; CUBICSPLINE: in-tangent, value, out-tangent
+    };
+    struct Clip {
+        std::string name;
+        float duration = 0.0f;
+        std::vector<Channel> channels;
+    };
+    std::vector<Node> nodes;
+    std::vector<int32_t> gltf_nodes; // nodes[i].gltf_node
+    std::vector<Clip> clips;
+    std::vector<Mat4> world; // per node, as the last apply() left it
+
+    // `width` values of `ch` at `time` into `out`.
+    static void sample(const Channel &ch, float time, float *out) {
+        const int width = ch.path == Rotation ? 4 : 3;
+        const size_t n = ch.times.size();
+        const bool cubic = ch.interpolation == CubicSpline;
+        const size_t stride = size_t(width) * (cubic ? 3 : 1), value_at = cubic ? size_t(width) : 0;
+        auto key = [&](size_t k) { return ch.values.data() + k * stride + value_at; };
+        size_t k1 = size_t(std::upper_bound(ch.times.begin(), ch.times.end(), time) - ch.times.begin());
+        if (k1 == 0 || k1 >= n || ch.interpolation == Step) {
+            std::copy_n(key(k1 == 0 ? 0 : k1 - 1), width, out);
+        } else {
+            const size_t k0 = k1 - 1;
+            const float dt = ch.times[k1] - ch.times[k0];
+            const float u = dt > 0.0f ? (time - ch.times[k0]) / dt : 0.0f;
+            const float *a = key(k0), *b = key(k1);
+            if (cubic) {
+                const float u2 = u * u, u3 = u2 * u;
+                const float *out_tangent = a + width, *in_tangent = b - width;
+                for (int c = 0; c < width; ++c)
+                    out[c] = (2 * u3 - 3 * u2 + 1) * a[c] + dt * (u3 - 2 * u2 + u) * out_tangent[c] +
+                             (-2 * u3 + 3 * u2) * b[c] + dt * (u3 - u2) * in_tangent[c];
+            } else if (ch.path == Rotation) {
+                // Spherical, the short way round; near-parallel quaternions fall back to a straight blend.
+                float d = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+                const float sign = d < 0.0f ? -1.0f : 1.0f;
+                d = std::min(d * sign, 1.0f);
+                float wa = 1.0f - u, wb = u;
+                if (d < 0.9995f) {
+                    const float theta = std::acos(d), inv = 1.0f / std::sin(theta);
+                    wa = std::sin((1.0f - u) * theta) * inv;
+                    wb = std::sin(u * theta) * inv;
+                }
+                for (int c = 0; c < 4; ++c)
+                    out[c] = wa * a[c] + wb * sign * b[c];
+            } else {
+                for (int c = 0; c < width; ++c)
+                    out[c] = a[c] + (b[c] - a[c]) * u;
+            }
+        }
+        if (ch.path == Rotation) {
+            const float l = std::sqrt(out[0] * out[0] + out[1] * out[1] + out[2] * out[2] + out[3] * out[3]);
+            if (l > 0.0f)
+                for (int c = 0; c < 4; ++c)
+                    out[c] /= l;
+        }
+    }
+
+    // The world matrix of the first `count` nodes with `clip` (null = at rest) at `time`, into `out`.
+    void pose(const Clip *clip, float time, size_t count, std::vector<Mat4> &out) const {
+        struct Trs {
+            float t[3], r[4], s[3];
+            bool moved;
+        };
+        std::vector<Trs> trs(clip ? count : 0);
+        if (clip) {
+            for (size_t i = 0; i < count; ++i) {
+                const Node &n = nodes[i];
+                std::copy_n(n.t, 3, trs[i].t);
+                std::copy_n(n.r, 4, trs[i].r);
+                std::copy_n(n.s, 3, trs[i].s);
+                trs[i].moved = false;
+            }
+            for (const Channel &ch : clip->channels) {
+                if (ch.node >= count || ch.times.empty())
+                    continue;
+                Trs &x = trs[ch.node];
+                sample(ch, time, ch.path == Translation ? x.t : ch.path == Rotation ? x.r : x.s);
+                x.moved = true;
+            }
+        }
+        out.resize(count);
+        for (size_t i = 0; i < count; ++i) {
+            const Node &n = nodes[i];
+            const Mat4 local = clip && trs[i].moved ? compose(trs[i].t, trs[i].r, trs[i].s) : n.rest;
+            out[i] = mul(n.parent >= 0 ? out[n.parent] : n.base, local);
+        }
+    }
+};
+
+size_t GlbAnimations::count() const {
+    return data_ ? data_->clips.size() : 0;
+}
+
+const std::string &GlbAnimations::name(size_t animation) const {
+    if (animation >= count())
+        throw std::out_of_range("adacpp.render: unknown animation " + std::to_string(animation));
+    return data_->clips[animation].name;
+}
+
+float GlbAnimations::duration(size_t animation) const {
+    if (animation >= count())
+        throw std::out_of_range("adacpp.render: unknown animation " + std::to_string(animation));
+    return data_->clips[animation].duration;
+}
+
+void GlbAnimations::apply(Renderer &renderer, int animation, float time) const {
+    if (!data_)
+        return;
+    if (animation >= int(data_->clips.size()))
+        throw std::out_of_range("adacpp.render: unknown animation " + std::to_string(animation));
+    data_->pose(animation < 0 ? nullptr : &data_->clips[animation], time, data_->nodes.size(), data_->world);
+    for (size_t i = 0; i < data_->nodes.size(); ++i)
+        for (const uint32_t instance : data_->nodes[i].instances)
+            renderer.set_instance_model(instance, data_->world[i].data());
+}
+
+const std::vector<int32_t> &GlbAnimations::nodes() const {
+    static const std::vector<int32_t> none;
+    return data_ ? data_->gltf_nodes : none;
+}
+
+std::array<float, 16> GlbAnimations::node_matrix(size_t i) const {
+    if (!data_ || i >= data_->world.size())
+        throw std::out_of_range("adacpp.render: unknown animated node " + std::to_string(i));
+    return data_->world[i];
+}
+
+namespace {
+
+// The animated part of the scene while it is read: GlbAnimations::Data in the making, and the poses the
+// bounds are taken over.
+class AnimationBuilder {
+public:
+    using Data = GlbAnimations::Data;
+    static constexpr int kBoundsSamples = 33; // per animation, evenly spaced over its duration
+
+    // Reads every animation's translation / rotation / scale channels; `targeted()` then names the nodes.
+    explicit AnimationBuilder(const tinygltf::Model &model) : targeted_(model.nodes.size(), 0) {
+        for (const auto &anim : model.animations) {
+            Data::Clip clip;
+            clip.name = anim.name;
+            for (const auto &ch : anim.channels) {
+                Data::Path path;
+                if (ch.target_path == "translation")
+                    path = Data::Translation;
+                else if (ch.target_path == "rotation")
+                    path = Data::Rotation;
+                else if (ch.target_path == "scale")
+                    path = Data::Scale;
+                else
+                    continue; // morph weights
+                if (ch.target_node < 0 || ch.target_node >= int(model.nodes.size()) || ch.sampler < 0 ||
+                    ch.sampler >= int(anim.samplers.size()))
+                    continue;
+                const auto &smp = anim.samplers[ch.sampler];
+                if (smp.input < 0 || smp.output < 0)
+                    continue;
+                Data::Channel out;
+                out.node = uint32_t(ch.target_node); // a glTF node for now: place() makes it an index
+                out.path = path;
+                out.interpolation = smp.interpolation == "STEP"          ? Data::Step
+                                    : smp.interpolation == "CUBICSPLINE" ? Data::CubicSpline
+                                                                         : Data::Linear;
+                const int width = path == Data::Rotation ? 4 : 3;
+                out.times = read_floats(model, smp.input, 1);
+                out.values = read_floats(model, smp.output, width);
+                const size_t per_key = size_t(width) * (out.interpolation == Data::CubicSpline ? 3 : 1);
+                const size_t keys = std::min(out.times.size(), out.values.size() / per_key);
+                if (keys == 0)
+                    continue;
+                out.times.resize(keys);
+                out.values.resize(keys * per_key);
+                clip.duration = std::max(clip.duration, out.times.back());
+                targeted_[ch.target_node] = 1;
+                clip.channels.push_back(std::move(out));
+            }
+            data_->clips.push_back(std::move(clip));
+        }
+    }
+
+    bool targeted(int gltf_node) const {
+        return targeted_[gltf_node] != 0;
+    }
+
+    // A node to keep apart, under `parent` (one of these, or -1 with what is above it at `base`). Parents
+    // come before their children. Returns its index.
+    int32_t add_node(const tinygltf::Node &n, int gltf_node, int32_t parent, const Mat4 &base) {
+        Data::Node node;
+        node.gltf_node = gltf_node;
+        node.parent = parent;
+        node.base = base;
+        node.rest = node_matrix(n);
+        for (size_t i = 0; i < n.translation.size() && i < 3; ++i)
+            node.t[i] = float(n.translation[i]);
+        for (size_t i = 0; i < n.rotation.size() && i < 4; ++i)
+            node.r[i] = float(n.rotation[i]);
+        for (size_t i = 0; i < n.scale.size() && i < 3; ++i)
+            node.s[i] = float(n.scale[i]);
+        const int32_t index = int32_t(data_->nodes.size());
+        if (size_t(gltf_node) >= place_.size())
+            place_.resize(gltf_node + 1, -1);
+        place_[gltf_node] = index;
+        data_->nodes.push_back(std::move(node));
+        data_->gltf_nodes.push_back(gltf_node);
+        poses_.clear(); // taken again, with this node, when next asked for
+        return index;
+    }
+
+    int gltf_node(int32_t node) const {
+        return data_->nodes[node].gltf_node;
+    }
+
+    // The node's world transform at rest.
+    Mat4 rest_world(int32_t node) {
+        return poses()[0][node];
+    }
+
+    void add_instance(int32_t node, uint32_t instance) {
+        data_->nodes[node].instances.push_back(instance);
+    }
+
+    // `box` (min xyz, max xyz in the node's space) over the rest pose and every sampled pose, added to `out`.
+    void grow(float out[6], int32_t node, const float box[6]) {
+        for (const std::vector<Mat4> &pose : poses())
+            grow_bounds(out, pose[node], box);
+    }
+
+    // The animations, when anything is animated.
+    GlbAnimations finish() {
+        if (data_->nodes.empty() || data_->clips.empty())
+            return {};
+        // Channels name their node by its place among the nodes kept apart; one aimed at a node outside
+        // the scene moves nothing.
+        for (Data::Clip &clip : data_->clips) {
+            std::vector<Data::Channel> kept;
+            for (Data::Channel &ch : clip.channels) {
+                if (ch.node >= place_.size() || place_[ch.node] < 0)
+                    continue;
+                ch.node = uint32_t(place_[ch.node]);
+                kept.push_back(std::move(ch));
+            }
+            clip.channels = std::move(kept);
+        }
+        data_->pose(nullptr, 0.0f, data_->nodes.size(), data_->world);
+        return GlbAnimations(data_);
+    }
+
+private:
+    // The poses of the nodes added so far: at rest, then each animation's samples. While the scene is read
+    // the channels still name glTF nodes, so they are mapped as they are sampled.
+    const std::vector<std::vector<Mat4>> &poses() {
+        if (!poses_.empty())
+            return poses_;
+        const size_t count = data_->nodes.size();
+        poses_.emplace_back();
+        data_->pose(nullptr, 0.0f, count, poses_.back());
+        for (const Data::Clip &clip : data_->clips) {
+            Data::Clip mapped;
+            for (const Data::Channel &ch : clip.channels)
+                if (ch.node < place_.size() && place_[ch.node] >= 0) {
+                    mapped.channels.push_back(ch);
+                    mapped.channels.back().node = uint32_t(place_[ch.node]);
+                }
+            if (mapped.channels.empty())
+                continue;
+            for (int k = 0; k < kBoundsSamples; ++k) {
+                poses_.emplace_back();
+                data_->pose(&mapped, clip.duration * float(k) / float(kBoundsSamples - 1), count, poses_.back());
+            }
+        }
+        return poses_;
+    }
+
+    std::shared_ptr<Data> data_ = std::make_shared<Data>();
+    std::vector<char> targeted_;
+    std::vector<int32_t> place_; // glTF node -> index among the nodes kept apart, -1 = not one
+    std::vector<std::vector<Mat4>> poses_;
+};
+
 void normalize(float v[3]) {
     float l = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
     if (l > 0)
@@ -624,14 +1043,17 @@ InstanceDesc material_desc(const tinygltf::Model &model, int material, bool vert
 // Every primitive of one material and topology, merged into one geometry in world space, as the viewer
 // batches a model (CustomBatchedMesh): a model of 15k objects is then a handful of draws instead of 15k.
 // Each primitive -- or each adapy draw range in it -- stays a segment, so picking still names the object.
+// What an animation moves (GlbOptions::animations) is batched per node instead, in the node's own space.
 class Batcher {
 public:
     Batcher(Renderer &r, const tinygltf::Model &model, GlbLoadResult &res, const GlbOptions &options,
-            ObjectTable &objects)
-        : r_(r), model_(model), res_(res), options_(options), objects_(objects) {}
+            ObjectTable &objects, AnimationBuilder *animation)
+        : r_(r), model_(model), res_(res), options_(options), objects_(objects), animation_(animation) {}
 
-    // `object`: what the primitive is when no draw ranges split it (-1 = nothing).
-    void add(const tinygltf::Primitive &prim, const Mat4 &world, const tinygltf::Value *ranges, int32_t object) {
+    // `object`: what the primitive is when no draw ranges split it (-1 = nothing). `animated`: the node kept
+    // apart (AnimationBuilder) whose instance the primitive joins, -1 to merge it at `world`.
+    void add(const tinygltf::Primitive &prim, const Mat4 &world, const tinygltf::Value *ranges, int32_t object,
+             int32_t animated = -1) {
         Topology topo;
         if (prim.mode == TINYGLTF_MODE_TRIANGLES || prim.mode == -1)
             topo = Topology::Triangles;
@@ -644,18 +1066,20 @@ public:
         auto pos_it = prim.attributes.find("POSITION");
         if (pos_it == prim.attributes.end())
             return;
-        const auto positions = read_floats(model_, pos_it->second, 3);
-        const size_t nv = positions.size() / 3;
-        std::vector<float> normals;
-        if (auto it = prim.attributes.find("NORMAL"); it != prim.attributes.end())
-            normals = read_floats(model_, it->second, 3);
-        std::vector<float> colors;
-        if (auto it = prim.attributes.find("COLOR_0"); it != prim.attributes.end())
-            colors = read_floats(model_, it->second, 4);
+        std::vector<float> positions, normals, colors;
         std::vector<uint32_t> indices;
-        if (prim.indices >= 0) {
+        const bool draco = read_draco(model_, prim, positions, normals, colors, indices);
+        if (!draco) {
+            positions = read_floats(model_, pos_it->second, 3);
+            if (auto it = prim.attributes.find("NORMAL"); it != prim.attributes.end())
+                normals = read_floats(model_, it->second, 3);
+            if (auto it = prim.attributes.find("COLOR_0"); it != prim.attributes.end())
+                colors = read_floats(model_, it->second, 4);
+        }
+        const size_t nv = positions.size() / 3;
+        if (!draco && prim.indices >= 0) {
             indices = read_indices(model_, prim.indices);
-        } else {
+        } else if (!draco) {
             indices.resize(nv);
             for (uint32_t i = 0; i < nv; ++i)
                 indices[i] = i;
@@ -663,28 +1087,33 @@ public:
 
         // Coloured and plain lines draw differently (members vs wireframe): never in one batch.
         const bool colored = !colors.empty() && topo != Topology::Triangles;
-        Batch &b = batches_[{int(topo), prim.material, colored}];
+        Batch &b = batches_[{animated, int(topo), prim.material, colored}];
         b.topology = topo;
         b.material = prim.material;
+        b.animated = animated;
         if (b.vertex_count() + nv > kBatchMaxVertices || b.indices.size() + indices.size() > kBatchMaxIndices)
             flush(b);
 
         // Normals take the inverse transpose (the cofactor matrix, up to scale); a mirroring transform also
         // flips the winding, as glTF requires.
-        const Mat4 &m = world;
+        // An animated node's vertices stay in its space; only a mirroring rest pose still turns the winding.
+        const Mat4 &m = animated >= 0 ? kIdentity : world;
         const float cof[9] = {m[5] * m[10] - m[6] * m[9], m[6] * m[8] - m[4] * m[10], m[4] * m[9] - m[5] * m[8],
                               m[2] * m[9] - m[1] * m[10], m[0] * m[10] - m[2] * m[8], m[1] * m[8] - m[0] * m[9],
                               m[1] * m[6] - m[2] * m[5],  m[2] * m[4] - m[0] * m[6],  m[0] * m[5] - m[1] * m[4]};
         const float det = m[0] * cof[0] + m[4] * cof[1] + m[8] * cof[2];
         const float sign = det < 0.0f ? -1.0f : 1.0f;
+        const bool mirrored = animated >= 0 ? det3(world) < 0.0f : det < 0.0f;
         const uint32_t base = uint32_t(b.vertex_count());
         for (size_t v = 0; v < nv; ++v) {
             const float *p = &positions[v * 3];
             for (int k = 0; k < 3; ++k) {
                 const float w = m[k] * p[0] + m[4 + k] * p[1] + m[8 + k] * p[2] + m[12 + k];
                 b.positions.push_back(w);
-                res_.bounds[k] = std::min(res_.bounds[k], w);
-                res_.bounds[3 + k] = std::max(res_.bounds[3 + k], w);
+                if (animated < 0) { // an animated batch joins the bounds once flushed, over its motion
+                    res_.bounds[k] = std::min(res_.bounds[k], w);
+                    res_.bounds[3 + k] = std::max(res_.bounds[3 + k], w);
+                }
             }
             float n[3] = {0, 0, 0}; // zero: the shader derives a flat normal
             if (!normals.empty()) {
@@ -700,7 +1129,7 @@ public:
         b.any_colors |= !colors.empty();
 
         const uint32_t first = uint32_t(b.indices.size());
-        const bool flip = det < 0.0f && topo == Topology::Triangles;
+        const bool flip = mirrored && topo == Topology::Triangles;
         for (size_t i = 0; i < indices.size(); ++i) {
             // Mirrored triangle: swap its 2nd and 3rd corner.
             size_t src = i;
@@ -738,6 +1167,7 @@ private:
         std::vector<uint32_t> colors, indices, segments;
         std::vector<int32_t> segment_objects; // per segment, its ObjectTable index or -1
         bool any_normals = false, any_colors = false;
+        int32_t animated = -1; // the AnimationBuilder node whose space the vertices are in
         size_t vertex_count() const {
             return positions.size() / 3;
         }
@@ -770,6 +1200,10 @@ private:
         } else if (options_.section_caps && !(desc.flags & kDoubleSided)) {
             desc.flags |= kCapped;
         }
+        if (b.animated >= 0) {
+            desc.model = animation_->rest_world(b.animated);
+            animation_->add_instance(b.animated, inst);
+        }
         r_.set_instance(inst, desc);
         res_.geometries++;
         res_.instances++;
@@ -779,6 +1213,15 @@ private:
         rec.topology = b.topology;
         rec.vertex_count = uint32_t(b.vertex_count());
         rec.vertex_colors = b.any_colors;
+        if (b.animated >= 0) {
+            rec.node = animation_->gltf_node(b.animated);
+            float local[6] = {3.4e38f, 3.4e38f, 3.4e38f, -3.4e38f, -3.4e38f, -3.4e38f};
+            for (size_t v = 0; v < b.positions.size(); ++v) {
+                local[v % 3] = std::min(local[v % 3], b.positions[v]);
+                local[3 + v % 3] = std::max(local[3 + v % 3], b.positions[v]);
+            }
+            animation_->grow(res_.bounds.data(), b.animated, local);
+        }
         if (options_.keep_positions) {
             rec.positions = b.positions;
             rec.indices = b.indices;
@@ -796,6 +1239,11 @@ private:
                     bounds[3 + c] = std::max(bounds[3 + c], p[c]);
                 }
             }
+            if (b.animated >= 0 && count > 0) {
+                float moved[6] = {3.4e38f, 3.4e38f, 3.4e38f, -3.4e38f, -3.4e38f, -3.4e38f};
+                animation_->grow(moved, b.animated, bounds);
+                std::copy(moved, moved + 6, bounds);
+            }
             objects_.add_segment(b.segment_objects[k], inst, uint32_t(k), bounds,
                                  b.topology == Topology::Triangles ? count / 3 : 0);
         }
@@ -805,9 +1253,11 @@ private:
             add_feature_edges(b);
         const Topology topo = b.topology;
         const int material = b.material;
+        const int32_t animated = b.animated;
         b = Batch{};
         b.topology = topo;
         b.material = material;
+        b.animated = animated;
     }
 
     // The batch's feature edges as a line overlay (GlbOptions::feature_edge_angle_deg), drawn like the
@@ -826,11 +1276,17 @@ private:
         desc.flags = kClipped | kUnlit;
         desc.color = options_.line_color[3] > 0.0f ? options_.line_color : std::array<float, 4>{0, 0, 0, 1};
         desc.line_width = options_.line_width;
+        if (b.animated >= 0) {
+            desc.model = animation_->rest_world(b.animated);
+            animation_->add_instance(b.animated, inst);
+        }
         r_.set_instance(inst, desc);
         res_.geometries++;
         res_.instances++;
         res_.feature_edges += lines.size() / 6;
         GlbGeometry rec;
+        if (b.animated >= 0)
+            rec.node = animation_->gltf_node(b.animated);
         rec.geometry = geom;
         rec.instance = inst;
         rec.topology = Topology::Lines;
@@ -845,7 +1301,9 @@ private:
     GlbLoadResult &res_;
     GlbOptions options_;
     ObjectTable &objects_;
-    std::map<std::tuple<int, int, bool>, Batch> batches_;
+    AnimationBuilder *animation_; // null unless GlbOptions::animations found something to animate
+    // By (animated node or -1, topology, material, coloured lines): the merged batches first.
+    std::map<std::tuple<int, int, int, bool>, Batch> batches_;
 };
 
 struct Walk {
@@ -854,11 +1312,15 @@ struct Walk {
     const tinygltf::Value &scene_extras;
     ObjectTable &objects;
     bool node_objects; // every node is an object (no adapy extras to name them)
+    AnimationBuilder *animation = nullptr;
 
-    void node(int node_index, const Mat4 &parent, int32_t parent_object) {
+    // `animated`: the node kept apart that this one hangs under, -1 while in the merged part of the scene.
+    void node(int node_index, const Mat4 &parent, int32_t parent_object, int32_t animated = -1) {
         const auto &n = model.nodes.at(node_index);
         const Mat4 world = mul(parent, node_matrix(n));
         const int32_t object = node_objects ? objects.for_node(model, node_index, parent_object) : -1;
+        if (animation && (animated >= 0 || animation->targeted(node_index)))
+            animated = animation->add_node(n, node_index, animated, parent);
         if (n.mesh >= 0) {
             const auto &prims = model.meshes.at(n.mesh).primitives;
             const std::string key = "draw_ranges_" + n.name;
@@ -866,10 +1328,10 @@ struct Walk {
                                                 ? &scene_extras.Get(key)
                                                 : nullptr;
             for (const auto &prim : prims)
-                batcher.add(prim, world, ranges, object);
+                batcher.add(prim, world, ranges, object, animated);
         }
         for (int child : n.children)
-            node(child, world, object);
+            node(child, world, object, animated);
     }
 };
 
@@ -903,9 +1365,11 @@ GlbLoadResult load_glb_bytes(Renderer &renderer, std::vector<unsigned char> byte
     bytes.shrink_to_fit();
     if (!ok)
         throw std::runtime_error("adacpp.render: failed to read " + name + ": " + err);
+#ifndef ADACPP_RENDER_DRACO
     for (const auto &ext : model.extensionsRequired)
         if (ext == "KHR_draco_mesh_compression")
-            throw std::runtime_error("adacpp.render: " + name + " requires " + ext + ", not supported");
+            throw std::runtime_error("adacpp.render: " + name + " requires " + ext + ", not supported by this build");
+#endif
 
     // glTF y-up -> z-up: rotate +90 degrees about x.
     const Mat4 root = options.y_up_to_z_up ? Mat4{1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1}
@@ -925,8 +1389,11 @@ GlbLoadResult load_glb_bytes(Renderer &renderer, std::vector<unsigned char> byte
             adapy |= key.rfind("draw_ranges_", 0) == 0;
     }
     res.node_objects = !adapy;
-    Batcher batcher(renderer, model, res, options, objects);
-    Walk walk{batcher, model, extras, objects, res.node_objects};
+    std::unique_ptr<AnimationBuilder> animation;
+    if (options.animations && !model.animations.empty())
+        animation = std::make_unique<AnimationBuilder>(model);
+    Batcher batcher(renderer, model, res, options, objects, animation.get());
+    Walk walk{batcher, model, extras, objects, res.node_objects, animation.get()};
     if (!model.scenes.empty()) {
         for (int n : model.scenes.at(scene).nodes)
             walk.node(n, root, -1);
@@ -936,6 +1403,8 @@ GlbLoadResult load_glb_bytes(Renderer &renderer, std::vector<unsigned char> byte
     }
     batcher.finish();
     objects.finish(res);
+    if (animation)
+        res.animations = animation->finish();
     return res;
 }
 
