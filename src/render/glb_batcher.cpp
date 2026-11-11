@@ -233,13 +233,29 @@ void Batcher::flush(Batch &b) {
 }
 
 void Batcher::add_feature_edges(const Batch &b) {
-    const std::vector<float> lines = feature_edges(b.positions, b.indices, options_.feature_edge_angle_deg);
+    // Per segment, as the viewer outlines each draw range: an object's edges are a segment of the overlay
+    // that names it, so hiding the object hides them too.
+    std::vector<float> lines;
+    std::vector<uint32_t> segments;
+    std::vector<int32_t> segment_objects;
+    for (size_t k = 0; k < b.segment_objects.size(); ++k) {
+        const uint32_t first = uint32_t(lines.size() / 3);
+        append_feature_edges(b.positions, &b.indices[b.segments[k * 2]], b.segments[k * 2 + 1],
+                             options_.feature_edge_angle_deg, lines);
+        const uint32_t count = uint32_t(lines.size() / 3) - first;
+        if (!count)
+            continue;
+        segments.insert(segments.end(), {first, count});
+        segment_objects.push_back(b.segment_objects[k]);
+    }
     if (lines.empty())
         return;
     GeometryDesc gd;
     gd.topology = Topology::Lines;
     gd.positions = lines.data();
     gd.vertex_count = lines.size() / 3;
+    gd.segments = segments.data();
+    gd.segment_count = segment_objects.size();
     const uint32_t geom = r_.add_geometry(gd);
     const uint32_t inst = r_.add_instance(geom);
     InstanceDesc desc;
@@ -262,18 +278,14 @@ void Batcher::add_feature_edges(const Batch &b) {
     rec.topology = Topology::Lines;
     rec.vertex_count = uint32_t(lines.size() / 3);
     rec.feature_edges = true;
-    rec.segment_objects = {-1};
+    rec.segment_objects = std::move(segment_objects);
     res_.loaded.push_back(std::move(rec));
 }
 
-} // namespace detail
-
-using detail::normalize;
-
-std::vector<float> feature_edges(const std::vector<float> &positions, const std::vector<uint32_t> &indices,
-                                 float angle_deg) {
+void append_feature_edges(const std::vector<float> &positions, const uint32_t *indices, size_t index_count,
+                          float angle_deg, std::vector<float> &out) {
     // Weld by position (a tessellated GLB is a triangle soup), quantised to 1e-4 model units as the viewer
-    // does (frontend utils/mesh_select/edgeCore.ts).
+    // does (frontend utils/mesh_select/edgeCore.ts). Only the vertices the triangles use take part.
     struct Key {
         int64_t x, y, z;
         bool operator==(const Key &o) const {
@@ -285,21 +297,21 @@ std::vector<float> feature_edges(const std::vector<float> &positions, const std:
             return size_t(k.x * 73856093) ^ size_t(k.y * 19349663) ^ size_t(k.z * 83492791);
         }
     };
-    const size_t nv = positions.size() / 3;
+    // Per index entry, the vertex it is welded to.
     std::unordered_map<Key, uint32_t, KeyHash> weld;
-    weld.reserve(nv);
-    std::vector<uint32_t> id(nv);
-    for (size_t v = 0; v < nv; ++v) {
+    weld.reserve(index_count);
+    std::vector<uint32_t> id(index_count);
+    for (size_t i = 0; i < index_count; ++i) {
+        const uint32_t v = indices[i];
         const Key k{std::llround(positions[v * 3] * 1e4), std::llround(positions[v * 3 + 1] * 1e4),
                     std::llround(positions[v * 3 + 2] * 1e4)};
-        id[v] = weld.emplace(k, uint32_t(v)).first->second;
+        id[i] = weld.emplace(k, v).first->second;
     }
 
-    const size_t nt = indices.size() / 3;
+    const size_t nt = index_count / 3;
     std::vector<float> normal(nt * 3, 0.0f);
     for (size_t t = 0; t < nt; ++t) {
-        const float *a = &positions[id[indices[t * 3]] * 3], *b = &positions[id[indices[t * 3 + 1]] * 3],
-                    *c = &positions[id[indices[t * 3 + 2]] * 3];
+        const float *a = &positions[id[t * 3] * 3], *b = &positions[id[t * 3 + 1] * 3], *c = &positions[id[t * 3 + 2] * 3];
         const float u[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, w[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
         float n[3] = {u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]};
         normalize(n);
@@ -317,7 +329,7 @@ std::vector<float> feature_edges(const std::vector<float> &positions, const std:
     std::vector<uint64_t> order; // first-seen order, so the output is deterministic
     const float cos_angle = std::cos(angle_deg * 3.14159265358979f / 180.0f);
     for (size_t t = 0; t < nt; ++t) {
-        const uint32_t v[3] = {id[indices[t * 3]], id[indices[t * 3 + 1]], id[indices[t * 3 + 2]]};
+        const uint32_t v[3] = {id[t * 3], id[t * 3 + 1], id[t * 3 + 2]};
         if (v[0] == v[1] || v[1] == v[2] || v[0] == v[2])
             continue; // collapsed by the weld
         for (int e = 0; e < 3; ++e) {
@@ -333,7 +345,6 @@ std::vector<float> feature_edges(const std::vector<float> &positions, const std:
             }
         }
     }
-    std::vector<float> out;
     for (const uint64_t key : order) {
         const Use &u = edges[key];
         // boundary (1) and non-manifold (>2) edges always; shared ones when the faces meet at the angle
@@ -343,6 +354,14 @@ std::vector<float> feature_edges(const std::vector<float> &positions, const std:
         for (const uint32_t v : {uint32_t(key >> 32), uint32_t(key & 0xFFFFFFFFu)})
             out.insert(out.end(), &positions[v * 3], &positions[v * 3] + 3);
     }
+}
+
+} // namespace detail
+
+std::vector<float> feature_edges(const std::vector<float> &positions, const std::vector<uint32_t> &indices,
+                                 float angle_deg) {
+    std::vector<float> out;
+    detail::append_feature_edges(positions, indices.data(), indices.size(), angle_deg, out);
     return out;
 }
 

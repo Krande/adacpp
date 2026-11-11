@@ -32,8 +32,9 @@ struct GlbGeometry {
     std::vector<float> positions;
     std::vector<uint32_t> indices;
     // Per segment of the geometry (what PickResult::segment indexes): the GlbLoadResult::objects entry it
-    // draws, or -1 for a gap between draw ranges and for a primitive that is no object. A feature-edge
-    // overlay is no object.
+    // draws, or -1 for a gap between draw ranges and for a primitive that is no object. Each segment of a
+    // feature-edge overlay outlines one segment of the faces, and names its object (not in
+    // GlbObject::segments, which are the faces a pick reports).
     std::vector<int32_t> segment_objects;
 };
 
@@ -138,7 +139,8 @@ struct GlbOptions {
     // Above 0: also draw the surfaces' feature edges as Ada Studio's viewer does with tessellation edges
     // hidden (its default) -- vertices welded by position, then every boundary edge and every edge whose
     // two faces meet at more than this angle (degrees; the viewer's is 30), in `line_color` at
-    // `line_width`. 0 draws only the lines the GLB carries.
+    // `line_width`. Worked out per segment, as the viewer does per draw range, so an object's edges can be
+    // hidden with it. 0 draws only the lines the GLB carries.
     float feature_edge_angle_deg = 0.0f;
     // Keep each added geometry's world-space positions and indices in GlbLoadResult::loaded (for a caller
     // that builds more geometry on the same vertices, e.g. an FEA mesh's element edges).

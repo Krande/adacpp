@@ -54,7 +54,8 @@ private:
 
     void flush(Batch &b);
     // The batch's feature edges as a line overlay (GlbOptions::feature_edge_angle_deg), drawn like the
-    // GLB's own uncoloured lines; the faces already sit behind coplanar lines (kDepthBack).
+    // GLB's own uncoloured lines; the faces already sit behind coplanar lines (kDepthBack). One overlay
+    // segment per batch segment that has edges, naming the same object.
     void add_feature_edges(const Batch &b);
 
     Renderer &r_;
@@ -66,5 +67,9 @@ private:
     // By (animated node or -1, topology, material, coloured lines): the merged batches first.
     std::map<std::tuple<int, int, int, bool>, Batch> batches_;
 };
+
+// feature_edges of the triangles indices[0, index_count) over `positions`, appended to `out`.
+void append_feature_edges(const std::vector<float> &positions, const uint32_t *indices, size_t index_count,
+                          float angle_deg, std::vector<float> &out);
 
 } // namespace adacpp::render::detail

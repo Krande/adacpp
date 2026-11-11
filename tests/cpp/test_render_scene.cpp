@@ -1,5 +1,5 @@
-// The parts of the renderer that need a GPU to check: GLB animations (glb_scene.h GlbAnimations), the GLB
-// offset and glb_bounds_bytes, Draco decoding in the GLB reader, and textured quads (renderer.h QuadDesc). Every GLB is
+// The parts of the renderer that need a GPU to check: GLB animations (glb_scene.h GlbAnimations), feature edges
+// per object, the GLB offset and glb_bounds_bytes, Draco decoding in the GLB reader, and textured quads (renderer.h QuadDesc). Every GLB is
 // built here, in memory, and every image is drawn into an offscreen target and read back. Built and registered with
 // ctest by src/render/CMakeLists.txt (pixi run -e render test-render); skipped where there is no adapter to draw with.
 #include <algorithm>
@@ -366,6 +366,47 @@ void test_animation(NativeDevice &dev) {
             CHECK(close(m[12], 3) && close(m[13], 4));
         }
     CHECK(edge_overlays == 1);
+}
+
+// Two unit squares side by side in one primitive, x in [-1, 0] and [0, 1], made objects "a" and "b" by
+// draw ranges: each object's feature edges are its own outline, a segment of the overlay naming it.
+void test_feature_edge_objects(NativeDevice &dev) {
+    GlbBuilder b;
+    const int pos = b.floats({-1, -1, 0, 0, -1, 0, 0, 1, 0, -1, 1, 0, 0, -1, 0, 1, -1, 0, 1, 1, 0, 0, 1, 0}, "VEC3", 3);
+    const int idx = b.indices({0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7});
+    const Bytes glb = b.finish(
+        R"("scene":0,"scenes":[{"nodes":[0],"extras":{"id_hierarchy":{"a":["a","*"],"b":["b","*"]},
+            "draw_ranges_n":{"a":[0,6],"b":[6,6]}}}],"nodes":[{"name":"n","mesh":0}],
+        "meshes":[{"primitives":[{"attributes":{"POSITION":)" +
+        std::to_string(pos) + R"(},"indices":)" + std::to_string(idx) + "}]}]");
+    Stage s(dev, -2, 2, -2, 2);
+    GlbOptions options;
+    options.feature_edge_angle_deg = 30.0f;
+    options.line_color = {0, 0, 0, 1};
+    options.line_width = 6.0f;
+    const GlbLoadResult res = load_glb_bytes(s.r, glb, options);
+    const int a = object_by_id(res, "a"), b_ = object_by_id(res, "b");
+    const GlbGeometry *faces = nullptr, *edges = nullptr;
+    for (const GlbGeometry &g : res.loaded)
+        (g.feature_edges ? edges : faces) = &g;
+    CHECK(faces && edges);
+    if (!faces || !edges)
+        return;
+    // The shared edge at x = 0 is on both outlines.
+    CHECK(res.feature_edges == 8);
+    CHECK((edges->segment_objects == std::vector<int32_t>{a, b_}));
+    CHECK(res.objects[a].segments.size() == 1 && res.objects[a].segments[0][0] == faces->instance);
+
+    InstanceDesc hidden = s.r.instance_desc(faces->instance);
+    hidden.flags |= kHidden;
+    s.r.set_instance(faces->instance, hidden);
+    s.draw();
+    CHECK(s.shows(-1, -0.5f, 0, 0, 0) && s.shows(1, -0.5f, 0, 0, 0));
+    // Hiding "a" hides its outline; b's stays.
+    const uint32_t states[4] = {0, kSegmentHidden, 0, 0};
+    s.r.set_segment_states(edges->instance, states, 2);
+    s.draw();
+    CHECK(s.background(-1, -0.5f) && s.shows(1, -0.5f, 0, 0, 0) && s.shows(0, -0.5f, 0, 0, 0));
 }
 
 // A translation far from the origin, as text for a GLB and as the double it parses to.
@@ -823,6 +864,7 @@ int main() {
     }
     std::printf("adapter: %s (%s)\n", dev->info().device.c_str(), dev->info().backend.c_str());
     test_animation(*dev);
+    test_feature_edge_objects(*dev);
     test_offset(*dev);
 #ifdef ADACPP_RENDER_DRACO
     test_draco(*dev);
