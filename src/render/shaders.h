@@ -19,7 +19,8 @@ namespace adacpp::render {
 //             segment) followed by the cluster vertex lists and the packed local triangles (3 x u8 in
 //             one u32, followed by that triangle's index in the original index list and its segment:
 //             3 x u32 per triangle); lines/points: the index list followed by the segment of every index entry
-//             (at Instance.material.w, bit-cast), so hidden segments drop out without extra draws
+//             (at Instance.material.w, bit-cast), so hidden segments drop out without extra draws, then the
+//             plane the geometry lies in (4 x f32 bits: normal, 1; zeros when it is not flat), for underlay()
 inline constexpr const char *kShaderWGSL =
     R"WGSL(
 struct Frame {
