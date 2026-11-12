@@ -2,6 +2,13 @@
 
 
 
+## v0.42.1 (2026-11-12)
+
+### Fix
+
+* fix(render): reversed-Z with a 32-bit float depth buffer, and a ground grid that stays under the model (#83) ([`54ade4e`](https://github.com/Krande/adacpp/commit/54ade4efe0c5c05aa14d84a6c9c33b63c8473923))
+
+
 ## v0.42.0 (2026-11-11)
 
 ### Feature
