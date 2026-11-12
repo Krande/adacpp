@@ -20,14 +20,15 @@ namespace adacpp::render {
 //             one u32, followed by that triangle's index in the original index list and its segment:
 //             3 x u32 per triangle); lines/points: the index list followed by the segment of every index entry
 //             (at Instance.material.w, bit-cast), so hidden segments drop out without extra draws
-inline constexpr const char *kShaderWGSL = R"WGSL(
+inline constexpr const char *kShaderWGSL =
+    R"WGSL(
 struct Frame {
     view_proj: mat4x4<f32>,
     cam_pos: vec4<f32>,
     light_dir: vec4<f32>,
     params: vec4<f32>, // ambient, headlight, target width, target height (pixels)
     // x: section plane count, y: the plane being capped + 1 (cap passes, else 0), z: the least size of a
-    // point in pixels (the pick pass, else 0)
+    // point in pixels (the pick pass, else 0), w: 1 when the depth target is 24-bit fixed point (else float)
     clip_info: vec4<u32>,
     clip: array<vec4<f32>, 6>, // section planes (normal, constant): cut where dot(n, p) + constant < 0
     cap_color: vec4<f32>, // section caps: linear rgb for every cap; a = 0: each instance's base colour
@@ -58,16 +59,53 @@ const FLAG_CAPPED: u32 = 65536u; // its cut is capped; the renderer picks the in
 const FLAG_ON_TOP: u32 = 131072u; // drawn last with no depth test; the renderer picks the pipeline, as above
 const FLAG_CAP: u32 = 1073741824u; // internal, set by vs_cap: a fragment of the cap on plane clip_info.y - 1
 
-// An underlay line a hair farther away than the face on its plane, so the face wins even where the two
-// rasterise to slightly different depths (WebGPU's depth bias applies to triangles only). Depth is reversed
-// (near 1, far 0): farther is smaller. 2e-4 of the depth range, but never past half the depth: a perspective
-// depth falls off as near / distance, and from far away a fixed step would put the line behind the far
-// plane; halving the depth instead doubles its distance.
-fn underlay(inst: Instance, c: vec4<f32>) -> vec4<f32> {
+// An underlay line (a ground grid) a hair farther away than a face lying in its plane, so the face wins even
+// where the two rasterise to different depths; and no farther, so whatever stands above the plane is still
+// behind it seen from below. Depth is reversed (near 1, far 0): farther is smaller. As polygonOffset(1, 1)
+// does for a face (WebGPU's depth bias applies to triangles only):
+//   - the plane's depth slope over one pixel (UNDERLAY_SLOPE): a line's depth at a sample is its depth where
+//     the sample projects onto it, up to half a pixel across the line from where the face has it, so seen
+//     at an angle the two part by a share of the slope. The plane is the geometry's own (flat_plane() in
+//     renderer.cpp, after the segment ids in `prim`); its depth is affine on screen, so the slope is the same
+//     at every point and taken here from three points on the plane.
+//   - a share of the depth itself (UNDERLAY_PUSH), i.e. of the distance (perspective depth goes as
+//     near / distance; orthographic depth is linear, but a float's spacing is still relative to its value):
+//     about eight times a float depth's rounding (1.2e-7 of it); square on, the only term. A
+//     24-bit target (the section caps' fallback, clip_info.w = 1) cannot resolve less than its step: never
+//     less than two of those.
+// A fixed step in depth (as before) pushed the line back by about step x distance^2 / near: from an overview,
+// by as much as the model's size, and the grid showed behind a model seen from below it.
+const UNDERLAY_PUSH: f32 = 1e-6;
+const UNDERLAY_SLOPE: f32 = 1.0;
+fn underlay(inst: Instance, c: vec4<f32>, world: vec3<f32>) -> vec4<f32> {
     if ((inst.flags & FLAG_UNDERLAY) == 0u) {
         return c;
     }
-    return vec4<f32>(c.xy, max(c.z - 2e-4 * c.w, 0.5 * c.z), c.w);
+    var push = max(UNDERLAY_PUSH * c.z, select(0.0, 1.2e-7 * c.w, frame.clip_info.w != 0u));
+    let at = bitcast<u32>(inst.material.w) * 2u;
+    if (bitcast<f32>(prim[at + 3u]) > 0.5 && c.w > 0.0) {
+        let n_model = vec3<f32>(bitcast<f32>(prim[at]), bitcast<f32>(prim[at + 1u]), bitcast<f32>(prim[at + 2u]));
+        let n = normalize((inst.model * vec4<f32>(n_model, 0.0)).xyz);
+        let t1 = normalize(cross(n, select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(n.x) > 0.7)));
+        let t2 = cross(n, t1);
+        let s = max(length(frame.cam_pos.xyz - world), 1e-20) * 1e-3;
+        let q0 = frame.view_proj * vec4<f32>(world, 1.0);
+        let q1 = frame.view_proj * vec4<f32>(world + s * t1, 1.0);
+        let q2 = frame.view_proj * vec4<f32>(world + s * t2, 1.0);
+        if (q0.w > 0.0 && q1.w > 0.0 && q2.w > 0.0) {
+            let a = q1.xyz / q1.w - q0.xyz / q0.w;
+            let b = q2.xyz / q2.w - q0.xyz / q0.w;
+            let det = a.x * b.y - b.x * a.y;
+            if (abs(det) > 1e-30) {
+                // d(depth) / d(ndc x, ndc y) on the plane, then per pixel.
+                let gx = (a.z * b.y - b.z * a.y) / det;
+                let gy = (a.x * b.z - b.x * a.z) / det;
+                let slope = max(abs(gx) * 2.0 / frame.params.z, abs(gy) * 2.0 / frame.params.w);
+                push = push + UNDERLAY_SLOPE * slope * c.w;
+            }
+        }
+    }
+    return vec4<f32>(c.xy, max(c.z - push, 0.0), c.w);
 }
 const CLUSTER_VERTS: u32 = {{CLUSTER_VERTS}}u; // Renderer::kClusterMaxTriangles x 3, filled in at load
 
@@ -170,7 +208,7 @@ fn vs_list(@builtin(vertex_index) vid: u32, @builtin(instance_index) ii: u32) ->
         return dead;
     }
     var out = shade_vertex(inst, prim[vid], i32(seg), ii, vid);
-    out.pos = underlay(inst, out.pos);
+    out.pos = underlay(inst, out.pos, out.world);
     return out;
 }
 
@@ -236,7 +274,7 @@ fn vs_wide(@builtin(vertex_index) vid: u32, @builtin(instance_index) ii: u32) ->
         // near / distance, so 0.2% more of it) or 0.02% of the depth range (orthographic, w = 1).
         c.z = c.z + select(2e-4, 2e-3 * c.z, frame.cam_pos.w > 0.5);
     }
-    out.pos = underlay(inst, c);
+    out.pos = underlay(inst, c, out.world);
     return out;
 }
 
@@ -281,6 +319,9 @@ fn vs_reset(@builtin(vertex_index) vid: u32) -> VOut {
     return out;
 }
 
+)WGSL"
+    // (One raw string is limited to 16 KiB by some compilers: the rest of it follows.)
+    R"WGSL(
 const PI: f32 = 3.141592653589793;
 
 // three.js MeshStandardMaterial's direct-light BRDF (lights_physical_pars_fragment): GGX distribution,

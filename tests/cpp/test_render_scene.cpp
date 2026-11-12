@@ -1101,6 +1101,166 @@ void test_section_caps(NativeDevice &dev) {
     CHECK(s.background(0.5f, 0) && s.shows(-1, 0, 0, 255, 0));
 }
 
+// A ground grid (kUnderlay lines) in the plane z = 0 under a box standing on it, with the viewer's clip range
+// (a ratio of 1e6). The box has its bottom face on the plane under its left half only and is open under the
+// right half; a second face lies on the plane beside it. Seen from below, the grid shows over the open half
+// (in front of the box's inside, which is above the plane) and a face on the plane covers it; seen from
+// above, from steep to grazing, a face on the plane still covers it. `fixed_point`: the main pass draws into
+// the 24-bit depth + stencil fallback (section caps on, on a device without depth32float-stencil8).
+void test_underlay(NativeDevice &dev, bool fixed_point) {
+    constexpr uint32_t kS = Stage::kSize;
+    Stage s(dev, -1, 1, -1, 1);
+    s.r.set_background(200 / 255.0f, 200 / 255.0f, 200 / 255.0f);
+    if (fixed_point)
+        s.r.set_section_caps(true);
+    std::vector<float> grid;
+    std::vector<uint32_t> grid_idx;
+    for (int k = -16; k <= 16; ++k) {
+        const float t = 0.25f * k;
+        grid.insert(grid.end(), {t, -4, 0, t, 4, 0, -4, t, 0, 4, t, 0});
+    }
+    for (uint32_t i = 0; i < grid.size() / 3; ++i)
+        grid_idx.push_back(i);
+    add_shape(s.r, Topology::Lines, grid, grid_idx, {0, 0, 0, 1}, kUnlit | kUnderlay | kNoPick);
+    // The box: [-1, 1]^2 x [0, 1], walls and top; its bottom face under x < 0 only.
+    const std::vector<float> box = {-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0, -1, -1, 1, 1, -1, 1, 1, 1, 1, -1, 1, 1};
+    const std::vector<uint32_t> box_faces = {4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 3, 7, 6,
+                                             3, 6, 2, 0, 4, 7, 0, 7, 3, 1, 2, 6, 1, 6, 5};
+    const uint32_t box_id = add_shape(s.r, Topology::Triangles, box, box_faces, {1, 0, 0, 1}, kUnlit | kDoubleSided);
+    const uint32_t bottom = add_rect(s.r, -1, -1, 0, 1, 0, {0, 1, 0, 1}, kUnlit | kDoubleSided);
+    const uint32_t beside = add_rect(s.r, 1.5f, -1, 2.5f, 1, 0, {0, 1, 0, 1}, kUnlit | kDoubleSided);
+    auto show_model = [&](bool on) {
+        for (const uint32_t id : {box_id, bottom, beside}) {
+            InstanceDesc d = s.r.instance_desc(id);
+            d.flags = on ? (d.flags & ~uint32_t(kHidden)) : (d.flags | kHidden);
+            s.r.set_instance(id, d);
+        }
+    };
+
+    struct View {
+        float elevation, distance;
+        bool ortho = false; // orthographic, showing what the perspective camera shows at the target
+    };
+    for (const View v : {View{-60, 15}, View{-89.9f, 15}, View{-30, 6}, View{89.9f, 15}, View{45, 15}, View{15, 15},
+                         View{8, 6}, View{-60, 15, true}, View{45, 15, true}, View{8, 6, true}}) {
+        // Look at (0.5, 0, 0) from that elevation (degrees; below the plane when negative), azimuth 30.
+        const float el = v.elevation * 3.14159265f / 180, az = 30 * 3.14159265f / 180;
+        const std::array<float, 3> target{0.5f, 0, 0};
+        const std::array<float, 3> eye{target[0] + v.distance * std::cos(el) * std::sin(az),
+                                       target[1] - v.distance * std::cos(el) * std::cos(az),
+                                       target[2] + v.distance * std::sin(el)};
+        std::array<float, 3> up{0, 0, 1};
+        if (std::fabs(v.elevation) > 80)
+            up = {0, 1, 0};
+        auto sub = [](std::array<float, 3> a, std::array<float, 3> b) {
+            return std::array<float, 3>{a[0] - b[0], a[1] - b[1], a[2] - b[2]};
+        };
+        auto cross = [](std::array<float, 3> a, std::array<float, 3> b) {
+            return std::array<float, 3>{a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2],
+                                        a[0] * b[1] - a[1] * b[0]};
+        };
+        auto norm = [](std::array<float, 3> a) {
+            const float l = std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+            return std::array<float, 3>{a[0] / l, a[1] / l, a[2] / l};
+        };
+        auto dot = [](std::array<float, 3> a, std::array<float, 3> b) {
+            return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        };
+        const auto f = norm(sub(target, eye)), r = norm(cross(f, up)), u = cross(r, f);
+        const Mat4 view{r[0], u[0], -f[0], 0, r[1],         u[1],         -f[1],       0,
+                        r[2], u[2], -f[2], 0, -dot(r, eye), -dot(u, eye), dot(f, eye), 1};
+        const float n = 0.005f, fa = 5000.0f, focal = 1.0f / std::tan(22.5f * 3.14159265f / 180);
+        const float half = v.distance / focal; // the half height the perspective view has at the target
+        Mat4 proj{};
+        if (v.ortho) {
+            proj[0] = 1 / half;
+            proj[5] = 1 / half;
+            proj[10] = -2 / (fa - n);
+            proj[14] = -(fa + n) / (fa - n);
+            proj[15] = 1;
+        } else {
+            proj[0] = focal;
+            proj[5] = focal;
+            proj[10] = (fa + n) / (n - fa);
+            proj[11] = -1;
+            proj[14] = 2 * fa * n / (n - fa);
+        }
+        s.r.set_camera(view.data(), proj.data(), v.ortho);
+        // The pixels showing the plane z = 0 over [x0, x1] x [y0, y1].
+        auto region = [&](float x0, float y0, float x1, float y1) {
+            std::vector<uint32_t> px;
+            for (float x = x0; x <= x1; x += 0.005f)
+                for (float y = y0; y <= y1; y += 0.005f) {
+                    const float vz = view[2] * x + view[6] * y + view[14];
+                    const float vx = view[0] * x + view[4] * y + view[12], vy = view[1] * x + view[5] * y + view[13];
+                    const float w = -vz;
+                    if (w <= 0)
+                        continue;
+                    const float nx = v.ortho ? vx / half : focal * vx / w, ny = v.ortho ? vy / half : focal * vy / w;
+                    if (std::fabs(nx) >= 1 || std::fabs(ny) >= 1)
+                        continue;
+                    px.push_back(uint32_t((1 - ny) * 0.5f * kS) * kS + uint32_t((nx + 1) * 0.5f * kS));
+                }
+            std::sort(px.begin(), px.end());
+            px.erase(std::unique(px.begin(), px.end()), px.end());
+            // Less two pixels along its outline, which also show what is beside it.
+            for (int pass = 0; pass < 2; ++pass) {
+                std::vector<uint32_t> inner;
+                auto has = [&](int64_t q) { return q >= 0 && std::binary_search(px.begin(), px.end(), uint32_t(q)); };
+                for (const uint32_t p : px)
+                    if (p % kS > 0 && p % kS + 1 < kS && has(int64_t(p) - 1) && has(int64_t(p) + 1) &&
+                        has(int64_t(p) - kS) && has(int64_t(p) + kS))
+                        inner.push_back(p);
+                px = std::move(inner);
+            }
+            return px;
+        };
+        auto dark = [&](uint32_t p) {
+            const uint8_t *c = &s.image[size_t(p) * 4];
+            return c[0] < 100 && c[1] < 100 && c[2] < 100;
+        };
+        auto green = [&](uint32_t p) {
+            const uint8_t *c = &s.image[size_t(p) * 4];
+            return c[0] <= 8 && c[1] >= 247 && c[2] <= 8;
+        };
+        const bool below = v.elevation < 0;
+        const auto open = region(0, -1, 1, 1), under = region(-1, -1, 0, 1), side = region(1.5f, -1, 2.5f, 1);
+        show_model(false);
+        s.draw();
+        std::vector<uint32_t> grid_px;
+        for (const uint32_t p : open)
+            if (dark(p))
+                grid_px.push_back(p);
+        int grid_under = 0, grid_side = 0;
+        for (const uint32_t p : under)
+            grid_under += dark(p);
+        for (const uint32_t p : side)
+            grid_side += dark(p);
+        show_model(true);
+        s.draw();
+        // Through the open half from below: the grid is in front of the box's inside.
+        int shown = 0;
+        for (const uint32_t p : grid_px)
+            shown += dark(p);
+        // A face on the plane covers the grid, from either side.
+        int through = 0;
+        for (const uint32_t p : side)
+            through += !green(p);
+        if (below)
+            for (const uint32_t p : under)
+                through += !green(p);
+        const bool ok = (below ? shown >= int(grid_px.size()) * 95 / 100 && !grid_px.empty() : true) && through == 0 &&
+                        grid_side > 0 && (!below || grid_under > 0);
+        if (!ok)
+            std::fprintf(stderr,
+                         "  underlay (%s, %s, elevation %g, distance %g): grid shown at %d of %d pixels over the open "
+                         "half; %d face pixels not the face (grid there without it: %d beside, %d under)\n",
+                         fixed_point ? "24-bit" : "float", v.ortho ? "orthographic" : "perspective", v.elevation,
+                         v.distance, shown, int(grid_px.size()), through, grid_side, grid_under);
+        CHECK(ok);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -1125,6 +1285,7 @@ int main() {
     test_edges_on_faces(*dev);
     test_occlusion(*dev);
     test_section_caps(*dev);
+    test_underlay(*dev, false);
     {
         // A device without depth32float-stencil8 (a browser's, unless asked for): caps on 24-bit depth + stencil.
         NativeDevice plain("auto", false);
@@ -1132,6 +1293,7 @@ int main() {
                     wgpuDeviceHasFeature(dev->device(), WGPUFeatureName_Depth32FloatStencil8) ? "yes" : "no",
                     wgpuDeviceHasFeature(plain.device(), WGPUFeatureName_Depth32FloatStencil8) ? "yes" : "no");
         test_section_caps(plain);
+        test_underlay(plain, true);
     }
     std::printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;

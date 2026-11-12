@@ -1,6 +1,7 @@
 #include "renderer.h"
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -123,6 +124,49 @@ bool invert(const Mat4 &m, Mat4 &out) {
 float det3(const Mat4 &m) {
     return m[0] * (m[5] * m[10] - m[9] * m[6]) - m[4] * (m[1] * m[10] - m[9] * m[2]) +
            m[8] * (m[1] * m[6] - m[5] * m[2]);
+}
+
+// The unit normal of the plane all `count` points lie in, with 1 in w; all zeros when they do not lie in
+// one (within 1e-5 of their extent) or span no plane (one point, a straight line).
+std::array<float, 4> flat_plane(const float *p, size_t count) {
+    if (!p || count < 3)
+        return {0, 0, 0, 0};
+    auto at = [&](size_t i) { return std::array<double, 3>{p[i * 3], p[i * 3 + 1], p[i * 3 + 2]}; };
+    auto sub = [](std::array<double, 3> a, std::array<double, 3> b) {
+        return std::array<double, 3>{a[0] - b[0], a[1] - b[1], a[2] - b[2]};
+    };
+    auto dot = [](std::array<double, 3> a, std::array<double, 3> b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
+    auto cross = [](std::array<double, 3> a, std::array<double, 3> b) {
+        return std::array<double, 3>{a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
+    };
+    const auto p0 = at(0);
+    size_t i1 = 0;
+    for (size_t i = 1; i < count; ++i)
+        if (dot(sub(at(i), p0), sub(at(i), p0)) > dot(sub(at(i1), p0), sub(at(i1), p0)))
+            i1 = i;
+    const auto d1 = sub(at(i1), p0);
+    const double extent = std::sqrt(dot(d1, d1));
+    if (!(extent > 0))
+        return {0, 0, 0, 0};
+    std::array<double, 3> n{0, 0, 0};
+    double best = 0;
+    for (size_t i = 1; i < count; ++i) {
+        const auto c = cross(d1, sub(at(i), p0));
+        const double l = dot(c, c);
+        if (l > best) {
+            best = l;
+            n = c;
+        }
+    }
+    const double len = std::sqrt(best);
+    if (!(len > 1e-6 * extent * extent))
+        return {0, 0, 0, 0};
+    for (double &v : n)
+        v /= len;
+    for (size_t i = 0; i < count; ++i)
+        if (std::fabs(dot(n, sub(at(i), p0))) > 1e-5 * extent)
+            return {0, 0, 0, 0};
+    return {float(n[0]), float(n[1]), float(n[2]), 1.0f};
 }
 
 // The six clip planes of `mvp` in the space `mvp` maps from, normalised so distances come out in that
@@ -1171,6 +1215,11 @@ struct Renderer::Impl {
                 for (uint32_t i = r.start; i < r.start + r.count && i < g->list_count; ++i)
                     prim[g->list_count + i] = s;
             }
+            // Then the plane the geometry lies in, if it is flat (normal xyz, 1; else all 0): what a kUnderlay
+            // instance (a ground grid) is pushed back from by its depth slope, see underlay() in the shader.
+            const auto plane = flat_plane(desc.positions, desc.vertex_count);
+            for (float v : plane)
+                prim.push_back(std::bit_cast<uint32_t>(v));
         }
         g->prim = upload(prim.data(), prim.size() * sizeof(uint32_t), "adacpp.prim");
         bind_geometry(*g);
@@ -1514,7 +1563,10 @@ struct Renderer::Impl {
         frame[25] = diffuse;
         frame[26] = pick ? 1.0f : float(std::max(target_w, 1u));
         frame[27] = pick ? 1.0f : float(std::max(target_h, 1u));
-        const uint32_t clip_info[3] = {uint32_t(clip_planes.size() / 4), cap_plane, pick ? kPickPointPixels : 0u};
+        // w: the main target's depth is 24-bit fixed point (the caps' fallback), for the underlay push.
+        const uint32_t fixed_point = !pick && depth_format == kDepthStencilFallback ? 1u : 0u;
+        const uint32_t clip_info[4] = {uint32_t(clip_planes.size() / 4), cap_plane, pick ? kPickPointPixels : 0u,
+                                       fixed_point};
         std::memcpy(frame + 28, clip_info, sizeof(clip_info));
         std::copy(clip_planes.begin(), clip_planes.end(), frame + 32);
         std::copy(cap_color, cap_color + 4, frame + 56);
