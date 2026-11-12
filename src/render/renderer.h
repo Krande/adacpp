@@ -190,6 +190,11 @@ public:
 
     // `color_format` is the format of every target passed to render(). The renderer writes sRGB-encoded
     // values itself, so pass a non-sRGB (unorm) format.
+    //
+    // Depth is reversed-Z in a 32-bit float buffer (near 1, far 0), for a precision that is near-constant
+    // relative to the distance. Section caps also need a stencil: the device should be created with the
+    // optional depth32float-stencil8 feature where the adapter has it (WGPUFeatureName_Depth32FloatStencil8,
+    // "depth32float-stencil8" in the browser); without it caps fall back to 24-bit depth + stencil.
     Renderer(WGPUDevice device, WGPUTextureFormat color_format);
     ~Renderer();
     Renderer(const Renderer &) = delete;
@@ -213,7 +218,7 @@ public:
     void clear(); // every geometry, instance, sprite, quad and texture
 
     // `proj_gl` is an OpenGL-convention projection (clip z in [-1, 1], e.g. three.js); it is remapped to
-    // WebGPU's [0, 1] here. Matrices are column-major.
+    // WebGPU's [0, 1] here, reversed (near 1, far 0). Matrices are column-major.
     void set_camera(const float view[16], const float proj_gl[16], bool orthographic);
     // The renderer's own camera (camera_controller.h): the host maps its input to orbit / pan / zoom / fit
     // and the matrices follow. Off by default, when set_camera() is the camera. Switched on, render() and

@@ -103,7 +103,11 @@ public:
     bool moving() const;
 
     std::array<float, 16> view() const;
+    // OpenGL convention (clip z in [-1, 1], near at -1), as three.js builds it and set_camera() takes it.
     std::array<float, 16> projection(double aspect) const;
+    // The same frustum in the renderer's own clip space: WebGPU's z in [0, 1], reversed (near at 1, far at
+    // 0), worked out in double so the near term keeps its precision.
+    std::array<float, 16> projection_reversed_z(double aspect) const;
 
     std::array<double, 3> target() const {
         return state_.target;

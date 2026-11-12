@@ -189,6 +189,30 @@ std::array<float, 16> CameraController::projection(double aspect) const {
     return p;
 }
 
+std::array<float, 16> CameraController::projection_reversed_z(double aspect) const {
+    // z_clip = A z_view + B: depth 1 at the near plane, 0 at the far one. In perspective, depth = n (f - d) /
+    // (d (f - n)) for distance d, about n / d: a float depth buffer then keeps a near-constant relative
+    // precision at every distance.
+    const double a = std::max(aspect, 1e-3);
+    const auto [near_z, far_z] = clip_range();
+    std::array<float, 16> p{};
+    if (ortho_) {
+        p[0] = float(2.0 / (state_.ortho_height * a));
+        p[5] = float(2.0 / state_.ortho_height);
+        p[10] = float(1.0 / (far_z - near_z));
+        p[14] = float(far_z / (far_z - near_z));
+        p[15] = 1.0f;
+        return p;
+    }
+    const double t = 1.0 / tan_half(state_.fov);
+    p[0] = float(t / a);
+    p[5] = float(t);
+    p[10] = float(near_z / (far_z - near_z));
+    p[11] = -1.0f;
+    p[14] = float(far_z * near_z / (far_z - near_z));
+    return p;
+}
+
 double CameraController::world_per_pixel() const {
     return (ortho_ ? state_.ortho_height : 2.0 * state_.distance * tan_half(state_.fov)) / double(height_);
 }

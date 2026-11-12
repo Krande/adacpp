@@ -662,6 +662,43 @@ void test_clip_range() {
     CHECK(c.clip_range() == range);
 }
 
+void test_reversed_z() {
+    // The renderer's projection: WebGPU depth, near -> 1, far -> 0; x, y and w as the OpenGL one has them.
+    CameraController c = framed();
+    for (const bool set : {false, true})
+        for (const bool ortho : {false, true}) {
+            c.set_clip_range(set ? 0.05 : 0.0, set ? 5e4 : 0.0);
+            c.set_orthographic(ortho);
+            const double aspect = 1.5;
+            const Mat4 gl = c.projection(aspect), rz = c.projection_reversed_z(aspect);
+            for (int col = 0; col < 4; ++col) {
+                CHECK(rz[col * 4] == gl[col * 4] && rz[col * 4 + 1] == gl[col * 4 + 1]);
+                CHECK(rz[col * 4 + 3] == gl[col * 4 + 3]);
+            }
+            const auto range = c.clip_range();
+            const double n = range[0], f = range[1];
+            // Depth at view distance d (view z = -d), as the GPU gets it: float matrix, double divide.
+            auto depth = [&](double d) {
+                const double z = double(rz[10]) * -d + rz[14], w = double(rz[11]) * -d + rz[15];
+                return z / w;
+            };
+            CHECK(close(depth(n), 1.0, 1e-6) && std::fabs(depth(f)) < 1e-6);
+            const double mid = 0.5 * (n + f);
+            const double expected = ortho ? (f - mid) / (f - n) : n * (f - mid) / (mid * (f - n));
+            CHECK(close(depth(mid), expected, 1e-5));
+            CHECK(depth(n) > depth(mid) && depth(mid) > depth(f));
+        }
+    // The viewer's range for a large model (a ratio of 1e6): seen from 2000 away, surfaces half a unit apart
+    // still land on different float depths -- a relative step of about 1e-7 of the distance.
+    c.set_orthographic(false);
+    c.set_clip_range(0.05, 5e4);
+    const Mat4 rz = c.projection_reversed_z(1.5);
+    auto float_depth = [&](float d) { return (rz[10] * -d + rz[14]) / d; };
+    CHECK(float_depth(2000.0f) > float_depth(2000.5f));
+    CHECK(float_depth(2000.0f) > float_depth(2000.01f));
+    CHECK(float_depth(20.0f) > float_depth(20.0001f));
+}
+
 } // namespace
 
 int main() {
@@ -679,6 +716,7 @@ int main() {
     test_orthographic();
     test_depth_range();
     test_clip_range();
+    test_reversed_z();
     std::printf("camera controller: %d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }
