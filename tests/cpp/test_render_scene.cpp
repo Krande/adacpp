@@ -1,6 +1,7 @@
 // The parts of the renderer that need a GPU to check: GLB animations (glb_scene.h GlbAnimations), feature edges
-// per object, the GLB offset and glb_bounds_bytes, Draco decoding in the GLB reader, and textured quads (renderer.h
-// QuadDesc). Every GLB is built here, in memory, and every image is drawn into an offscreen target and read back. Built
+// per object, the GLB offset and glb_bounds_bytes, Draco decoding in the GLB reader, textured quads (renderer.h
+// QuadDesc), and depth: precision far away, feature edges on their faces, picking, occlusion culling and section
+// caps. Every GLB is built here, in memory, and every image is drawn into an offscreen target and read back. Built
 // and registered with ctest by src/render/CMakeLists.txt (pixi run -e render test-render); skipped where there is no
 // adapter to draw with.
 #include <algorithm>
@@ -140,11 +141,33 @@ struct Stage {
         r.set_camera(view.data(), proj.data(), true);
         r.set_background(10 / 255.0f, 20 / 255.0f, 30 / 255.0f);
     }
+    // Instead: a perspective camera at (0, 0, eye_z) looking down -z (`fov_deg` vertical), with the given near
+    // and far planes, in the OpenGL convention as the viewer hands it over. pixel_of() then looks at the plane
+    // z = plane_z.
+    bool persp = false;
+    float eye_z = 0, focal = 1, plane_z = 0;
+    void perspective(float eye, float fov_deg, float n, float f) {
+        persp = true;
+        eye_z = eye;
+        focal = 1.0f / std::tan(fov_deg * 3.14159265f / 360.0f);
+        const Mat4 view{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, -eye, 1};
+        Mat4 proj{};
+        proj[0] = focal;
+        proj[5] = focal;
+        proj[10] = (f + n) / (n - f);
+        proj[11] = -1;
+        proj[14] = 2 * f * n / (n - f);
+        r.set_camera(view.data(), proj.data(), false);
+    }
     void draw() {
         r.render(target.view(), kSize, kSize);
         image = target.read_rgba();
     }
     std::array<uint32_t, 2> pixel_of(float x, float y) const {
+        if (persp) {
+            const float d = eye_z - plane_z;
+            return {uint32_t((focal * x / d + 1) * 0.5f * kSize), uint32_t((1 - focal * y / d) * 0.5f * kSize)};
+        }
         return {uint32_t((x - x0) / (x1 - x0) * kSize), uint32_t((y1 - y) / (y1 - y0) * kSize)};
     }
     // The pixel of the last draw() showing world (x, y).
@@ -853,6 +876,231 @@ void test_quads(NativeDevice &dev) {
     CHECK(s.background(0, 0));
 }
 
+// One instance of a geometry made from `positions` and `indices`: triangles, or line segments drawn
+// `width` pixels wide.
+uint32_t add_shape(Renderer &r, Topology topology, const std::vector<float> &positions,
+                   const std::vector<uint32_t> &indices, std::array<float, 4> color, uint32_t flags,
+                   float width = 1.0f) {
+    GeometryDesc gd;
+    gd.topology = topology;
+    gd.positions = positions.data();
+    gd.vertex_count = positions.size() / 3;
+    gd.indices = indices.data();
+    gd.index_count = indices.size();
+    const uint32_t instance = r.add_instance(r.add_geometry(gd));
+    InstanceDesc id;
+    id.color = color;
+    id.flags = flags;
+    id.line_width = width;
+    r.set_instance(instance, id);
+    return instance;
+}
+
+// The rectangle [x0, x1] x [y0, y1] in the plane z, facing +z.
+uint32_t add_rect(Renderer &r, float x0, float y0, float x1, float y1, float z, std::array<float, 4> color,
+                  uint32_t flags) {
+    return add_shape(r, Topology::Triangles, {x0, y0, z, x1, y0, z, x1, y1, z, x0, y1, z}, {0, 1, 2, 0, 2, 3}, color,
+                     flags);
+}
+
+// Whether the pixel of the last draw() at `p` is (red, green, blue), give or take `tol`.
+bool pixel_is(const Stage &s, std::array<uint32_t, 2> p, int red, int green, int blue, int tol = 2) {
+    const uint8_t *c = &s.image[(size_t(p[1]) * Stage::kSize + p[0]) * 4];
+    return std::abs(c[0] - red) <= tol && std::abs(c[1] - green) <= tol && std::abs(c[2] - blue) <= tol;
+}
+
+PickResult pick_pixel(Stage &s, std::array<uint32_t, 2> p) {
+    PickResult hit;
+    bool done = false;
+    s.r.pick(p[0], p[1], Stage::kSize, Stage::kSize, [&](const PickResult &res) {
+        hit = res;
+        done = true;
+    });
+    while (!done)
+        s.dev.process_events();
+    return hit;
+}
+
+// The viewer's clip range for a model of radius 50: near and far 1e3 times the radius either way of it, a
+// ratio of 1e6. With a 24-bit depth buffer and the usual depth mapping that leaves a step of several units
+// between depth values at 2000 away, and surfaces closer together than that fight.
+constexpr float kViewNear = 0.05f, kViewFar = 5e4f;
+
+// A large model seen from far away: a face just in front of another wins everywhere, and picking finds it.
+void test_depth_far(NativeDevice &dev) {
+    // Drawn in either order: where the two land on one depth value, the one drawn last would win.
+    for (const bool green_first : {false, true}) {
+        Stage s(dev, -1, 1, -1, 1);
+        s.perspective(2000, 30, kViewNear, kViewFar);
+        // Red at z = 0, green 0.5 nearer (a 2.5e-4 part of the distance) over its right half.
+        uint32_t red = 0, green = 0;
+        if (green_first)
+            green = add_rect(s.r, 0, -300, 300, 300, 0.5f, {0, 1, 0, 1}, kUnlit | kDoubleSided);
+        red = add_rect(s.r, -300, -300, 300, 300, 0, {1, 0, 0, 1}, kUnlit | kDoubleSided);
+        if (!green_first)
+            green = add_rect(s.r, 0, -300, 300, 300, 0.5f, {0, 1, 0, 1}, kUnlit | kDoubleSided);
+        s.draw();
+        int wrong = 0, samples = 0;
+        for (float x = -250; x <= 250; x += 12.5f)
+            for (float y = -250; y <= 250; y += 12.5f) {
+                if (std::fabs(x) < 10)
+                    continue;
+                ++samples;
+                wrong += !(x < 0 ? pixel_is(s, s.pixel_of(x, y), 255, 0, 0) : pixel_is(s, s.pixel_of(x, y), 0, 255, 0));
+            }
+        if (wrong)
+            std::fprintf(stderr, "  depth_far: %d of %d samples show the face behind\n", wrong, samples);
+        CHECK(wrong == 0);
+
+        // Picks find the nearer face, and where on it.
+        s.plane_z = 0.5f;
+        PickResult hit = pick_pixel(s, s.pixel_of(150, 100));
+        CHECK(hit.hit && hit.instance == green);
+        CHECK(close(hit.world[0], 150, 4) && close(hit.world[1], 100, 4) && close(hit.world[2], 0.5f, 1e-3f));
+        s.plane_z = 0;
+        hit = pick_pixel(s, s.pixel_of(-150, -100));
+        CHECK(hit.hit && hit.instance == red);
+        CHECK(close(hit.world[0], -150, 4) && close(hit.world[1], -100, 4) && close(hit.world[2], 0, 1e-3f));
+        CHECK(!pick_pixel(s, s.pixel_of(-500, 0)).hit);
+    }
+}
+
+// Feature edges on their (kDepthBack) faces win, and an edge just behind a face stays hidden: seen from far
+// away and up close, square on and at a grazing angle (an I-beam's flange over the web-flange junction).
+void test_edges_on_faces(NativeDevice &dev) {
+    for (const float eye : {2000.0f, 3.0f})
+        for (const float tilt : {0.0f, 2.75f}) { // z = tilt * y: square on, or turned 70 degrees
+            Stage s(dev, -1, 1, -1, 1);
+            s.perspective(eye, 30, kViewNear, kViewFar);
+            const float h = eye * 0.12f; // the face spans [-h, h] in x and in y
+            // How far behind the face (in z) the hidden edge runs: a 2.5e-4 part of the distance square on. At
+            // the grazing angle a line 4 pixels wide, flat across its width, cuts into the face's depth over
+            // that width (as three.js' wide lines do): there the gap is wider than that, to look at the depth
+            // bias alone.
+            const float gap = tilt == 0.0f ? eye * 2.5e-4f : 0.15f * h;
+            auto z_at = [&](float y) { return tilt * y; };
+            add_shape(s.r, Topology::Triangles, {-h, -h, z_at(-h), h, -h, z_at(-h), h, h, z_at(h), -h, h, z_at(h)},
+                      {0, 1, 2, 0, 2, 3}, {0.5f, 0.5f, 0.5f, 1}, kUnlit | kDoubleSided | kDepthBack);
+            // On the face: a line along x at y = -h / 3 and one along y at x = 0 (to y = 0). Behind it: a
+            // line along x at y = h / 3.
+            const float ya = -h / 3, yb = h / 3;
+            add_shape(s.r, Topology::Lines,
+                      {-0.9f * h, ya, z_at(ya), 0.9f * h, ya, z_at(ya), 0, -0.9f * h, z_at(-0.9f * h), 0, 0, z_at(0),
+                       -0.9f * h, yb, z_at(yb) - gap, 0.9f * h, yb, z_at(yb) - gap},
+                      {0, 1, 2, 3, 4, 5}, {0, 0, 0, 1}, kUnlit | kNoPick, 4.0f);
+            s.draw();
+            auto at = [&](float x, float y, float z) {
+                s.plane_z = z;
+                return s.pixel_of(x, y);
+            };
+            const auto face = at(0.6f * h, 0.6f * h, z_at(0.6f * h));
+            const uint8_t *fc = &s.image[(size_t(face[1]) * Stage::kSize + face[0]) * 4];
+            CHECK(fc[0] > 100 && fc[0] == fc[1] && fc[1] == fc[2]);
+            int edge_missing = 0, hidden_shown = 0, samples = 0;
+            for (float t = -0.8f; t <= 0.8f; t += 0.05f) {
+                if (std::fabs(t) < 0.1f)
+                    continue;
+                ++samples;
+                edge_missing += !pixel_is(s, at(t * h, ya, z_at(ya)), 0, 0, 0, 8);
+                hidden_shown += !pixel_is(s, at(t * h, yb, z_at(yb)), fc[0], fc[1], fc[2], 8);
+            }
+            for (float t = -0.8f; t <= -0.45f; t += 0.05f) {
+                ++samples;
+                edge_missing += !pixel_is(s, at(0, t * h, z_at(t * h)), 0, 0, 0, 8);
+            }
+            if (edge_missing || hidden_shown)
+                std::fprintf(stderr,
+                             "  edges (eye %g, tilt %g): %d edge samples lost to the face, %d hidden ones "
+                             "shown, of %d\n",
+                             eye, tilt, edge_missing, hidden_shown, samples);
+            CHECK(edge_missing == 0);
+            CHECK(hidden_shown == 0);
+        }
+}
+
+// Two-pass occlusion culling (2M+ triangles): the depth pyramid holds the farthest depth of each block, so a
+// grid behind an opaque plate is culled there and drawn everywhere the plate leaves it uncovered.
+void test_occlusion(NativeDevice &dev) {
+    Stage s(dev, -1, 1, -1, 1);
+    s.perspective(2000, 30, kViewNear, kViewFar);
+    const int nx = 1001, ny = 1000; // 2 x 1001 x 1000 triangles, just over the GPU culling threshold
+    std::vector<float> positions;
+    std::vector<uint32_t> indices;
+    positions.reserve(size_t(nx + 1) * (ny + 1) * 3);
+    indices.reserve(size_t(nx) * ny * 6);
+    for (int j = 0; j <= ny; ++j)
+        for (int i = 0; i <= nx; ++i)
+            positions.insert(positions.end(), {-300 + 600.0f * i / nx, -300 + 600.0f * j / ny, -100});
+    for (int j = 0; j < ny; ++j)
+        for (int i = 0; i < nx; ++i) {
+            const uint32_t a = j * (nx + 1) + i, b = a + 1, c = a + nx + 1, d = c + 1;
+            indices.insert(indices.end(), {a, b, d, a, d, c});
+        }
+    add_shape(s.r, Topology::Triangles, positions, indices, {0, 0, 1, 1}, kUnlit);
+    add_rect(s.r, -300, -300, 0, 300, 0, {1, 0, 0, 1}, kUnlit);
+    auto check_image = [&](const char *when) {
+        int wrong = 0, samples = 0;
+        for (float x = -250; x <= 250; x += 25)
+            for (float y = -250; y <= 250; y += 25) {
+                if (std::fabs(x) < 10)
+                    continue;
+                ++samples;
+                s.plane_z = x < 0 ? 0 : -100;
+                wrong += !(x < 0 ? pixel_is(s, s.pixel_of(x, y), 255, 0, 0) : pixel_is(s, s.pixel_of(x, y), 0, 0, 255));
+            }
+        if (wrong)
+            std::fprintf(stderr, "  occlusion (%s): %d of %d samples wrong\n", when, wrong, samples);
+        return wrong == 0;
+    };
+    // The first frame has no visible set to build the pyramid from; the second one finds what is occluded,
+    // and the third one draws without it.
+    s.draw();
+    CHECK(check_image("first frame"));
+    s.draw();
+    CHECK(check_image("second frame"));
+    s.draw();
+    CHECK(check_image("third frame"));
+    RenderStats stats;
+    bool done = false;
+    s.r.read_cull_stats([&](const RenderStats &st) {
+        stats = st;
+        done = true;
+    });
+    while (!done)
+        dev.process_events();
+    std::printf("occlusion: %llu of %llu clusters occluded, %llu drawn\n", (unsigned long long) stats.clusters_occluded,
+                (unsigned long long) stats.clusters_total, (unsigned long long) stats.clusters_drawn);
+    CHECK(stats.gpu_culled);
+    // About half the grid is behind the plate.
+    CHECK(stats.clusters_occluded > stats.clusters_total / 4);
+    CHECK(stats.clusters_drawn < stats.clusters_total * 3 / 4);
+}
+
+// Section caps (stencil counting) fill the cut through a closed solid, depth-tested against the rest.
+void test_section_caps(NativeDevice &dev) {
+    Stage s(dev, -2, 2, -2, 2);
+    const std::vector<float> cube = {-1, -1, -1, 1, -1, -1, 1, 1, -1, -1, 1, -1,
+                                     -1, -1, 1,  1, -1, 1,  1, 1, 1,  -1, 1, 1};
+    const std::vector<uint32_t> faces = {0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4,
+                                         3, 7, 6, 3, 6, 2, 0, 4, 7, 0, 7, 3, 1, 2, 6, 1, 6, 5};
+    add_shape(s.r, Topology::Triangles, cube, faces, {0.5f, 0.5f, 0.5f, 1}, kUnlit | kClipped | kCapped);
+    // Over the cube's left part, below the cut: a green plate, in front of the cap there.
+    add_rect(s.r, -1.5f, -1.5f, -0.5f, 1.5f, 0.25f, {0, 1, 0, 1}, kUnlit | kDoubleSided);
+    const float plane[4] = {0, 0, -1, 0}; // keeps z < 0
+    s.r.set_clip_planes(plane, 1);
+    s.draw();
+    CHECK(s.background(0.5f, 0)); // looking into the cut solid: its inside faces are back faces
+    s.r.set_section_caps(true);
+    s.r.set_section_cap_color(1, 0, 0);
+    s.draw();
+    const auto c = s.at(0.5f, 0);
+    CHECK(c[0] > 100 && c[1] < 40 && c[2] < 40); // the cap, lit
+    CHECK(s.shows(-1, 0, 0, 255, 0) && s.background(1.5f, 0));
+    s.r.set_section_caps(false);
+    s.draw();
+    CHECK(s.background(0.5f, 0) && s.shows(-1, 0, 0, 255, 0));
+}
+
 } // namespace
 
 int main() {
@@ -873,6 +1121,18 @@ int main() {
     std::printf("built without Draco: its test is skipped\n");
 #endif
     test_quads(*dev);
+    test_depth_far(*dev);
+    test_edges_on_faces(*dev);
+    test_occlusion(*dev);
+    test_section_caps(*dev);
+    {
+        // A device without depth32float-stencil8 (a browser's, unless asked for): caps on 24-bit depth + stencil.
+        NativeDevice plain("auto", false);
+        std::printf("depth32float-stencil8: %s, without asking: %s\n",
+                    wgpuDeviceHasFeature(dev->device(), WGPUFeatureName_Depth32FloatStencil8) ? "yes" : "no",
+                    wgpuDeviceHasFeature(plain.device(), WGPUFeatureName_Depth32FloatStencil8) ? "yes" : "no");
+        test_section_caps(plain);
+    }
     std::printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

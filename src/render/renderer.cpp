@@ -32,9 +32,33 @@ constexpr size_t kCounters = 8;           // cull counters, see kCullWGSL
 // multisampled targets stored and reloaded, the depth pyramid) and saves tens of ms where most of a big
 // model is (a 62M-triangle crane: 93 -> 17 ms). Below this many triangles the CPU culls instead.
 constexpr uint64_t kOcclusionMinTriangles = 2'000'000;
-constexpr WGPUTextureFormat kDepthFormat = WGPUTextureFormat_Depth24Plus;
+// Depth is reversed (near 1, far 0; cleared to 0, nearer is greater) and 32-bit float: the float's own
+// spacing, finest near 0, makes up for the perspective depth's crowding near the near plane, so the precision
+// stays near-constant relative to the distance (about 1e-7 of it). A 24-bit depth spread over a
+// near / far ratio of 1e6 left steps of several units at a large model's far end, where faces and edges fought.
+constexpr WGPUTextureFormat kDepthFormat = WGPUTextureFormat_Depth32Float;
 // The main depth target once section caps have been switched on: they count faces in the stencil.
-constexpr WGPUTextureFormat kDepthStencilFormat = WGPUTextureFormat_Depth24PlusStencil8;
+// depth32float-stencil8 is an optional WebGPU feature (requested by the host along with the device); without
+// it the caps fall back to the 24-bit depth + stencil format, reversed all the same: the precision there is
+// what it was before reversed-Z, no worse.
+constexpr WGPUTextureFormat kDepthStencilFormat = WGPUTextureFormat_Depth32FloatStencil8;
+constexpr WGPUTextureFormat kDepthStencilFallback = WGPUTextureFormat_Depth24PlusStencil8;
+constexpr float kDepthClear = 0.0f; // the far plane, reversed
+constexpr WGPUCompareFunction kDepthNearer = WGPUCompareFunction_Greater;
+constexpr WGPUCompareFunction kDepthNearerOrEqual = WGPUCompareFunction_GreaterEqual;
+// three.js' polygonOffset(units, factor) as WebGPU depth bias. `toward`: +1 pushes away from the camera
+// (faces under their feature edges), -1 pulls towards it (overlays), 0 none. Reversed, away is a negative
+// bias. A float depth's bias unit is 2^-23 of the primitive's largest depth (relative, a few 1e-7 of the
+// distance) where a 24-bit one's is 2^-24 absolute, so a float target takes more units for a margin over
+// rounding that still stays far below any modelled gap (16 units: a few 1e-6 of the distance). The slope
+// term is in depth per pixel either way: factor 1, as before.
+void set_depth_bias(WGPUDepthStencilState &ds, int toward) {
+    if (toward == 0)
+        return;
+    const bool is_float = ds.format == WGPUTextureFormat_Depth32Float || ds.format == kDepthStencilFormat;
+    ds.depthBias = -toward * (is_float ? 16 : 1);
+    ds.depthBiasSlopeScale = -float(toward);
+}
 // Minimum triangles per clustering batch (runs of consecutive segments); see build_clusters. Measured on a
 // 1M-triangle / 25k-object frame model: larger batches fill clusters better, 8192 keeps load time low.
 constexpr size_t kBatchTriangles = 8192;
@@ -102,7 +126,8 @@ float det3(const Mat4 &m) {
 }
 
 // The six clip planes of `mvp` in the space `mvp` maps from, normalised so distances come out in that
-// space's units. WebGPU clip volume: -w <= x,y <= w, 0 <= z <= w.
+// space's units. WebGPU clip volume: -w <= x,y <= w, 0 <= z <= w (reversed depth: z >= 0 is the far plane,
+// z <= w the near one).
 std::array<std::array<float, 4>, 6> frustum_planes(const Mat4 &m) {
     auto row = [&](int r) { return std::array<float, 4>{m[r], m[4 + r], m[8 + r], m[12 + r]}; };
     auto r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3);
@@ -343,7 +368,8 @@ struct Renderer::Impl {
     bool structure_dirty = true, instances_dirty = true, segstate_dirty = true;
 
     Mat4 view{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
-    Mat4 proj{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    // In the renderer's clip space: WebGPU's, depth reversed (near 1, far 0). See set_camera_gl().
+    Mat4 proj{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -0.5f, 0, 0, 0, 0.5f, 1};
     bool ortho = false;
     std::vector<float> clip_planes;                     // 4 floats per section plane
     float clear[4] = {0.2235f, 0.2235f, 0.2235f, 1.0f}; // #393939, the viewer's background
@@ -467,7 +493,7 @@ struct Renderer::Impl {
         ds.format = depth_format;
         const bool no_depth = stencil_only || on_top;
         ds.depthWriteEnabled = blend || no_depth ? WGPUOptionalBool_False : WGPUOptionalBool_True;
-        ds.depthCompare = no_depth ? WGPUCompareFunction_Always : WGPUCompareFunction_LessEqual;
+        ds.depthCompare = no_depth ? WGPUCompareFunction_Always : kDepthNearerOrEqual;
         auto ops = [](WGPUStencilFaceState &f, WGPUCompareFunction compare, WGPUStencilOperation op) {
             f.compare = compare;
             f.failOp = op;
@@ -485,16 +511,13 @@ struct Renderer::Impl {
             ops(ds.stencilFront, WGPUCompareFunction_Always, WGPUStencilOperation_Zero);
             ops(ds.stencilBack, WGPUCompareFunction_Always, WGPUStencilOperation_Zero);
         }
-        if (depth_bias != 0) {
-            // three.js' polygonOffset: faces pushed back so the feature edges on them win the depth test
-            // (the CAD materials), or an overlay pulled in front of what it lies on (negative offsets).
-            // polygonOffset(1, 1), as the viewer's FEA materials set it. A larger slope term pushed a
-            // face seen at a grazing angle back by more than a thin plate's thickness at poster
-            // resolution, and the hidden edge under it (an I-beam's web-flange junction) broke through
-            // as a dashed line.
-            ds.depthBias = depth_bias;
-            ds.depthBiasSlopeScale = float(depth_bias);
-        }
+        // three.js' polygonOffset: faces pushed back so the feature edges on them win the depth test
+        // (the CAD materials), or an overlay pulled in front of what it lies on (negative offsets).
+        // polygonOffset(1, 1), as the viewer's FEA materials set it. A larger slope term pushed a
+        // face seen at a grazing angle back by more than a thin plate's thickness at poster
+        // resolution, and the hidden edge under it (an I-beam's web-flange junction) broke through
+        // as a dashed line.
+        set_depth_bias(ds, depth_bias);
 
         WGPURenderPipelineDescriptor d = WGPU_RENDER_PIPELINE_DESCRIPTOR_INIT;
         d.label = sv(label);
@@ -595,11 +618,8 @@ struct Renderer::Impl {
         WGPUDepthStencilState ds = WGPU_DEPTH_STENCIL_STATE_INIT;
         ds.format = depth_format;
         ds.depthWriteEnabled = WGPUOptionalBool_False;
-        ds.depthCompare = depth_test ? WGPUCompareFunction_LessEqual : WGPUCompareFunction_Always;
-        if (depth_bias != 0) {
-            ds.depthBias = depth_bias;
-            ds.depthBiasSlopeScale = float(depth_bias);
-        }
+        ds.depthCompare = depth_test ? kDepthNearerOrEqual : WGPUCompareFunction_Always;
+        set_depth_bias(ds, depth_bias);
         WGPURenderPipelineDescriptor d = WGPU_RENDER_PIPELINE_DESCRIPTOR_INIT;
         d.label = sv(label);
         d.layout = sprite_pipeline_layout.get();
@@ -671,7 +691,7 @@ struct Renderer::Impl {
         WGPUDepthStencilState ds = WGPU_DEPTH_STENCIL_STATE_INIT;
         ds.format = kDepthFormat;
         ds.depthWriteEnabled = WGPUOptionalBool_True;
-        ds.depthCompare = WGPUCompareFunction_Less;
+        ds.depthCompare = kDepthNearer;
         WGPURenderPipelineDescriptor d = WGPU_RENDER_PIPELINE_DESCRIPTOR_INIT;
         d.label = sv(label);
         d.layout = pipeline_layout.get();
@@ -742,7 +762,7 @@ struct Renderer::Impl {
         sprite_tested = make_sprite_pipeline("adacpp.sprite_tested", true);
         sprite_untested = make_sprite_pipeline("adacpp.sprite_untested", false);
         quad_tested.reset(); // made again, for this depth format, by the next frame that draws a quad
-        if (depth_format == kDepthStencilFormat) {
+        if (has_stencil()) {
             cap_count = make_pipeline("adacpp.cap_count", "vs_tri", tri, WGPUCullMode_None, false, 0, Stencil::Count);
             cap_fill = make_pipeline("adacpp.cap_fill", "vs_cap", tri, WGPUCullMode_None, false, 0, Stencil::Fill);
             cap_reset = make_pipeline("adacpp.cap_reset", "vs_reset", tri, WGPUCullMode_None, false, 0, Stencil::Reset);
@@ -759,11 +779,16 @@ struct Renderer::Impl {
     // never caps keeps the plain depth format, and its memory.
     void set_section_caps(bool enabled) {
         caps_enabled = enabled;
-        if (!enabled || depth_format == kDepthStencilFormat)
+        if (!enabled || has_stencil())
             return;
-        depth_format = kDepthStencilFormat;
+        depth_format = wgpuDeviceHasFeature(device, WGPUFeatureName_Depth32FloatStencil8) ? kDepthStencilFormat
+                                                                                          : kDepthStencilFallback;
         create_pipelines();
         msaa_tex.reset(); // ensure_targets() makes the targets again, in the new format
+    }
+
+    bool has_stencil() const {
+        return depth_format != kDepthFormat;
     }
 
     bool caps_active() const {
@@ -1452,12 +1477,16 @@ struct Renderer::Impl {
         st.clusters_drawn += n;
     }
 
-    // The projection in WebGPU clip space: OpenGL clip z [-w, w] -> [0, w], z' = 0.5 z + 0.5 w.
-    Mat4 webgpu_proj() const {
-        Mat4 proj_wgpu = proj;
+    // An OpenGL-convention projection (clip z in [-w, w], near at -w) into `proj`: z' = 0.5 w - 0.5 z, so
+    // near -> w and far -> 0. In double: the perspective z row of a large near / far ratio is all but the w
+    // row, and their difference is what places the far plane.
+    void set_camera_gl(const float proj_gl[16]) {
+        std::copy(proj_gl, proj_gl + 16, proj.begin());
         for (int c = 0; c < 4; ++c)
-            proj_wgpu[c * 4 + 2] = 0.5f * proj[c * 4 + 2] + 0.5f * proj[c * 4 + 3];
-        return proj_wgpu;
+            proj[c * 4 + 2] = float(0.5 * double(proj_gl[c * 4 + 3]) - 0.5 * double(proj_gl[c * 4 + 2]));
+    }
+    Mat4 webgpu_proj() const {
+        return proj;
     }
     Mat4 webgpu_view_proj() const {
         return mul(webgpu_proj(), view);
@@ -1548,7 +1577,7 @@ struct Renderer::Impl {
         da.view = pick_depth_view.get();
         da.depthLoadOp = WGPULoadOp_Clear;
         da.depthStoreOp = WGPUStoreOp_Discard;
-        da.depthClearValue = 1.0f;
+        da.depthClearValue = kDepthClear;
         WGPURenderPassDescriptor rp = WGPU_RENDER_PASS_DESCRIPTOR_INIT;
         rp.label = sv("adacpp.pick");
         rp.colorAttachmentCount = 2;
@@ -1660,8 +1689,8 @@ struct Renderer::Impl {
         da.view = depth_view.get();
         da.depthLoadOp = clear_targets ? WGPULoadOp_Clear : WGPULoadOp_Load;
         da.depthStoreOp = resolve ? WGPUStoreOp_Discard : WGPUStoreOp_Store;
-        da.depthClearValue = 1.0f;
-        if (depth_format == kDepthStencilFormat) {
+        da.depthClearValue = kDepthClear;
+        if (has_stencil()) {
             // The caps leave the stencil zeroed and are all drawn within one pass: nothing to carry over.
             da.stencilLoadOp = WGPULoadOp_Clear;
             da.stencilStoreOp = WGPUStoreOp_Discard;
@@ -2421,7 +2450,7 @@ void Renderer::clear() {
 
 void Renderer::set_camera(const float view[16], const float proj_gl[16], bool orthographic) {
     std::copy(view, view + 16, impl_->view.begin());
-    std::copy(proj_gl, proj_gl + 16, impl_->proj.begin());
+    impl_->set_camera_gl(proj_gl);
     impl_->ortho = orthographic;
 }
 
@@ -2469,7 +2498,7 @@ void Renderer::apply_controlled_camera(uint32_t width, uint32_t height) {
     // Near and far follow what is in the scene now, helpers and all: nothing drawn falls outside them.
     camera_.set_scene_bounds(bounds());
     impl_->view = camera_.view();
-    impl_->proj = camera_.projection(camera_.aspect());
+    impl_->proj = camera_.projection_reversed_z(camera_.aspect());
     impl_->ortho = camera_.orthographic();
 }
 

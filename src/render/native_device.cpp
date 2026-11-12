@@ -32,7 +32,7 @@ const char *backend_name(WGPUBackendType t) {
 
 } // namespace
 
-NativeDevice::NativeDevice(const std::string &backend) {
+NativeDevice::NativeDevice(const std::string &backend, bool float_depth_stencil) {
     WGPUInstanceExtras extras = {};
     extras.chain.sType = (WGPUSType) WGPUSType_InstanceExtras;
     if (backend == "vulkan")
@@ -100,6 +100,13 @@ NativeDevice::NativeDevice(const std::string &backend) {
     WGPUDeviceDescriptor ddesc = WGPU_DEVICE_DESCRIPTOR_INIT;
     ddesc.label = sv("adacpp.render");
     ddesc.requiredLimits = &required;
+    // Section caps keep a 32-bit float depth with their stencil where the adapter offers it (the renderer
+    // falls back to 24-bit depth + stencil without it).
+    const WGPUFeatureName depth_stencil = WGPUFeatureName_Depth32FloatStencil8;
+    if (float_depth_stencil && wgpuAdapterHasFeature(adapter_, depth_stencil)) {
+        ddesc.requiredFeatureCount = 1;
+        ddesc.requiredFeatures = &depth_stencil;
+    }
     // Never throw through this callback: it is called from inside wgpu-native (C ABI).
     ddesc.uncapturedErrorCallbackInfo.callback = [](WGPUDevice const *, WGPUErrorType type, WGPUStringView message,
                                                     void *, void *) {

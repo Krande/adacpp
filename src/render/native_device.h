@@ -18,7 +18,9 @@ struct AdapterInfo {
 class NativeDevice {
 public:
     // `backend`: "auto", "vulkan", "gl", "metal", "dx12". Falls back to whatever adapter is available.
-    explicit NativeDevice(const std::string &backend = "auto");
+    // `float_depth_stencil`: ask for depth32float-stencil8 where the adapter has it (section caps keep the
+    // float depth); off, the device goes without, as a browser device that was not asked for it does.
+    explicit NativeDevice(const std::string &backend = "auto", bool float_depth_stencil = true);
     ~NativeDevice();
     NativeDevice(const NativeDevice &) = delete;
     NativeDevice &operator=(const NativeDevice &) = delete;
