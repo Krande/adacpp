@@ -2,6 +2,15 @@
 
 
 
+## v0.42.2 (2026-11-15)
+
+### Fix
+
+* fix(step): project vertices orthogonally onto ELLIPSE edges so a short arc cannot wrap the long way (#84)
+
+Co-authored-by: Claude Opus 5.5 &lt;noreply@anthropic.com&gt; ([`07bd57b`](https://github.com/Krande/adacpp/commit/07bd57bb4612b1e9b59e1c5a4349848605147627))
+
+
 ## v0.42.1 (2026-11-12)
 
 ### Fix
