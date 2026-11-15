@@ -15,6 +15,45 @@
 
 namespace adacpp::ngeom {
 
+// Parameter t of the point on the ellipse (rx cos t, ry sin t) nearest to the in-plane point (x, y):
+// the orthogonal projection, not just the eccentric-anomaly guess atan2(y/ry, x/rx).
+//
+// The two agree only for a circle or for a point exactly on the ellipse. A STEP vertex sits on its
+// edge curve only to within the file's tolerance, and dividing by the radii stretches the
+// off-curve (normal) error by rx/ry relative to the along-curve offset. On an eccentric ellipse the
+// guess can then put two vertices a few microns apart in the WRONG order: the arc from a to b, which
+// should be tiny, wraps the other way into nearly the full ellipse. (Seen on a vendor robot STEP: a
+// 165.8 x 3.86 ellipse edge 0.004 long came out ~330 long; the cone face it bounded then wrapped
+// round the near-cylinder to its apex 4 m away.) Newton on the squared distance, started from the
+// guess, keeps only steps that bring the point closer.
+inline double ellipse_param(double rx, double ry, double x, double y) {
+    double t = std::atan2(y / ry, x / rx);
+    if (std::abs(std::abs(rx) - std::abs(ry)) <= 1e-12 * std::max(std::abs(rx), std::abs(ry)))
+        return t; // circle: the guess is already the projection
+    auto dist2 = [&](double s) {
+        double ex = rx * std::cos(s) - x, ey = ry * std::sin(s) - y;
+        return ex * ex + ey * ey;
+    };
+    double best = dist2(t);
+    for (int it = 0; it < 32; ++it) {
+        double c = std::cos(t), s = std::sin(t);
+        double ex = rx * c - x, ey = ry * s - y;
+        double g = -rx * s * ex + ry * c * ey;                                    // (1/2) d/dt |P(t)-q|^2
+        double h = rx * rx * s * s + ry * ry * c * c - rx * c * ex - ry * s * ey; // (1/2) d2/dt2
+        if (!(h > 0.0))
+            break; // not locally convex: keep the current (closer) estimate
+        double step = std::clamp(g / h, -0.5, 0.5);
+        double tn = t - step, dn = dist2(tn);
+        if (dn > best)
+            break;
+        t = tn;
+        best = dn;
+        if (std::abs(step) < 1e-15)
+            break;
+    }
+    return t;
+}
+
 // Discretize a circular/elliptical arc between two 3D endpoints by projecting them onto the
 // curve to recover the angular parameter range — a port of model.rs curve_polyline's
 // CIRCLE/ELLIPSE arm. The reference never trusts stored edge parameters; it always rebuilds the arc
@@ -25,7 +64,7 @@ inline std::vector<Vec3> discretize_arc(const Frame &f, double rx, double ry, co
                                         double deflection, double max_angle) {
     auto ang = [&](const Vec3 &pt) {
         Vec3 d = f.to_local(pt);
-        return std::atan2(d.y / ry, d.x / rx);
+        return ellipse_param(rx, ry, d.x, d.y);
     };
     double t0 = ang(a);
     double t1 = ang(b);
