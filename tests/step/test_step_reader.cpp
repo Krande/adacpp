@@ -231,6 +231,75 @@ static void test_conic_edge() {
     CHECK(inr, "disk vertices within radius 2");
 }
 
+// A tiny planar sliver bounded by a short arc of a very eccentric ELLIPSE (165.8 x 3.86) plus two
+// lines. Vertex #2 sits 0.0003 off the ellipse (well inside any STEP tolerance), 0.0041 further
+// along it than #1. The eccentric-anomaly guess atan2(y/ry, x/rx) puts #2 slightly BEHIND #1 —
+// dividing by the radii inflates the off-curve error 43x relative to the along-curve offset — so
+// the .T. edge #1 -> #2 used to wrap the long way round the whole ellipse, and the face boundary
+// became a ~330-long loop. (Seen on a vendor robot STEP, where it bounded a near-cylindrical cone
+// face that then tessellated out to the cone apex 4 m away.)
+static const char *kEllipseSliver = "ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\n"
+                                    "#1=CARTESIAN_POINT('',(146.64043956,-1.80127146,0.));\n"
+                                    "#2=CARTESIAN_POINT('',(146.64453956,-1.80139846,0.));\n"
+                                    "#3=CARTESIAN_POINT('',(146.14043956,-1.30127146,0.));\n"
+                                    "#4=CARTESIAN_POINT('',(0.,0.,0.));\n"
+                                    "#11=VERTEX_POINT('',#1);\n"
+                                    "#12=VERTEX_POINT('',#2);\n"
+                                    "#13=VERTEX_POINT('',#3);\n"
+                                    "#20=DIRECTION('',(0.,0.,1.));\n"
+                                    "#21=DIRECTION('',(1.,0.,0.));\n"
+                                    "#22=AXIS2_PLACEMENT_3D('',#4,#20,#21);\n"
+                                    "#23=ELLIPSE('',#22,165.8,3.86);\n"
+                                    "#24=VECTOR('',#21,1.);\n"
+                                    "#25=LINE('',#4,#24);\n"
+                                    "#31=EDGE_CURVE('',#11,#12,#23,.T.);\n"
+                                    "#32=EDGE_CURVE('',#12,#13,#25,.T.);\n"
+                                    "#33=EDGE_CURVE('',#13,#11,#25,.T.);\n"
+                                    "#41=ORIENTED_EDGE('',*,*,#31,.T.);\n"
+                                    "#42=ORIENTED_EDGE('',*,*,#32,.T.);\n"
+                                    "#43=ORIENTED_EDGE('',*,*,#33,.T.);\n"
+                                    "#50=EDGE_LOOP('',(#41,#42,#43));\n"
+                                    "#51=FACE_OUTER_BOUND('',#50,.T.);\n"
+                                    "#52=PLANE('',#22);\n"
+                                    "#53=ADVANCED_FACE('sliver',(#51),#52,.T.);\n"
+                                    "#54=OPEN_SHELL('',(#53));\n"
+                                    "#55=SHELL_BASED_SURFACE_MODEL('',(#54));\n"
+                                    "ENDSEC;\nEND-ISO-10303-21;\n";
+
+static void test_eccentric_ellipse_arc() {
+    // Unit level: the arc between the two vertices is the short one (~0.0041), not the ~667-long
+    // complement round the ellipse.
+    ng::Frame f = ng::Frame::from_axis_ref(ng::Vec3{0, 0, 0}, ng::Vec3{0, 0, 1}, ng::Vec3{1, 0, 0});
+    ng::Vec3 a{146.64043956, -1.80127146, 0.0}, b{146.64453956, -1.80139846, 0.0};
+    std::vector<ng::Vec3> arc = ng::discretize_arc(f, 165.8, 3.86, a, b, 0.01, 0.35);
+    double len = 0;
+    for (size_t i = 1; i < arc.size(); ++i)
+        len += (arc[i] - arc[i - 1]).norm();
+    CHECK(len < 0.01, "eccentric ellipse: short arc between nearby vertices");
+    // The projection lands ON the ellipse nearest the vertex, and a circle is untouched.
+    double t = ng::ellipse_param(165.8, 3.86, b.x, b.y);
+    ng::Vec3 pb{165.8 * std::cos(t), 3.86 * std::sin(t), 0.0};
+    CHECK((pb - b).norm() < 4e-4, "ellipse_param: nearest point within the vertex's off-curve distance");
+    CHECK(std::abs(ng::ellipse_param(2.0, 2.0, 1.0, 1.0) - std::atan2(1.0, 1.0)) < 1e-15,
+          "ellipse_param: circle == atan2");
+
+    // End to end: STEP text -> native reader -> libtess2. Every vertex stays on the ~0.7 sliver.
+    std::vector<Instance> store;
+    ng::NgeomDoc doc = read_step_brep(kEllipseSliver, store);
+    CHECK(doc.roots.size() == 1 && doc.roots[0].faces.size() == 1, "ellipse sliver: one face");
+    ng::TessParams tp;
+    tp.deflection = 0.05;
+    ng::TessMesh m = ng::tessellate_doc(doc, tp);
+    CHECK(m.indices.size() >= 3, "ellipse sliver tessellates");
+    bool local = true;
+    for (size_t i = 0; i + 2 < m.positions.size(); i += 3) {
+        if (m.positions[i] < 146.1 || m.positions[i] > 146.7 || m.positions[i + 1] < -1.9 ||
+            m.positions[i + 1] > -1.2 || std::abs(m.positions[i + 2]) > 1e-6)
+            local = false;
+    }
+    CHECK(local, "ellipse sliver: no vertex leaves the face (no wrap round the ellipse)");
+}
+
 // One face on a simple (non-rational) B_SPLINE_SURFACE_WITH_KNOTS and one on a rational complex
 // record (weights ((1,1),(1,2))) — both a 2x2 degree-1 patch over the unit square.
 static const char *kBSplineSurf =
@@ -501,6 +570,7 @@ int main() {
     test_curved_surfaces_and_polyloop();
     test_degree_angle_unit();
     test_conic_edge();
+    test_eccentric_ellipse_arc();
     test_bspline_surfaces();
     test_bspline_edge_curve();
     test_colour_and_units();
