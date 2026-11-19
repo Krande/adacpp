@@ -68,6 +68,7 @@
 #include "mem_trim.h"
 #include "mem_tune.h"
 #include "effective_concurrency.h"
+#include "faceted_solid.h"
 
 #include <Bnd_Box.hxx>
 #include <Bnd_OBB.hxx>
@@ -6007,6 +6008,105 @@ void cad_module(nb::module_ &m) {
     m.def("make_volumes_from_faces", &make_volumes_from_faces_impl, "faces"_a, "tolerance"_a = 1e-6,
           "Partition space into solids from a face soup (BOPAlgo_MakerVolume). "
           "Interior faces come out shared between the two cells they separate.");
+
+    // Faceted B-rep -> solid in one call per solid, or many in parallel (faceted_solid.h). The
+    // inputs are converted while the GIL is held; the kernel work runs without it.
+    namespace fs = adacpp::faceted;
+    auto batch_result = [](const std::vector<TopoDS_Shape> &shapes, const std::vector<std::string> &errors) {
+        std::vector<std::optional<ShapeHandle>> out_shapes;
+        std::vector<std::optional<std::string>> out_errors;
+        out_shapes.reserve(shapes.size());
+        out_errors.reserve(shapes.size());
+        for (size_t i = 0; i < shapes.size(); ++i) {
+            if (errors[i].empty()) {
+                out_shapes.emplace_back(ShapeHandle(shapes[i]));
+                out_errors.emplace_back(std::nullopt);
+            } else {
+                out_shapes.emplace_back(std::nullopt);
+                out_errors.emplace_back(errors[i]);
+            }
+        }
+        return std::make_pair(std::move(out_shapes), std::move(out_errors));
+    };
+
+    m.def(
+        "solid_from_polygons",
+        [](const fs::Polygons &polygons, double tolerance) {
+            TopoDS_Shape shape;
+            {
+                nb::gil_scoped_release release;
+                shape = fs::solid_from_polygons(polygons, tolerance).shape;
+            }
+            return ShapeHandle(shape);
+        },
+        "polygons"_a, "tolerance"_a = 1e-6,
+        "The solid a closed set of planar polygons bounds (each polygon a loop of >=3 [x, y, z] "
+        "points, or an (n, 3) array; either winding). The corners are welded within `tolerance`, each "
+        "edge is made once and shared by its two faces, and the shell is wound consistently and turned "
+        "outward -- linear in the number of faces, no sewing and no boolean. Polygons that are not one "
+        "closed 2-manifold shell of simple planar faces that way go to BOPAlgo_MakerVolume instead. "
+        "Raises ValueError when the polygons bound no volume.");
+
+    m.def(
+        "solid_from_mesh",
+        [](const std::vector<fs::Point> &vertices, const std::vector<std::vector<int>> &faces, double tolerance) {
+            TopoDS_Shape shape;
+            {
+                nb::gil_scoped_release release;
+                shape = fs::solid_from_mesh(vertices, faces, tolerance).shape;
+            }
+            return ShapeHandle(shape);
+        },
+        "vertices"_a, "faces"_a, "tolerance"_a = 1e-6,
+        "solid_from_polygons for an indexed mesh: `vertices` as [x, y, z] rows (or an (n, 3) array) "
+        "and `faces` as loops of 0-based indices into them (triangles or polygons). Vertices that "
+        "coincide within `tolerance` are welded too.");
+
+    m.def(
+        "solid_from_polygons_route",
+        [](const fs::Polygons &polygons, double tolerance) {
+            nb::gil_scoped_release release;
+            return std::string(fs::method_name(fs::solid_from_polygons(polygons, tolerance).method));
+        },
+        "polygons"_a, "tolerance"_a = 1e-6,
+        "Which step solid_from_polygons builds these polygons with: 'direct' (welded shared-edge "
+        "shell) or 'maker_volume'. A diagnostic: builds the solid and discards it.");
+
+    m.def(
+        "solids_from_polygons_batch",
+        [batch_result](const std::vector<fs::Polygons> &items, double tolerance, int threads) {
+            std::vector<TopoDS_Shape> shapes;
+            std::vector<std::string> errors;
+            std::vector<fs::Method> methods;
+            {
+                nb::gil_scoped_release release;
+                fs::solids_from_polygons_batch(items, tolerance, threads, adacpp::effective_concurrency(), shapes,
+                                               errors, methods);
+            }
+            return batch_result(shapes, errors);
+        },
+        "items"_a, "tolerance"_a = 1e-6, "threads"_a = 0,
+        "solid_from_polygons for many solids at once, in parallel with the GIL released. `items` is "
+        "a list of polygon lists; `threads` 0 uses every core (the cgroup quota where there is one). "
+        "Returns (shapes, errors), both as long as `items`: shapes[i] is the solid and errors[i] "
+        "None, or shapes[i] None and errors[i] why it failed. One failure does not stop the rest.");
+
+    m.def(
+        "solids_from_meshes_batch",
+        [batch_result](const std::vector<fs::Mesh> &items, double tolerance, int threads) {
+            std::vector<TopoDS_Shape> shapes;
+            std::vector<std::string> errors;
+            std::vector<fs::Method> methods;
+            {
+                nb::gil_scoped_release release;
+                fs::solids_from_meshes_batch(items, tolerance, threads, adacpp::effective_concurrency(), shapes, errors,
+                                             methods);
+            }
+            return batch_result(shapes, errors);
+        },
+        "items"_a, "tolerance"_a = 1e-6, "threads"_a = 0,
+        "solid_from_mesh for many solids at once, like solids_from_polygons_batch: `items` is a list "
+        "of (vertices, faces) pairs. Returns (shapes, errors).");
 
     m.def("sew_faces", &sew_faces_impl, "faces"_a, "tolerance"_a = 1e-6,
           "Sew faces into one connected shell (BRepBuilderAPI_Sewing). For OPEN "
