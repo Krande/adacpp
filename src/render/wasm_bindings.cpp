@@ -338,6 +338,16 @@ public:
         d.line_width = line_width;
         d.dash = dash;
         d.gap = gap;
+        d.render_order = renderer_->instance_desc(instance).render_order; // setInstanceRenderOrder's, kept
+        renderer_->set_instance(instance, d);
+    }
+    // three.js' renderOrder (InstanceDesc::render_order): where a transparent or kOnTop instance comes among
+    // the others drawn sorted. Kept by setInstance; 0 until set.
+    void set_instance_render_order(uint32_t instance, float order) {
+        InstanceDesc d = renderer_->instance_desc(instance);
+        if (d.render_order == order)
+            return;
+        d.render_order = order;
         renderer_->set_instance(instance, d);
     }
     // The instance's matrix alone (16 floats in the heap), the rest of setInstance's values kept.
@@ -567,8 +577,10 @@ public:
     }
 
     // GPU pick at canvas pixel (x, y) of a width x height drawing buffer; `callback(result)` runs once the
-    // readback lands: {hit, instance, segment, triangle, topology, world: [x, y, z]}; `topology` 0 = a
-    // triangle, 2 = a point, whose index (position in the index list) is in `triangle`.
+    // readback lands: {hit, instance, segment, triangle, topology, world: [x, y, z], vertex: [x, y, z],
+    // edge: [x, y, z]}; `topology` 0 = a triangle, 2 = a point, whose index (position in the index list) is in
+    // `triangle`. `vertex` / `edge`: the hit triangle's corner / point on its sides nearest to `world` (a
+    // point's own position for a point), what a snap takes.
     void pick(uint32_t x, uint32_t y, uint32_t width, uint32_t height, emscripten::val callback) {
         renderer_->pick(x, y, width, height, [callback](const PickResult &r) {
             auto o = emscripten::val::object();
@@ -577,10 +589,15 @@ public:
             o.set("segment", r.segment);
             o.set("triangle", r.triangle);
             o.set("topology", r.topology);
-            auto w = emscripten::val::array();
-            for (int i = 0; i < 3; ++i)
-                w.call<void>("push", r.world[i]);
-            o.set("world", w);
+            auto vec = [](const float *v) {
+                auto a = emscripten::val::array();
+                for (int i = 0; i < 3; ++i)
+                    a.call<void>("push", v[i]);
+                return a;
+            };
+            o.set("world", vec(r.world));
+            o.set("vertex", vec(r.vertex));
+            o.set("edge", vec(r.edge));
             callback(o);
         });
     }
@@ -649,6 +666,7 @@ EMSCRIPTEN_BINDINGS(adacpp_render) {
         .function("addInstance", &WebRenderer::add_instance)
         .function("setInstance", &WebRenderer::set_instance)
         .function("setInstanceMatrix", &WebRenderer::set_instance_matrix)
+        .function("setInstanceRenderOrder", &WebRenderer::set_instance_render_order)
         .function("instanceMatrix", &WebRenderer::instance_matrix)
         .function("animationCount", &WebRenderer::animation_count)
         .function("animationName", &WebRenderer::animation_name)
