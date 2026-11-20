@@ -2,6 +2,15 @@
 
 
 
+## v0.44.0 (2026-11-20)
+
+### Feature
+
+* feat(render): transparency sorted as three.js sorts it, render order, sRGB vertex colours and snap points in picks (#86)
+
+Co-authored-by: Claude Opus 5.5 &lt;noreply@anthropic.com&gt; ([`4c5ef27`](https://github.com/Krande/adacpp/commit/4c5ef27508b9c2ae87ebfc3e8adaebf5e5bbcc33))
+
+
 ## v0.43.0 (2026-11-20)
 
 ### Feature
