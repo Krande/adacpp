@@ -137,7 +137,12 @@ serialize_brep = _cad.serialize_brep
 sew_faces = _cad.sew_faces
 shape_type = _cad.shape_type
 shells = _cad.shells
+solid_from_mesh = _cad.solid_from_mesh
+solid_from_polygons = _cad.solid_from_polygons
+solid_from_polygons_route = _cad.solid_from_polygons_route
 solids = _cad.solids
+solids_from_meshes_batch = _cad.solids_from_meshes_batch
+solids_from_polygons_batch = _cad.solids_from_polygons_batch
 step_bytes_to_glb_bytes = _cad.step_bytes_to_glb_bytes
 step_emit_ifc_brep = _cad.step_emit_ifc_brep
 step_parity = _cad.step_parity
@@ -273,7 +278,12 @@ __all__ = [
     "sew_faces",
     "shape_type",
     "shells",
+    "solid_from_mesh",
+    "solid_from_polygons",
+    "solid_from_polygons_route",
     "solids",
+    "solids_from_meshes_batch",
+    "solids_from_polygons_batch",
     "step_bytes_to_glb_bytes",
     "step_emit_ifc_brep",
     "step_parity",
