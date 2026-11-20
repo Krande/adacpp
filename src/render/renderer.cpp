@@ -280,6 +280,7 @@ std::vector<uint8_t> half_mip(const std::vector<uint8_t> &src, uint32_t w, uint3
 
 constexpr WGPUTextureFormat kPickIdFormat = WGPUTextureFormat_RGBA32Uint;
 constexpr WGPUTextureFormat kPickPosFormat = WGPUTextureFormat_RGBA32Float;
+constexpr size_t kPickReadback = 4 * 256; // id, world, corner, edge: a 256-byte row each
 
 } // namespace
 
@@ -331,10 +332,14 @@ struct Renderer::Impl {
     // kOnTop instances: the same without a depth test or write.
     RenderPipelineRef top_double, top_single, top_blend, top_lines, top_lines_blend, top_points, top_wide,
         top_wide_blend;
-    // kCullBack: transparent, back faces culled.
+    // kCullBack: transparent, back faces culled. A double-sided transparent instance is drawn with these after
+    // the `inner` ones, which cull its front faces: its far side first, then its near side, as three.js does.
     RenderPipelineRef tri_blend_cull, tri_blend_cull_back, tri_blend_cull_front, top_blend_cull;
+    RenderPipelineRef tri_blend_inner, tri_blend_inner_back, tri_blend_inner_front, top_blend_inner;
     RenderPipelineRef pick_double, pick_single; // id + world-position targets, 1 sample
     RenderPipelineRef pick_points;              // points as squares (vs_wide)
+    // The pick's second pass, the same triangles again: the hit triangle's nearest corner and edge point.
+    RenderPipelineRef pick_corner_double, pick_corner_single;
     // Section caps (see vs_cap): made with the stencil depth format, the first time caps are switched on.
     RenderPipelineRef cap_count, cap_fill, cap_reset;
     WGPUTextureFormat depth_format = kDepthFormat;
@@ -396,8 +401,8 @@ struct Renderer::Impl {
     size_t instance_cap = 0, segstate_cap = 0, visible_cap = 0;
     BindGroupRef frame_bind, pick_frame_bind;
     BufferRef pick_frame_buf;
-    TextureRef pick_id_tex, pick_pos_tex, pick_depth_tex;
-    TextureViewRef pick_id_view, pick_pos_view, pick_depth_view;
+    TextureRef pick_id_tex, pick_pos_tex, pick_depth_tex, pick_corner_tex, pick_edge_tex;
+    TextureViewRef pick_id_view, pick_pos_view, pick_depth_view, pick_corner_view, pick_edge_view;
 
     TextureRef msaa_tex, depth_tex;
     TextureViewRef msaa_view, depth_view;
@@ -406,7 +411,8 @@ struct Renderer::Impl {
 
     std::vector<std::unique_ptr<Geometry>> geometries;
     std::vector<std::unique_ptr<Instance>> instances;
-    std::vector<Instance *> order; // live instances in GPU order
+    std::vector<Instance *> order;                  // live instances in GPU order
+    std::vector<Instance *> blend_order, top_order; // this frame's sorted draws, see sort_draw_order()
     std::vector<uint32_t> visible;
 
     bool structure_dirty = true, instances_dirty = true, segstate_dirty = true;
@@ -721,7 +727,8 @@ struct Renderer::Impl {
         }
     }
 
-    RenderPipelineRef make_pick_pipeline(const char *label, WGPUCullMode cull, const char *vs = "vs_tri") {
+    RenderPipelineRef make_pick_pipeline(const char *label, WGPUCullMode cull, const char *vs = "vs_tri",
+                                         const char *fragment = "fs_pick") {
         WGPUColorTargetState ct[2] = {WGPU_COLOR_TARGET_STATE_INIT, WGPU_COLOR_TARGET_STATE_INIT};
         ct[0].format = kPickIdFormat;
         ct[0].writeMask = WGPUColorWriteMask_All;
@@ -729,7 +736,7 @@ struct Renderer::Impl {
         ct[1].writeMask = WGPUColorWriteMask_All;
         WGPUFragmentState fs = WGPU_FRAGMENT_STATE_INIT;
         fs.module = shader.get();
-        fs.entryPoint = sv("fs_pick");
+        fs.entryPoint = sv(fragment);
         fs.targetCount = 2;
         fs.targets = ct;
         WGPUDepthStencilState ds = WGPU_DEPTH_STENCIL_STATE_INIT;
@@ -765,6 +772,8 @@ struct Renderer::Impl {
         const auto readable = WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_CopySrc;
         make(kPickIdFormat, readable, pick_id_tex, pick_id_view, "adacpp.pick_id");
         make(kPickPosFormat, readable, pick_pos_tex, pick_pos_view, "adacpp.pick_pos");
+        make(kPickIdFormat, readable, pick_corner_tex, pick_corner_view, "adacpp.pick_corner");
+        make(kPickPosFormat, readable, pick_edge_tex, pick_edge_view, "adacpp.pick_edge");
         make(kDepthFormat, WGPUTextureUsage_RenderAttachment, pick_depth_tex, pick_depth_view, "adacpp.pick_depth");
     }
 
@@ -782,6 +791,10 @@ struct Renderer::Impl {
         tri_blend_cull = make_pipeline("adacpp.tri_blend_cull", "vs_tri", tri, WGPUCullMode_Back, true, 0);
         tri_blend_cull_back = make_pipeline("adacpp.tri_blend_cull_back", "vs_tri", tri, WGPUCullMode_Back, true, 1);
         tri_blend_cull_front = make_pipeline("adacpp.tri_blend_cull_front", "vs_tri", tri, WGPUCullMode_Back, true, -1);
+        tri_blend_inner = make_pipeline("adacpp.tri_blend_inner", "vs_tri", tri, WGPUCullMode_Front, true, 0);
+        tri_blend_inner_back = make_pipeline("adacpp.tri_blend_inner_back", "vs_tri", tri, WGPUCullMode_Front, true, 1);
+        tri_blend_inner_front =
+            make_pipeline("adacpp.tri_blend_inner_front", "vs_tri", tri, WGPUCullMode_Front, true, -1);
         lines = make_pipeline("adacpp.lines", "vs_list", WGPUPrimitiveTopology_LineList, WGPUCullMode_None, false, 0);
         lines_blend =
             make_pipeline("adacpp.lines_blend", "vs_list", WGPUPrimitiveTopology_LineList, WGPUCullMode_None, true, 0);
@@ -797,6 +810,7 @@ struct Renderer::Impl {
         top_single = top("adacpp.top_single", "vs_tri", tri, WGPUCullMode_Back, false);
         top_blend = top("adacpp.top_blend", "vs_tri", tri, WGPUCullMode_None, true);
         top_blend_cull = top("adacpp.top_blend_cull", "vs_tri", tri, WGPUCullMode_Back, true);
+        top_blend_inner = top("adacpp.top_blend_inner", "vs_tri", tri, WGPUCullMode_Front, true);
         top_lines = top("adacpp.top_lines", "vs_list", WGPUPrimitiveTopology_LineList, WGPUCullMode_None, false);
         top_lines_blend =
             top("adacpp.top_lines_blend", "vs_list", WGPUPrimitiveTopology_LineList, WGPUCullMode_None, true);
@@ -817,6 +831,10 @@ struct Renderer::Impl {
         pick_double = make_pick_pipeline("adacpp.pick_double", WGPUCullMode_None);
         pick_single = make_pick_pipeline("adacpp.pick_single", WGPUCullMode_Back);
         pick_points = make_pick_pipeline("adacpp.pick_points", WGPUCullMode_None, "vs_wide");
+        pick_corner_double =
+            make_pick_pipeline("adacpp.pick_corner_double", WGPUCullMode_None, "vs_tri_corners", "fs_pick_corner");
+        pick_corner_single =
+            make_pick_pipeline("adacpp.pick_corner_single", WGPUCullMode_Back, "vs_tri_corners", "fs_pick_corner");
     }
 
     // Section caps need a stencil, which the depth target only gets once they are asked for: a viewer that
@@ -1373,6 +1391,8 @@ struct Renderer::Impl {
                 flags |= kUnlit;
             if (!g.has_colors)
                 flags &= ~uint32_t(kVertexColors);
+            if (!(flags & kVertexColors))
+                flags &= ~uint32_t(kVertexColorsSrgb);
             if (cone_exact(*inst, g))
                 flags |= kConeOk;
             rec[20] = flags;
@@ -1616,55 +1636,70 @@ struct Renderer::Impl {
 
         WGPUCommandEncoderDescriptor ed = WGPU_COMMAND_ENCODER_DESCRIPTOR_INIT;
         WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(device, &ed);
-        WGPURenderPassColorAttachment ca[2] = {WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT,
-                                               WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT};
-        ca[0].view = pick_id_view.get();
-        ca[1].view = pick_pos_view.get();
-        for (auto &a : ca) {
-            a.loadOp = WGPULoadOp_Clear;
-            a.storeOp = WGPUStoreOp_Store;
-            a.clearValue = {0, 0, 0, 0};
-        }
-        WGPURenderPassDepthStencilAttachment da = WGPU_RENDER_PASS_DEPTH_STENCIL_ATTACHMENT_INIT;
-        da.view = pick_depth_view.get();
-        da.depthLoadOp = WGPULoadOp_Clear;
-        da.depthStoreOp = WGPUStoreOp_Discard;
-        da.depthClearValue = kDepthClear;
-        WGPURenderPassDescriptor rp = WGPU_RENDER_PASS_DESCRIPTOR_INIT;
-        rp.label = sv("adacpp.pick");
-        rp.colorAttachmentCount = 2;
-        rp.colorAttachments = ca;
-        rp.depthStencilAttachment = &da;
-        WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(enc, &rp);
-        wgpuRenderPassEncoderSetBindGroup(pass, 0, pick_frame_bind.get(), 0, nullptr);
-        WGPURenderPipeline bound = nullptr;
-        for (Instance *inst : order) {
-            if (inst->vis_count == 0)
-                continue;
-            const Geometry &g = geometry(inst->geometry);
-            WGPURenderPipeline p =
-                (inst->desc.flags & (kDoubleSided | kTransparent)) ? pick_double.get() : pick_single.get();
-            if (p != bound) {
-                wgpuRenderPassEncoderSetPipeline(pass, p);
-                bound = p;
+        auto begin = [&](WGPUTextureView id, WGPUTextureView pos, const char *label) {
+            WGPURenderPassColorAttachment ca[2] = {WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT,
+                                                   WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT};
+            ca[0].view = id;
+            ca[1].view = pos;
+            for (auto &a : ca) {
+                a.loadOp = WGPULoadOp_Clear;
+                a.storeOp = WGPUStoreOp_Store;
+                a.clearValue = {0, 0, 0, 0};
             }
-            wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
-            wgpuRenderPassEncoderDraw(pass, inst->vis_count * kClusterMaxTriangles * 3, 1,
-                                      inst->vis_base * kClusterMaxTriangles * 3, 0);
-        }
+            WGPURenderPassDepthStencilAttachment da = WGPU_RENDER_PASS_DEPTH_STENCIL_ATTACHMENT_INIT;
+            da.view = pick_depth_view.get();
+            da.depthLoadOp = WGPULoadOp_Clear;
+            da.depthStoreOp = WGPUStoreOp_Discard;
+            da.depthClearValue = kDepthClear;
+            WGPURenderPassDescriptor rp = WGPU_RENDER_PASS_DESCRIPTOR_INIT;
+            rp.label = sv(label);
+            rp.colorAttachmentCount = 2;
+            rp.colorAttachments = ca;
+            rp.depthStencilAttachment = &da;
+            WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(enc, &rp);
+            wgpuRenderPassEncoderSetBindGroup(pass, 0, pick_frame_bind.get(), 0, nullptr);
+            return pass;
+        };
+        // The pickable triangles, with `single` / `both` for one-sided / double-sided instances.
+        auto triangles = [&](WGPURenderPassEncoder pass, WGPURenderPipeline single, WGPURenderPipeline both) {
+            WGPURenderPipeline bound = nullptr;
+            for (Instance *inst : order) {
+                if (inst->vis_count == 0)
+                    continue;
+                const Geometry &g = geometry(inst->geometry);
+                WGPURenderPipeline p = (inst->desc.flags & (kDoubleSided | kTransparent)) ? both : single;
+                if (p != bound) {
+                    wgpuRenderPassEncoderSetPipeline(pass, p);
+                    bound = p;
+                }
+                wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
+                wgpuRenderPassEncoderDraw(pass, inst->vis_count * kClusterMaxTriangles * 3, 1,
+                                          inst->vis_base * kClusterMaxTriangles * 3, 0);
+            }
+        };
+        WGPURenderPassEncoder pass = begin(pick_id_view.get(), pick_pos_view.get(), "adacpp.pick");
+        triangles(pass, pick_single.get(), pick_double.get());
         // Points, as the squares they are drawn as (never smaller than kPickPointPixels), against the
         // triangles' depth.
+        bool points_bound = false;
         for (Instance *inst : order) {
             const Geometry &g = geometry(inst->geometry);
             if (g.topology != Topology::Points || (inst->desc.flags & (kHidden | kNoPick)) || g.list_count == 0)
                 continue;
-            if (bound != pick_points.get()) {
+            if (!points_bound) {
                 wgpuRenderPassEncoderSetPipeline(pass, pick_points.get());
-                bound = pick_points.get();
+                points_bound = true;
             }
             wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
             wgpuRenderPassEncoderDraw(pass, g.list_count * 6, 1, 0, inst->gpu_index);
         }
+        wgpuRenderPassEncoderEnd(pass);
+        wgpuRenderPassEncoderRelease(pass);
+        // The same triangles again, drawn the same way so the same one is in front: where its nearest corner and
+        // edge point are. One pixel, so a second pass costs next to nothing; a third target in the first would
+        // pass WebGPU's 32 bytes of colour per sample.
+        pass = begin(pick_corner_view.get(), pick_edge_view.get(), "adacpp.pick_corner");
+        triangles(pass, pick_corner_single.get(), pick_corner_double.get());
         wgpuRenderPassEncoderEnd(pass);
         wgpuRenderPassEncoderRelease(pass);
 
@@ -1673,20 +1708,22 @@ struct Renderer::Impl {
         pending->ids.reserve(order.size());
         for (Instance *inst : order)
             pending->ids.push_back(inst->id);
-        // Two texels, each in its own 256-byte row (bytesPerRow must be a multiple of 256).
-        pending->readback = make_buffer(512, WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead, "adacpp.pick_readback");
+        // Four texels, each in its own 256-byte row (bytesPerRow must be a multiple of 256).
+        pending->readback =
+            make_buffer(kPickReadback, WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead, "adacpp.pick_readback");
         WGPUExtent3D one = {1, 1, 1};
         WGPUTexelCopyTextureInfo src = WGPU_TEXEL_COPY_TEXTURE_INFO_INIT;
         WGPUTexelCopyBufferInfo dst = WGPU_TEXEL_COPY_BUFFER_INFO_INIT;
         dst.buffer = pending->readback.get();
         dst.layout.bytesPerRow = 256;
         dst.layout.rowsPerImage = 1;
-        src.texture = pick_id_tex.get();
-        dst.layout.offset = 0;
-        wgpuCommandEncoderCopyTextureToBuffer(enc, &src, &dst, &one);
-        src.texture = pick_pos_tex.get();
-        dst.layout.offset = 256;
-        wgpuCommandEncoderCopyTextureToBuffer(enc, &src, &dst, &one);
+        const WGPUTexture texels[4] = {pick_id_tex.get(), pick_pos_tex.get(), pick_corner_tex.get(),
+                                       pick_edge_tex.get()};
+        for (uint32_t k = 0; k < 4; ++k) {
+            src.texture = texels[k];
+            dst.layout.offset = k * 256;
+            wgpuCommandEncoderCopyTextureToBuffer(enc, &src, &dst, &one);
+        }
         WGPUCommandBufferDescriptor cd = WGPU_COMMAND_BUFFER_DESCRIPTOR_INIT;
         WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, &cd);
         wgpuQueueSubmit(queue, 1, &cmd);
@@ -1704,11 +1741,13 @@ struct Renderer::Impl {
             PickResult r;
             if (status == WGPUMapAsyncStatus_Success) {
                 const auto *bytes =
-                    static_cast<const uint8_t *>(wgpuBufferGetConstMappedRange(p->readback.get(), 0, 512));
-                uint32_t id[4];
-                float pos[4];
+                    static_cast<const uint8_t *>(wgpuBufferGetConstMappedRange(p->readback.get(), 0, kPickReadback));
+                uint32_t id[4], corner[4];
+                float pos[4], edge[4];
                 std::memcpy(id, bytes, 16);
                 std::memcpy(pos, bytes + 256, 16);
+                std::memcpy(corner, bytes + 512, 16);
+                std::memcpy(edge, bytes + 768, 16);
                 wgpuBufferUnmap(p->readback.get());
                 if (id[0] != 0 && id[0] - 1 < p->ids.size()) {
                     r.hit = true;
@@ -1716,15 +1755,19 @@ struct Renderer::Impl {
                     r.triangle = id[1];
                     r.segment = id[2];
                     r.topology = id[3];
-                    r.world[0] = pos[0];
-                    r.world[1] = pos[1];
-                    r.world[2] = pos[2];
+                    for (int k = 0; k < 3; ++k) {
+                        r.world[k] = pos[k];
+                        // A point (drawn after the triangles, not in the second pass) is its own corner.
+                        const bool triangle = r.topology == uint32_t(Topology::Triangles) && corner[3] == 1;
+                        r.vertex[k] = triangle ? std::bit_cast<float>(corner[k]) : pos[k];
+                        r.edge[k] = triangle ? edge[k] : pos[k];
+                    }
                 }
             }
             p->done(r);
         };
         cb.userdata1 = pending;
-        wgpuBufferMapAsync(pending->readback.get(), WGPUMapMode_Read, 0, 512, cb);
+        wgpuBufferMapAsync(pending->readback.get(), WGPUMapMode_Read, 0, kPickReadback, cb);
     }
 
     // One render pass. `clear` starts from the background (else loads what an earlier pass left), `resolve`
@@ -1775,25 +1818,35 @@ struct Renderer::Impl {
             const bool front = flags & kDepthOffset;
             const bool back = !front && (flags & kDepthBack);
             const bool cull = (flags & kCullBack) && !(flags & kDoubleSided);
+            const bool blend = flags & kTransparent;
+            auto draw = [&] {
+                if (args)
+                    wgpuRenderPassEncoderDrawIndirect(pass, args, uint64_t(inst->gpu_index) * 16);
+                else
+                    wgpuRenderPassEncoderDraw(pass, inst->vis_count * kClusterMaxTriangles * 3, 1,
+                                              inst->vis_base * kClusterMaxTriangles * 3, 0);
+                st.draw_calls++;
+            };
+            wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
+            if (blend && !cull) {
+                // Double-sided and see-through: its back faces first, then (below) its front faces over them,
+                // as three.js draws a transparent DoubleSide material. Neither writes depth, so in one pass a
+                // near face drawn before a far one would end up under it.
+                use((flags & kOnTop) ? r.top_blend_inner
+                    : front          ? r.tri_blend_inner_front
+                    : back           ? r.tri_blend_inner_back
+                                     : r.tri_blend_inner);
+                draw();
+            }
             if (flags & kOnTop)
-                use((flags & kTransparent)   ? (cull ? r.top_blend_cull : r.top_blend)
-                    : (flags & kDoubleSided) ? r.top_double
-                                             : r.top_single);
-            else if (flags & kTransparent && cull)
+                use(blend ? r.top_blend_cull : (flags & kDoubleSided) ? r.top_double : r.top_single);
+            else if (blend)
                 use(front ? r.tri_blend_cull_front : back ? r.tri_blend_cull_back : r.tri_blend_cull);
-            else if (flags & kTransparent)
-                use(front ? r.tri_blend_front : back ? r.tri_blend_back : r.tri_blend);
             else if (flags & kDoubleSided)
                 use(front ? r.tri_double_front : back ? r.tri_double_back : r.tri_double);
             else
                 use(front ? r.tri_single_front : back ? r.tri_single_back : r.tri_single);
-            wgpuRenderPassEncoderSetBindGroup(pass, 1, g.bind.get(), 0, nullptr);
-            if (args)
-                wgpuRenderPassEncoderDrawIndirect(pass, args, uint64_t(inst->gpu_index) * 16);
-            else
-                wgpuRenderPassEncoderDraw(pass, inst->vis_count * kClusterMaxTriangles * 3, 1,
-                                          inst->vis_base * kClusterMaxTriangles * 3, 0);
-            st.draw_calls++;
+            draw();
         }
         void tris(bool transparent, WGPUBuffer args, const std::vector<char> *in_view) {
             for (Instance *inst : r.order) {
@@ -1844,13 +1897,26 @@ struct Renderer::Impl {
                 list(inst, g);
             }
         }
-        // The kOnTop instances, whatever they are made of, in instance order; triangles from their CPU-culled
-        // clusters (the frame bound must be the one over `visible_buf`).
-        void on_top() {
-            for (Instance *inst : r.order) {
+        // The transparent instances, triangles and lines, in the frame's sorted order (blend_order: render
+        // order, then back to front).
+        void blended(WGPUBuffer args, const std::vector<char> *in_view) {
+            for (Instance *inst : r.blend_order) {
                 const Geometry &g = r.geometry(inst->geometry);
-                if ((inst->desc.flags & (kHidden | kOnTop)) != kOnTop)
+                if (g.topology != Topology::Triangles) {
+                    list(inst, g);
                     continue;
+                }
+                if (g.clusters.empty() || (args ? !(*in_view)[inst->gpu_index] : inst->vis_count == 0))
+                    continue;
+                tri(inst, g, args);
+            }
+        }
+        // The kOnTop instances, whatever they are made of, in the frame's sorted order (top_order: render order,
+        // the opaque before the transparent, these back to front); triangles from their CPU-culled clusters (the
+        // frame bound must be the one over `visible_buf`).
+        void on_top() {
+            for (Instance *inst : r.top_order) {
+                const Geometry &g = r.geometry(inst->geometry);
                 if (g.topology != Topology::Triangles)
                     list(inst, g);
                 else if (inst->vis_count != 0)
@@ -1897,6 +1963,48 @@ struct Renderer::Impl {
                 d.st.draw_calls++;
             }
         }
+    }
+
+    // This frame's order of the instances drawn sorted, as three.js sorts its render lists:
+    //   blend_order  transparent instances (not kOnTop, not kUnderlay), triangles and lines together: by
+    //                render_order, then back to front by the view depth of their bounds' centre (three.js
+    //                takes the geometry's bounding sphere centre too), then by id
+    //   top_order    kOnTop instances: by render_order, the opaque before the transparent, these back to
+    //                front, then by id
+    // Opaque instances need no order: the depth test settles what is in front.
+    void sort_draw_order() {
+        struct Item {
+            float order, z; // z: view-space depth, more negative is farther
+            bool blend;
+            Instance *inst;
+        };
+        std::vector<Item> blend, top;
+        for (Instance *inst : order) {
+            const uint32_t f = inst->desc.flags;
+            const bool on_top = f & kOnTop, transparent = f & kTransparent;
+            if ((f & kHidden) || !(on_top || (transparent && !(f & kUnderlay))))
+                continue;
+            float c[3];
+            world_sphere(*inst, c);
+            const float z = view[2] * c[0] + view[6] * c[1] + view[10] * c[2] + view[14];
+            (on_top ? top : blend).push_back({inst->desc.render_order, z, transparent, inst});
+        }
+        std::stable_sort(blend.begin(), blend.end(), [](const Item &a, const Item &b) {
+            return a.order != b.order ? a.order < b.order : a.z < b.z;
+        });
+        std::stable_sort(top.begin(), top.end(), [](const Item &a, const Item &b) {
+            if (a.order != b.order)
+                return a.order < b.order;
+            if (a.blend != b.blend)
+                return b.blend;
+            return a.blend && a.z < b.z;
+        });
+        blend_order.clear();
+        top_order.clear();
+        for (const Item &i : blend)
+            blend_order.push_back(i.inst);
+        for (const Item &i : top)
+            top_order.push_back(i.inst);
     }
 
     // The camera and the section planes as the sprite and quad shaders read them.
@@ -2138,6 +2246,7 @@ struct Renderer::Impl {
         }
         for (auto &g : geometries)
             st.geometries += g ? 1 : 0;
+        sort_draw_order();
         prepare_quads();
 
         WGPUCommandEncoderDescriptor ed = WGPU_COMMAND_ENCODER_DESCRIPTOR_INIT;
@@ -2170,8 +2279,7 @@ struct Renderer::Impl {
         d.lists(false);
         draw_caps(d, view_proj);
         wgpuRenderPassEncoderSetBindGroup(pass, 0, frame_bind.get(), 0, nullptr);
-        d.tris(true, nullptr, nullptr);
-        d.lists(true);
+        d.blended(nullptr, nullptr);
         if (draw_quads(pass, st, false)) {
             d.bound = nullptr;
             wgpuRenderPassEncoderSetBindGroup(pass, 0, frame_bind.get(), 0, nullptr);
@@ -2256,8 +2364,7 @@ struct Renderer::Impl {
         late.lists(false);
         draw_caps(late, view_proj);
         wgpuRenderPassEncoderSetBindGroup(pass, 0, frame_bind_late.get(), 0, nullptr);
-        late.tris(true, args_late_buf.get(), &in_view);
-        late.lists(true);
+        late.blended(args_late_buf.get(), &in_view);
         if (draw_quads(pass, st, false))
             late.bound = nullptr;
         wgpuRenderPassEncoderSetBindGroup(pass, 0, frame_bind.get(), 0, nullptr);

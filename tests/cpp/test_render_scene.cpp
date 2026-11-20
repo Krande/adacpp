@@ -1261,6 +1261,218 @@ void test_underlay(NativeDevice &dev, bool fixed_point) {
     }
 }
 
+// The background (10, 20, 30) under `layers` (sRGB-encoded colour, alpha), blended in the order given: what the
+// renderer's target holds after drawing them (it blends the sRGB-encoded values, as three.js' canvas does).
+std::array<int, 3> blended(std::vector<std::array<float, 4>> layers) {
+    float c[3] = {10, 20, 30};
+    for (const auto &l : layers)
+        for (int k = 0; k < 3; ++k)
+            c[k] = l[k] * 255 * l[3] + c[k] * (1 - l[3]);
+    return {int(std::lround(c[0])), int(std::lround(c[1])), int(std::lround(c[2]))};
+}
+
+// Transparency as three.js draws it: nothing transparent writes depth, transparent instances (triangles and lines)
+// are drawn back to front whatever order they were added in (render_order first), a double-sided one is drawn
+// back faces first, and kOnTop instances follow their render_order.
+void test_transparency(NativeDevice &dev) {
+    const uint32_t overlay = kUnlit | kNoPick | kDepthOffset | kMorphRelative;
+    {
+        // An edge behind a see-through face (an overlay cell's, culling its back faces) shows through it.
+        Stage s(dev, -2, 2, -2, 2);
+        add_rect(s.r, -1, -1, 1, 1, 0, {1, 1, 1, 0.3f}, overlay | kTransparent | kCullBack);
+        add_shape(s.r, Topology::Lines, {-0.9f, 0.5f, -1, 0.9f, 0.5f, -1}, {0, 1}, {1, 0, 0, 1}, overlay, 3.0f);
+        s.draw();
+        const auto edge = blended({{1, 0, 0, 1}, {1, 1, 1, 0.3f}});
+        CHECK(s.shows(0, 0.5f, edge[0], edge[1], edge[2], 3));
+    }
+    {
+        // Three see-through planes, added front-most first, red over green over blue; and a see-through line
+        // between the green and the blue one, sorted among them.
+        Stage s(dev, -2, 2, -2, 2);
+        add_rect(s.r, -1, -1, 1, 1, 2, {1, 0, 0, 0.5f}, kUnlit | kTransparent);
+        add_rect(s.r, -1, -1, 1, 1, 1, {0, 1, 0, 0.5f}, kUnlit | kTransparent);
+        add_rect(s.r, -1, -1, 1, 1, 0, {0, 0, 1, 0.5f}, kUnlit | kTransparent);
+        add_shape(s.r, Topology::Lines, {-1.5f, 0.5f, 0.5f, 1.5f, 0.5f, 0.5f}, {0, 1}, {1, 1, 1, 0.5f},
+                  kUnlit | kTransparent, 3.0f);
+        s.draw();
+        const auto planes = blended({{0, 0, 1, 0.5f}, {0, 1, 0, 0.5f}, {1, 0, 0, 0.5f}});
+        CHECK(s.shows(0, -0.5f, planes[0], planes[1], planes[2], 3));
+        const auto line = blended({{0, 0, 1, 0.5f}, {1, 1, 1, 0.5f}, {0, 1, 0, 0.5f}, {1, 0, 0, 0.5f}});
+        CHECK(s.shows(0, 0.5f, line[0], line[1], line[2], 3));
+        // Outside the planes the line is over the background alone.
+        const auto bare = blended({{1, 1, 1, 0.5f}});
+        CHECK(s.shows(1.25f, 0.5f, bare[0], bare[1], bare[2], 3));
+    }
+    {
+        // render_order before depth: the blue plane, farthest, drawn last when its order is higher.
+        Stage s(dev, -2, 2, -2, 2);
+        add_rect(s.r, -1, -1, 1, 1, 1, {1, 0, 0, 0.5f}, kUnlit | kTransparent);
+        const uint32_t blue = add_rect(s.r, -1, -1, 1, 1, 0, {0, 0, 1, 0.5f}, kUnlit | kTransparent);
+        InstanceDesc d = s.r.instance_desc(blue);
+        d.render_order = 1;
+        s.r.set_instance(blue, d);
+        s.draw();
+        const auto c = blended({{1, 0, 0, 0.5f}, {0, 0, 1, 0.5f}});
+        CHECK(s.shows(0, 0, c[0], c[1], c[2], 3));
+    }
+    {
+        // A double-sided see-through box with its near face first in the index list: its far face (green) is
+        // still drawn under its near face (red).
+        Stage s(dev, -2, 2, -2, 2);
+        const std::vector<float> faces = {-1, -1, 1,  1,  -1, 1,  1, 1, 1,  -1, 1,  1,   // near (z = 1), red
+                                          -1, -1, -1, -1, 1,  -1, 1, 1, -1, 1,  -1, -1}; // far (z = -1), green
+        const std::vector<uint32_t> indices = {0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7};
+        const std::vector<uint32_t> colors = {0xff0000ffu, 0xff0000ffu, 0xff0000ffu, 0xff0000ffu,
+                                              0xff00ff00u, 0xff00ff00u, 0xff00ff00u, 0xff00ff00u};
+        GeometryDesc gd;
+        gd.positions = faces.data();
+        gd.vertex_count = 8;
+        gd.colors = colors.data();
+        gd.indices = indices.data();
+        gd.index_count = indices.size();
+        const uint32_t box = s.r.add_instance(s.r.add_geometry(gd));
+        InstanceDesc d;
+        d.color = {1, 1, 1, 0.5f};
+        d.flags = kUnlit | kTransparent | kDoubleSided | kVertexColors;
+        s.r.set_instance(box, d);
+        s.draw();
+        const auto c = blended({{0, 1, 0, 0.5f}, {1, 0, 0, 0.5f}});
+        CHECK(s.shows(0, 0, c[0], c[1], c[2], 3));
+        // kCullBack: the far face, which faces away, is not drawn.
+        d.flags = (d.flags & ~uint32_t(kDoubleSided)) | kCullBack;
+        s.r.set_instance(box, d);
+        s.draw();
+        const auto front = blended({{1, 0, 0, 0.5f}});
+        CHECK(s.shows(0, 0, front[0], front[1], front[2], 3));
+    }
+    {
+        // kOnTop instances by render_order, then id: the first one added drawn last when its order is higher.
+        Stage s(dev, -2, 2, -2, 2);
+        const uint32_t red = add_rect(s.r, -1, -1, 1, 1, -5, {1, 0, 0, 1}, kUnlit | kOnTop);
+        add_rect(s.r, -1, -1, 1, 1, 5, {0, 1, 0, 1}, kUnlit | kOnTop);
+        s.draw();
+        CHECK(s.shows(0, 0, 0, 255, 0));
+        InstanceDesc d = s.r.instance_desc(red);
+        d.render_order = 2;
+        s.r.set_instance(red, d);
+        s.draw();
+        CHECK(s.shows(0, 0, 255, 0, 0));
+    }
+}
+
+// An overlay drawn lit (no kUnlit: three.js' MeshStandardMaterial on a helper) is shaded exactly as the model is,
+// transparent, pulled forward, one-sided or not, with the normals it is given.
+void test_lit_overlay(NativeDevice &dev) {
+    Stage s(dev, -2, 2, -2, 2);
+    // A face tilted 40 degrees about x, so the headlight (along -z) lights it partly; the model's on the left,
+    // the overlay's on the right, both with given normals.
+    const float c = std::cos(0.698f), sn = std::sin(0.698f);
+    auto tilted = [&](float x0, uint32_t flags, float alpha) {
+        const std::vector<float> p = {x0, -c, -sn, x0 + 1.5f, -c, -sn, x0 + 1.5f, c, sn, x0, c, sn};
+        const std::vector<float> n = {0, -sn, c, 0, -sn, c, 0, -sn, c, 0, -sn, c};
+        const std::vector<uint32_t> idx = {0, 1, 2, 0, 2, 3};
+        GeometryDesc gd;
+        gd.positions = p.data();
+        gd.vertex_count = 4;
+        gd.normals = n.data();
+        gd.indices = idx.data();
+        gd.index_count = 6;
+        const uint32_t inst = s.r.add_instance(s.r.add_geometry(gd));
+        InstanceDesc d;
+        d.color = {0.6f, 0.5f, 0.4f, alpha};
+        d.flags = flags;
+        d.metalness = 0.2f;
+        d.roughness = 0.5f;
+        s.r.set_instance(inst, d);
+    };
+    tilted(-1.75f, kDepthBack, 1);
+    tilted(0.25f, kNoPick | kDepthOffset | kMorphRelative | kCullBack, 1);
+    s.draw();
+    const auto model = s.at(-1, 0), over = s.at(1, 0);
+    CHECK(model[0] > 60 && model[0] < 250 && model[0] > model[1] && model[1] > model[2]);
+    CHECK(std::abs(model[0] - over[0]) <= 1 && std::abs(model[1] - over[1]) <= 1 && std::abs(model[2] - over[2]) <= 1);
+    // Transparent: the lit colour blended over the background.
+    s.r.clear();
+    tilted(0.25f, kNoPick | kDepthOffset | kTransparent | kCullBack, 0.5f);
+    s.draw();
+    const auto t = s.at(1, 0);
+    const auto expect = blended({{model[0] / 255.0f, model[1] / 255.0f, model[2] / 255.0f, 0.5f}});
+    CHECK(s.shows(1, 0, expect[0], expect[1], expect[2], 3));
+    (void) t;
+}
+
+// kVertexColorsSrgb: vertex colours blended in sRGB and decoded per pixel, so the middle of a black-to-white ramp is
+// sRGB 128 (a legend's gradient) where linear colours give 188, and a dark value comes out as it went in.
+void test_srgb_vertex_colors(NativeDevice &dev) {
+    Stage s(dev, -2, 2, -2, 2);
+    const std::vector<float> p = {-2, -2, 0, 2, -2, 0, 2, 0, 0, -2, 0, 0, -2, 0, 0, 2, 0, 0, 2, 2, 0, -2, 2, 0};
+    // Lower half: a ramp from black (left) to white (right); upper half: sRGB 10, 20, 30 everywhere.
+    const std::vector<uint32_t> colors = {0xff000000u, 0xffffffffu, 0xffffffffu, 0xff000000u,
+                                          0xff1e140au, 0xff1e140au, 0xff1e140au, 0xff1e140au};
+    const std::vector<uint32_t> idx = {0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7};
+    const std::vector<uint32_t> segments = {0, 6, 6, 6};
+    GeometryDesc gd;
+    gd.positions = p.data();
+    gd.vertex_count = 8;
+    gd.colors = colors.data();
+    gd.indices = idx.data();
+    gd.index_count = idx.size();
+    gd.segments = segments.data();
+    gd.segment_count = 2;
+    const uint32_t inst = s.r.add_instance(s.r.add_geometry(gd));
+    InstanceDesc d;
+    d.flags = kUnlit | kVertexColors | kVertexColorsSrgb;
+    s.r.set_instance(inst, d);
+    s.r.set_background(0, 0, 0);
+    s.draw();
+    const auto mid = s.at(0, -1);
+    CHECK(std::abs(mid[0] - 128) <= 3 && mid[0] == mid[1] && mid[1] == mid[2]);
+    CHECK(s.shows(0, 1, 10, 20, 30, 0));
+    // The instance's colour multiplies them in linear light: half of white is sRGB 188.
+    d.color = {0.5f, 0.5f, 0.5f, 1};
+    s.r.set_instance(inst, d);
+    s.draw();
+    CHECK(s.shows(1.99f, -1, 188, 188, 188, 2));
+    // A segment's colour override (the selection) is linear and replaces them.
+    const uint32_t states[4] = {0, 0, 0xff000080u, 0}; // segment 1: linear red 0.5 -> sRGB 188
+    s.r.set_segment_states(inst, states, 2);
+    s.draw();
+    CHECK(s.shows(0, 1, 188, 0, 0, 2));
+    // Without the flag the same colours are linear: the ramp's middle is sRGB 188 (times 0.5 now: 128 linear 0.25).
+    d.color = {1, 1, 1, 1};
+    d.flags = kUnlit | kVertexColors;
+    s.r.set_instance(inst, d);
+    s.draw();
+    CHECK(s.shows(0, -1, 188, 188, 188, 3));
+}
+
+// The pick's snap points: the hit triangle's nearest corner and the nearest point on its sides, as drawn (moved by
+// the instance's matrix); a point's own position for a point.
+void test_pick_snap(NativeDevice &dev) {
+    Stage s(dev, -2, 2, -2, 2);
+    const uint32_t rect = add_rect(s.r, -1, -1, 1, 1, 0, {1, 1, 1, 1}, kUnlit);
+    InstanceDesc d = s.r.instance_desc(rect);
+    d.model[12] = 0.5f; // moved right by 0.5: the square spans x in [-0.5, 1.5]
+    s.r.set_instance(rect, d);
+    add_shape(s.r, Topology::Points, {-1.5f, 1.5f, 0.5f}, {0}, {1, 0, 0, 1}, kUnlit, 4.0f);
+    s.draw();
+    // Triangle (0, 1, 2) of the square: (-0.5, -1), (1.5, -1), (1.5, 1). At (1.3, 0.7): the corner (1.5, 1), and the
+    // diagonal from (-0.5, -1) to (1.5, 1) passes at (1.25, 0.75), nearer than the right side at (1.5, 0.7).
+    PickResult hit = s.pick(1.3f, 0.7f);
+    CHECK(hit.hit && hit.instance == rect && hit.topology == 0);
+    CHECK(close(hit.vertex[0], 1.5f, 1e-4f) && close(hit.vertex[1], 1, 1e-4f) && close(hit.vertex[2], 0, 1e-4f));
+    CHECK(close(hit.edge[0], hit.edge[1] + 0.5f, 0.02f) && close(hit.edge[2], 0, 1e-4f));
+    CHECK(close(hit.edge[0], 0.5f * (hit.world[0] + hit.world[1] + 0.5f), 0.02f));
+    // Near the right side, away from the diagonal: the side.
+    hit = s.pick(1.45f, -0.6f);
+    CHECK(hit.hit && close(hit.edge[0], 1.5f, 1e-3f) && close(hit.edge[1], hit.world[1], 1e-3f));
+    CHECK(close(hit.vertex[0], 1.5f, 1e-4f) && close(hit.vertex[1], -1, 1e-4f));
+    // A point: its position.
+    hit = s.pick(-1.5f, 1.5f);
+    CHECK(hit.hit && hit.topology == 2);
+    CHECK(close(hit.vertex[0], -1.5f, 1e-4f) && close(hit.vertex[1], 1.5f, 1e-4f) && close(hit.vertex[2], 0.5f, 1e-4f));
+}
+
 } // namespace
 
 int main() {
@@ -1286,6 +1498,10 @@ int main() {
     test_occlusion(*dev);
     test_section_caps(*dev);
     test_underlay(*dev, false);
+    test_transparency(*dev);
+    test_lit_overlay(*dev);
+    test_srgb_vertex_colors(*dev);
+    test_pick_snap(*dev);
     {
         // A device without depth32float-stencil8 (a browser's, unless asked for): caps on 24-bit depth + stencil.
         NativeDevice plain("auto", false);

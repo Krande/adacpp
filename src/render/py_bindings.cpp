@@ -478,6 +478,9 @@ public:
         d["triangle"] = hit.triangle;
         d["topology"] = hit.topology; // 0 a triangle, 2 a point (its index is in "triangle")
         d["world"] = std::array<float, 3>{hit.world[0], hit.world[1], hit.world[2]};
+        // The hit triangle's corner and the point on its sides nearest to "world" (a point: the point itself).
+        d["vertex"] = std::array<float, 3>{hit.vertex[0], hit.vertex[1], hit.vertex[2]};
+        d["edge"] = std::array<float, 3>{hit.edge[0], hit.edge[1], hit.edge[2]};
         return d;
     }
 

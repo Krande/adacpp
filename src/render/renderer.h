@@ -23,9 +23,12 @@
 // Smaller scenes, scenes with occlusion culling switched off, and picking are culled on the CPU (frustum +
 // cone).
 //
-// After the opaque model: section caps (the cut faces of kCapped solids, by stencil counting). After the
-// transparent one: textured quads lying in the world, kOnTop instances (and quads), which ignore depth, and
-// last of all sprites, camera-facing textured quads sorted back to front.
+// After the opaque model: section caps (the cut faces of kCapped solids, by stencil counting). Then the
+// transparent instances, triangles and lines together, sorted back to front as three.js sorts transparent
+// objects; none of them writes depth, so whatever is behind a see-through face (an edge, another face) shows
+// through it, and a double-sided one is drawn as three.js draws it: its back faces, then its front faces. After
+// the transparent ones: textured quads lying in the world, kOnTop instances (and quads), which ignore depth,
+// and last of all sprites, camera-facing textured quads sorted back to front.
 #pragma once
 
 #include <array>
@@ -44,10 +47,12 @@ enum class Topology : uint32_t { Triangles = 0, Lines = 1, Points = 2 };
 
 // Instance flags. Keep in step with the WGSL constants in shaders.h and with the TypeScript bridge.
 enum InstanceFlags : uint32_t {
-    kVertexColors = 1u << 0,  // multiply the base colour by the geometry's per-vertex colours
-    kUnlit = 1u << 1,         // no lighting (MeshBasicMaterial, lines, points)
-    kDoubleSided = 1u << 2,   // no back-face culling (and no cone culling)
-    kTransparent = 1u << 3,   // alpha-blended, drawn after the opaque pass without depth writes
+    kVertexColors = 1u << 0, // multiply the base colour by the geometry's per-vertex colours
+    kUnlit = 1u << 1,        // no lighting (MeshBasicMaterial, lines, points)
+    kDoubleSided = 1u << 2,  // no back-face culling (and no cone culling)
+    // Alpha-blended, drawn after the opaque pass without depth writes, sorted back to front (render_order
+    // first); double-sided unless kCullBack, back faces before front faces.
+    kTransparent = 1u << 3,
     kHidden = 1u << 4,        // skip the whole instance
     kMorphRelative = 1u << 5, // morph target holds displacements (else absolute target positions)
     kNoPick = 1u << 8,        // drawn, but never returned by pick() (helpers, overlays, edges)
@@ -65,6 +70,11 @@ enum InstanceFlags : uint32_t {
     // Quads (set_quad) only: the texture is sampled at its nearest texel, so the cells of a grid keep hard
     // edges. Clear, it is filtered (trilinear when the texture has a mip chain).
     kNearest = 1u << 19,
+    // With kVertexColors: the geometry's per-vertex colours are sRGB-encoded (the numbers a colour map or a
+    // legend writes), not linear. They are blended across a primitive as they are and decoded per pixel, so
+    // a colour between two vertices is the one a legend's gradient shows there, and 8 bits lose nothing at the
+    // dark end. The instance's own colour still multiplies them, in linear light.
+    kVertexColorsSrgb = 1u << 20,
 };
 
 // Segment state flags (second u32 of a segment's state pair).
@@ -152,6 +162,11 @@ struct InstanceDesc {
     // zero dash draws solid.
     float dash = 0.0f;
     float gap = 0.0f;
+    // Draw order among the instances drawn sorted, as three.js' Object3D.renderOrder: the transparent ones
+    // (ascending render_order, then back to front by the centre of their bounds, then by id) and the kOnTop
+    // ones (ascending render_order, the opaque before the transparent, then by id). Opaque instances are
+    // depth-tested and drawn in id order whatever it is.
+    float render_order = 0.0f;
 };
 
 // What is under a pixel: the nearest pickable triangle or point there.
@@ -164,6 +179,11 @@ struct PickResult {
     uint32_t triangle = 0;
     uint32_t topology = 0; // what was hit, as Topology: 0 a triangle, 2 a point
     float world[3] = {0, 0, 0};
+    // What to snap to there (a measurement, a port), in the world as drawn (morphed, placed): `vertex` the
+    // corner of the hit triangle nearest to `world`, `edge` the nearest point on that triangle's three sides
+    // (which include the diagonals a face is triangulated with). For a point both are the point itself.
+    float vertex[3] = {0, 0, 0};
+    float edge[3] = {0, 0, 0};
 };
 
 struct RenderStats {

@@ -13,7 +13,7 @@ namespace adacpp::render {
 //             slot from the vertex index alone (indirect draws cannot rely on firstInstance)
 //   vtx       6 x f32 per vertex: position, normal (zero normal = derive a flat one; lines: x = distance
 //             along the line, for dashes)
-//   colors    packed RGBA8 per vertex
+//   colors    packed RGBA8 per vertex: linear, or sRGB-encoded with FLAG_COLORS_SRGB
 //   morph     3 x f32 per vertex
 //   prim      triangles: cluster records (4 x u32: vertex offset, triangle offset, triangle count,
 //             segment) followed by the cluster vertex lists and the packed local triangles (3 x u8 in
@@ -59,6 +59,10 @@ const FLAG_UNDERLAY: u32 = 32768u; // lines under the model (a ground grid): dra
 const FLAG_CAPPED: u32 = 65536u; // its cut is capped; the renderer picks the instances, the shaders do not read it
 const FLAG_ON_TOP: u32 = 131072u; // drawn last with no depth test; the renderer picks the pipeline, as above
 const FLAG_CAP: u32 = 1073741824u; // internal, set by vs_cap: a fragment of the cap on plane clip_info.y - 1
+// The vertex colours are sRGB-encoded: VOut.color carries them as they are, blended across the primitive in
+// sRGB, and fs_main decodes them and multiplies by VOut.tint (the instance's colour). Cleared per vertex where
+// a segment's colour override replaces them.
+const FLAG_COLORS_SRGB: u32 = 1048576u;
 
 // An underlay line (a ground grid) a hair farther away than a face lying in its plane, so the face wins even
 // where the two rasterise to different depths; and no farther, so whatever stands above the plane is still
@@ -129,11 +133,12 @@ struct VOut {
     @location(4) @interpolate(flat) material: vec4<f32>,
     @location(5) @interpolate(flat) pick: vec4<u32>, // instance + 1, primitive, segment, topology (0 or 2)
     @location(6) dist: f32, // lines: distance along the line
+    @location(7) @interpolate(flat) tint: vec4<f32>, // FLAG_COLORS_SRGB: the instance's colour
 };
 
-fn shade_vertex(inst: Instance, vi: u32, seg: i32, ii: u32, primitive: u32) -> VOut {
+// Vertex `vi` in the world, morphed.
+fn vertex_world(inst: Instance, vi: u32) -> vec4<f32> {
     var p = vec3<f32>(vtx[vi * 6u], vtx[vi * 6u + 1u], vtx[vi * 6u + 2u]);
-    let n = vec3<f32>(vtx[vi * 6u + 3u], vtx[vi * 6u + 4u], vtx[vi * 6u + 5u]);
     if ((inst.flags & FLAG_HAS_MORPH) != 0u) {
         let m = vec3<f32>(morph[vi * 3u], morph[vi * 3u + 1u], morph[vi * 3u + 2u]);
         if ((inst.flags & FLAG_MORPH_RELATIVE) != 0u) {
@@ -142,16 +147,28 @@ fn shade_vertex(inst: Instance, vi: u32, seg: i32, ii: u32, primitive: u32) -> V
             p = mix(p, m, inst.morph);
         }
     }
-    let wp = inst.model * vec4<f32>(p, 1.0);
+    return inst.model * vec4<f32>(p, 1.0);
+}
+
+fn shade_vertex(inst: Instance, vi: u32, seg: i32, ii: u32, primitive: u32) -> VOut {
+    let n = vec3<f32>(vtx[vi * 6u + 3u], vtx[vi * 6u + 4u], vtx[vi * 6u + 5u]);
+    let wp = vertex_world(inst, vi);
     var c = inst.color;
-    if ((inst.flags & FLAG_VERTEX_COLORS) != 0u) {
-        c = vec4<f32>(c.rgb * unpack4x8unorm(colors[vi]).rgb, c.a);
+    var flags = inst.flags;
+    if ((flags & FLAG_VERTEX_COLORS) != 0u) {
+        let vc = unpack4x8unorm(colors[vi]).rgb;
+        if ((flags & FLAG_COLORS_SRGB) != 0u) {
+            c = vec4<f32>(vc, c.a); // decoded per pixel, see fs_main
+        } else {
+            c = vec4<f32>(c.rgb * vc, c.a);
+        }
     }
     var material = inst.material;
     if (seg >= 0) {
         let ov = unpack4x8unorm(segstate[(inst.seg_base + u32(seg)) * 2u]);
         if (ov.a > 0.0) {
             c = vec4<f32>(ov.rgb, c.a);
+            flags = flags & ~FLAG_COLORS_SRGB;
             // A matte override (the selection highlight) is lit as its own material, not the instance's.
             if ((segstate[(inst.seg_base + u32(seg)) * 2u + 1u] & SEGMENT_MATTE) != 0u) {
                 material = vec4<f32>(0.0, 1.0, 1.0, material.w);
@@ -163,41 +180,81 @@ fn shade_vertex(inst: Instance, vi: u32, seg: i32, ii: u32, primitive: u32) -> V
     out.world = wp.xyz;
     out.normal = (inst.model * vec4<f32>(n, 0.0)).xyz;
     out.color = c;
-    out.flags = inst.flags;
+    out.flags = flags;
+    out.tint = inst.color;
     out.material = material;
     out.pick = vec4<u32>(ii + 1u, primitive, u32(max(seg, 0)), select(0u, 2u, (inst.flags & FLAG_POINTS) != 0u));
     out.dist = vtx[vi * 6u + 3u];
     return out;
 }
 
-@vertex
-fn vs_tri(@builtin(vertex_index) vid: u32) -> VOut {
+// Where vertex `vid` of a vs_tri draw is: x the instance, y its triangle's record in `prim` (packed corners,
+// original index, segment), z its cluster's vertex list in `prim`, w which corner; x = NONE when it draws
+// nothing: an unused slot of a partial cluster, or a triangle of a hidden object sharing the cluster.
+const NONE: u32 = 0xffffffffu;
+fn tri_at(vid: u32) -> vec4<u32> {
     let slot = vid / CLUSTER_VERTS;
     let ii = visible[slot * 2u];
-    let inst = instances[ii];
     let local = vid % CLUSTER_VERTS;
     let tri = local / 3u;
-    let corner = local % 3u;
     let cl = visible[slot * 2u + 1u] * 4u;
-    let v_off = prim[cl];
-    let t_off = prim[cl + 1u];
-    let t_cnt = prim[cl + 2u];
-    if (tri >= t_cnt) {
+    if (tri >= prim[cl + 2u]) {
+        return vec4<u32>(NONE);
+    }
+    let t = prim[cl + 1u] + tri * 3u;
+    if ((segstate[(instances[ii].seg_base + prim[t + 2u]) * 2u + 1u] & 1u) != 0u) {
+        return vec4<u32>(NONE);
+    }
+    return vec4<u32>(ii, t, prim[cl], local % 3u);
+}
+
+// The vertex at `corner` (0, 1, 2) of the triangle tri_at() found.
+fn tri_corner(at: vec4<u32>, corner: u32) -> u32 {
+    return prim[at.z + ((prim[at.y] >> (corner * 8u)) & 0xffu)];
+}
+
+@vertex
+fn vs_tri(@builtin(vertex_index) vid: u32) -> VOut {
+    let at = tri_at(vid);
+    if (at.x == NONE) {
         var dead: VOut;
         dead.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0); // all three corners equal: zero-area, outside the clip volume
         return dead;
     }
-    let t = t_off + tri * 3u;
-    let seg = prim[t + 2u];
-    if ((segstate[(inst.seg_base + seg) * 2u + 1u] & 1u) != 0u) {
-        var hidden: VOut;
-        hidden.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0); // a hidden object sharing this cluster
-        return hidden;
-    }
-    let local_index = (prim[t] >> (corner * 8u)) & 0xffu;
-    let vi = prim[v_off + local_index];
-    return shade_vertex(inst, vi, i32(seg), ii, prim[t + 1u]);
+    return shade_vertex(instances[at.x], tri_corner(at, at.w), i32(prim[at.y + 2u]), at.x, prim[at.y + 1u]);
 }
+
+// The pick's second pass (Renderer::pick): vs_tri's triangles, each fragment knowing its triangle's corners.
+struct COut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) world: vec3<f32>,
+    @location(1) @interpolate(flat) flags: u32,
+    @location(2) @interpolate(flat) a: vec3<f32>,
+    @location(3) @interpolate(flat) b: vec3<f32>,
+    @location(4) @interpolate(flat) c: vec3<f32>,
+};
+
+@vertex
+fn vs_tri_corners(@builtin(vertex_index) vid: u32) -> COut {
+    var out: COut;
+    let at = tri_at(vid);
+    if (at.x == NONE) {
+        out.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        return out;
+    }
+    let inst = instances[at.x];
+    let v = shade_vertex(inst, tri_corner(at, at.w), i32(prim[at.y + 2u]), at.x, prim[at.y + 1u]);
+    out.pos = v.pos;
+    out.world = v.world;
+    out.flags = v.flags;
+    out.a = vertex_world(inst, tri_corner(at, 0u)).xyz;
+    out.b = vertex_world(inst, tri_corner(at, 1u)).xyz;
+    out.c = vertex_world(inst, tri_corner(at, 2u)).xyz;
+    return out;
+}
+)WGSL"
+    // (One raw string is limited to 16 KiB by some compilers: the rest of it follows.)
+    R"WGSL(
 
 @vertex
 fn vs_list(@builtin(vertex_index) vid: u32, @builtin(instance_index) ii: u32) -> VOut {
@@ -349,20 +406,24 @@ struct PickOut {
     @location(1) world: vec4<f32>,
 };
 
-// Whether the section planes cut this fragment away (three.js' clippingPlanes, union: any plane cuts).
-fn clipped(in: VOut) -> bool {
-    if ((in.flags & FLAG_CLIPPED) == 0u) {
+// Whether the section planes cut a fragment away (three.js' clippingPlanes, union: any plane cuts).
+fn cut(flags: u32, world: vec3<f32>) -> bool {
+    if ((flags & FLAG_CLIPPED) == 0u) {
         return false;
     }
     // A cap lies in its own plane: only the other planes cut it.
-    let own = select(0u, frame.clip_info.y, (in.flags & FLAG_CAP) != 0u);
+    let own = select(0u, frame.clip_info.y, (flags & FLAG_CAP) != 0u);
     for (var i = 0u; i < min(frame.clip_info.x, 6u); i = i + 1u) {
         let pl = frame.clip[i];
-        if (i + 1u != own && dot(pl.xyz, in.world) + pl.w < 0.0) {
+        if (i + 1u != own && dot(pl.xyz, world) + pl.w < 0.0) {
             return true;
         }
     }
     return false;
+}
+
+fn clipped(in: VOut) -> bool {
+    return cut(in.flags, in.world);
 }
 
 @fragment
@@ -373,6 +434,41 @@ fn fs_pick(in: VOut) -> PickOut {
     var o: PickOut;
     o.id = in.pick;
     o.world = vec4<f32>(in.world, 1.0);
+    return o;
+}
+
+fn nearest_on_segment(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>) -> vec3<f32> {
+    let ab = b - a;
+    return a + clamp(dot(p - a, ab) / max(dot(ab, ab), 1e-30), 0.0, 1.0) * ab;
+}
+
+// The pick's second pass: the corner of the picked triangle nearest to the picked point (its xyz bits in
+// id.xyz, 1 in id.w) and the nearest point on the triangle's edges (world.xyz).
+@fragment
+fn fs_pick_corner(in: COut) -> PickOut {
+    if (cut(in.flags, in.world)) {
+        discard;
+    }
+    let p = in.world;
+    var v = in.a;
+    if (distance(p, in.b) < distance(p, v)) {
+        v = in.b;
+    }
+    if (distance(p, in.c) < distance(p, v)) {
+        v = in.c;
+    }
+    var e = nearest_on_segment(p, in.a, in.b);
+    let e1 = nearest_on_segment(p, in.b, in.c);
+    let e2 = nearest_on_segment(p, in.c, in.a);
+    if (distance(p, e1) < distance(p, e)) {
+        e = e1;
+    }
+    if (distance(p, e2) < distance(p, e)) {
+        e = e2;
+    }
+    var o: PickOut;
+    o.id = vec4<u32>(bitcast<u32>(v.x), bitcast<u32>(v.y), bitcast<u32>(v.z), 1u);
+    o.world = vec4<f32>(e, 1.0);
     return o;
 }
 
@@ -395,6 +491,12 @@ fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
     return select(hi, lo, c <= vec3<f32>(0.0031308));
 }
 
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow((max(c, vec3<f32>(0.0)) + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(hi, lo, c <= vec3<f32>(0.04045));
+}
+
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     // Derivatives first, in uniform control flow: the flat normal for geometry without normals.
@@ -407,6 +509,9 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         discard;
     }
     var rgb = in.color.rgb;
+    if ((in.flags & FLAG_COLORS_SRGB) != 0u) {
+        rgb = srgb_to_linear(rgb) * in.tint.rgb;
+    }
     if ((in.flags & FLAG_UNLIT) == 0u) {
         var n = in.normal;
         if (dot(n, n) < 1e-12) {
