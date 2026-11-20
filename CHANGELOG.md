@@ -2,6 +2,15 @@
 
 
 
+## v0.43.0 (2026-11-20)
+
+### Feature
+
+* feat(cad): solid_from_polygons / solid_from_mesh build a faceted B-rep solid directly, and in parallel in batches (#85)
+
+Co-authored-by: Claude Opus 5.5 &lt;noreply@anthropic.com&gt; ([`19ea410`](https://github.com/Krande/adacpp/commit/19ea41022da5a5ad9afd697c3aea086ccabe10b4))
+
+
 ## v0.42.2 (2026-11-15)
 
 ### Fix
