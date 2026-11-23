@@ -2,6 +2,15 @@
 
 
 
+## v0.45.0 (2026-11-23)
+
+### Feature
+
+* feat(render): HDR target, tone mapping and bloom, image-based lighting, point lights with flicker, emissive ramps and particle emitters (#87)
+
+Co-authored-by: Claude Opus 5.5 &lt;noreply@anthropic.com&gt; ([`a27f0a4`](https://github.com/Krande/adacpp/commit/a27f0a4fc485516364216b14e37607feb288b732))
+
+
 ## v0.44.0 (2026-11-20)
 
 ### Feature
