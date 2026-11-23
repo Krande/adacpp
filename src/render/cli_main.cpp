@@ -5,7 +5,7 @@
 //                 [--pick X,Y] [--bench N] [--camera ex,ey,ez,tx,ty,tz] [--line-width PX] [--point-size PX]
 //                 [--gizmo] [--overlay spec.json]   (orientation gizmo / colour legend, see overlay_json.h)
 //                 [--effects spec.json] [--time T] [--hdr] [--tonemap none|neutral|aces] [--exposure E]
-//                 [--bloom] [--env studio|file.hdr]   (realistic visuals, see docs/render_effects.md; the GLB's own
+//                 [--bloom] [--env studio|file.hdr] [--lighting AMBIENT,HEADLIGHT]   (realistic visuals, see docs/render_effects.md; the GLB's own
 //                 "ada_effects" scene extras are applied too)
 #include <chrono>
 #include <cstdio>
@@ -34,7 +34,7 @@ int main(int argc, char **argv) {
                      "[--backend auto|vulkan|gl] [--y-up] [--no-cull] [--cpu-cull] [--stats] [--pick X,Y] [--bench N] "
                      "[--camera ex,ey,ez,tx,ty,tz] [--line-width PX] [--point-size PX] [--gizmo] [--overlay spec.json] "
                      "[--effects spec.json] [--time T] [--hdr] [--tonemap none|neutral|aces] [--exposure E] [--bloom] "
-                     "[--env studio|file.hdr]\n",
+                     "[--env studio|file.hdr] [--lighting AMBIENT,HEADLIGHT]\n",
                      argv[0]);
         return 2;
     }
@@ -47,7 +47,8 @@ int main(int argc, char **argv) {
     std::string overlay_path, effects_path, tonemap, env_name;
     double time = 0.0;
     bool hdr = false, bloom = false;
-    float exposure = -1.0f;
+    float exposure = -1.0f, lighting[2] = {0, 0};
+    bool lighting_set = false;
     for (int i = 3; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--size" && i + 1 < argc)
@@ -81,6 +82,8 @@ int main(int argc, char **argv) {
             exposure = std::strtof(argv[++i], nullptr);
         else if (a == "--env" && i + 1 < argc)
             env_name = argv[++i];
+        else if (a == "--lighting" && i + 1 < argc)
+            lighting_set = std::sscanf(argv[++i], "%f,%f", &lighting[0], &lighting[1]) == 2;
         else if (a == "--hdr")
             hdr = true;
         else if (a == "--bloom")
@@ -148,6 +151,8 @@ int main(int argc, char **argv) {
             renderer.set_environment(env);
         }
         renderer.set_time(time);
+        if (lighting_set)
+            renderer.set_lighting(lighting[0], lighting[1]);
         const double load_ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - load_t0).count();
         Camera cam = frame_bounds(renderer.bounds(), vit->second, {0, 0, 1}, 60.0f, float(w) / float(h));

@@ -369,6 +369,26 @@ EnvImage studio_environment(uint32_t width, uint32_t height) {
             }
             std::copy(c.begin(), c.end(), img.rgb.begin() + (size_t(y) * width + x) * 3);
         }
+    // Scaled so a white diffuse face turned up is lit to kUpwardShade (its cosine-weighted radiance from above):
+    // the softboxes are what a metal reflects, and left as they are they burnt every diffuse surface to white.
+    constexpr double kUpwardShade = 0.75;
+    double num = 0.0, den = 0.0;
+    for (uint32_t y = 0; y < height; ++y) {
+        const float v = (y + 0.5f) / height;
+        const double cos_up = std::cos(double(v) * kPi), solid = std::sin(double(v) * kPi);
+        if (cos_up <= 0.0)
+            continue;
+        for (uint32_t x = 0; x < width; ++x) {
+            const float *p = &img.rgb[(size_t(y) * width + x) * 3];
+            num += (0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]) * cos_up * solid;
+            den += cos_up * solid;
+        }
+    }
+    if (num > 0.0) {
+        const float k = float(kUpwardShade * den / num);
+        for (float &c : img.rgb)
+            c *= k;
+    }
     return img;
 }
 
