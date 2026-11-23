@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "camera_controller.h"
+#include "effects.h"
 #include "gpu.h"
 
 namespace adacpp::render {
@@ -95,6 +96,8 @@ enum SpriteFlags : uint32_t {
 
 // SpriteDesc::texture for an untextured sprite: a quad of the tint colour.
 inline constexpr uint32_t kNoTexture = 0xFFFFFFFFu;
+// InstanceDesc::emissive_ramp / set_segment_emissive() for no ramp.
+inline constexpr uint32_t kNoRamp = 0xFFFFFFFFu;
 
 // A camera-facing textured quad: three.js' Sprite, with SpriteMaterial's parameters.
 struct SpriteDesc {
@@ -167,6 +170,11 @@ struct InstanceDesc {
     // ones (ascending render_order, the opaque before the transparent, then by id). Opaque instances are
     // depth-tested and drawn in id order whatever it is.
     float render_order = 0.0f;
+    // Light the surface gives off, added after the lighting: linear RGB times strength, above 1 for a glow
+    // (kept by PostSettings::hdr, and bloomed). `emissive_ramp` (add_emissive_ramp; kNoRamp = none) makes it
+    // change over time instead, and replaces `emissive`.
+    std::array<float, 3> emissive{0, 0, 0};
+    uint32_t emissive_ramp = kNoRamp;
 };
 
 // What is under a pixel: the nearest pickable triangle or point there.
@@ -235,7 +243,9 @@ public:
     // Two u32 per segment: RGBA8 colour override (alpha 0 = no override) and SegmentFlags.
     void set_segment_states(uint32_t instance, const uint32_t *packed, size_t segment_count);
     void remove_instance(uint32_t instance);
-    void clear(); // every geometry, instance, sprite, quad and texture
+    // Every geometry, instance, sprite, quad and texture, and every point light, emissive ramp and emitter
+    // (the post-processing and the environment stay).
+    void clear();
 
     // `proj_gl` is an OpenGL-convention projection (clip z in [-1, 1], e.g. three.js); it is remapped to
     // WebGPU's [0, 1] here, reversed (near 1, far 0). Matrices are column-major.
@@ -293,6 +303,46 @@ public:
     uint32_t add_quad();
     void set_quad(uint32_t quad, const QuadDesc &desc);
     void remove_quad(uint32_t quad);
+
+    // Realistic visuals (effects.h). Nothing here costs anything until it is used: the defaults draw exactly
+    // as before.
+    //
+    // Post-processing: HDR target, tone mapping, exposure, bloom.
+    void set_post(const PostSettings &post);
+    const PostSettings &post() const;
+    // Image-based lighting.
+    void set_environment(const EnvironmentDesc &env);
+    const EnvironmentDesc &environment() const;
+    // The environment image: `width` x `height` linear RGB floats (3 per texel), equirectangular, row 0 at the
+    // zenith. Resampled to the renderer's own size. reset_environment_map() goes back to the procedural studio.
+    void set_environment_map(const float *rgb, uint32_t width, uint32_t height);
+    // The same from the bytes of a Radiance .hdr file; throws std::runtime_error when it cannot be read.
+    void set_environment_hdr(const uint8_t *bytes, size_t size);
+    void reset_environment_map();
+    // The clock every time-dependent effect reads (flicker, emissive ramps, particles), in seconds.
+    void set_time(double seconds);
+    double time() const;
+    // Point lights: at most kMaxPointLights are lit at once (the first ones, by id, that are on).
+    static constexpr size_t kMaxPointLights = 16;
+    uint32_t add_point_light();
+    void set_point_light(uint32_t light, const PointLightDesc &desc);
+    void remove_point_light(uint32_t light);
+    // Emissive ramps, shared by the instances and segments that use them: at most kMaxEmissiveRamps.
+    static constexpr size_t kMaxEmissiveRamps = 255;
+    uint32_t add_emissive_ramp();
+    void set_emissive_ramp(uint32_t ramp, const EmissiveRampDesc &desc);
+    void remove_emissive_ramp(uint32_t ramp); // what used it glows no more
+    // Segments `segments[0 .. count)` of an instance glow with `ramp` (kNoRamp: as the instance does), over
+    // InstanceDesc::emissive: one object of a batched geometry. Kept apart from set_segment_states().
+    void set_segment_emissive(uint32_t instance, const uint32_t *segments, size_t count, uint32_t ramp);
+    // Particle emitters (EmitterDesc); each draws at most kMaxParticlesPerEmitter at once.
+    static constexpr uint32_t kMaxParticlesPerEmitter = 4096;
+    uint32_t add_emitter();
+    void set_emitter(uint32_t emitter, const EmitterDesc &desc);
+    void remove_emitter(uint32_t emitter);
+    // Whether a frame drawn now could differ from one drawn a moment later at a later time(): a flickering
+    // light, a running ramp or live particles. A host drawing on demand keeps drawing while this is true.
+    bool animating() const;
 
     void render(WGPUTextureView target, uint32_t width, uint32_t height);
 

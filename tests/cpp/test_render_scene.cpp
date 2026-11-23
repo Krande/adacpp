@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "glb_effects.h"
 #include "glb_scene.h"
 #include "native_device.h"
 #include "renderer.h"
@@ -1473,6 +1474,347 @@ void test_pick_snap(NativeDevice &dev) {
     CHECK(close(hit.vertex[0], -1.5f, 1e-4f) && close(hit.vertex[1], 1.5f, 1e-4f) && close(hit.vertex[2], 0.5f, 1e-4f));
 }
 
+// --- Realistic visuals (effects.h) ---------------------------------------------------------------------------------
+
+int srgb8(float linear) {
+    linear = std::clamp(linear, 0.0f, 1.0f);
+    const float e = linear <= 0.0031308f ? linear * 12.92f : 1.055f * std::pow(linear, 1.0f / 2.4f) - 0.055f;
+    return int(std::lround(e * 255.0f));
+}
+
+// The HDR target with no tone mapping draws an opaque lit scene as the plain path does, and every tone mapping
+// leaves the background as it is.
+void test_hdr_target(NativeDevice &dev) {
+    Stage s(dev, -2, 2, -2, 2);
+    const uint32_t rect = add_rect(s.r, -1, -1, 1, 1, 0, {0.6f, 0.4f, 0.3f, 1}, 0);
+    InstanceDesc d = s.r.instance_desc(rect);
+    d.metalness = 0.2f;
+    d.roughness = 0.5f;
+    s.r.set_instance(rect, d);
+    s.draw();
+    const auto plain = s.at(0.3f, 0.2f);
+    PostSettings p;
+    p.hdr = true;
+    p.tone_mapping = ToneMapping::None;
+    s.r.set_post(p);
+    s.draw();
+    CHECK(s.shows(0.3f, 0.2f, plain[0], plain[1], plain[2], 1));
+    CHECK(s.shows(1.5f, 1.5f, 10, 20, 30, 1));
+    for (ToneMapping op : {ToneMapping::Neutral, ToneMapping::Aces}) {
+        p.tone_mapping = op;
+        p.exposure = 1.3f;
+        s.r.set_post(p);
+        s.draw();
+        CHECK(s.shows(1.5f, 1.5f, 10, 20, 30, 1)); // the background, through the inverse of the tone mapping
+        const auto lit = s.at(0.3f, 0.2f);
+        CHECK(lit[0] > 0 && (lit[0] != plain[0] || lit[1] != plain[1]));
+    }
+    // And back: the plain path again, exactly.
+    p.hdr = false;
+    s.r.set_post(p);
+    s.draw();
+    CHECK(s.shows(0.3f, 0.2f, plain[0], plain[1], plain[2], 0));
+}
+
+// Emissive light: constant, from a ramp at the renderer's time, and per segment of a batched geometry.
+void test_emissive(NativeDevice &dev) {
+    Stage s(dev, -2, 2, -2, 2);
+    // Two squares in one geometry, a segment each.
+    const std::vector<float> pos = {-1.5f, -0.5f, 0, -0.5f, -0.5f, 0, -0.5f, 0.5f, 0, -1.5f, 0.5f, 0,
+                                    0.5f,  -0.5f, 0, 1.5f,  -0.5f, 0, 1.5f,  0.5f, 0, 0.5f,  0.5f, 0};
+    const std::vector<uint32_t> idx = {0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7};
+    const std::vector<uint32_t> segs = {0, 6, 6, 6};
+    GeometryDesc gd;
+    gd.positions = pos.data();
+    gd.vertex_count = 8;
+    gd.indices = idx.data();
+    gd.index_count = idx.size();
+    gd.segments = segs.data();
+    gd.segment_count = 2;
+    const uint32_t inst = s.r.add_instance(s.r.add_geometry(gd));
+    InstanceDesc d;
+    d.color = {0, 0, 0, 1};
+    d.flags = kUnlit;
+    d.emissive = {0.5f, 0.25f, 0.0f};
+    s.r.set_instance(inst, d);
+    s.draw();
+    CHECK(s.shows(-1, 0, srgb8(0.5f), srgb8(0.25f), 0));
+    CHECK(s.shows(1, 0, srgb8(0.5f), srgb8(0.25f), 0));
+
+    // A ramp on the instance, read at the renderer's time.
+    EmissiveRampDesc ramp;
+    ramp.hot_color = {1, 0, 0};
+    ramp.hot_intensity = 1.0f;
+    ramp.cool_color = {0, 0, 1};
+    ramp.cool_intensity = 0.5f;
+    ramp.start = 1.0;
+    ramp.duration = 2.0f;
+    ramp.curve = 0.5f;
+    const uint32_t r0 = s.r.add_emissive_ramp();
+    s.r.set_emissive_ramp(r0, ramp);
+    d.emissive_ramp = r0;
+    s.r.set_instance(inst, d);
+    for (double t : {0.0, 1.5, 2.0, 5.0}) {
+        s.r.set_time(t);
+        s.draw();
+        const auto want = fx::ramp_value(ramp, t);
+        CHECK(s.shows(1, 0, srgb8(want[0]), srgb8(want[1]), srgb8(want[2])));
+    }
+    CHECK(s.r.animating() == false); // t = 5: the ramp is over
+    s.r.set_time(2.0);
+    CHECK(s.r.animating());
+
+    // A ramp on the right square alone: the left one keeps the instance's.
+    EmissiveRampDesc green = ramp;
+    green.hot_color = {0, 1, 0};
+    green.duration = 0.0f; // constant
+    const uint32_t r1 = s.r.add_emissive_ramp();
+    s.r.set_emissive_ramp(r1, green);
+    const uint32_t right = 1;
+    s.r.set_segment_emissive(inst, &right, 1, r1);
+    s.draw();
+    const auto want = fx::ramp_value(ramp, 2.0);
+    CHECK(s.shows(-1, 0, srgb8(want[0]), srgb8(want[1]), srgb8(want[2])));
+    CHECK(s.shows(1, 0, 0, 255, 0));
+    // The caller's own segment states do not disturb it, and removing the ramp ends it.
+    const uint32_t states[4] = {0, 0, 0, 0};
+    s.r.set_segment_states(inst, states, 2);
+    s.draw();
+    CHECK(s.shows(1, 0, 0, 255, 0));
+    s.r.remove_emissive_ramp(r1);
+    s.draw();
+    CHECK(s.shows(1, 0, srgb8(want[0]), srgb8(want[1]), srgb8(want[2])));
+}
+
+// Point lights: three.js' falloff, the range cutoff, flicker in time and the on/off window.
+void test_point_lights(NativeDevice &dev) {
+    Stage s(dev, -2, 2, -2, 2);
+    const uint32_t rect = add_rect(s.r, -2, -2, 2, 2, 0, {1, 1, 1, 1}, 0);
+    InstanceDesc d = s.r.instance_desc(rect);
+    d.specular = false; // Lambert: diffuse = irradiance / PI exactly
+    s.r.set_instance(rect, d);
+    s.r.set_lighting(0, 0);
+    s.draw();
+    CHECK(s.shows(0, 0, 0, 0, 0, 0));
+    const uint32_t l = s.r.add_point_light();
+    PointLightDesc pl;
+    pl.position = {0, 0, 1};
+    pl.intensity = 2.0f;
+    s.r.set_point_light(l, pl);
+    s.draw();
+    const float pi = 3.14159265f;
+    // Under the light: 2 / 1^2 x cos 0 / PI; at (1, 0): 2 / 2 x cos 45deg / PI.
+    CHECK(s.shows(0, 0, srgb8(2.0f / pi), srgb8(2.0f / pi), srgb8(2.0f / pi)));
+    CHECK(s.shows(1, 0, srgb8(1.0f / pi * 0.70710678f), srgb8(1.0f / pi * 0.70710678f), srgb8(0.70710678f / pi)));
+    pl.range = 1.2f; // (1, 0) is sqrt(2) away: beyond the cutoff
+    s.r.set_point_light(l, pl);
+    s.draw();
+    CHECK(s.shows(1, 0, 0, 0, 0, 0));
+    pl.range = 0.0f;
+    pl.intensity = 0.5f;
+    pl.flicker = 0.6f;
+    pl.flicker_rate = 10.0f;
+    pl.seed = 7;
+    s.r.set_point_light(l, pl);
+    CHECK(s.r.animating());
+    for (double t : {0.11, 0.37, 0.93}) {
+        s.r.set_time(t);
+        s.draw();
+        const float k = 0.5f * fx::flicker_value(7, t, 10.0f, 0.6f) / pi;
+        CHECK(s.shows(0, 0, srgb8(k), srgb8(k), srgb8(k)));
+    }
+    pl.start = 2.0;
+    s.r.set_point_light(l, pl);
+    s.draw(); // t = 0.93: not on yet
+    CHECK(s.shows(0, 0, 0, 0, 0, 0));
+    s.r.remove_point_light(l);
+    CHECK(!s.r.animating());
+}
+
+// Image-based lighting: a metal lit by nothing but the environment, and how roughness spreads its reflection.
+void test_environment(NativeDevice &dev) {
+    Stage s(dev, -2, 2, -2, 2);
+    const uint32_t rect = add_rect(s.r, -2, -2, 2, 2, 0, {0.9f, 0.9f, 0.9f, 1}, 0);
+    InstanceDesc d = s.r.instance_desc(rect);
+    d.metalness = 1.0f;
+    d.roughness = 0.4f;
+    s.r.set_instance(rect, d);
+    s.r.set_lighting(0, 0);
+    s.draw();
+    CHECK(s.shows(0, 0, 0, 0, 0, 0)); // a metal without diffuse, and no light to reflect
+    EnvironmentDesc env;
+    env.enabled = true;
+    s.r.set_environment(env);
+    s.draw();
+    const auto lit = s.at(0, 0);
+    CHECK(lit[0] > 40 && lit[1] > 40 && lit[2] > 40);
+    // Half the intensity, darker; a dielectric, lit diffusely by the irradiance.
+    env.intensity = 0.5f;
+    s.r.set_environment(env);
+    s.draw();
+    CHECK(s.at(0, 0)[1] < lit[1] && s.at(0, 0)[1] > 10);
+    d.metalness = 0.0f;
+    d.roughness = 1.0f;
+    s.r.set_instance(rect, d);
+    s.draw();
+    CHECK(s.at(0, 0)[1] > 40);
+    // A constant environment from an image: a white furnace. A rough white dielectric lit by L = 0.5 everywhere
+    // reflects close to 0.5 (diffuse + specular, energy-conserving within a few per cent).
+    const std::vector<float> grey(16 * 8 * 3, 0.5f);
+    s.r.set_environment_map(grey.data(), 16, 8);
+    env.intensity = 1.0f;
+    s.r.set_environment(env);
+    d.color = {1, 1, 1, 1};
+    s.r.set_instance(rect, d);
+    s.draw();
+    const auto furnace = s.at(0, 0);
+    CHECK(std::abs(furnace[1] - srgb8(0.5f)) <= 14);
+    s.r.reset_environment_map();
+    env.enabled = false;
+    s.r.set_environment(env);
+    s.draw();
+    CHECK(s.shows(0, 0, 0, 0, 0, 0));
+}
+
+// Bloom: a small bright square glows onto the background around it, only with bloom on.
+void test_bloom(NativeDevice &dev) {
+    Stage s(dev, -2, 2, -2, 2);
+    const uint32_t rect = add_rect(s.r, -0.1f, -0.1f, 0.1f, 0.1f, 0, {0, 0, 0, 1}, kUnlit);
+    InstanceDesc d = s.r.instance_desc(rect);
+    d.emissive = {20, 15, 10};
+    s.r.set_instance(rect, d);
+    PostSettings p;
+    p.hdr = true;
+    s.r.set_post(p);
+    s.draw();
+    CHECK(s.shows(0.4f, 0, 10, 20, 30, 1));
+    p.bloom = true;
+    p.bloom_strength = 1.0f;
+    s.r.set_post(p);
+    s.draw();
+    const auto glow = s.at(0.4f, 0);
+    CHECK(glow[0] > 10 + 10);
+    CHECK(s.at(1.8f, 1.8f)[0] < glow[0]); // fading with distance
+}
+
+// Effects carried in a GLB's scene extras ("ada_effects"): an emissive ramp on one object of a batched mesh, a point
+// light placed with the model's offset; removed again with the model.
+void test_glb_effects(NativeDevice &dev) {
+    GlbBuilder b;
+    const int pos = b.floats({-1, -1, 0, 0, -1, 0, 0, 1, 0, -1, 1, 0, 0, -1, 0, 1, -1, 0, 1, 1, 0, 0, 1, 0}, "VEC3", 3);
+    const int idx = b.indices({0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7});
+    const Bytes glb = b.finish(
+        R"("scene":0,"scenes":[{"nodes":[0],"extras":{"id_hierarchy":{"a":["a","*"],"b":["b","*"]},
+            "draw_ranges_n":{"a":[0,6],"b":[6,6]},
+            "ada_effects":{"version":1,
+              "emissive":[{"targets":["b","nope"],"hotColor":[0,1,0],"hotIntensity":1,"duration":0}],
+              "lights":[{"position":[-0.5,0,1],"intensity":2,"color":[1,1,1]}],
+              "post":{"hdr":true,"toneMapping":"none"}}}}],
+            "nodes":[{"name":"n","mesh":0}],
+            "materials":[{"pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1],"metallicFactor":0}}],
+        "meshes":[{"primitives":[{"attributes":{"POSITION":)" +
+        std::to_string(pos) + R"(},"indices":)" + std::to_string(idx) + R"(,"material":0}]}])");
+    Stage s(dev, -2, 3, -2, 2);
+    s.r.set_lighting(0, 0);
+    GlbOptions options;
+    options.offset = {1, 0, 0}; // the model, and its light, one to the right
+    const GlbLoadResult res = load_glb_bytes(s.r, glb, options);
+    const EffectHandles h = apply_glb_effects(s.r, res, options, false);
+    CHECK(h.lights.size() == 1 && h.ramps.size() == 1 && h.emitters.empty());
+    CHECK(h.unresolved.size() == 1 && h.unresolved[0] == "nope");
+    CHECK(h.has_post && h.post.hdr && h.post.tone_mapping == ToneMapping::None);
+    CHECK(!s.r.post().hdr); // the look is the host's to apply
+    s.draw();
+    const auto glow = s.at(1.5f, 0); // object "b", moved by the offset: lit a little, and glowing green
+    CHECK(glow[1] == 255 && glow[0] < 200);
+    const auto lit = s.at(0.5f, 0); // object "a", under the light (at x = 0.5 with the offset)
+    CHECK(lit[0] > 30 && lit[1] == lit[0]);
+    remove_effects(s.r, h);
+    s.draw();
+    CHECK(s.shows(1.5f, 0, 0, 0, 0, 0));
+    CHECK(s.shows(0.5f, 0, 0, 0, 0, 0));
+    // The same keys one at a time, as the browser and Python bindings take them.
+    const PointLightDesc l = point_light_from_json(R"({"position":[1,2,3],"flicker":0.5,"seed":4,"end":9})");
+    CHECK(l.position[2] == 3 && l.flicker == 0.5f && l.seed == 4 && l.end == 9.0);
+    const EmitterDesc e = emitter_from_json(R"({"preset":"smoke","rate":3})");
+    CHECK(e.blend == ParticleBlend::Alpha && e.rate == 3.0f);
+    CHECK(!post_from_json("{}").hdr);
+    CHECK(post_from_json(R"({"hdr":true,"toneMapping":"neutral"})").tone_mapping == ToneMapping::Neutral);
+    bool threw = false;
+    try {
+        emitter_from_json(R"({"blend":"sideways"})");
+    } catch (const std::invalid_argument &) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
+// Particles: a stateless emitter is a function of the time alone.
+void test_particles(NativeDevice &dev) {
+    Stage s(dev, -2, 2, -2, 2);
+    PostSettings p;
+    p.hdr = true;
+    s.r.set_post(p);
+    EmitterDesc e;
+    e.origin = {-1, 0, 0};
+    e.direction = {1, 0, 0};
+    e.spread = 0.3f;
+    e.speed = 2.0f;
+    e.gravity = {0, 0, 0};
+    e.rate = 200.0f;
+    e.lifetime = 0.8f;
+    e.size_start = e.size_end = 0.05f;
+    e.start = 1.0;
+    e.end = 3.0;
+    e.seed = 3;
+    const uint32_t em = s.r.add_emitter();
+    s.r.set_emitter(em, e);
+    auto lit_pixels = [&] {
+        int n = 0;
+        for (size_t i = 0; i < s.image.size(); i += 4)
+            n += (s.image[i] > 60) ? 1 : 0;
+        return n;
+    };
+    s.r.set_time(0.5);
+    s.draw();
+    CHECK(lit_pixels() == 0);
+    CHECK(!s.r.animating());
+    s.r.set_time(1.6);
+    CHECK(s.r.animating());
+    s.draw();
+    const auto first = s.image;
+    CHECK(lit_pixels() > 100);
+    int behind = 0; // nothing flies backwards: no particle left of x = -1.2 (pixel column 51)
+    for (size_t y = 0; y < Stage::kSize; ++y)
+        for (size_t x = 0; x < 51; ++x)
+            behind += s.image[(y * Stage::kSize + x) * 4] > 60 ? 1 : 0;
+    CHECK(behind == 0);
+    s.draw();
+    CHECK(s.image == first); // the same time draws the same particles
+    s.r.set_time(1.65);
+    s.draw();
+    CHECK(s.image != first);
+    s.r.set_time(10.0); // long after `end`: all dead
+    s.draw();
+    CHECK(lit_pixels() == 0);
+    // Smoke (alpha-blended) draws too, and in the plain (non-HDR) path.
+    p.hdr = false;
+    s.r.set_post(p);
+    EmitterDesc smoke = smoke_emitter({0, 0, 0});
+    smoke.color_start = smoke.color_end = {1, 1, 1};
+    smoke.alpha_start = 1.0f;
+    smoke.start = 0.0;
+    const uint32_t sm = s.r.add_emitter();
+    s.r.set_emitter(sm, smoke);
+    s.r.set_time(3.0);
+    s.draw();
+    CHECK(lit_pixels() > 0);
+    s.r.remove_emitter(sm);
+    s.r.remove_emitter(em);
+    s.draw();
+    CHECK(lit_pixels() == 0);
+}
+
 } // namespace
 
 int main() {
@@ -1502,6 +1844,13 @@ int main() {
     test_lit_overlay(*dev);
     test_srgb_vertex_colors(*dev);
     test_pick_snap(*dev);
+    test_hdr_target(*dev);
+    test_emissive(*dev);
+    test_point_lights(*dev);
+    test_environment(*dev);
+    test_bloom(*dev);
+    test_particles(*dev);
+    test_glb_effects(*dev);
     {
         // A device without depth32float-stencil8 (a browser's, unless asked for): caps on 24-bit depth + stencil.
         NativeDevice plain("auto", false);

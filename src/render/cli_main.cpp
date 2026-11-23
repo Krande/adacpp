@@ -4,6 +4,9 @@
 //                 [--backend auto|vulkan|gl] [--y-up] [--no-cull] [--cpu-cull] [--stats]
 //                 [--pick X,Y] [--bench N] [--camera ex,ey,ez,tx,ty,tz] [--line-width PX] [--point-size PX]
 //                 [--gizmo] [--overlay spec.json]   (orientation gizmo / colour legend, see overlay_json.h)
+//                 [--effects spec.json] [--time T] [--hdr] [--tonemap none|neutral|aces] [--exposure E]
+//                 [--bloom] [--env studio|file.hdr]   (realistic visuals, see docs/render_effects.md; the GLB's own
+//                 "ada_effects" scene extras are applied too)
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -16,6 +19,7 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
 
+#include "glb_effects.h"
 #include "glb_scene.h"
 #include "native_device.h"
 #include "overlay_json.h"
@@ -25,12 +29,13 @@ using namespace adacpp::render;
 
 int main(int argc, char **argv) {
     if (argc < 3) {
-        std::fprintf(
-            stderr,
-            "usage: %s <in.glb> <out.png> [--size WxH] [--view iso|front|back|left|right|top|bottom] "
-            "[--backend auto|vulkan|gl] [--y-up] [--no-cull] [--cpu-cull] [--stats] [--pick X,Y] [--bench N] "
-            "[--camera ex,ey,ez,tx,ty,tz] [--line-width PX] [--point-size PX] [--gizmo] [--overlay spec.json]\n",
-            argv[0]);
+        std::fprintf(stderr,
+                     "usage: %s <in.glb> <out.png> [--size WxH] [--view iso|front|back|left|right|top|bottom] "
+                     "[--backend auto|vulkan|gl] [--y-up] [--no-cull] [--cpu-cull] [--stats] [--pick X,Y] [--bench N] "
+                     "[--camera ex,ey,ez,tx,ty,tz] [--line-width PX] [--point-size PX] [--gizmo] [--overlay spec.json] "
+                     "[--effects spec.json] [--time T] [--hdr] [--tonemap none|neutral|aces] [--exposure E] [--bloom] "
+                     "[--env studio|file.hdr]\n",
+                     argv[0]);
         return 2;
     }
     std::string in = argv[1], out = argv[2], view = "iso", backend = "auto";
@@ -39,7 +44,10 @@ int main(int argc, char **argv) {
     int pick_x = -1, pick_y = -1, bench = 0;
     float cam_eye[3], cam_target[3], line_width = 1.0f, point_size = 1.0f;
     bool cam_set = false, gizmo = false;
-    std::string overlay_path;
+    std::string overlay_path, effects_path, tonemap, env_name;
+    double time = 0.0;
+    bool hdr = false, bloom = false;
+    float exposure = -1.0f;
     for (int i = 3; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--size" && i + 1 < argc)
@@ -63,6 +71,20 @@ int main(int argc, char **argv) {
             gizmo = true;
         else if (a == "--overlay" && i + 1 < argc)
             overlay_path = argv[++i];
+        else if (a == "--effects" && i + 1 < argc)
+            effects_path = argv[++i];
+        else if (a == "--time" && i + 1 < argc)
+            time = std::strtod(argv[++i], nullptr);
+        else if (a == "--tonemap" && i + 1 < argc)
+            tonemap = argv[++i];
+        else if (a == "--exposure" && i + 1 < argc)
+            exposure = std::strtof(argv[++i], nullptr);
+        else if (a == "--env" && i + 1 < argc)
+            env_name = argv[++i];
+        else if (a == "--hdr")
+            hdr = true;
+        else if (a == "--bloom")
+            bloom = true;
         else if (a == "--y-up")
             y_up = true;
         else if (a == "--no-cull")
@@ -94,6 +116,38 @@ int main(int argc, char **argv) {
         opts.line_width = opts.member_width = line_width;
         opts.point_size = point_size;
         const auto res = load_glb(renderer, in, opts);
+        apply_glb_effects(renderer, res, opts, true);
+        if (!effects_path.empty()) {
+            std::ifstream f(effects_path);
+            if (!f)
+                throw std::runtime_error("cannot open " + effects_path);
+            std::stringstream text;
+            text << f.rdbuf();
+            apply_effects(renderer, text.str(), &res.objects, glb_effects_transform(opts), true);
+        }
+        PostSettings post = renderer.post();
+        post.hdr = post.hdr || hdr || bloom;
+        post.bloom = post.bloom || bloom;
+        if (!tonemap.empty())
+            post.tone_mapping = tonemap == "none"      ? ToneMapping::None
+                                : tonemap == "neutral" ? ToneMapping::Neutral
+                                                       : ToneMapping::Aces;
+        if (exposure >= 0.0f)
+            post.exposure = exposure;
+        renderer.set_post(post);
+        if (!env_name.empty()) {
+            if (env_name != "studio") {
+                std::ifstream f(env_name, std::ios::binary);
+                if (!f)
+                    throw std::runtime_error("cannot open " + env_name);
+                const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+                renderer.set_environment_hdr(bytes.data(), bytes.size());
+            }
+            EnvironmentDesc env = renderer.environment();
+            env.enabled = true;
+            renderer.set_environment(env);
+        }
+        renderer.set_time(time);
         const double load_ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - load_t0).count();
         Camera cam = frame_bounds(renderer.bounds(), vit->second, {0, 0, 1}, 60.0f, float(w) / float(h));

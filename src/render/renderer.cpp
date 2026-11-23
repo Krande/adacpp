@@ -11,24 +11,28 @@
 
 #include <meshoptimizer.h>
 
+#include "effects_gpu.h"
 #include "shaders.h"
 
 namespace adacpp::render {
 
 namespace {
 
-constexpr uint32_t kHasMorph = 1u << 6;   // internal: set when the instance's geometry carries a morph target
-constexpr uint32_t kConeOk = 1u << 9;     // internal: cone culling is exact for this instance (GPU culling)
-constexpr uint32_t kPoints = 1u << 10;    // internal: a points instance, for vs_wide
-constexpr uint32_t kDashed = 1u << 13;    // internal: a dashed lines instance (material.y dash, .z gap)
-constexpr size_t kInstanceBytes = 128;    // WGSL `Instance`
-constexpr size_t kFrameBytes = 240;       // WGSL `Frame`
-constexpr size_t kItemWords = 16;         // WGSL `Item` (cull shader)
-constexpr size_t kCullFrameBytes = 208;   // WGSL `CullFrame`
-constexpr size_t kSpriteBytes = 64;       // WGSL `Sprite`
-constexpr size_t kSpriteFrameBytes = 240; // WGSL `SpriteFrame`
-constexpr size_t kQuadBytes = 96;         // WGSL `Quad`
-constexpr size_t kCounters = 8;           // cull counters, see kCullWGSL
+constexpr uint32_t kHasMorph = 1u << 6;         // internal: set when the instance's geometry carries a morph target
+constexpr uint32_t kConeOk = 1u << 9;           // internal: cone culling is exact for this instance (GPU culling)
+constexpr uint32_t kPoints = 1u << 10;          // internal: a points instance, for vs_wide
+constexpr uint32_t kDashed = 1u << 13;          // internal: a dashed lines instance (material.y dash, .z gap)
+constexpr size_t kInstanceBytes = 144;          // WGSL `Instance`
+constexpr size_t kFrameBytes = 832;             // WGSL `Frame`
+constexpr size_t kRampBytes = 48;               // WGSL `Ramp`
+constexpr size_t kRampSlots = 256;              // slot 0 = none, then Renderer::kMaxEmissiveRamps
+constexpr uint32_t kFxLinear = 1u, kFxIbl = 2u; // WGSL FX_* flags
+constexpr size_t kItemWords = 16;               // WGSL `Item` (cull shader)
+constexpr size_t kCullFrameBytes = 208;         // WGSL `CullFrame`
+constexpr size_t kSpriteBytes = 64;             // WGSL `Sprite`
+constexpr size_t kSpriteFrameBytes = 240;       // WGSL `SpriteFrame`
+constexpr size_t kQuadBytes = 96;               // WGSL `Quad`
+constexpr size_t kCounters = 8;                 // cull counters, see kCullWGSL
 // Two-pass occlusion culling costs ~0.35 ms a frame where nothing is hidden (an extra render pass, the
 // multisampled targets stored and reloaded, the depth pyramid) and saves tens of ms where most of a big
 // model is (a 62M-triangle crane: 93 -> 17 ms). Below this many triangles the CPU culls instead.
@@ -304,6 +308,7 @@ struct Renderer::Impl {
         uint32_t geometry = 0;
         InstanceDesc desc;
         std::vector<uint32_t> segstate; // 2 per segment
+        std::vector<uint8_t> seg_ramp;  // per segment: its own emissive ramp slot (0 = none), see set_segment_emissive
         uint32_t id = 0, gpu_index = 0, seg_base = 0, vis_base = 0, vis_count = 0;
     };
 
@@ -427,8 +432,51 @@ struct Renderer::Impl {
     float diffuse = 1.4f;                               // its camera-tracking DirectionalLight(0xffffff, 1.4)
     bool cull_frustum = true, cull_cone = true, cull_occlusion = true;
 
+    // Realistic visuals (effects.h, effects_gpu.h).
+    PostSettings post;
+    EnvironmentDesc env;
+    double time = 0.0;
+    std::vector<std::unique_ptr<PointLightDesc>> lights;
+    std::vector<std::unique_ptr<EmissiveRampDesc>> ramps; // id = slot - 1
+    std::vector<std::unique_ptr<EmitterDesc>> emitters;
+    BufferRef ramps_buf;
+    bool ramps_dirty = true;
+    std::unique_ptr<detail::Environment> environment;
+    std::unique_ptr<detail::PostChain> post_chain; // made when HDR is first switched on
+    std::unique_ptr<detail::Particles> particles;  // made when the first emitter is drawn
+
+    bool hdr() const {
+        return post.hdr;
+    }
+    // The format the scene is drawn in: the host's, or the HDR target's.
+    WGPUTextureFormat scene_format() const {
+        return hdr() ? detail::PostChain::kFormat : color_format;
+    }
+    bool ramps_in_use() const {
+        for (const auto &r : ramps)
+            if (r)
+                return true;
+        return false;
+    }
+    // The main pipelines are made with the shader's effects compiled in (FX) only while something uses them, so
+    // a scene without them runs exactly the shader it did before they existed: a larger shader alone cost a
+    // 2.9M-triangle scene ~30% of its frame time.
+    bool fx_variant = false;
+    bool any_emissive = false; // an instance with InstanceDesc::emissive (upload_instances)
+    bool effects_in_use() const {
+        if (env.enabled || any_emissive || ramps_in_use())
+            return true;
+        for (const auto &l : lights)
+            if (l && l->enabled)
+                return true;
+        return false;
+    }
+
     Impl(WGPUDevice dev, WGPUTextureFormat fmt) : device(dev), queue(wgpuDeviceGetQueue(dev)), color_format(fmt) {
         wgpuDeviceAddRef(device);
+        environment = std::make_unique<detail::Environment>(device, queue);
+        ramps_buf =
+            make_buffer(kRampSlots * kRampBytes, WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst, "adacpp.ramps");
         create_layouts();
         create_sprite_resources();
         create_pipelines();
@@ -466,18 +514,20 @@ struct Renderer::Impl {
     }
 
     void create_layouts() {
-        WGPUBindGroupLayoutEntry fe[4] = {WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT, WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT,
-                                          WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT, WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT};
-        for (uint32_t i = 0; i < 4; ++i) {
+        // 0 frame, 1 instances, 2 segment states, 3 visible clusters, 4 emissive ramps.
+        WGPUBindGroupLayoutEntry fe[5] = {WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT, WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT,
+                                          WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT, WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT,
+                                          WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT};
+        for (uint32_t i = 0; i < 5; ++i) {
             fe[i].binding = i;
             fe[i].visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
             fe[i].buffer.type = i == 0 ? WGPUBufferBindingType_Uniform : WGPUBufferBindingType_ReadOnlyStorage;
         }
-        for (uint32_t i = 1; i < 4; ++i)
+        for (uint32_t i = 1; i < 5; ++i)
             fe[i].visibility = WGPUShaderStage_Vertex;
         WGPUBindGroupLayoutDescriptor fd = WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
         fd.label = sv("adacpp.frame_layout");
-        fd.entryCount = 4;
+        fd.entryCount = 5;
         fd.entries = fe;
         frame_layout.reset(wgpuDeviceCreateBindGroupLayout(device, &fd));
 
@@ -494,10 +544,11 @@ struct Renderer::Impl {
         gd.entries = ge;
         geom_layout.reset(wgpuDeviceCreateBindGroupLayout(device, &gd));
 
-        WGPUBindGroupLayout layouts[2] = {frame_layout.get(), geom_layout.get()};
+        // Group 2: the environment (image-based lighting), stand-ins until there is one.
+        WGPUBindGroupLayout layouts[3] = {frame_layout.get(), geom_layout.get(), environment->layout()};
         WGPUPipelineLayoutDescriptor pd = WGPU_PIPELINE_LAYOUT_DESCRIPTOR_INIT;
         pd.label = sv("adacpp.pipeline_layout");
-        pd.bindGroupLayoutCount = 2;
+        pd.bindGroupLayoutCount = 3;
         pd.bindGroupLayouts = layouts;
         pipeline_layout.reset(wgpuDeviceCreatePipelineLayout(device, &pd));
 
@@ -528,7 +579,7 @@ struct Renderer::Impl {
         bs.alpha.operation = WGPUBlendOperation_Add;
 
         WGPUColorTargetState ct = WGPU_COLOR_TARGET_STATE_INIT;
-        ct.format = color_format;
+        ct.format = scene_format();
         ct.blend = blend ? &bs : nullptr;
         const bool stencil_only = stencil == Stencil::Count || stencil == Stencil::Reset;
         ct.writeMask = stencil_only ? WGPUColorWriteMask_None : WGPUColorWriteMask_All;
@@ -581,6 +632,14 @@ struct Renderer::Impl {
         d.multisample.count = kSampleCount;
         d.multisample.mask = 0xFFFFFFFFu;
         d.fragment = &fs;
+        // The shader's FX override: the effects' lighting in, or compiled out (see effects_in_use).
+        WGPUConstantEntry fx = WGPU_CONSTANT_ENTRY_INIT;
+        fx.key = sv("FX");
+        fx.value = fx_variant ? 1.0 : 0.0;
+        d.vertex.constantCount = 1;
+        d.vertex.constants = &fx;
+        fs.constantCount = 1;
+        fs.constants = &fx;
         return RenderPipelineRef(wgpuDeviceCreateRenderPipeline(device, &d));
     }
 
@@ -657,7 +716,7 @@ struct Renderer::Impl {
         bs.alpha.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
         bs.alpha.operation = WGPUBlendOperation_Add;
         WGPUColorTargetState ct = WGPU_COLOR_TARGET_STATE_INIT;
-        ct.format = color_format;
+        ct.format = scene_format();
         ct.blend = &bs;
         ct.writeMask = WGPUColorWriteMask_All;
         WGPUFragmentState fs = WGPU_FRAGMENT_STATE_INIT;
@@ -755,6 +814,13 @@ struct Renderer::Impl {
         d.multisample.count = 1;
         d.multisample.mask = 0xFFFFFFFFu;
         d.fragment = &fs;
+        WGPUConstantEntry fx = WGPU_CONSTANT_ENTRY_INIT; // picking needs none of the effects
+        fx.key = sv("FX");
+        fx.value = 0.0;
+        d.vertex.constantCount = 1;
+        d.vertex.constants = &fx;
+        fs.constantCount = 1;
+        fs.constants = &fx;
         return RenderPipelineRef(wgpuDeviceCreateRenderPipeline(device, &d));
     }
 
@@ -865,10 +931,10 @@ struct Renderer::Impl {
     }
 
     BindGroupRef make_frame_bind(WGPUBuffer frame, WGPUBuffer vis, const char *label) {
-        WGPUBindGroupEntry e[4] = {WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT,
-                                   WGPU_BIND_GROUP_ENTRY_INIT};
-        WGPUBuffer bufs[4] = {frame, instance_buf.get(), segstate_buf.get(), vis};
-        for (uint32_t i = 0; i < 4; ++i) {
+        WGPUBindGroupEntry e[5] = {WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT,
+                                   WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT};
+        WGPUBuffer bufs[5] = {frame, instance_buf.get(), segstate_buf.get(), vis, ramps_buf.get()};
+        for (uint32_t i = 0; i < 5; ++i) {
             e[i].binding = i;
             e[i].buffer = bufs[i];
             e[i].size = wgpuBufferGetSize(bufs[i]);
@@ -876,7 +942,7 @@ struct Renderer::Impl {
         WGPUBindGroupDescriptor d = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
         d.label = sv(label);
         d.layout = frame_layout.get();
-        d.entryCount = 4;
+        d.entryCount = 5;
         d.entries = e;
         return BindGroupRef(wgpuDeviceCreateBindGroup(device, &d));
     }
@@ -1279,7 +1345,7 @@ struct Renderer::Impl {
             tex.reset(wgpuDeviceCreateTexture(device, &d));
             view.reset(wgpuTextureCreateView(tex.get(), nullptr));
         };
-        make(color_format, msaa_tex, msaa_view, "adacpp.msaa");
+        make(scene_format(), msaa_tex, msaa_view, "adacpp.msaa");
         make(depth_format, depth_tex, depth_view, "adacpp.depth");
         WGPUTextureViewDescriptor vd = WGPU_TEXTURE_VIEW_DESCRIPTOR_INIT;
         vd.aspect = WGPUTextureAspect_DepthOnly;
@@ -1377,6 +1443,7 @@ struct Renderer::Impl {
     }
 
     void upload_instances() {
+        any_emissive = false;
         constexpr size_t words = kInstanceBytes / 4;
         std::vector<uint32_t> data(order.size() * words, 0);
         for (Instance *inst : order) {
@@ -1415,6 +1482,10 @@ struct Renderer::Impl {
             float sphere[4];
             sphere[3] = world_sphere(*inst, sphere);
             std::memcpy(rec + 28, sphere, 16);
+            std::memcpy(rec + 32, inst->desc.emissive.data(), 12);
+            rec[35] = ramp_slot(inst->desc.emissive_ramp);
+            any_emissive |= inst->desc.emissive[0] > 0.0f || inst->desc.emissive[1] > 0.0f ||
+                            inst->desc.emissive[2] > 0.0f || rec[35] != 0;
         }
         if (!data.empty())
             wgpuQueueWriteBuffer(queue, instance_buf.get(), 0, data.data(), data.size() * 4);
@@ -1463,10 +1534,40 @@ struct Renderer::Impl {
         return true;
     }
 
+    // The GPU slot of emissive ramp `id` (0: none, or a ramp that is gone).
+    uint32_t ramp_slot(uint32_t id) const {
+        return id < ramps.size() && ramps[id] ? id + 1 : 0u;
+    }
+
+    void upload_ramps() {
+        std::vector<float> data(kRampSlots * kRampBytes / 4, 0.0f);
+        for (size_t id = 0; id < ramps.size(); ++id) {
+            if (!ramps[id])
+                continue;
+            const EmissiveRampDesc &r = *ramps[id];
+            float *o = data.data() + (id + 1) * (kRampBytes / 4);
+            const float rec[12] = {r.hot_color[0],  r.hot_color[1],  r.hot_color[2],  r.hot_intensity,
+                                   r.cool_color[0], r.cool_color[1], r.cool_color[2], r.cool_intensity,
+                                   float(r.start),  r.duration,      r.curve,         0.0f};
+            std::copy(rec, rec + 12, o);
+        }
+        wgpuQueueWriteBuffer(queue, ramps_buf.get(), 0, data.data(), data.size() * 4);
+        ramps_dirty = false;
+    }
+
     void upload_segstate() {
         std::vector<uint32_t> data;
-        for (Instance *inst : order)
+        for (Instance *inst : order) {
+            const size_t at = data.size();
             data.insert(data.end(), inst->segstate.begin(), inst->segstate.end());
+            // A segment's own emissive ramp in bits 8..15 of its flags (the shader's segstate contract).
+            for (size_t s = 0; 2 * s + 1 < inst->segstate.size(); ++s) {
+                uint32_t &flags = data[at + 2 * s + 1];
+                flags &= ~0xff00u;
+                if (s < inst->seg_ramp.size() && inst->seg_ramp[s] && ramp_slot(inst->seg_ramp[s] - 1u))
+                    flags |= uint32_t(inst->seg_ramp[s]) << 8;
+            }
+        }
         if (!data.empty())
             wgpuQueueWriteBuffer(queue, segstate_buf.get(), 0, data.data(), data.size() * 4);
         segstate_dirty = false;
@@ -1590,8 +1691,92 @@ struct Renderer::Impl {
         std::memcpy(frame + 28, clip_info, sizeof(clip_info));
         std::copy(clip_planes.begin(), clip_planes.end(), frame + 32);
         std::copy(cap_color, cap_color + 4, frame + 56);
+        write_effects(frame + 60);
         wgpuQueueWriteBuffer(queue, buf, 0, frame, sizeof(frame));
     }
+
+    // The effects' part of the Frame uniform (from `fx` on): time, flags, environment rotation, point lights.
+    void write_effects(float *f) const {
+        const bool ibl = env.enabled && environment->built();
+        f[0] = float(time);
+        f[1] = ibl ? std::max(env.intensity, 0.0f) : 0.0f;
+        f[2] = environment->max_lod();
+        uint32_t info[4] = {0, (hdr() ? kFxLinear : 0u) | (ibl ? kFxIbl : 0u), ramps_in_use() ? 1u : 0u, 0};
+        // World -> environment frame: rows x, up, z, the azimuth turned by env.rotation about up.
+        std::array<float, 3> up = env.up;
+        float len = std::sqrt(up[0] * up[0] + up[1] * up[1] + up[2] * up[2]);
+        if (!(len > 0.0f))
+            up = {0, 0, 1}, len = 1.0f;
+        for (float &v : up)
+            v /= len;
+        const std::array<float, 3> ref =
+            std::fabs(up[1]) < 0.9f ? std::array<float, 3>{0, 1, 0} : std::array<float, 3>{1, 0, 0};
+        auto cross = [](const std::array<float, 3> &a, const std::array<float, 3> &b) {
+            return std::array<float, 3>{a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2],
+                                        a[0] * b[1] - a[1] * b[0]};
+        };
+        std::array<float, 3> x0 = cross(ref, up);
+        const float xl = std::sqrt(x0[0] * x0[0] + x0[1] * x0[1] + x0[2] * x0[2]);
+        for (float &v : x0)
+            v /= xl;
+        const std::array<float, 3> z0 = cross(x0, up);
+        const float c = std::cos(env.rotation), s = std::sin(env.rotation);
+        for (int k = 0; k < 3; ++k) {
+            f[8 + k] = c * x0[k] + s * z0[k];
+            f[12 + k] = up[k];
+            f[16 + k] = -s * x0[k] + c * z0[k];
+        }
+        // Point lights on now, flicker applied, the first Renderer::kMaxPointLights of them.
+        float *l = f + 20;
+        for (const auto &p : lights) {
+            if (info[0] >= Renderer::kMaxPointLights)
+                break;
+            if (!p || !p->enabled || time < p->start || time > p->end)
+                continue;
+            const float k = p->intensity * fx::flicker_value(p->seed, time, p->flicker_rate, p->flicker);
+            const float rec[8] = {p->position[0],  p->position[1],  p->position[2],  std::max(p->range, 0.0f),
+                                  p->color[0] * k, p->color[1] * k, p->color[2] * k, p->decay};
+            std::copy(rec, rec + 8, l + info[0] * 8);
+            ++info[0];
+        }
+        std::memcpy(f + 4, info, sizeof(info));
+    }
+
+    // Whether anything drawn changes with time() now (see Renderer::animating).
+    bool animating() const {
+        for (const auto &p : lights)
+            if (p && p->enabled && p->flicker > 0.0f && time >= p->start && time <= p->end)
+                return true;
+        for (const auto &r : ramps)
+            if (r && r->duration > 0.0f && time >= r->start && time <= r->start + r->duration)
+                return true;
+        for (const auto &e : emitters)
+            if (e && detail::Particles::alive(*e, time))
+                return true;
+        return false;
+    }
+
+    // The colour the target is cleared to: the background, or in the HDR target the linear light the tone
+    // mapping turns into it.
+    std::array<float, 4> clear_value() const {
+        if (!hdr())
+            return {clear[0], clear[1], clear[2], clear[3]};
+        const std::array<float, 6> key{clear[0],     clear[1], clear[2], clear[3], float(uint32_t(post.tone_mapping)),
+                                       post.exposure};
+        if (key != hdr_clear_key) {
+            auto lin = [](float c) {
+                c = std::clamp(c, 0.0f, 1.0f);
+                return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+            };
+            const auto x =
+                fx::inverse_tone_map(post.tone_mapping, {lin(clear[0]), lin(clear[1]), lin(clear[2])}, post.exposure);
+            hdr_clear = {x[0], x[1], x[2], clear[3]};
+            hdr_clear_key = key;
+        }
+        return hdr_clear;
+    }
+    mutable std::array<float, 6> hdr_clear_key{-1, -1, -1, -1, -1, -1};
+    mutable std::array<float, 4> hdr_clear{0, 0, 0, 1};
 
     struct PendingPick {
         BufferRef readback;
@@ -1658,6 +1843,7 @@ struct Renderer::Impl {
             rp.depthStencilAttachment = &da;
             WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(enc, &rp);
             wgpuRenderPassEncoderSetBindGroup(pass, 0, pick_frame_bind.get(), 0, nullptr);
+            wgpuRenderPassEncoderSetBindGroup(pass, 2, environment->bind(), 0, nullptr);
             return pass;
         };
         // The pickable triangles, with `single` / `both` for one-sided / double-sided instances.
@@ -1779,7 +1965,8 @@ struct Renderer::Impl {
         ca.resolveTarget = resolve ? target : nullptr;
         ca.loadOp = clear_targets ? WGPULoadOp_Clear : WGPULoadOp_Load;
         ca.storeOp = resolve ? WGPUStoreOp_Discard : WGPUStoreOp_Store;
-        ca.clearValue = {clear[0], clear[1], clear[2], clear[3]};
+        const auto cv = clear_value();
+        ca.clearValue = {cv[0], cv[1], cv[2], cv[3]};
         WGPURenderPassDepthStencilAttachment da = WGPU_RENDER_PASS_DEPTH_STENCIL_ATTACHMENT_INIT;
         da.view = depth_view.get();
         da.depthLoadOp = clear_targets ? WGPULoadOp_Clear : WGPULoadOp_Load;
@@ -1796,7 +1983,9 @@ struct Renderer::Impl {
         rp.colorAttachmentCount = 1;
         rp.colorAttachments = &ca;
         rp.depthStencilAttachment = &da;
-        return wgpuCommandEncoderBeginRenderPass(enc, &rp);
+        WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(enc, &rp);
+        wgpuRenderPassEncoderSetBindGroup(pass, 2, environment->bind(), 0, nullptr);
+        return pass;
     }
 
     // Draws triangle instances (opaque or transparent) and/or line / point instances into `pass`.
@@ -2015,6 +2204,8 @@ struct Renderer::Impl {
         std::memcpy(frame + 16, proj_wgpu.data(), 64);
         const uint32_t clip_count = uint32_t(clip_planes.size() / 4);
         std::memcpy(frame + 32, &clip_count, 4);
+        const uint32_t linear = hdr() ? 1u : 0u; // clip_info.y: write linear light (the HDR target)
+        std::memcpy(frame + 33, &linear, 4);
         std::copy(clip_planes.begin(), clip_planes.end(), frame + 36);
         wgpuQueueWriteBuffer(queue, sprite_frame_buf.get(), 0, frame, sizeof(frame));
     }
@@ -2232,10 +2423,26 @@ struct Renderer::Impl {
             upload_instances();
         if (segstate_dirty)
             upload_segstate();
+        if (ramps_dirty)
+            upload_ramps();
+        if (env.enabled)
+            environment->ensure_built();
+        if (effects_in_use() != fx_variant) {
+            fx_variant = !fx_variant;
+            create_pipelines();
+        }
+        WGPUTextureView scene_target = target;
+        if (hdr()) {
+            if (!post_chain)
+                post_chain = std::make_unique<detail::PostChain>(device, queue, color_format);
+            post_chain->ensure(w, h);
+            scene_target = post_chain->hdr_view();
+        }
 
         const Mat4 view_proj = webgpu_view_proj();
         float cam[3];
         write_frame(frame_buf.get(), view_proj, cam);
+        prepare_particles();
 
         st = RenderStats{};
         for (Instance *inst : order) {
@@ -2252,10 +2459,35 @@ struct Renderer::Impl {
         WGPUCommandEncoderDescriptor ed = WGPU_COMMAND_ENCODER_DESCRIPTOR_INIT;
         WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(device, &ed);
         if (cull_occlusion && item_count > 0 && scene_triangles >= kOcclusionMinTriangles)
-            encode_gpu_culled(enc, target, view_proj, cam, st);
+            encode_gpu_culled(enc, scene_target, view_proj, cam, st);
         else
-            encode_cpu_culled(enc, target, view_proj, cam, st);
+            encode_cpu_culled(enc, scene_target, view_proj, cam, st);
+        if (hdr())
+            post_chain->encode(enc, target, post);
         submit(enc);
+    }
+
+    bool particles_ready = false; // this frame has particles to draw (prepare_particles)
+
+    void prepare_particles() {
+        particles_ready = false;
+        std::vector<const EmitterDesc *> list;
+        for (const auto &e : emitters)
+            if (e && detail::Particles::alive(*e, time))
+                list.push_back(e.get());
+        if (list.empty())
+            return;
+        if (!particles)
+            particles = std::make_unique<detail::Particles>(device, queue);
+        particles_ready = particles->prepare(list, view, webgpu_proj(), time, hdr());
+    }
+
+    // The particles, after the transparent instances. Leaves their own bind group 0 set; returns whether it did.
+    bool draw_particles(WGPURenderPassEncoder pass, RenderStats &st) {
+        if (!particles_ready)
+            return false;
+        st.draw_calls += particles->draw(pass, scene_format(), depth_format, kSampleCount);
+        return true;
     }
 
     void encode_cpu_culled(WGPUCommandEncoder enc, WGPUTextureView target, const Mat4 &view_proj, const float cam[3],
@@ -2280,7 +2512,8 @@ struct Renderer::Impl {
         draw_caps(d, view_proj);
         wgpuRenderPassEncoderSetBindGroup(pass, 0, frame_bind.get(), 0, nullptr);
         d.blended(nullptr, nullptr);
-        if (draw_quads(pass, st, false)) {
+        const bool drew_particles = draw_particles(pass, st);
+        if (draw_quads(pass, st, false) || drew_particles) {
             d.bound = nullptr;
             wgpuRenderPassEncoderSetBindGroup(pass, 0, frame_bind.get(), 0, nullptr);
         }
@@ -2365,6 +2598,8 @@ struct Renderer::Impl {
         draw_caps(late, view_proj);
         wgpuRenderPassEncoderSetBindGroup(pass, 0, frame_bind_late.get(), 0, nullptr);
         late.blended(args_late_buf.get(), &in_view);
+        if (draw_particles(pass, st))
+            late.bound = nullptr;
         if (draw_quads(pass, st, false))
             late.bound = nullptr;
         wgpuRenderPassEncoderSetBindGroup(pass, 0, frame_bind.get(), 0, nullptr);
@@ -2604,7 +2839,152 @@ void Renderer::clear() {
     impl_->sprites.clear();
     impl_->quads.clear();
     impl_->textures.clear();
+    impl_->lights.clear();
+    impl_->ramps.clear();
+    impl_->emitters.clear();
+    impl_->ramps_dirty = true;
     impl_->structure_dirty = true;
+}
+
+namespace {
+// A free slot of `list` (or a new one at its end), holding a default-made T.
+template <typename T> uint32_t add_slot(std::vector<std::unique_ptr<T>> &list, size_t limit, const char *what) {
+    for (uint32_t id = 0; id < list.size(); ++id)
+        if (!list[id]) {
+            list[id] = std::make_unique<T>();
+            return id;
+        }
+    if (list.size() >= limit)
+        throw std::length_error(std::string("adacpp.render: too many ") + what);
+    list.push_back(std::make_unique<T>());
+    return uint32_t(list.size() - 1);
+}
+template <typename T> T &slot(std::vector<std::unique_ptr<T>> &list, uint32_t id, const char *what) {
+    if (id >= list.size() || !list[id])
+        throw std::out_of_range(std::string("adacpp.render: unknown ") + what + " " + std::to_string(id));
+    return *list[id];
+}
+} // namespace
+
+void Renderer::set_post(const PostSettings &post) {
+    const bool was = impl_->post.hdr;
+    impl_->post = post;
+    if (was != post.hdr) {
+        // Every pipeline that draws the scene is made for the format it draws into.
+        impl_->create_pipelines();
+        impl_->msaa_tex.reset();
+    }
+}
+
+const PostSettings &Renderer::post() const {
+    return impl_->post;
+}
+
+void Renderer::set_environment(const EnvironmentDesc &env) {
+    impl_->env = env;
+}
+
+const EnvironmentDesc &Renderer::environment() const {
+    return impl_->env;
+}
+
+void Renderer::set_environment_map(const float *rgb, uint32_t width, uint32_t height) {
+    if (!rgb || width == 0 || height == 0)
+        throw std::invalid_argument("adacpp.render: environment map without pixels");
+    fx::EnvImage img;
+    img.width = width;
+    img.height = height;
+    img.rgb.assign(rgb, rgb + size_t(width) * height * 3);
+    impl_->environment->set_image(std::move(img));
+}
+
+void Renderer::set_environment_hdr(const uint8_t *bytes, size_t size) {
+    impl_->environment->set_image(fx::decode_hdr(bytes, size));
+}
+
+void Renderer::reset_environment_map() {
+    impl_->environment->set_image(fx::EnvImage{});
+}
+
+void Renderer::set_time(double seconds) {
+    impl_->time = seconds;
+}
+
+double Renderer::time() const {
+    return impl_->time;
+}
+
+uint32_t Renderer::add_point_light() {
+    return add_slot(impl_->lights, 1u << 20, "point lights");
+}
+
+void Renderer::set_point_light(uint32_t light, const PointLightDesc &desc) {
+    slot(impl_->lights, light, "point light") = desc;
+}
+
+void Renderer::remove_point_light(uint32_t light) {
+    slot(impl_->lights, light, "point light");
+    impl_->lights[light].reset();
+}
+
+uint32_t Renderer::add_emissive_ramp() {
+    const uint32_t id = add_slot(impl_->ramps, kMaxEmissiveRamps, "emissive ramps");
+    impl_->ramps_dirty = true;
+    impl_->instances_dirty = true; // instances naming it by id now find it
+    impl_->segstate_dirty = true;
+    return id;
+}
+
+void Renderer::set_emissive_ramp(uint32_t ramp, const EmissiveRampDesc &desc) {
+    slot(impl_->ramps, ramp, "emissive ramp") = desc;
+    impl_->ramps_dirty = true;
+}
+
+void Renderer::remove_emissive_ramp(uint32_t ramp) {
+    slot(impl_->ramps, ramp, "emissive ramp");
+    impl_->ramps[ramp].reset();
+    // Forget it everywhere, so a ramp added later in the same slot lights nothing it did not ask for.
+    for (auto &inst : impl_->instances) {
+        if (!inst)
+            continue;
+        if (inst->desc.emissive_ramp == ramp)
+            inst->desc.emissive_ramp = kNoRamp;
+        for (uint8_t &s : inst->seg_ramp)
+            if (s == ramp + 1)
+                s = 0;
+    }
+    impl_->ramps_dirty = true;
+    impl_->instances_dirty = true;
+    impl_->segstate_dirty = true;
+}
+
+void Renderer::set_segment_emissive(uint32_t instance, const uint32_t *segments, size_t count, uint32_t ramp) {
+    auto &inst = impl_->instance(instance);
+    const size_t n = inst.segstate.size() / 2;
+    if (inst.seg_ramp.size() != n)
+        inst.seg_ramp.assign(n, 0);
+    const uint8_t s = ramp == kNoRamp || ramp >= kMaxEmissiveRamps ? 0 : uint8_t(ramp + 1);
+    for (size_t i = 0; i < count; ++i)
+        if (segments[i] < n)
+            inst.seg_ramp[segments[i]] = s;
+    impl_->segstate_dirty = true;
+}
+
+uint32_t Renderer::add_emitter() {
+    return add_slot(impl_->emitters, 1u << 16, "emitters");
+}
+
+void Renderer::set_emitter(uint32_t emitter, const EmitterDesc &desc) {
+    slot(impl_->emitters, emitter, "emitter") = desc;
+}
+
+void Renderer::remove_emitter(uint32_t emitter) {
+    slot(impl_->emitters, emitter, "emitter");
+    impl_->emitters[emitter].reset();
+}
+
+bool Renderer::animating() const {
+    return impl_->animating();
 }
 
 void Renderer::set_camera(const float view[16], const float proj_gl[16], bool orthographic) {

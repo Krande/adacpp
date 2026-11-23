@@ -16,6 +16,8 @@ add_library(
     adacpp_render_core
     STATIC
     renderer.cpp
+    effects.cpp
+    effects_gpu.cpp
     camera_controller.cpp
     ${MESHOPT_SOURCES}
 )
@@ -32,6 +34,7 @@ set(ADACPP_RENDER_GLB_SOURCES
     glb_objects.cpp
     glb_animation.cpp
     glb_batcher.cpp
+    glb_effects.cpp
 )
 
 # KHR_draco_mesh_compression in the GLB reader. OFF builds a reader that refuses Draco-compressed GLBs.
@@ -198,6 +201,20 @@ else()
         )
     endif()
 
+    # The realistic visuals on a small generic scene: stills, frames and timings (effects_demo.cpp).
+    add_executable(adacpp_render_effects_demo effects_demo.cpp)
+    target_link_libraries(
+        adacpp_render_effects_demo
+        PRIVATE adacpp_render_headless
+    )
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(adacpp_render_effects_demo PRIVATE dl pthread m)
+        set_target_properties(
+            adacpp_render_effects_demo
+            PROPERTIES BUILD_RPATH "$ENV{CONDA_PREFIX}/lib"
+        )
+    endif()
+
     add_executable(adacpp_render cli_main.cpp)
     target_link_libraries(adacpp_render PRIVATE adacpp_render_headless)
     if(UNIX AND NOT APPLE)
@@ -226,6 +243,24 @@ else()
             PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
         )
         add_test(NAME camera_controller COMMAND adacpp_render_camera_test)
+    endif()
+
+    # The effects' CPU math (flicker, ramps, tone mapping, environment maps): no GPU either.
+    set(ADACPP_RENDER_EFFECTS_TEST
+        ${ADACPP_ROOT}/tests/cpp/test_render_effects.cpp
+    )
+    if(ADACPP_RENDER_TESTS AND EXISTS ${ADACPP_RENDER_EFFECTS_TEST})
+        enable_testing()
+        add_executable(
+            adacpp_render_effects_test
+            ${ADACPP_RENDER_EFFECTS_TEST}
+            effects.cpp
+        )
+        target_include_directories(
+            adacpp_render_effects_test
+            PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+        )
+        add_test(NAME render_effects COMMAND adacpp_render_effects_test)
     endif()
 
     # What needs a device to check (GLB animations, Draco, textured quads) draws offscreen and reads the

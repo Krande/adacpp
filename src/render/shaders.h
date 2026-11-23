@@ -4,10 +4,14 @@
 namespace adacpp::render {
 
 // Layout contract with renderer.cpp:
-//   Frame     uniform, 240 bytes (with the section planes)
-//   Instance  storage, 128 bytes each (model, colour, flags, segment base, morph influence, visible base,
-//             material: metalness, roughness, specular on/off; world-space bounding sphere)
-//   segstate  2 x u32 per segment: RGBA8 colour override (alpha 0 = none), flags (1 hidden, 2 matte override)
+//   Frame     uniform, 832 bytes (with the section planes, the effects' time and flags, the environment
+//             rotation and 16 point lights)
+//   Instance  storage, 144 bytes each (model, colour, flags, segment base, morph influence, visible base,
+//             material: metalness, roughness, specular on/off; world-space bounding sphere; emissive + ramp)
+//   segstate  2 x u32 per segment: RGBA8 colour override (alpha 0 = none), flags (1 hidden, 2 matte override,
+//             bits 8..15 the segment's emissive ramp slot)
+//   ramps     emissive ramps, 48 bytes each, slot 0 none
+//   group 2   the environment: sampler, prefiltered radiance, irradiance, BRDF table
 //   visible   visible clusters as (instance, cluster) pairs, one region per instance starting at
 //             Instance.vis_base; a draw starts at vertex vis_base x CLUSTER_VERTS, so vs_tri finds its
 //             slot from the vertex index alone (indirect draws cannot rely on firstInstance)
@@ -33,7 +37,32 @@ struct Frame {
     clip_info: vec4<u32>,
     clip: array<vec4<f32>, 6>, // section planes (normal, constant): cut where dot(n, p) + constant < 0
     cap_color: vec4<f32>, // section caps: linear rgb for every cap; a = 0: each instance's base colour
+    // Effects (effects.h). x: the renderer's time (s), y: environment intensity, z: the environment's last
+    // prefiltered mip (roughness 1)
+    fx: vec4<f32>,
+    fx_info: vec4<u32>, // x: point lights, y: FX_* flags, z: 1 when any emissive ramp is in use
+    env_rot: array<vec4<f32>, 3>, // rows: world -> environment frame (+y up)
+    lights: array<Light, 16>,
 };
+
+struct Light {
+    pos_range: vec4<f32>,   // position, range (0 = no cutoff)
+    color_decay: vec4<f32>, // linear colour x intensity (flicker applied), decay exponent
+};
+
+// An emissive ramp (EmissiveRampDesc): colour, intensity at either end; start, duration, curve.
+struct Ramp {
+    hot: vec4<f32>,
+    cool: vec4<f32>,
+    timing: vec4<f32>,
+};
+
+// The pipelines made with FX false (Renderer::Impl::effects_in_use) leave the effects' lighting out altogether, so a
+// scene without them runs the shader it always did.
+override FX: bool = true;
+
+const FX_LINEAR: u32 = 1u; // write linear light (the HDR target), else sRGB-encoded values
+const FX_IBL: u32 = 2u;    // image-based lighting from group 2
 
 struct Instance {
     model: mat4x4<f32>,
@@ -45,10 +74,12 @@ struct Instance {
     material: vec4<f32>, // metalness, roughness, specular (0 = Lambert), lines/points: segment-id offset (u32 bits)
                          // lines/points: x = width / diameter in pixels; dashed lines: y = dash, z = gap
     bounds: vec4<f32>,   // world-space bounding sphere: centre, radius
+    emissive: vec4<f32>, // linear rgb x strength; w: emissive ramp slot (u32 bits, 0 = none)
 };
 
 const FLAG_VERTEX_COLORS: u32 = 1u;
 const FLAG_UNLIT: u32 = 2u;
+const FLAG_TRANSPARENT: u32 = 8u;
 const FLAG_MORPH_RELATIVE: u32 = 32u;
 const FLAG_HAS_MORPH: u32 = 64u;
 const FLAG_POINTS: u32 = 1024u; // internal: a points instance (vs_wide draws squares, not segments)
@@ -118,6 +149,7 @@ const CLUSTER_VERTS: u32 = {{CLUSTER_VERTS}}u; // Renderer::kClusterMaxTriangles
 @group(0) @binding(1) var<storage, read> instances: array<Instance>;
 @group(0) @binding(2) var<storage, read> segstate: array<u32>;
 @group(0) @binding(3) var<storage, read> visible: array<u32>;
+@group(0) @binding(4) var<storage, read> ramps: array<Ramp>; // slot 0 is no ramp
 
 @group(1) @binding(0) var<storage, read> vtx: array<f32>;
 @group(1) @binding(1) var<storage, read> colors: array<u32>;
@@ -134,7 +166,21 @@ struct VOut {
     @location(5) @interpolate(flat) pick: vec4<u32>, // instance + 1, primitive, segment, topology (0 or 2)
     @location(6) dist: f32, // lines: distance along the line
     @location(7) @interpolate(flat) tint: vec4<f32>, // FLAG_COLORS_SRGB: the instance's colour
+    @location(8) @interpolate(flat) emissive: vec3<f32>, // linear light added after the lighting
 };
+
+// An emissive ramp's colour x intensity now (fx::ramp_value in effects.cpp).
+fn ramp_at(slot: u32) -> vec3<f32> {
+    let r = ramps[slot];
+    var w = 0.0;
+    if (r.timing.y > 0.0) {
+        let s = clamp((frame.fx.x - r.timing.x) / r.timing.y, 0.0, 1.0);
+        if (s > 0.0) {
+            w = pow(s, max(r.timing.z, 1e-3));
+        }
+    }
+    return mix(r.hot.rgb, r.cool.rgb, w) * mix(r.hot.w, r.cool.w, w);
+}
 
 // Vertex `vi` in the world, morphed.
 fn vertex_world(inst: Instance, vi: u32) -> vec4<f32> {
@@ -176,6 +222,22 @@ fn shade_vertex(inst: Instance, vi: u32, seg: i32, ii: u32, primitive: u32) -> V
         }
     }
     var out: VOut;
+    if (FX) {
+        out.emissive = inst.emissive.rgb;
+    }
+    if (FX && frame.fx_info.z != 0u) {
+        var slot = bitcast<u32>(inst.emissive.w);
+        if (seg >= 0) {
+            // A segment's own ramp (Renderer::set_segment_emissive), in bits 8..15 of its flags.
+            let own = (segstate[(inst.seg_base + u32(seg)) * 2u + 1u] >> 8u) & 0xffu;
+            if (own != 0u) {
+                slot = own;
+            }
+        }
+        if (slot != 0u) {
+            out.emissive = ramp_at(slot);
+        }
+    }
     out.pos = frame.view_proj * wp;
     out.world = wp.xyz;
     out.normal = (inst.model * vec4<f32>(n, 0.0)).xyz;
@@ -497,6 +559,39 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
     return select(hi, lo, c <= vec3<f32>(0.04045));
 }
 
+// Image-based lighting (effects.h EnvironmentDesc): the environment prefiltered by roughness into the mips of
+// an equirectangular image, its irradiance, and the split-sum BRDF table (x scale, y bias of F0).
+@group(2) @binding(0) var env_samp: sampler;
+@group(2) @binding(1) var env_spec: texture_2d<f32>;
+@group(2) @binding(2) var env_irr: texture_2d<f32>;
+@group(2) @binding(3) var env_brdf: texture_2d<f32>;
+
+// Equirectangular coordinates of a world direction (fx::env_uv in effects.cpp).
+fn env_uv(d: vec3<f32>) -> vec2<f32> {
+    let e = normalize(vec3<f32>(dot(frame.env_rot[0].xyz, d), dot(frame.env_rot[1].xyz, d),
+                                dot(frame.env_rot[2].xyz, d)));
+    return vec2<f32>(atan2(e.x, -e.z) / (2.0 * PI) + 0.5, acos(clamp(e.y, -1.0, 1.0)) / PI);
+}
+
+fn ibl(n: vec3<f32>, v: vec3<f32>, diffuse: vec3<f32>, f0: vec3<f32>, rough: f32, specular: bool) -> vec3<f32> {
+    let irr = textureSampleLevel(env_irr, env_samp, env_uv(n), 0.0).rgb;
+    var c = diffuse * irr / PI;
+    if (specular) {
+        let ndv = clamp(dot(n, v), 1e-4, 1.0);
+        let r = reflect(-v, n);
+        let pre = textureSampleLevel(env_spec, env_samp, env_uv(r), rough * frame.fx.z).rgb;
+        let lut = clamp(vec2<f32>(ndv, rough), vec2<f32>(1.0 / 64.0), vec2<f32>(63.0 / 64.0));
+        let ab = textureSampleLevel(env_brdf, env_samp, lut, 0.0).rg;
+        // Single scattering plus the energy a rough metal loses to it, as three.js' multiscattering term.
+        let fss = f0 * ab.x + ab.y;
+        let ems = 1.0 - (ab.x + ab.y);
+        let favg = f0 + (1.0 - f0) / 21.0;
+        let fms = fss * favg / (1.0 - ems * favg);
+        c = c + pre * fss + fms * ems * irr / PI;
+    }
+    return c * frame.fx.y;
+}
+
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     // Derivatives first, in uniform control flow: the flat normal for geometry without normals.
@@ -531,13 +626,41 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
         let metal = clamp(in.material.x, 0.0, 1.0);
         let rough = clamp(in.material.y, 0.0525, 1.0);
         let diffuse = rgb * (1.0 - metal);
+        let specular = in.material.z > 0.5;
+        let f0 = mix(vec3<f32>(0.04), rgb, metal);
         let irradiance = frame.params.y * clamp(dot(n, l), 0.0, 1.0);
         var out_rgb = diffuse * (frame.params.x + irradiance) / PI;
-        if (in.material.z > 0.5) {
-            let f0 = mix(vec3<f32>(0.04), rgb, metal);
+        if (specular) {
             out_rgb = out_rgb + irradiance * brdf_ggx(l, v, n, f0, rough);
         }
+        // Point lights, three.js' PointLight (getDistanceAttenuation).
+        for (var i = 0u; FX && i < min(frame.fx_info.x, 16u); i = i + 1u) {
+            let pl = frame.lights[i];
+            let to = pl.pos_range.xyz - in.world;
+            let d = max(length(to), 1e-6);
+            let ld = to / d;
+            var fall = 1.0 / max(pow(d, pl.color_decay.w), 0.01);
+            if (pl.pos_range.w > 0.0) {
+                let q = clamp(1.0 - pow(d / pl.pos_range.w, 4.0), 0.0, 1.0);
+                fall = fall * q * q;
+            }
+            let e = pl.color_decay.rgb * (fall * clamp(dot(n, ld), 0.0, 1.0));
+            out_rgb = out_rgb + e * diffuse / PI;
+            if (specular) {
+                out_rgb = out_rgb + e * brdf_ggx(ld, v, n, f0, rough);
+            }
+        }
+        if (FX && (frame.fx_info.y & FX_IBL) != 0u) {
+            out_rgb = out_rgb + ibl(n, v, diffuse, f0, rough, specular);
+        }
         rgb = out_rgb;
+    }
+    if (FX) {
+        rgb = rgb + in.emissive;
+    }
+    if ((frame.fx_info.y & FX_LINEAR) != 0u) {
+        // The HDR target keeps coverage in alpha for the composite: an opaque surface covers its pixel.
+        return vec4<f32>(rgb, select(1.0, in.color.a, (in.flags & FLAG_TRANSPARENT) != 0u));
     }
     return vec4<f32>(linear_to_srgb(rgb), in.color.a);
 }
@@ -629,6 +752,9 @@ fn fs_sprite(in: SOut) -> @location(0) vec4<f32> {
         }
     }
     let c = texel * in.tint;
+    if (sf.clip_info.y != 0u) {
+        return c; // the HDR target: linear light
+    }
     return vec4<f32>(linear_to_srgb(c.rgb), c.a);
 }
 )WGSL";
@@ -697,6 +823,9 @@ fn fs_quad(in: QOut) -> @location(0) vec4<f32> {
         }
     }
     let c = texel * in.tint;
+    if (sf.clip_info.y != 0u) {
+        return c; // the HDR target: linear light
+    }
     return vec4<f32>(linear_to_srgb(c.rgb), c.a);
 }
 )WGSL";
@@ -728,6 +857,7 @@ struct Instance {
     vis_base: u32,
     material: vec4<f32>,
     bounds: vec4<f32>,
+    emissive: vec4<f32>,
 };
 
 struct CullFrame {

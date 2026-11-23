@@ -1,6 +1,8 @@
 // adacpp._render: the WebGPU renderer for Python, headless (wgpu-native). adapy wraps it
 // (ada.visit.rendering.adacpp_offscreen) with camera presets and the GLB -> image entry points.
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <stdexcept>
@@ -16,6 +18,7 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
 
+#include "glb_effects.h"
 #include "glb_scene.h"
 #include "native_device.h"
 #include "overlay_json.h"
@@ -69,7 +72,8 @@ public:
 
     nb::dict load_glb(const std::string &path, bool y_up, float line_width, float member_width, float point_size,
                       std::optional<std::array<float, 4>> line_color, bool double_sided, float feature_edge_angle_deg,
-                      bool section_caps, bool animations, std::array<double, 3> offset) {
+                      bool section_caps, bool animations, std::array<double, 3> offset, bool effects,
+                      bool effects_look) {
         GlbOptions o;
         o.y_up_to_z_up = y_up;
         o.line_width = line_width;
@@ -88,6 +92,10 @@ public:
             r = adacpp::render::load_glb(renderer_, path, o);
         }
         nb::dict d;
+        // The GLB's "ada_effects" scene extras, with effects=True (and their post / environment with effects_look).
+        if (effects)
+            d["effects"] = effect_set(apply_glb_effects(renderer_, r, o, effects_look));
+        last_objects_ = r.objects;
         d["geometries"] = r.geometries;
         d["instances"] = r.instances;
         d["vertices"] = r.vertices;
@@ -304,6 +312,8 @@ public:
         geometry_of_.clear();
         descs_.clear();
         animation_sets_.clear();
+        effect_sets_.clear();
+        last_objects_.clear();
     }
 
     // Column-major 4x4s; `proj` in the OpenGL convention (clip z in [-1, 1]), as three.js builds it.
@@ -331,6 +341,41 @@ public:
     }
     void set_lighting(float ambient, float headlight) {
         renderer_.set_lighting(ambient, headlight);
+    }
+
+    // Realistic visuals (effects.h): the keys of docs/render_effects.md, as JSON text.
+    nb::dict apply_effects(const std::string &spec_json, bool apply_look) {
+        static const std::array<double, 16> identity{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        return effect_set(adacpp::render::apply_effects(
+            renderer_, spec_json, last_objects_.empty() ? nullptr : &last_objects_, identity, apply_look));
+    }
+    void remove_effects(uint32_t set) {
+        if (set >= effect_sets_.size())
+            throw std::out_of_range("adacpp.render: unknown effect set " + std::to_string(set));
+        adacpp::render::remove_effects(renderer_, effect_sets_[set]);
+        effect_sets_[set] = EffectHandles{};
+    }
+    void set_post(const std::string &json) {
+        renderer_.set_post(post_from_json(json));
+    }
+    void set_environment(const std::string &json) {
+        renderer_.set_environment(environment_from_json(json));
+    }
+    void set_environment_hdr(const std::string &path) {
+        std::ifstream f(path, std::ios::binary);
+        if (!f)
+            throw std::runtime_error("cannot open " + path);
+        const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        renderer_.set_environment_hdr(bytes.data(), bytes.size());
+    }
+    void reset_environment_map() {
+        renderer_.reset_environment_map();
+    }
+    void set_time(double seconds) {
+        renderer_.set_time(seconds);
+    }
+    bool animating() const {
+        return renderer_.animating();
     }
     void set_culling(bool frustum, bool cone, bool occlusion) {
         renderer_.set_culling(frustum, cone, occlusion);
@@ -524,8 +569,29 @@ private:
         return it->second;
     }
 
+    nb::dict effect_set(EffectHandles h) {
+        uint32_t set = uint32_t(effect_sets_.size());
+        for (uint32_t i = 0; i < effect_sets_.size(); ++i)
+            if (effect_sets_[i].lights.empty() && effect_sets_[i].emitters.empty() && effect_sets_[i].ramps.empty()) {
+                set = i;
+                break;
+            }
+        if (set == effect_sets_.size())
+            effect_sets_.emplace_back();
+        nb::dict d;
+        d["set"] = set;
+        d["lights"] = h.lights;
+        d["emitters"] = h.emitters;
+        d["ramps"] = h.ramps;
+        d["unresolved"] = h.unresolved;
+        effect_sets_[set] = std::move(h);
+        return d;
+    }
+
     NativeDevice device_;
     Renderer renderer_;
+    std::vector<EffectHandles> effect_sets_;
+    std::vector<GlbObject> last_objects_; // what apply_effects' emissive targets name
     std::unique_ptr<OffscreenTarget> target_;
     std::map<uint32_t, uint32_t> geometry_of_;
     std::map<uint32_t, InstanceDesc> descs_;
@@ -633,9 +699,25 @@ NB_MODULE(_render, m) {
         .def("load_glb", &OffscreenRenderer::load_glb, "path"_a, "y_up"_a = false, "line_width"_a = 1.0f,
              "member_width"_a = 1.0f, "point_size"_a = 1.0f, "line_color"_a = nb::none(), "double_sided"_a = false,
              "feature_edge_angle_deg"_a = 0.0f, "section_caps"_a = false, "animations"_a = false,
-             "offset"_a = std::array<double, 3>{0, 0, 0},
+             "offset"_a = std::array<double, 3>{0, 0, 0}, "effects"_a = false, "effects_look"_a = false,
              "offset: added to every world position in double before it is a float (after y_up, so z-up); "
-             "bounds, positions and matrices include it.")
+             "bounds, positions and matrices include it. effects: add the GLB's \"ada_effects\" scene extras "
+             "(point lights, emitters, emissive ramps; see apply_effects), effects_look: and its post / environment.")
+        .def("apply_effects", &OffscreenRenderer::apply_effects, "spec_json"_a, "apply_look"_a = true,
+             "Add an effects description (JSON text: lights, emitters, emissive ramps on the last GLB's object ids, "
+             "post, environment). Returns {set, lights, emitters, ramps, unresolved}; remove_effects(set) undoes it.")
+        .def("remove_effects", &OffscreenRenderer::remove_effects, "set"_a)
+        .def("set_post", &OffscreenRenderer::set_post, "settings_json"_a,
+             "HDR target, tone mapping, exposure and bloom: {hdr, toneMapping, exposure, bloom, bloomThreshold, "
+             "bloomKnee, bloomStrength, bloomRadius}; {} is everything off.")
+        .def("set_environment", &OffscreenRenderer::set_environment, "settings_json"_a,
+             "Image-based lighting: {enabled, intensity, rotation, up}.")
+        .def("set_environment_hdr", &OffscreenRenderer::set_environment_hdr, "path"_a,
+             "An equirectangular Radiance .hdr image to light with (else the procedural studio).")
+        .def("reset_environment_map", &OffscreenRenderer::reset_environment_map)
+        .def("set_time", &OffscreenRenderer::set_time, "seconds"_a,
+             "The clock of flicker, emissive ramps and particles.")
+        .def("animating", &OffscreenRenderer::animating)
         .def("set_animation_time", &OffscreenRenderer::set_animation_time, "animation_set"_a, "animation"_a.none(),
              "time"_a,
              "Pose what load_glb(animations=True) kept apart: animation index (None = the rest pose) at time "

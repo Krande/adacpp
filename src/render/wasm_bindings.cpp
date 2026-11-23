@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "glb_effects.h"
 #include "glb_scene.h"
 #include "renderer.h"
 
@@ -72,6 +73,20 @@ emscripten::val glb_bounds(uintptr_t bytes, uint32_t length, bool y_up) {
     for (double v : b)
         out.call<void>("push", v);
     return out;
+}
+
+// A JS object as JSON text, for the effect readers (glb_effects.h), so the browser takes the same keys as a GLB.
+std::string to_json(const emscripten::val &v) {
+    if (v.isUndefined() || v.isNull())
+        return "{}";
+    return emscripten::val::global("JSON").call<std::string>("stringify", v);
+}
+
+emscripten::val id_array(const std::vector<uint32_t> &ids) {
+    emscripten::val a = emscripten::val::array();
+    for (uint32_t id : ids)
+        a.call<void>("push", id);
+    return a;
 }
 
 } // namespace
@@ -255,7 +270,107 @@ public:
             animation_sets_[set] = r.animations;
         }
         out.set("animationSet", set);
+        // opts.effects: the GLB's "ada_effects" scene extras (lights, emitters, emissive ramps on its objects),
+        // added and kept as an effect set (removeEffects); opts.effectsLook also applies its post-processing and
+        // environment, which a viewer usually keeps as its own settings instead.
+        if (!opts.isUndefined() && !opts.isNull() && flag("effects")) {
+            try {
+                out.set("effects", effect_set(apply_glb_effects(*renderer_, r, o, flag("effectsLook"))));
+            } catch (const std::exception &e) {
+                out.set("effectsError", std::string(e.what()));
+            }
+        }
         return out;
+    }
+
+    // Effects (effects.h) as plain data: the keys of docs/render_effects.md, as a GLB's "ada_effects" holds them.
+    // applyEffects(json, applyLook) adds a whole description at once and returns {set, lights, emitters, ramps,
+    // unresolved}: removeEffects(set) takes it away again.
+    emscripten::val apply_effects_json(const std::string &json, bool apply_look) {
+        static const std::array<double, 16> identity{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        return effect_set(apply_effects(*renderer_, json, nullptr, identity, apply_look));
+    }
+    void remove_effects_set(int set) {
+        if (set < 0 || size_t(set) >= effect_sets_.size())
+            throw std::out_of_range("adacpp.render: unknown effect set " + std::to_string(set));
+        remove_effects(*renderer_, effect_sets_[set]);
+        effect_sets_[set] = EffectHandles{};
+    }
+
+    // {hdr, toneMapping: "none" | "neutral" | "aces", exposure, bloom, bloomThreshold, bloomKnee, bloomStrength,
+    // bloomRadius}; what is left out is the default (PostSettings): {} switches every post-processing off.
+    void set_post(emscripten::val settings) {
+        renderer_->set_post(post_from_json(to_json(settings)));
+    }
+    // {enabled, intensity, rotation (radians), up: [x, y, z]}.
+    void set_environment(emscripten::val settings) {
+        renderer_->set_environment(environment_from_json(to_json(settings)));
+    }
+    // A Radiance .hdr file's bytes in the heap: the environment image. False (and unchanged) when unreadable.
+    bool set_environment_hdr(uintptr_t bytes, uint32_t length) {
+        try {
+            renderer_->set_environment_hdr(ptr<uint8_t>(bytes), length);
+            return true;
+        } catch (const std::exception &) {
+            return false;
+        }
+    }
+    // width x height linear RGB floats (3 per texel, row 0 the zenith) in the heap.
+    void set_environment_map(uintptr_t rgb, uint32_t width, uint32_t height) {
+        renderer_->set_environment_map(ptr<float>(rgb), width, height);
+    }
+    void reset_environment_map() {
+        renderer_->reset_environment_map();
+    }
+    // The clock of every effect (seconds); animating(): whether the page should keep drawing frames.
+    void set_time(double seconds) {
+        renderer_->set_time(seconds);
+    }
+    bool animating() const {
+        return renderer_->animating();
+    }
+    uint32_t add_point_light() {
+        return renderer_->add_point_light();
+    }
+    // {position, color, intensity, range, decay, flicker, flickerRate, seed, start, end, enabled}.
+    void set_point_light(uint32_t light, emscripten::val desc) {
+        renderer_->set_point_light(light, point_light_from_json(to_json(desc)));
+    }
+    void remove_point_light(uint32_t light) {
+        renderer_->remove_point_light(light);
+    }
+    uint32_t add_emissive_ramp() {
+        return renderer_->add_emissive_ramp();
+    }
+    // {hotColor, hotIntensity, coolColor, coolIntensity, start, duration, curve}.
+    void set_emissive_ramp(uint32_t ramp, emscripten::val desc) {
+        renderer_->set_emissive_ramp(ramp, emissive_ramp_from_json(to_json(desc)));
+    }
+    void remove_emissive_ramp(uint32_t ramp) {
+        renderer_->remove_emissive_ramp(ramp);
+    }
+    // The instance's own emissive (linear rgb x strength) and ramp (-1 none), the rest of setInstance's values kept.
+    void set_instance_emissive(uint32_t instance, float r, float g, float b, int ramp) {
+        InstanceDesc d = renderer_->instance_desc(instance);
+        d.emissive = {r, g, b};
+        d.emissive_ramp = ramp < 0 ? kNoRamp : uint32_t(ramp);
+        renderer_->set_instance(instance, d);
+    }
+    // `count` segment indices (u32) in the heap glow with `ramp` (-1: as their instance does).
+    void set_segment_emissive(uint32_t instance, uintptr_t segments, uint32_t count, int ramp) {
+        renderer_->set_segment_emissive(instance, ptr<uint32_t>(segments), count, ramp < 0 ? kNoRamp : uint32_t(ramp));
+    }
+    uint32_t add_emitter() {
+        return renderer_->add_emitter();
+    }
+    // {preset: "sparks" | "smoke", origin, velocity, direction, spread, speed, speedJitter, rate, lifetime,
+    // lifetimeJitter, start, end, gravity, drag, radius, sizeStart, sizeEnd, colorStart, intensityStart,
+    // alphaStart, colorEnd, intensityEnd, alphaEnd, stretch, blend: "additive" | "alpha", seed, enabled}.
+    void set_emitter(uint32_t emitter, emscripten::val desc) {
+        renderer_->set_emitter(emitter, emitter_from_json(to_json(desc)));
+    }
+    void remove_emitter(uint32_t emitter) {
+        renderer_->remove_emitter(emitter);
     }
 
     // The animations of a loadGlb with `animations` (its animationSet). setAnimationTime poses the instances
@@ -368,6 +483,7 @@ public:
     void clear() {
         renderer_->clear();
         animation_sets_.clear();
+        effect_sets_.clear();
     }
 
     void set_camera(uintptr_t view, uintptr_t proj, bool orthographic) {
@@ -627,6 +743,31 @@ private:
         return o;
     }
 
+    // Keeps `h` as an effect set (a freed slot first) and describes it to the page.
+    emscripten::val effect_set(EffectHandles h) {
+        int set = -1;
+        for (size_t i = 0; i < effect_sets_.size() && set < 0; ++i)
+            if (effect_sets_[i].lights.empty() && effect_sets_[i].emitters.empty() && effect_sets_[i].ramps.empty())
+                set = int(i);
+        if (set < 0) {
+            set = int(effect_sets_.size());
+            effect_sets_.emplace_back();
+        }
+        emscripten::val o = emscripten::val::object();
+        o.set("set", set);
+        o.set("lights", id_array(h.lights));
+        o.set("emitters", id_array(h.emitters));
+        o.set("ramps", id_array(h.ramps));
+        emscripten::val missing = emscripten::val::array();
+        for (const std::string &s : h.unresolved)
+            missing.call<void>("push", s);
+        o.set("unresolved", missing);
+        o.set("hasPost", h.has_post);
+        o.set("hasEnvironment", h.has_environment);
+        effect_sets_[set] = std::move(h);
+        return o;
+    }
+
     const GlbAnimations &animation_set(int set) const {
         if (set < 0 || size_t(set) >= animation_sets_.size() || animation_sets_[set].count() == 0)
             throw std::out_of_range("adacpp.render: unknown animation set " + std::to_string(set));
@@ -645,6 +786,7 @@ private:
     WGPUSurface surface_ = nullptr;
     std::unique_ptr<Renderer> renderer_;
     std::vector<GlbAnimations> animation_sets_; // by loadGlb's animationSet; an empty one is a free slot
+    std::vector<EffectHandles> effect_sets_;    // by applyEffects' / loadGlb's effects.set; empty = free
     uint32_t width_ = 0, height_ = 0;
 };
 
@@ -715,6 +857,26 @@ EMSCRIPTEN_BINDINGS(adacpp_render) {
         .function("addSprite", &WebRenderer::add_sprite)
         .function("setSprite", &WebRenderer::set_sprite)
         .function("removeSprite", &WebRenderer::remove_sprite)
+        .function("applyEffects", &WebRenderer::apply_effects_json)
+        .function("removeEffects", &WebRenderer::remove_effects_set)
+        .function("setPost", &WebRenderer::set_post)
+        .function("setEnvironment", &WebRenderer::set_environment)
+        .function("setEnvironmentHdr", &WebRenderer::set_environment_hdr)
+        .function("setEnvironmentMap", &WebRenderer::set_environment_map)
+        .function("resetEnvironmentMap", &WebRenderer::reset_environment_map)
+        .function("setTime", &WebRenderer::set_time)
+        .function("animating", &WebRenderer::animating)
+        .function("addPointLight", &WebRenderer::add_point_light)
+        .function("setPointLight", &WebRenderer::set_point_light)
+        .function("removePointLight", &WebRenderer::remove_point_light)
+        .function("addEmissiveRamp", &WebRenderer::add_emissive_ramp)
+        .function("setEmissiveRamp", &WebRenderer::set_emissive_ramp)
+        .function("removeEmissiveRamp", &WebRenderer::remove_emissive_ramp)
+        .function("setInstanceEmissive", &WebRenderer::set_instance_emissive)
+        .function("setSegmentEmissive", &WebRenderer::set_segment_emissive)
+        .function("addEmitter", &WebRenderer::add_emitter)
+        .function("setEmitter", &WebRenderer::set_emitter)
+        .function("removeEmitter", &WebRenderer::remove_emitter)
         .function("pick", &WebRenderer::pick)
         .function("stats", &WebRenderer::stats)
         .function("readCullStats", &WebRenderer::read_cull_stats);
