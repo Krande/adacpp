@@ -5,8 +5,8 @@
 //                 [--pick X,Y] [--bench N] [--camera ex,ey,ez,tx,ty,tz] [--line-width PX] [--point-size PX]
 //                 [--gizmo] [--overlay spec.json]   (orientation gizmo / colour legend, see overlay_json.h)
 //                 [--effects spec.json] [--time T] [--hdr] [--tonemap none|neutral|aces] [--exposure E]
-//                 [--bloom] [--env studio|file.hdr] [--lighting AMBIENT,HEADLIGHT]   (realistic visuals, see docs/render_effects.md; the GLB's own
-//                 "ada_effects" scene extras are applied too)
+//                 [--bloom] [--env studio|file.hdr] [--lighting AMBIENT,HEADLIGHT]   (realistic visuals, see
+//                 docs/render_effects.md; the GLB's own "ada_effects" scene extras are applied too)
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>

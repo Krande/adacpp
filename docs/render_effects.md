@@ -91,7 +91,7 @@ The environment is added to the ambient light and headlight of `set_lighting()`.
 
 How it works:
 
-- **Image.** The default image is a procedural studio: a soft overhead gradient, a darker floor and three softboxes. An equirectangular Radiance `.hdr` replaces it (`set_environment_hdr`), as does any linear RGB float image (`set_environment_map`).
+- **Image.** The default image is a procedural studio: a soft overhead gradient, a darker floor and three softboxes, scaled so that a white diffuse face turned up is lit to 0.75. An equirectangular Radiance `.hdr` replaces it (`set_environment_hdr`), as does any linear RGB float image (`set_environment_map`).
 - **Prefiltering.** The image is resampled to 512 x 256 and prefiltered on the GPU by GGX importance sampling into six roughness mips. Its irradiance and a split-sum BRDF table are computed the same way. This happens once per image, the first time the environment is enabled.
 - **Shading.** Reflections use the GGX split sum, with three.js' multiple-scattering compensation. Diffuse light comes from the irradiance.
 
@@ -193,7 +193,7 @@ Switching an effect on, or the HDR target, re-creates the main pipelines once.
 - The CLI renders any GLB with its `ada_effects`, or with a separate description:
 
   ```
-  adacpp_render model.glb out.png --effects spec.json --time 2.5 --hdr --bloom --env studio
+  adacpp_render model.glb out.png --effects spec.json --time 2.5 --hdr --bloom --env studio --lighting 0.2,0.4
   ```
 - Tests: `pixi run -e render test-render`.
   - `render_effects` covers the CPU math: flicker, ramps, tone mapping and its inverse, the `.hdr` reader and the studio.
