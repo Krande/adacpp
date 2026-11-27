@@ -1,11 +1,10 @@
-"""Shared gmsh test cases for the gmsh-in-pyodide spikes (adapy-plugins#177 step 2d).
+"""Shared gmsh test cases for the gmsh in adacpp's pyodide wheel.
 
-One file, run unchanged in three places, so the counts are a comparison basis:
-  * natively (conda gmsh 4.15.2 + native adacpp):   python tools/gmsh_spike_cases.py [fixture.stp]
-  * in node-pyodide, option A (gmsh inside adacpp's extension): tools/test_gmsh_pyodide.js
-  * in node-pyodide, option B (gmsh wheel + shared OCCT side module): same harness, other wheel(s)
+One file, run unchanged in both places, so the counts are a comparison basis:
+  * natively (conda gmsh 4.15.2 + native adacpp):   python tools/gmsh_cases.py [fixture.stp]
+  * in node-pyodide (gmsh inside adacpp's extension):  tools/test_gmsh_pyodide.js
 
-tools/gmsh_spike_native.json is the native reference: this script's output in the adapy devstack
+tools/gmsh_cases_native.json is the native reference: this script's output in the adapy devstack
 image (conda gmsh 4.15.2 h09a0abf_11, occt 8.0.1, adacpp 0.44.0 native, x86_64 Linux).
 
 It needs only `import gmsh` and `import adacpp.cad`; it does not care which binary gmsh.py loads.
@@ -48,8 +47,8 @@ def _counts(gmsh) -> dict:
     by_type = {}
     for t, tags in zip(types, elem_tags):
         name = gmsh.model.mesh.getElementProperties(t)[0]
-        by_type[name] = int(len(tags))
-    return {"nodes": int(len(node_tags)), "elements": dict(sorted(by_type.items()))}
+        by_type[name] = len(tags)
+    return {"nodes": len(node_tags), "elements": dict(sorted(by_type.items()))}
 
 
 def _fresh(gmsh, name: str):
@@ -109,7 +108,7 @@ def case_plate_native_pointer(gmsh, cad):
 
 def _lshape(gmsh, cad, name: str, recomb_alg: int):
     _fresh(gmsh, name)
-    _shape, ents = _import_ptr(gmsh, cad, LSHAPE)
+    _shape, _ents = _import_ptr(gmsh, cad, LSHAPE)
     gmsh.model.occ.synchronize()
     gmsh.option.setNumber("Mesh.Algorithm", 6)
     gmsh.option.setNumber("Mesh.MeshSizeMin", 0.1)
@@ -147,7 +146,7 @@ def case_plate_stiffener_fragment(gmsh, cad):
 
 def case_size_field(gmsh, cad):
     _fresh(gmsh, "size_field")
-    _shape, ents = _import_ptr(gmsh, cad, LSHAPE)
+    _shape, _ents = _import_ptr(gmsh, cad, LSHAPE)
     gmsh.model.occ.synchronize()
     corner = gmsh.model.getEntitiesInBoundingBox(0.79, 0.59, -0.01, 0.81, 0.61, 0.01, dim=0)
     f_dist = gmsh.model.mesh.field.add("Distance")
@@ -203,23 +202,23 @@ CASES = [
 
 
 def run_all(step_path: str | None = None) -> dict:
-    import gmsh
-
-    import adacpp.cad as cad
-
     import os
 
-    skip = set(filter(None, os.environ.get("GMSH_SPIKE_SKIP", "").split(",")))
+    import gmsh
+
+    from adacpp import cad
+
+    skip = set(filter(None, os.environ.get("GMSH_CASES_SKIP", "").split(",")))
     results = {"gmsh_version": gmsh.__version__, "platform": sys.platform}
     for name, fn in CASES + [("step_import", lambda g, c: case_step_import(g, c, step_path))]:
         if name in skip:
-            results[name] = {"skipped": "GMSH_SPIKE_SKIP"}
+            results[name] = {"skipped": "GMSH_CASES_SKIP"}
             continue
-        print(f"[gmsh_spike_cases] {name}", file=sys.stderr, flush=True)
+        print(f"[gmsh_cases] {name}", file=sys.stderr, flush=True)
         t0 = time.perf_counter()
         try:
             results[name] = fn(gmsh, cad)
-        except Exception as e:  # report, keep going
+        except Exception as e:  # noqa: BLE001 - report, keep going
             results[name] = {"error": f"{type(e).__name__}: {e}"}
         results[name]["seconds"] = round(time.perf_counter() - t0, 3)
     if gmsh.isInitialized():

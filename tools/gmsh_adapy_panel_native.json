@@ -1,5 +1,5 @@
 {
- "_source": "tools/gmsh_spike_adapy_panel.py in the adapy devstack image: conda gmsh 4.15.2 (Blossom), occt 8.0.1, native adacpp 0.44.0, adapy from adapy-e2e/src (copied to ext4), --cpus 2",
+ "_source": "tools/gmsh_adapy_panel.py in the adapy devstack image: conda gmsh 4.15.2 (Blossom), occt 8.0.1, native adacpp 0.44.0, adapy from adapy-e2e/src (copied to ext4), --cpus 2",
  "size=0.25 alg=-": {
   "deck": "panelT1.FEM",
   "deck_GELMNT1": 472,

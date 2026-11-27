@@ -11,6 +11,8 @@
 # /out/ layout (consumed by downstream image builds, e.g. adapy's viewer via
 # `COPY --from=<this image> /out/`):
 #   ada_cpp-<ver>-cp313-cp313-pyodide_2025_0_wasm32.whl
+#                   carries gmsh: libgmsh linked into the extension, upstream
+#                   gmsh.py at the wheel top level (`import gmsh`), from 0.47
 #   manifest.json   {"adacpp": "<wheel filename>"}
 #   adacpp.sha      the resolved adacpp commit
 #   wasm/adacpp_step_glb.{js,wasm}     no-pyodide STEP->GLB embind module (viewer in-browser convert)

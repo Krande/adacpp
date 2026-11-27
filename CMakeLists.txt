@@ -52,7 +52,7 @@ option(
 )
 option(
     ADACPP_WITH_GMSH
-    "SPIKE: cross-build gmsh and link it into the pyodide extension (BUILD_WASM + BUILD_PYTHON only)"
+    "Cross-build gmsh into the pyodide extension (BUILD_WASM + BUILD_PYTHON; the wasm-pyodide preset sets it)"
     OFF
 )
 option(BUILD_PYTHON "Build the project for Python" ON)
@@ -276,7 +276,8 @@ if(BUILD_WASM)
         AND NOT BUILD_CLASH_WASM
     )
         include(cmake/wasm_occt.cmake)
-        # SPIKE: gmsh linked into the pyodide extension against the OCCT above (default OFF).
+        # gmsh linked into the pyodide extension against the OCCT above. Off unless asked for: the
+        # wasm-pyodide preset (the published pyodide wheel) asks; native builds never come here.
         if(ADACPP_WITH_GMSH AND BUILD_PYTHON)
             include(cmake/wasm_gmsh.cmake)
             list(APPEND ADA_CPP_LINK_LIBS gmsh_wasm)

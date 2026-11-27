@@ -1,7 +1,6 @@
-"""adapy's REAL mesh step on a stiffened panel, for the gmsh-in-pyodide spike (adapy-plugins#177 2d).
+"""adapy's REAL mesh step on a stiffened panel, with the gmsh in adacpp's pyodide wheel.
 
-The same call chain param_models' mesh step runs (param_models.iteration.code_aster.mesh_assembly +
-simulation.mesh_deck.gmsh_deck):
+The call chain a downstream Sesam mesh step runs:
 
     options = GmshOptions(); options.Mesh_RecombineAll = 1
     assembly.fem = assembly.to_fem_obj(mesh_size, options=options, use_quads=True)
@@ -11,7 +10,7 @@ on a 6 x 3 m, 12 mm plate with three TG200x100x8x12 stiffeners along x and one H
 across it at x = 3 (beams as line elements on the shell nodes, ada splits the plate along them).
 
 Run unchanged natively and in Pyodide (tools/test_gmsh_pyodide.js --adapy <adapy wheel>):
-    python tools/gmsh_spike_adapy_panel.py [out_dir] [mesh_size] [recombination_algorithm]
+    python tools/gmsh_adapy_panel.py [out_dir] [mesh_size] [recombination_algorithm]
 Prints JSON: node / element counts per type, deck size + sha256, mesh and write seconds.
 """
 
@@ -68,7 +67,6 @@ def _record_counts(data: bytes) -> Counter:
 
 def run(out_dir: str = "/tmp/panel_deck", mesh_size: float = 0.25, recomb_alg: int | None = None) -> dict:
     import gmsh
-
     from ada.fem.meshing import GmshOptions
 
     a = build_panel()

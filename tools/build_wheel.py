@@ -118,7 +118,7 @@ def main() -> int:
             zf.writestr(arcname, data)
             records.append(_record_line(arcname, data))
 
-        # Top-level modules staged next to adacpp/ (the ADACPP_WITH_GMSH spike installs gmsh.py
+        # Top-level modules staged next to adacpp/ (ADACPP_WITH_GMSH installs gmsh.py
         # there), and the licences of anything bundled with them (<staged>/licenses/*).
         for path in sorted(args.staged.glob("*.py")):
             arcname = path.name

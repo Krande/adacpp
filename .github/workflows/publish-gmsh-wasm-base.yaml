@@ -1,0 +1,122 @@
+name: Publish gmsh-wasm base image
+
+# Cross-compiles gmsh's static library for the pyodide wheel (cmake/wasm_gmsh.cmake) once and
+# publishes it as a reusable ghcr base image, the way publish-occt-wasm-base.yaml does for OCCT:
+#
+#   ghcr.io/<owner>/adacpp-gmsh-wasm-base:gmsh-<gmsh>-<OCCT>-emsdk-<emsdk>  (+ :latest, :sha-)
+#
+# The image carries lib/libgmsh.a and its build key under /opt/gmsh-wasm/, which ci-wasm-tests and
+# the wheel publish consume via GMSH_WASM_PREBUILT_DIR to skip the gmsh compile. cmake checks the
+# key, so a stale image only costs build time: it falls back to building gmsh from source.
+#
+# Rebuilt only when its inputs change -- the gmsh pin, patches and options (cmake/wasm_gmsh.cmake,
+# cmake/patches/gmsh/), the OCCT pin it compiles against (cmake/wasm_occt.cmake), the
+# emscripten/pyodide env (pixi.toml), the wasm preset, or this workflow -- plus on demand.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'cmake/wasm_gmsh.cmake'
+      - 'cmake/patches/gmsh/**'
+      - 'cmake/wasm_occt.cmake'
+      - 'CMakePresets.json'
+      - 'pixi.toml'
+      - 'deploy/Dockerfile.gmsh-wasm-base'
+      - '.github/workflows/publish-gmsh-wasm-base.yaml'
+  workflow_dispatch:
+
+concurrency:
+  group: publish-gmsh-wasm-base-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -l {0}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: prefix-dev/setup-pixi@v0.11.2
+        with:
+          pixi-version: v0.68.0
+          environments: wasm
+          cache: true
+
+      - name: Install pyodide cross-build env
+        run: pixi run -e wasm xbuildenv-install
+
+      - name: Use prebuilt OCCT-wasm base (if available)
+        # gmsh compiles against OCCT's headers; with the base image the OCCT compile is skipped.
+        run: |
+          echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+          repo=$(printf '%s' "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          base="ghcr.io/${repo}-occt-wasm-base:latest"
+          if docker pull "$base" >/dev/null 2>&1; then
+            dir="$RUNNER_TEMP/occt-wasm"
+            mkdir -p "$dir"
+            cid=$(docker create "$base")
+            docker cp "$cid:/opt/occt-wasm/." "$dir/"
+            docker rm "$cid" >/dev/null
+            echo "WASM_OCCT_PREBUILT_DIR=$dir" >> "$GITHUB_ENV"
+            echo "Using prebuilt OCCT-wasm base: $base"
+          else
+            echo "No prebuilt OCCT-wasm base ($base) -- building OCCT from source."
+          fi
+
+      - name: Cross-compile gmsh's static library
+        # build-gmsh-wasm builds ONLY the gmsh_external target -> build/wasm-pyodide/_deps/gmsh-build.
+        run: pixi run -e wasm build-gmsh-wasm
+
+      - name: Stage /opt/gmsh-wasm (lib + key)
+        run: |
+          src="build/wasm-pyodide/_deps/gmsh-build"
+          test -f "$src/libgmsh.a" && test -f "$src/adacpp-gmsh-wasm.key" \
+            || { echo "::error::expected $src/libgmsh.a and $src/adacpp-gmsh-wasm.key"; exit 1; }
+          mkdir -p gmsh-wasm/lib
+          cp "$src/libgmsh.a" gmsh-wasm/lib/
+          cp "$src/adacpp-gmsh-wasm.key" gmsh-wasm/
+          echo "Staged libgmsh.a ($(stat -c %s gmsh-wasm/lib/libgmsh.a) B), key $(cat gmsh-wasm/adacpp-gmsh-wasm.key)"
+
+      - name: Derive ABI tag (gmsh + OCCT + emscripten versions)
+        id: abi
+        run: |
+          gmsh=$(grep -A1 'set(ADACPP_GMSH_VERSION' cmake/wasm_gmsh.cmake | sed -n 's/.*"\([0-9][0-9.]*\)".*/\1/p' | head -1)
+          occt=$(sed -n 's/.*set(OCCT_GIT_TAG[[:space:]]*"\([^"]*\)".*/\1/p' cmake/wasm_occt.cmake | head -1)
+          emsdk=$(sed -n 's/.*emscripten[^0-9]*\([0-9][0-9.]*\).*/\1/p' pixi.toml | head -1)
+          echo "tag=gmsh-${gmsh:-unknown}-${occt:-OCCT}-emsdk-${emsdk:-unknown}" >> "$GITHUB_OUTPUT"
+          echo "gmsh=$gmsh OCCT=$occt emsdk=$emsdk"
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags + labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}-gmsh-wasm-base
+          tags: |
+            type=raw,value=${{ steps.abi.outputs.tag }}
+            type=raw,value=latest
+            type=sha,prefix=sha-
+
+      - name: Build and push base image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./deploy/Dockerfile.gmsh-wasm-base
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

@@ -1,18 +1,25 @@
 # cmake/wasm_gmsh.cmake
 #
-# SPIKE (option A, Aibel-Engineering/adapy-plugins#177 step 2d): cross-compile gmsh to a STATIC
-# wasm library and link it INTO _ada_cpp_ext_impl.so, against the same OCCT-wasm archives
-# (wasm_occt.cmake) adacpp already links. One OCCT copy in one side module means the
-# TopoDS_Shape* that cad.to_topods_pointer() hands out is directly usable by gmsh's
-# occ.importShapesNativePointer, exactly as natively.
+# gmsh in the pyodide wheel: cross-compile gmsh to a STATIC wasm library and link it INTO
+# _ada_cpp_ext_impl.so, against the same OCCT-wasm archives (wasm_occt.cmake) adacpp already links.
+# One OCCT copy in one side module means the TopoDS_Shape* that cad.to_topods_pointer() hands out
+# is directly usable by gmsh's occ.importShapesNativePointer, exactly as natively.
 #
 # Python reaches gmsh through gmsh's own upstream api/gmsh.py (ctypes), shipped as a top-level
 # `gmsh` module in the wheel. The only patch is where it loads the library from: under
 # sys.platform == "emscripten" it CDLLs adacpp's extension module, which exports gmsh's C API
 # (every GMSH_API function in api/gmshc.h, see ADACPP_GMSH_EXPORTS below).
 #
-# Only included when BUILD_WASM AND BUILD_PYTHON AND ADACPP_WITH_GMSH (default OFF). Native builds
-# keep linking conda-forge's libgmsh (deps_gmsh.cmake) and never read this file.
+# Only included when BUILD_WASM AND BUILD_PYTHON AND ADACPP_WITH_GMSH. The option defaults OFF; the
+# wasm-pyodide preset (the published pyodide wheel) turns it on, so there is ONE pyodide wheel and
+# it carries gmsh. Native builds keep linking conda-forge's libgmsh (deps_gmsh.cmake) and never
+# read this file. ADACPP_GMSH_VERSION below and the native `gmsh` pin in pixi.toml move together.
+#
+# libgmsh.a is reusable across adacpp builds (it depends on gmsh, the patches, OCCT's headers and
+# the toolchain, not on adacpp's source), so like OCCT it is published as a base image
+# (publish-gmsh-wasm-base.yaml) and consumed via GMSH_WASM_PREBUILT_DIR. A prebuilt tree is used
+# only when its key (ADACPP_GMSH_WASM_KEY: every build input of libgmsh.a) equals this
+# configure's; otherwise gmsh is built from source here (3-4 min at -j16).
 #
 # gmsh options: everything off (-DDEFAULT=0) and then exactly what the mesh step uses switched on:
 #   MESH, POST (size fields), PARSER, SOLVER, OCC + OCC_CAF (STEP import with labels) on adacpp's
@@ -96,7 +103,8 @@ if(NOT EXISTS "${_gmsh_patch_stamp}")
     endforeach()
     file(READ "${GMSH_SOURCE_DIR}/CMakeLists.txt" _gmsh_cml)
     string(
-        REPLACE "find_package(Freetype)"
+        REPLACE
+        "find_package(Freetype)"
         "set(FREETYPE_FOUND TRUE) # adacpp-wasm: no freetype"
         _gmsh_cml
         "${_gmsh_cml}"
@@ -115,15 +123,11 @@ set(_GMSH_FLAGS
     "-fwasm-exceptions -sSUPPORT_LONGJMP=wasm -fPIC -fvisibility=hidden"
 )
 
-set(_GMSH_CMAKE_ARGS
-    -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
+# gmsh's own options (no paths in here: they are part of the prebuilt key below).
+set(_GMSH_OPTIONS
     -DCMAKE_BUILD_TYPE=Release
     "-DCMAKE_C_FLAGS=${_GMSH_FLAGS}"
     "-DCMAKE_CXX_FLAGS=${_GMSH_FLAGS} -fvisibility-inlines-hidden"
-    # Find OCCT's archives in the OCCT-wasm install: add it as a find ROOT (the emscripten toolchain
-    # appends its sysroot), so find_library stays confined to wasm trees and never sees host libs.
-    -DCMAKE_FIND_ROOT_PATH=${OCCT_INSTALL_DIR}
-    -DOCC_INC=${OCCT_INCLUDE_DIR}
     -DDEFAULT=0
     -DENABLE_BUILD_LIB=ON
     -DENABLE_BUILD_SHARED=OFF
@@ -170,40 +174,108 @@ set(_GMSH_CMAKE_ARGS
     -DENABLE_TOUCHBAR=OFF
 )
 
-set(_GMSH_DEPENDS)
-if(TARGET occt_external)
-    list(APPEND _GMSH_DEPENDS occt_external)
-endif()
-
-ExternalProject_Add(
-    gmsh_external
-    SOURCE_DIR ${GMSH_SOURCE_DIR}
-    BINARY_DIR ${GMSH_BUILD_DIR}
-    DOWNLOAD_COMMAND ""
-    UPDATE_COMMAND ""
-    # gmsh turns $ENV{CMAKE_PREFIX_PATH} into -I flags (CMakeLists.txt "ENV_CMAKE_PREFIX_PATH").
-    # Under pixi that is the conda env and its x86_64 glibc sysroot, whose headers then shadow
-    # emscripten's libc ("gnu/stubs-32.h not found"). Configure gmsh without it. Same for conda's
-    # compiler activation flags: LDFLAGS carries GNU-ld options wasm-ld rejects, which fails every
-    # try_compile and silently flips gmsh's platform checks (size_t, vsnprintf, socklen_t).
-    # (wasm_toolchain.cmake clears the same flags for adacpp's own configure.)
-    CONFIGURE_COMMAND
-        ${CMAKE_COMMAND} -E env --unset=CMAKE_PREFIX_PATH
-        --unset=CMAKE_INCLUDE_PATH --unset=LDFLAGS --unset=CFLAGS
-        --unset=CXXFLAGS --unset=CPPFLAGS ${CMAKE_COMMAND} -G ${CMAKE_GENERATOR} -S
-        <SOURCE_DIR> -B <BINARY_DIR> ${_GMSH_CMAKE_ARGS}
-    # Only the static library: the default target also links the gmsh executable.
-    BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target lib
-    INSTALL_COMMAND ""
-    BUILD_BYPRODUCTS ${GMSH_WASM_LIB}
-    DEPENDS ${_GMSH_DEPENDS}
-    USES_TERMINAL_CONFIGURE TRUE
-    USES_TERMINAL_BUILD TRUE
+# Every input libgmsh.a depends on, hashed: the gmsh release, the patches (and the freetype edit,
+# which is fixed text in this file), gmsh's options and flags, the OCCT release whose headers it
+# compiles against, and the compiler. Not adacpp's source: a prebuilt library from an older adacpp
+# commit is exactly as good when this key matches.
+set(_gmsh_key_text
+    "gmsh=${ADACPP_GMSH_VERSION}\nsha256=${ADACPP_GMSH_SHA256}\nblossom=${_GMSH_BLOSSOM}\n"
 )
+string(
+    APPEND _gmsh_key_text
+    "occt=${OCCT_GIT_TAG}\n"
+    "cxx=${CMAKE_CXX_COMPILER_ID}-${CMAKE_CXX_COMPILER_VERSION}\n"
+    "options=${_GMSH_OPTIONS}\n"
+    "freetype-edit=1\n"
+)
+foreach(_p cxx17_for_occt.patch occt800_api_compat.patch)
+    file(SHA256 "${_GMSH_PATCH_DIR}/${_p}" _p_sha)
+    string(APPEND _gmsh_key_text "${_p}=${_p_sha}\n")
+endforeach()
+string(SHA256 ADACPP_GMSH_WASM_KEY "${_gmsh_key_text}")
+set(_GMSH_KEY_FILE_NAME "adacpp-gmsh-wasm.key")
+
+set(GMSH_WASM_PREBUILT_DIR
+    "$ENV{GMSH_WASM_PREBUILT_DIR}"
+    CACHE PATH
+    "Prebuilt gmsh-wasm tree (lib/libgmsh.a + ${_GMSH_KEY_FILE_NAME}); used when its key matches"
+)
+set(_gmsh_use_prebuilt FALSE)
+if(GMSH_WASM_PREBUILT_DIR)
+    set(_prebuilt_key_file "${GMSH_WASM_PREBUILT_DIR}/${_GMSH_KEY_FILE_NAME}")
+    set(_prebuilt_lib "${GMSH_WASM_PREBUILT_DIR}/lib/libgmsh.a")
+    set(_prebuilt_key "")
+    if(EXISTS "${_prebuilt_key_file}")
+        file(STRINGS "${_prebuilt_key_file}" _prebuilt_key LIMIT_COUNT 1)
+    endif()
+    if(
+        EXISTS "${_prebuilt_lib}"
+        AND _prebuilt_key STREQUAL ADACPP_GMSH_WASM_KEY
+    )
+        set(_gmsh_use_prebuilt TRUE)
+        set(GMSH_WASM_LIB "${_prebuilt_lib}")
+        message(STATUS "gmsh-wasm: using prebuilt ${GMSH_WASM_LIB}")
+    else()
+        # Not an error: a stale base image (gmsh or OCCT bumped in this very change) must not block
+        # the build that is about to make the new one.
+        message(
+            WARNING
+            "gmsh-wasm: ${GMSH_WASM_PREBUILT_DIR} does not hold a libgmsh.a for this "
+            "configuration (key '${_prebuilt_key}', wanted '${ADACPP_GMSH_WASM_KEY}'); "
+            "building gmsh from source"
+        )
+    endif()
+endif()
 
 add_library(gmsh_wasm STATIC IMPORTED GLOBAL)
 set_target_properties(gmsh_wasm PROPERTIES IMPORTED_LOCATION ${GMSH_WASM_LIB})
-add_dependencies(gmsh_wasm gmsh_external)
+
+if(NOT _gmsh_use_prebuilt)
+    # The key next to the library, for publish-gmsh-wasm-base.yaml to stage beside it.
+    file(MAKE_DIRECTORY "${GMSH_BUILD_DIR}")
+    file(
+        WRITE "${GMSH_BUILD_DIR}/${_GMSH_KEY_FILE_NAME}"
+        "${ADACPP_GMSH_WASM_KEY}\n"
+    )
+
+    set(_GMSH_DEPENDS)
+    if(TARGET occt_external)
+        list(APPEND _GMSH_DEPENDS occt_external)
+    endif()
+
+    ExternalProject_Add(
+        gmsh_external
+        SOURCE_DIR ${GMSH_SOURCE_DIR}
+        BINARY_DIR ${GMSH_BUILD_DIR}
+        DOWNLOAD_COMMAND ""
+        UPDATE_COMMAND ""
+        # gmsh turns $ENV{CMAKE_PREFIX_PATH} into -I flags (CMakeLists.txt "ENV_CMAKE_PREFIX_PATH").
+        # Under pixi that is the conda env and its x86_64 glibc sysroot, whose headers then shadow
+        # emscripten's libc ("gnu/stubs-32.h not found"). Configure gmsh without it. Same for
+        # conda's compiler activation flags: LDFLAGS carries GNU-ld options wasm-ld rejects, which
+        # fails every try_compile and silently flips gmsh's platform checks (size_t, vsnprintf,
+        # socklen_t). (wasm_toolchain.cmake clears the same flags for adacpp's own configure.)
+        CONFIGURE_COMMAND
+            ${CMAKE_COMMAND} -E env --unset=CMAKE_PREFIX_PATH
+            --unset=CMAKE_INCLUDE_PATH --unset=LDFLAGS --unset=CFLAGS
+            --unset=CXXFLAGS --unset=CPPFLAGS ${CMAKE_COMMAND} -G
+            ${CMAKE_GENERATOR} -S <SOURCE_DIR> -B <BINARY_DIR>
+            -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
+            # Find OCCT's archives in the OCCT-wasm install: add it as a find ROOT (the emscripten
+            # toolchain appends its sysroot), so find_library stays confined to wasm trees and
+            # never sees host libs.
+            -DCMAKE_FIND_ROOT_PATH=${OCCT_INSTALL_DIR}
+            -DOCC_INC=${OCCT_INCLUDE_DIR} ${_GMSH_OPTIONS}
+        # Only the static library: the default target also links the gmsh executable.
+        BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target lib
+        INSTALL_COMMAND ""
+        BUILD_BYPRODUCTS ${GMSH_WASM_LIB}
+        DEPENDS ${_GMSH_DEPENDS}
+        USES_TERMINAL_CONFIGURE TRUE
+        USES_TERMINAL_BUILD TRUE
+    )
+    add_dependencies(gmsh_wasm gmsh_external)
+endif()
 
 # The C API gmsh.py calls through ctypes: every GMSH_API function declared in api/gmshc.h.
 # SIDE_MODULE=2 exports only what is named, so each one gets an explicit --export.
@@ -223,7 +295,10 @@ file(READ "${GMSH_SOURCE_DIR}/api/gmsh.py" _gmsh_py)
 set(_gmsh_py_anchor "\nlibpath = None\n")
 string(FIND "${_gmsh_py}" "${_gmsh_py_anchor}" _anchor_at)
 if(_anchor_at EQUAL -1)
-    message(FATAL_ERROR "gmsh-wasm: cannot patch api/gmsh.py (anchor 'libpath = None' not found)")
+    message(
+        FATAL_ERROR
+        "gmsh-wasm: cannot patch api/gmsh.py (anchor 'libpath = None' not found)"
+    )
 endif()
 string(
     CONCAT _gmsh_py_patch

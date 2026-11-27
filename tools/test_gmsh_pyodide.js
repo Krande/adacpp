@@ -1,9 +1,8 @@
-// SPIKE (adapy-plugins#177 step 2d): gmsh in node-pyodide, through the shared cases in
-// tools/gmsh_spike_cases.py, checked against the native counts in tools/gmsh_spike_native.json.
+// gmsh in node-pyodide, through the shared cases in
+// tools/gmsh_cases.py, checked against the native counts in tools/gmsh_cases_native.json.
 //
-// Option A (this branch): ONE wheel, gmsh statically linked into adacpp's extension, gmsh.py at the
-// top level of the wheel. Option B can reuse this file: pass every wheel to install, in order
-// (e.g. the OCCT side-module wheel, then gmsh, then adacpp).
+// ONE wheel: gmsh statically linked into adacpp's extension, gmsh.py at the top level of the wheel.
+// Several wheels may be passed; they are installed in order.
 //
 //   node tools/test_gmsh_pyodide.js <wheel> [<wheel> ...]
 //   node tools/test_gmsh_pyodide.js --record <wheel> ...   (also print the raw results JSON)
@@ -18,8 +17,8 @@ const path = require("path");
 const zlib = require("zlib");
 
 const REPO = path.resolve(__dirname, "..");
-const CASES = path.join(__dirname, "gmsh_spike_cases.py");
-const NATIVE = path.join(__dirname, "gmsh_spike_native.json");
+const CASES = path.join(__dirname, "gmsh_cases.py");
+const NATIVE = path.join(__dirname, "gmsh_cases_native.json");
 const FIXTURE = path.join(REPO, "files", "flat_plate_abaqus_10x10_m_wColors.stp");
 
 let failures = 0;
@@ -45,8 +44,9 @@ function sizes() {
     console.log("\n[size] wheel(s), raw and brotli-11");
     for (const w of wheels) {
         const buf = fs.readFileSync(w);
-        const br = zlib.brotliCompressSync(buf, {params: {[zlib.constants.BROTLI_PARAM_QUALITY]: 11}});
-        console.log(`  ${path.basename(w)}: raw ${mib(buf.length)} (${buf.length}), brotli ${mib(br.length)} (${br.length})`);
+        const br = zlib.brotliCompressSync(buf, {params : {[zlib.constants.BROTLI_PARAM_QUALITY] : 11}});
+        console.log(
+            `  ${path.basename(w)}: raw ${mib(buf.length)} (${buf.length}), brotli ${mib(br.length)} (${br.length})`);
     }
 }
 
@@ -58,7 +58,7 @@ async function coldStart() {
     t.loadPyodide = performance.now() - t0;
     t0 = performance.now();
     py.FS.mkdirTree("/dist");
-    await py.loadPackage([ "micropip" ], {messageCallback: () => {}});
+    await py.loadPackage([ "micropip" ], {messageCallback : () => {}});
     const micropip = py.pyimport("micropip");
     for (const w of wheels) {
         py.FS.writeFile("/dist/" + path.basename(w), fs.readFileSync(w));
@@ -87,7 +87,7 @@ async function coldStart() {
 //    with it OFF gmsh falls back to the simple pairing (quad-dominant).
 const BLOSSOM = "lshape_recombine_blossom";
 const sorted = (o) => JSON.stringify(Object.fromEntries(Object.entries(o || {}).sort()));
-const fixed = (e) => ({Point: (e || {}).Point, line: (e || {})["Line 2"]});
+const fixed = (e) => ({Point : (e || {}).Point, line : (e || {})["Line 2"]});
 
 function compare(got, want) {
     console.log("\n[parity] counts vs native (conda gmsh 4.15.2 + native adacpp)");
@@ -122,24 +122,24 @@ async function main() {
     for (let i = 0; i < 3; i++) {
         const r = await coldStart();
         py = r.py;
-        console.log("  " + Object.entries(r.t).map(([k, v]) => `${k}=${v.toFixed(0)}`).join(" "));
+        console.log("  " + Object.entries(r.t).map(([ k, v ]) => `${k}=${v.toFixed(0)}`).join(" "));
     }
     if (timingOnly)
         process.exit(0);
 
-    console.log("\n[gmsh] shared cases (tools/gmsh_spike_cases.py)");
-    py.FS.writeFile("/gmsh_spike_cases.py", fs.readFileSync(CASES));
+    console.log("\n[gmsh] shared cases (tools/gmsh_cases.py)");
+    py.FS.writeFile("/gmsh_cases.py", fs.readFileSync(CASES));
     py.FS.writeFile("/fixture.stp", fs.readFileSync(FIXTURE));
     let got;
     try {
         got = JSON.parse(py.runPython(`
 import sys, json
 sys.path.insert(0, "/")
-import gmsh_spike_cases
-json.dumps(gmsh_spike_cases.run_all("/fixture.stp"))
+import gmsh_cases
+json.dumps(gmsh_cases.run_all("/fixture.stp"))
 `));
     } catch (e) {
-        check("run gmsh_spike_cases.run_all()", false, String(e).split("\n").slice(-3).join(" | "));
+        check("run gmsh_cases.run_all()", false, String(e).split("\n").slice(-3).join(" | "));
         process.exit(1);
     }
     if (record)

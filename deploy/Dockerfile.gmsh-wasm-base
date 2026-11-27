@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1.7
+#
+# Reusable gmsh-wasm base image: gmsh's static library cross-compiled for the
+# pyodide wheel (cmake/wasm_gmsh.cmake), under /opt/gmsh-wasm/. Like the OCCT
+# base, it is a stable build input that does not change with adacpp's source;
+# building it costs several minutes per wheel build otherwise.
+#
+# The library is cross-compiled on the CI runner (`pixi run -e wasm
+# build-gmsh-wasm`) and staged into ./gmsh-wasm/ by the publish-gmsh-wasm-base
+# workflow *before* this image is built; this Dockerfile only packages it.
+#
+# Consumers (ci-wasm-tests, the wheel publish) docker-cp /opt/gmsh-wasm/ onto
+# the runner and point cmake at it via GMSH_WASM_PREBUILT_DIR.
+#
+# /opt/gmsh-wasm/ layout:
+#   lib/libgmsh.a
+#   adacpp-gmsh-wasm.key   hash of every build input of libgmsh.a (gmsh release,
+#                          patches, options, OCCT release, compiler)
+#
+# cmake/wasm_gmsh.cmake uses the library only when the key equals the one it
+# computes, and builds gmsh from source otherwise, so a stale :latest can cost
+# build time but never ships a mismatched gmsh.
+#
+# busybox (not scratch) so `docker create` + `docker cp` work for consumers
+# without a running command.
+FROM busybox:stable-musl
+COPY gmsh-wasm/ /opt/gmsh-wasm/

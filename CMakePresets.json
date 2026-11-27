@@ -154,16 +154,8 @@
         "BUILD_STP2GLB_TESTING": "OFF",
         "BUILD_DEBUG_TESTING": "OFF",
         "WASM_PYODIDE": "ON",
+        "ADACPP_WITH_GMSH": "ON",
         "Python_EXECUTABLE": "$penv{CONDA_PREFIX}/bin/python"
-      }
-    },
-    {
-      "name": "wasm-pyodide-gmsh",
-      "inherits": "wasm-pyodide",
-      "hidden": false,
-      "binaryDir": "${sourceDir}/build/${presetName}",
-      "cacheVariables": {
-        "ADACPP_WITH_GMSH": "ON"
       }
     },
     {
