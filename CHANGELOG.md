@@ -2,6 +2,15 @@
 
 
 
+## v0.47.0 (2026-11-27)
+
+### Feature
+
+* feat(wasm): the pyodide wheel carries gmsh 4.15.2 (static, inside adacpp&#39;s extension); libgmsh.a cached as a base image (#90)
+
+Co-authored-by: Claude Opus 5.5 &lt;noreply@anthropic.com&gt; ([`f524c96`](https://github.com/Krande/adacpp/commit/f524c96f2d4d7e0ea72902c1fdcb2a508a574b0d))
+
+
 ## v0.46.0 (2026-11-27)
 
 ### Feature
