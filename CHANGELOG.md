@@ -2,6 +2,13 @@
 
 
 
+## v0.46.0 (2026-11-27)
+
+### Feature
+
+* feat(cad): triangulate_polygon, a constrained-Delaunay planar triangulation (detria) for native and pyodide (#88) ([`9f0b703`](https://github.com/Krande/adacpp/commit/9f0b703cb8ce9fd62afab17bb6420f23548f73c8))
+
+
 ## v0.45.0 (2026-11-23)
 
 ### Feature
