@@ -472,7 +472,44 @@ static void test_closed_bspline_edge_reversal_and_tube() {
     CHECK(close(area, expect, 0.05 * expect), "closed NURBS tube area ~ 2*pi*r*h");
 }
 
+// triangulate_polygon_cdt: exact input vertex set, CCW triangles, area preserved, fail-soft errors.
+static void test_polygon_cdt() {
+    using P = std::vector<std::array<double, 2>>;
+    auto area_ccw = [](const CdtPolyTriangulation &r, bool &all_ccw) {
+        double a = 0;
+        all_ccw = true;
+        for (const auto &t : r.tris) {
+            const auto &p = r.verts[t[0]], &q = r.verts[t[1]], &s = r.verts[t[2]];
+            double c = 0.5 * ((q[0] - p[0]) * (s[1] - p[1]) - (q[1] - p[1]) * (s[0] - p[0]));
+            all_ccw = all_ccw && c > 0;
+            a += c;
+        }
+        return a;
+    };
+    // L-shape, wound CW, with an explicit closing point
+    P l = {{0, 3}, {1, 3}, {1, 1}, {4, 1}, {4, 0}, {0, 0}, {0, 3}};
+    auto r = triangulate_polygon_cdt({l});
+    bool ccw = false;
+    CHECK(r.ok, "cdt L-shape ok");
+    CHECK(r.verts.size() == 6 && r.tris.size() == 4, "cdt L-shape: 6 verts (closing dropped), 4 tris");
+    for (size_t i = 0; i < r.verts.size() && i < 6; ++i)
+        CHECK(r.verts[i] == l[i], "cdt L-shape: verts in input order");
+    CHECK(close(area_ccw(r, ccw), 6.0, 1e-12) && ccw, "cdt L-shape: area 6, all CCW");
+
+    P outer = {{0, 0}, {10, 0}, {10, 10}, {0, 10}};
+    P hole = {{4, 4}, {6, 4}, {6, 6}, {4, 6}};
+    r = triangulate_polygon_cdt({outer, hole});
+    CHECK(r.ok && r.verts.size() == 8 && r.tris.size() == 8, "cdt square+hole: 8 verts, 8 tris");
+    CHECK(close(area_ccw(r, ccw), 96.0, 1e-12) && ccw, "cdt square+hole: area 96, all CCW");
+
+    CHECK(!triangulate_polygon_cdt({P{{0, 0}, {1, 0}}}).ok, "cdt: <3 points fails");
+    CHECK(!triangulate_polygon_cdt({P{{0, 0}, {1, 0}, {2, 0}}}).ok, "cdt: collinear fails");
+    auto bow = triangulate_polygon_cdt({P{{0, 0}, {1, 1}, {1, 0}, {0, 1}}});
+    CHECK(!bow.ok && !bow.error.empty(), "cdt: self-intersecting fails with a message");
+}
+
 int main() {
+    test_polygon_cdt();
     test_closed_bspline_edge_reversal_and_tube();
     test_plane_square_with_hole();
     test_plane_same_sense_false_flips_normal();

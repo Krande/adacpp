@@ -2730,6 +2730,85 @@ PolyTriangulation triangulate_polygon_with_holes(const std::vector<std::vector<s
     return out;
 }
 
+// Standalone planar CDT (ngeom_tessellate.h). The polygon's own vertices are the whole point set:
+// detria refuses to split a constraint edge and is never handed a Steiner point, so the output
+// vertices are the input vertices, index for index. Everything detria rejects comes back as an
+// error string rather than a repaired triangulation — the caller asked for exactly this polygon.
+CdtPolyTriangulation triangulate_polygon_cdt(const std::vector<std::vector<std::array<double, 2>>> &loops) {
+    CdtPolyTriangulation out;
+    auto fail = [&](std::string msg) {
+        out.verts.clear();
+        out.tris.clear();
+        out.ok = false;
+        out.error = std::move(msg);
+        return out;
+    };
+    if (loops.empty())
+        return fail("no loops given: loops[0] must be the outer boundary");
+
+    // Locals, not thread_local like run_detria: detria aliases these, and this entry point is
+    // per-polygon from Python, not a 300k-face hot loop.
+    std::vector<detria::PointD> pts;
+    std::vector<std::vector<uint32_t>> loop_idx;
+    loop_idx.reserve(loops.size());
+    for (size_t li = 0; li < loops.size(); ++li) {
+        const auto &lp = loops[li];
+        size_t n = lp.size();
+        // Implicitly closed; tolerate an explicit closing point.
+        if (n >= 2 && lp[n - 1][0] == lp[0][0] && lp[n - 1][1] == lp[0][1])
+            --n;
+        const std::string which = li == 0 ? std::string("outer loop") : "hole " + std::to_string(li);
+        if (n < 3)
+            return fail(which + " has fewer than 3 distinct points");
+        std::vector<uint32_t> idx;
+        idx.reserve(n);
+        double area2 = 0.0;
+        for (size_t k = 0; k < n; ++k) {
+            const auto &p = lp[k];
+            if (!std::isfinite(p[0]) || !std::isfinite(p[1]))
+                return fail(which + " has a non-finite coordinate");
+            const auto &q = lp[(k + 1) % n];
+            area2 += p[0] * q[1] - q[0] * p[1];
+            idx.push_back((uint32_t) pts.size());
+            pts.push_back({p[0], p[1]});
+            out.verts.push_back(p);
+        }
+        if (area2 == 0.0)
+            return fail(which + " has zero area (all points collinear)");
+        loop_idx.push_back(std::move(idx));
+    }
+
+    detria::Triangulation<detria::PointD, uint32_t> tri;
+    tri.setPoints(pts);
+    tri.addOutline(loop_idx[0]);
+    for (size_t i = 1; i < loop_idx.size(); ++i)
+        tri.addHole(loop_idx[i]);
+    if (!tri.triangulate(true))
+        return fail("constrained Delaunay triangulation failed: " + tri.getErrorMessage());
+
+    tri.forEachTriangle([&](detria::Triangle<uint32_t> t) { out.tris.push_back({t.x, t.y, t.z}); },
+                        /*cwTriangles=*/false);
+    // Guarantee CCW in the caller's (x, y) frame regardless of detria's internal convention, and drop
+    // anything degenerate (exact predicates should never produce one, but a zero-area triangle would
+    // break the caller's orientation contract).
+    size_t w = 0;
+    for (size_t i = 0; i < out.tris.size(); ++i) {
+        Tri t = out.tris[i];
+        const auto &a = out.verts[t[0]], &b = out.verts[t[1]], &c = out.verts[t[2]];
+        const double cr = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+        if (cr == 0.0)
+            continue;
+        if (cr < 0.0)
+            std::swap(t[1], t[2]);
+        out.tris[w++] = t;
+    }
+    out.tris.resize(w);
+    if (out.tris.empty())
+        return fail("triangulation produced no interior triangles");
+    out.ok = true;
+    return out;
+}
+
 namespace {
 bool tessellate_face_impl(const FaceSurfaceN &face, const TessParams &tp, TessMesh &outm) {
     // NOTE: do NOT bail on empty bounds — a closed quadric (full sphere/torus) or B-spline patch

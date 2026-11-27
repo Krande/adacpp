@@ -5118,6 +5118,49 @@ static nb::dict ngeom_emit_stats_dict(const adacpp::ifc_emit::FileStats &fs) {
     return d;
 }
 
+// triangulate_polygon: planar constrained Delaunay (detria) of an outline + holes. OCC-free, so it
+// is in the native AND the pyodide build. Each loop is coerced through numpy.ascontiguousarray, so
+// lists of tuples, (n, 2) arrays of any float/int dtype and strided views are all accepted.
+static nb::tuple triangulate_polygon_impl(nb::handle loops_obj) {
+    nb::module_ np = nb::module_::import_("numpy");
+    nb::object asarray = np.attr("ascontiguousarray");
+    nb::object f64 = np.attr("float64");
+    if (!nb::isinstance<nb::sequence>(loops_obj) || nb::isinstance<nb::str>(loops_obj))
+        throw std::invalid_argument("triangulate_polygon: loops must be a sequence of (n, 2) arrays");
+    std::vector<std::vector<std::array<double, 2>>> loops;
+    size_t li = 0;
+    for (nb::handle item : loops_obj) {
+        nb::object arr = asarray(item, "dtype"_a = f64);
+        nb::ndarray<const double, nb::ndim<2>, nb::device::cpu> a;
+        if (!nb::try_cast(arr, a) || a.shape(1) != 2)
+            throw std::invalid_argument("triangulate_polygon: loops[" + std::to_string(li) +
+                                        "] must be an array-like of shape (n, 2)");
+        std::vector<std::array<double, 2>> lp(a.shape(0));
+        for (size_t i = 0; i < a.shape(0); ++i)
+            lp[i] = {a(i, 0), a(i, 1)};
+        loops.push_back(std::move(lp));
+        ++li;
+    }
+
+    adacpp::ngeom::CdtPolyTriangulation r;
+    {
+        nb::gil_scoped_release release;
+        r = adacpp::ngeom::triangulate_polygon_cdt(loops);
+    }
+    if (!r.ok)
+        throw std::invalid_argument("triangulate_polygon: " + r.error);
+
+    auto *verts = new std::vector<std::array<double, 2>>(std::move(r.verts));
+    nb::capsule vown(verts, [](void *p) noexcept { delete static_cast<std::vector<std::array<double, 2>> *>(p); });
+    auto *tris = new std::vector<std::array<uint32_t, 3>>(std::move(r.tris));
+    nb::capsule town(tris, [](void *p) noexcept { delete static_cast<std::vector<std::array<uint32_t, 3>> *>(p); });
+    size_t vshape[2] = {verts->size(), 2};
+    size_t tshape[2] = {tris->size(), 3};
+    auto va = nb::ndarray<nb::numpy, double, nb::ndim<2>>(verts->data()->data(), 2, vshape, vown);
+    auto ta = nb::ndarray<nb::numpy, uint32_t, nb::ndim<2>>(tris->data()->data(), 2, tshape, town);
+    return nb::make_tuple(va, ta);
+}
+
 void cad_module(nb::module_ &m) {
     // Kernel-agnostic mesh / color / group types live in cad — they're the
     // surface every backend (native OCCT, wasm OCCT, future CGAL) speaks.
@@ -5693,6 +5736,19 @@ void cad_module(nb::module_ &m) {
     m.def("_step_index_parity", &step_index_parity_impl, "path"_a,
           "Debug: build the STEP offset index via mmap scan and via the wasm-safe pread scan, returning "
           "a dict of per-field equality (ids/offs/roots/units/styled/absr/srr/cdsr/sdr).");
+
+    m.def("triangulate_polygon", &triangulate_polygon_impl, "loops"_a,
+          "triangulate_polygon(loops) -> tuple[numpy.ndarray, numpy.ndarray]\n\n"
+          "Constrained-Delaunay triangulation of a planar polygon with holes (detria).\n\n"
+          "loops: sequence of (n_i, 2) array-likes; loops[0] is the outer boundary, further loops are\n"
+          "holes. Winding is irrelevant and loops are implicitly closed (a repeated first point at the\n"
+          "end is tolerated and dropped).\n\n"
+          "Returns (verts, tris): verts (m, 2) float64 is exactly the input vertices in input order\n"
+          "(loop 0, then each hole) -- no Steiner points, constraint edges are never split; tris (k, 3)\n"
+          "uint32 indexes verts, covers the polygon minus its holes and is CCW.\n\n"
+          "Raises ValueError for fewer than 3 points, all-collinear or non-finite input, duplicate\n"
+          "points, self-intersecting / touching boundaries, a hole outside the outline, or any other\n"
+          "triangulation failure.");
 
     m.def(
         "tess_tracks",

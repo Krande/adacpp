@@ -166,6 +166,7 @@ tessellate_box = _cad.tessellate_box
 tessellate_stream = _cad.tessellate_stream
 to_topods_pointer = _cad.to_topods_pointer
 transform = _cad.transform
+triangulate_polygon = _cad.triangulate_polygon
 unify_coplanar_faces = _cad.unify_coplanar_faces
 vertex_points = _cad.vertex_points
 volume = _cad.volume
@@ -307,6 +308,7 @@ __all__ = [
     "tessellate_stream",
     "to_topods_pointer",
     "transform",
+    "triangulate_polygon",
     "unify_coplanar_faces",
     "vertex_points",
     "volume",
