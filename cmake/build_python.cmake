@@ -119,7 +119,12 @@ endif()
 #
 # CMake registers WHOLE_ARCHIVE for many platforms but not the emscripten
 # wasm32 target — define it ourselves.
-if(EMSCRIPTEN AND DEFINED WASM_OCCT_TARGETS)
+if(EMSCRIPTEN AND ADACPP_WASM_SHARED_OCCT)
+    # SPIKE option B: OCCT comes from libocct.so (wasm_occt.cmake). Linking the .so records it as a
+    # NEEDED dylib, and occt_shared's INTERFACE rpath points it at the exact path the ada_occt wheel's
+    # copy is loaded from (wasm_occt.cmake: WASM_OCCT_SHARED_RPATH), so Pyodide reuses that copy.
+    target_link_libraries(_ada_cpp_ext_impl PRIVATE occt_shared)
+elseif(EMSCRIPTEN AND DEFINED WASM_OCCT_TARGETS)
     set(CMAKE_C_LINK_GROUP_USING_RESCAN
         "LINKER:--start-group"
         "LINKER:--end-group"

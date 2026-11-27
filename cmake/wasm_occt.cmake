@@ -45,6 +45,28 @@ set(WASM_OCCT_PREBUILT_DIR
 # V8_0_0-emsdk-<ver> and consumers stop matching the old V7_9_0 image.
 set(OCCT_GIT_TAG "V8_0_0" CACHE STRING "OCCT git tag to fetch for wasm build")
 
+# SPIKE (option B, Aibel-Engineering/adapy-plugins#177 step 2d): OCCT as ONE shared Pyodide side
+# module (libocct.so, its own wheel) that adacpp's extension and gmsh's libgmsh.so both link against,
+# so the process holds exactly one OCCT and a TopoDS_Shape* can cross from adacpp to gmsh as it does
+# natively (conda: libTK*.so shared by ada-cpp and libgmsh). OFF = today's static, hidden OCCT
+# baked into _ada_cpp_ext_impl.so.
+#
+# ON changes the OCCT build itself, so it needs its own install tree: the static archives are
+# compiled with DEFAULT visibility (a shared library must export them) and -fPIC, and the prebuilt
+# ghcr base image (hidden visibility) cannot be reused.
+option(
+    ADACPP_WASM_SHARED_OCCT
+    "SPIKE: build OCCT as a shared side module (libocct.so) instead of linking it statically"
+    OFF
+)
+if(ADACPP_WASM_SHARED_OCCT AND WASM_OCCT_PREBUILT_DIR)
+    message(
+        STATUS
+        "ADACPP_WASM_SHARED_OCCT: ignoring WASM_OCCT_PREBUILT_DIR (hidden-visibility archives)"
+    )
+    set(WASM_OCCT_PREBUILT_DIR "" CACHE PATH "" FORCE)
+endif()
+
 if(WASM_OCCT_PREBUILT_DIR)
     set(OCCT_INSTALL_DIR "${WASM_OCCT_PREBUILT_DIR}")
     message(STATUS "Using prebuilt OCCT-wasm install: ${OCCT_INSTALL_DIR}")
@@ -100,6 +122,18 @@ set(_WASM_OCCT_TOOLKITS
     TKMath
     TKernel
 )
+if(ADACPP_WASM_SHARED_OCCT)
+    # gmsh's OCC_LIBS_REQUIRED for OCCT >= 7.8 also names TKDEIGES (IGES import, and
+    # IGESCAFControl_Reader under OCC_CAF) and TKFeat; TKDE is the DE_* provider base both
+    # TKDESTEP and TKDEIGES reference. In the static build those references simply stayed unresolved
+    # imports; a shared library that two modules link against has to carry them.
+    #
+    # TKV3d + TKService (built by OCCT 8 as dependencies of the CAF toolkits even with the
+    # Visualization module off): TKXCAF/TKVCAF objects reference Graphic3d_* vtables. A side module's
+    # unresolved FUNCTION becomes a trapping stub, but an unresolved DATA symbol fails the load
+    # ("bad export type for '_ZTV20Graphic3d_TextureSet'"), and whole-archive pulls every object in.
+    list(PREPEND _WASM_OCCT_TOOLKITS TKDEIGES TKDE TKFeat TKV3d TKService)
+endif()
 
 if(NOT WASM_OCCT_PREBUILT_DIR)
     # ---- Build OCCT from source (the ~30-min cross-compile) ----------------
@@ -191,9 +225,31 @@ if(NOT WASM_OCCT_PREBUILT_DIR)
         # symbol table at load and pick up the upstream ifcopenshell wheel's
         # separate static OCCT — corrupting OCCT's RTTI registry. Hidden OCCT
         # stays private to adacpp; ifcopenshell keeps its own; no collision.
-        -DCMAKE_CXX_FLAGS=-fwasm-exceptions\ -sSUPPORT_LONGJMP=wasm\ -fvisibility=hidden\ -fvisibility-inlines-hidden
-        -DCMAKE_C_FLAGS=-fwasm-exceptions\ -sSUPPORT_LONGJMP=wasm\ -fvisibility=hidden
     )
+    if(ADACPP_WASM_SHARED_OCCT)
+        # Shared: default visibility (libocct.so must export OCCT) and PIC for the side module.
+        list(
+            APPEND _OCCT_CMAKE_ARGS
+            -DCMAKE_CXX_FLAGS=-fwasm-exceptions\ -sSUPPORT_LONGJMP=wasm\ -fPIC
+            -DCMAKE_C_FLAGS=-fwasm-exceptions\ -sSUPPORT_LONGJMP=wasm\ -fPIC
+        )
+    else()
+        list(
+            APPEND _OCCT_CMAKE_ARGS
+            -DCMAKE_CXX_FLAGS=-fwasm-exceptions\ -sSUPPORT_LONGJMP=wasm\ -fvisibility=hidden\ -fvisibility-inlines-hidden
+            -DCMAKE_C_FLAGS=-fwasm-exceptions\ -sSUPPORT_LONGJMP=wasm\ -fvisibility=hidden
+        )
+    endif()
+
+    set(_OCCT_EXTRA_PATCH)
+    if(ADACPP_WASM_SHARED_OCCT)
+        set(_OCCT_EXTRA_PATCH
+            COMMAND
+            bash
+            ${CMAKE_CURRENT_LIST_DIR}/occt_wasm_shared_patch.sh
+            ${OCCT_SOURCE_DIR}
+        )
+    endif()
 
     set(_WASM_OCCT_BYPRODUCTS)
     foreach(_tk IN LISTS _WASM_OCCT_TOOLKITS)
@@ -218,6 +274,7 @@ if(NOT WASM_OCCT_PREBUILT_DIR)
         PATCH_COMMAND
             sed -i "/add_definitions(-DOCC_CONVERT_SIGNALS)/d"
             ${OCCT_SOURCE_DIR}/adm/cmake/occt_defs_flags.cmake
+            ${_OCCT_EXTRA_PATCH}
         CMAKE_ARGS ${_OCCT_CMAKE_ARGS}
         BUILD_BYPRODUCTS ${_WASM_OCCT_BYPRODUCTS}
         USES_TERMINAL_DOWNLOAD TRUE
@@ -267,3 +324,56 @@ else()
     )
 endif()
 message(STATUS "OCCT-wasm install dir: ${OCCT_INSTALL_DIR}")
+
+if(ADACPP_WASM_SHARED_OCCT)
+    # libocct.so: every toolkit above, whole-archive, in one side module. -sSIDE_MODULE=1 exports
+    # every default-visibility symbol, which is the point: adacpp and gmsh import OCCT from here.
+    # One .so rather than one per toolkit: Pyodide resolves a module's NEEDED entries by file name,
+    # one file means one load and one place a second copy could come from.
+    set_property(GLOBAL PROPERTY TARGET_SUPPORTS_SHARED_LIBS TRUE)
+    set(_occt_stub "${CMAKE_BINARY_DIR}/occt_shared_stub.c")
+    file(WRITE "${_occt_stub}" "int adacpp_occt_shared_marker(void) { return 1; }\n")
+    add_library(occt_shared SHARED "${_occt_stub}")
+    set_target_properties(
+        occt_shared
+        PROPERTIES OUTPUT_NAME occt PREFIX "lib" SUFFIX ".so"
+    )
+    set(_occt_archives)
+    foreach(_tk IN LISTS _WASM_OCCT_TOOLKITS)
+        list(APPEND _occt_archives "${OCCT_LIB_DIR}/lib${_tk}.a")
+    endforeach()
+    target_link_options(
+        occt_shared
+        PRIVATE
+            "-sSIDE_MODULE=1"
+            "-sWASM_BIGINT"
+            "-fwasm-exceptions"
+            "-sSUPPORT_LONGJMP=wasm"
+            "-Wl,--no-gc-sections"
+            "-Wl,--whole-archive"
+            ${_occt_archives}
+            "-Wl,--no-whole-archive"
+    )
+    set_property(TARGET occt_shared APPEND PROPERTY LINK_DEPENDS ${_occt_archives})
+    target_include_directories(occt_shared INTERFACE ${OCCT_INCLUDE_DIR})
+    if(NOT WASM_OCCT_PREBUILT_DIR)
+        add_dependencies(occt_shared occt_external)
+    endif()
+    install(TARGETS occt_shared LIBRARY DESTINATION wheel-occt/ada_occt.libs)
+
+    # Where a NEEDED libocct.so resolves. Pyodide resolves a NEEDED name to a path (LD_LIBRARY_PATH
+    # = /usr/lib:<site-packages>, then the module's rpath) and only THEN checks whether that path is
+    # already loaded -- and it does not normalise it. micropip preloads the ada_occt wheel's library
+    # as <site-packages>/ada_occt.libs/libocct.so, so the rpath has to spell exactly that, or the
+    # loader finds the file under another name and instantiates a SECOND OCCT. "$ORIGIN/.." would
+    # do just that ("adacpp/../ada_occt.libs"). Pyodide 0.29's site-packages is fixed.
+    set(WASM_OCCT_SHARED_RPATH
+        "/lib/python3.13/site-packages/ada_occt.libs"
+        CACHE STRING
+        "Absolute in-Pyodide dir of libocct.so (rpath of the modules that NEED it)"
+    )
+    target_link_options(
+        occt_shared
+        INTERFACE "-Wl,-rpath,${WASM_OCCT_SHARED_RPATH}"
+    )
+endif()

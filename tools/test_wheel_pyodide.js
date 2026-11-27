@@ -44,7 +44,7 @@ function wheelPath() {
     if (given)
         return given;
     const dist = path.join(REPO, "dist");
-    const w = fs.readdirSync(dist).filter((f) => f.endsWith(".whl"));
+    const w = fs.readdirSync(dist).filter((f) => f.startsWith("ada_cpp-") && f.endsWith(".whl"));
     if (!w.length) {
         console.error("no wheel in dist/ — run `pixi run -e wasm pack-wheel-pyodide` first");
         process.exit(1);
@@ -69,6 +69,13 @@ async function fresh(wheel) {
     pyodide.FS.mkdirTree("/dist");
     pyodide.FS.writeFile("/dist/" + path.basename(wheel), fs.readFileSync(wheel));
     await pyodide.loadPackage([ "micropip" ]);
+    // ADACPP_PYODIDE_PREINSTALL: wheels (path-separated) installed BEFORE adacpp. The shared-OCCT
+    // spike (ADACPP_WASM_SHARED_OCCT=ON) needs the ada_occt wheel first: adacpp's extension NEEDS
+    // libocct.so and Pyodide resolves it against the copy already loaded.
+    for (const pre of (process.env.ADACPP_PYODIDE_PREINSTALL || "").split(path.delimiter).filter(Boolean)) {
+        pyodide.FS.writeFile("/dist/" + path.basename(pre), fs.readFileSync(pre));
+        await pyodide.pyimport("micropip").install("emfs:/dist/" + path.basename(pre), {deps : false});
+    }
     await pyodide.pyimport("micropip").install("emfs:/dist/" + path.basename(wheel));
     pyodide.FS.writeFile("/fixture.stp", fs.readFileSync(FIXTURE));
     return pyodide;
