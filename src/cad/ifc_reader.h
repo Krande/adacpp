@@ -604,7 +604,7 @@ public:
         if (!mi)
             return;
         if (!mi->args.empty() && mi->args[0].kind == adacpp::step::Kind::Str)
-            m.material = std::string(mi->args[0].s);
+            m.material = spf_text(mi->args[0].s);
         auto props = mat_props_.find(mat);
         if (props == mat_props_.end())
             return;
@@ -967,7 +967,7 @@ public:
                     if (prof) {
                         m.profile_type = prof->type;
                         if (prof->args.size() > 1 && prof->args[1].kind == adacpp::step::Kind::Str)
-                            m.profile_name = std::string(prof->args[1].s);
+                            m.profile_name = spf_text(prof->args[1].s);
                     }
                     m.depth = it->args[3].as_double() * us;
                     long pos = ref_arg(*it, 1);
@@ -1178,14 +1178,79 @@ public:
         c.has_segments = has_segs;
     }
 
-    // SPF string -> text: undo the '' escape (the only one this codebase's writers produce).
+    // SPF string -> UTF-8 text: undo '' and \\, and decode \X2\<UTF-16 hex>\X0\ runs (how a writer
+    // states anything outside printable ASCII). Other directives are kept verbatim.
     static std::string spf_text(std::string_view s) {
+        auto put = [](std::string &o, unsigned cp) {
+            if (cp < 0x80) {
+                o += (char) cp;
+            } else if (cp < 0x800) {
+                o += (char) (0xC0 | (cp >> 6));
+                o += (char) (0x80 | (cp & 0x3F));
+            } else if (cp < 0x10000) {
+                o += (char) (0xE0 | (cp >> 12));
+                o += (char) (0x80 | ((cp >> 6) & 0x3F));
+                o += (char) (0x80 | (cp & 0x3F));
+            } else {
+                o += (char) (0xF0 | (cp >> 18));
+                o += (char) (0x80 | ((cp >> 12) & 0x3F));
+                o += (char) (0x80 | ((cp >> 6) & 0x3F));
+                o += (char) (0x80 | (cp & 0x3F));
+            }
+        };
+        auto hexv = [](char c) -> int {
+            if (c >= '0' && c <= '9')
+                return c - '0';
+            if (c >= 'A' && c <= 'F')
+                return c - 'A' + 10;
+            if (c >= 'a' && c <= 'f')
+                return c - 'a' + 10;
+            return -1;
+        };
         std::string o;
         o.reserve(s.size());
         for (size_t i = 0; i < s.size(); ++i) {
-            o += s[i];
-            if (s[i] == '\'' && i + 1 < s.size() && s[i + 1] == '\'')
+            if (s[i] == '\'' && i + 1 < s.size() && s[i + 1] == '\'') {
+                o += '\'';
                 ++i;
+            } else if (s[i] == '\\' && i + 1 < s.size() && s[i + 1] == '\\') {
+                o += '\\';
+                ++i;
+            } else if (s.substr(i, 4) == "\\X2\\") {
+                size_t j = i + 4;
+                unsigned hi = 0;
+                std::string run;
+                while (j + 4 <= s.size() && s[j] != '\\') {
+                    unsigned v = 0;
+                    bool ok = true;
+                    for (size_t k = 0; k < 4; ++k) {
+                        int h = hexv(s[j + k]);
+                        ok = ok && h >= 0;
+                        v = (v << 4) | (unsigned) (h < 0 ? 0 : h);
+                    }
+                    if (!ok)
+                        break;
+                    j += 4;
+                    if (v >= 0xD800 && v < 0xDC00) {
+                        hi = v;
+                        continue;
+                    }
+                    if (v >= 0xDC00 && v < 0xE000 && hi) {
+                        put(run, 0x10000 + ((hi - 0xD800) << 10) + (v - 0xDC00));
+                        hi = 0;
+                        continue;
+                    }
+                    put(run, v);
+                }
+                if (s.substr(j, 4) == "\\X0\\") {
+                    o += run;
+                    i = j + 3;
+                } else {
+                    o += s[i]; // not a well-formed run: keep the text as written
+                }
+            } else {
+                o += s[i];
+            }
         }
         return o;
     }
@@ -1584,7 +1649,7 @@ private:
     static std::string name_of(const Instance &in) {
         // rooted entities: GlobalId, OwnerHistory, Name(arg2) ...
         if (in.args.size() > 2 && in.args[2].kind == adacpp::step::Kind::Str)
-            return std::string(in.args[2].s);
+            return spf_text(in.args[2].s);
         return {};
     }
     // Display/picking id for a rooted entity: its Name (arg2) if set, else its GlobalId (arg0). Rebar

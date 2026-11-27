@@ -20,6 +20,7 @@
 #include "ifc_to_glb_stream.h"   // native OCC-free IFC->GLB core (IfcResolver)
 #include "step_to_mesh_stream.h" // threaded OCC-free STEP->STL/OBJ core (parallel, baked, streaming)
 #include "ifc_emit.h"            // native IFC4 advanced-B-rep emitter (Phase 1, native STEP->IFC writer)
+#include "ifc_member_emit.h"     // structural members (IfcBeam/IfcPlate + axis, profile, cuts, psets)
 #include "step_emit.h"           // native AP242 STEP advanced-B-rep emitter (native STEP->STEP writer)
 #include "brep_file_convert.h"   // shared STEP<->IFC file writers (also compiled into the wasm writer)
 #include "ifc_reader.h"          // native IFC advanced-B-rep reader -> ng:: (native IFC->STEP path)
@@ -4535,12 +4536,17 @@ static void step_parity_impl(const std::string &in_path, double deflection, doub
 //     transforms  list of 16-float column-major (glTF) world placements; None/[] = one identity
 //     paths       per-instance assembly path: list of [(rep_id, name), ...] levels, parallel to
 //                 transforms (one entry total when transforms is empty)
+//     member      (IFC writer only) dict describing the product as a structural MEMBER -- see
+//                 parse_member_record. When given and writable, the product is written as that
+//                 member (IfcBeam / IfcPlate / ... with axis, profile, cuts, material, psets) and the
+//                 blob is not used; else the blob is written as before.
 struct NgeomEmitRecord {
     std::string name;
     nb::bytes blob;
     std::array<float, 4> color{0.f, 0.f, 0.f, -1.f}; // alpha<0 sentinel => no colour
     std::vector<std::array<float, 16>> transforms;
     std::vector<std::vector<std::pair<int, std::string>>> paths;
+    nb::object member; // None unless the record carries a member description
 };
 
 static NgeomEmitRecord parse_ngeom_record(nb::handle item) {
@@ -4551,15 +4557,207 @@ static NgeomEmitRecord parse_ngeom_record(nb::handle item) {
         throw std::runtime_error("NGEOM record needs at least (name, blob)");
     if (!seq[0].is_none())
         rec.name = nb::cast<std::string>(seq[0]);
-    rec.blob = nb::cast<nb::bytes>(seq[1]);
+    rec.blob = seq[1].is_none() ? nb::bytes("", 0) : nb::cast<nb::bytes>(seq[1]);
     if (n > 2 && !seq[2].is_none())
         rec.color = nb::cast<std::array<float, 4>>(seq[2]);
     if (n > 3 && !seq[3].is_none())
         rec.transforms = nb::cast<std::vector<std::array<float, 16>>>(seq[3]);
     if (n > 4 && !seq[4].is_none())
         rec.paths = nb::cast<std::vector<std::vector<std::pair<int, std::string>>>>(seq[4]);
+    rec.member = n > 5 ? nb::borrow<nb::object>(seq[5]) : nb::none();
     return rec;
 }
+
+// -- the member description (stream_ngeom_to_ifc's record element 6) -------------------------------
+//
+//   {"ifc_class": "IfcBeam", "guid": str, "name": str, "description": str|None,
+//    "object_type": str|None, "placement": 16 floats, column-major world matrix,
+//    "axis": ((x,y,z), (x,y,z)) | None,
+//    "profile": {"kind": "curves"|"circle"|"circle_hollow", "name": str|None,
+//                "outer": curve, "inners": [curve], "radius": f, "wall_thickness": f,
+//                "properties": {set: {prop: value}}},
+//    "extrusion": {"origin", "axis", "ref", "direction": 3 floats each, "depth": f},
+//    "cuts": [{"origin", "normal"[, "xdir"]: 3 floats, "agreement": bool}],   innermost first
+//    "material": {"name", "category"|None, "properties_name", "properties": [(name, value,
+//                 ifc_type|None)]} | None,
+//    "psets": {set: {prop: value}}, "color": 4 floats | None,
+//    "openings": [{"name": str, "guid": str, "blob": NGEOM bytes, "placement": 16 floats}]}
+//   An opening is a solid subtracted from the member that is not a half-space (a hole): written as
+//   an IfcOpeningElement (its solid through the NGEOM emitter, placed by its own world matrix) +
+//   IfcRelVoidsElement, as model writers state one.
+//   curve  = {"kind": "polyline"|"indexed", "points": [(x,y[,z])], "segments": [("line"|"arc",
+//             (1-based indices))] | None} -- the member scan's own curve form.
+//   value  = str | float | int | bool | None | list of those; typed by kind (IFCTEXT / IFCREAL /
+//            IFCINTEGER / IFCBOOLEAN) unless an ifc_type is given.
+// Lengths in MODEL units (the file declares unit_scale).
+namespace member_parse {
+namespace me = adacpp::ifc_member_emit;
+
+inline nb::object get(const nb::dict &d, const char *k) {
+    return d.contains(k) ? nb::borrow<nb::object>(d[k]) : nb::none();
+}
+inline std::array<double, 3> v3(const nb::handle &h) {
+    nb::sequence s = nb::cast<nb::sequence>(h);
+    return {nb::cast<double>(s[0]), nb::cast<double>(s[1]), nb::cast<double>(s[2])};
+}
+inline std::string str_or(const nb::object &o, bool &has) {
+    has = !o.is_none();
+    return has ? nb::cast<std::string>(o) : std::string();
+}
+inline me::Value value(const nb::handle &h) {
+    me::Value v;
+    using K = me::Value::Kind;
+    if (h.is_none()) {
+        v.kind = K::None;
+    } else if (nb::isinstance<nb::bool_>(h)) {
+        v.kind = K::Bool;
+        v.b = nb::cast<bool>(h);
+    } else if (nb::isinstance<nb::int_>(h)) {
+        v.kind = K::Int;
+        v.i = nb::cast<long long>(h);
+    } else if (nb::isinstance<nb::float_>(h)) {
+        v.kind = K::Real;
+        v.d = nb::cast<double>(h);
+    } else if (nb::isinstance<nb::str>(h)) {
+        v.kind = K::Text;
+        v.s = nb::cast<std::string>(h);
+    } else if (nb::isinstance<nb::list>(h) || nb::isinstance<nb::tuple>(h)) {
+        v.kind = K::List;
+        for (nb::handle e : nb::cast<nb::sequence>(h))
+            v.items.push_back(value(e));
+    } else {
+        // numpy scalars and the like: a number if it converts to one, else its text.
+        try {
+            v.d = nb::cast<double>(h);
+            v.kind = K::Real;
+        } catch (...) {
+            v.kind = K::Text;
+            v.s = nb::cast<std::string>(nb::str(h));
+        }
+    }
+    return v;
+}
+inline me::PropSets sets(const nb::object &o) {
+    me::PropSets out;
+    if (o.is_none())
+        return out;
+    for (auto [k, props] : nb::cast<nb::dict>(o)) {
+        me::PropSet ps;
+        for (auto [pk, pv] : nb::cast<nb::dict>(props))
+            ps.emplace_back(nb::cast<std::string>(pk), value(pv));
+        out.emplace_back(nb::cast<std::string>(k), std::move(ps));
+    }
+    return out;
+}
+inline me::Curve curve(const nb::object &o) {
+    me::Curve c;
+    if (o.is_none())
+        return c;
+    nb::dict d = nb::cast<nb::dict>(o);
+    c.kind = nb::cast<std::string>(d["kind"]);
+    c.dim = 2;
+    for (nb::handle p : nb::cast<nb::sequence>(d["points"])) {
+        nb::sequence s = nb::cast<nb::sequence>(p);
+        size_t n = nb::len(s);
+        if (n > 2)
+            c.dim = 3;
+        c.points.push_back({nb::cast<double>(s[0]), nb::cast<double>(s[1]), n > 2 ? nb::cast<double>(s[2]) : 0.0});
+    }
+    nb::object segs = get(d, "segments");
+    if (!segs.is_none()) {
+        c.has_segments = true;
+        for (nb::handle sh : nb::cast<nb::sequence>(segs)) {
+            nb::sequence s = nb::cast<nb::sequence>(sh);
+            std::vector<int> ix;
+            for (nb::handle i : nb::cast<nb::sequence>(s[1]))
+                ix.push_back(nb::cast<int>(i));
+            c.segments.emplace_back(nb::cast<std::string>(s[0]) == "arc", std::move(ix));
+        }
+    }
+    return c;
+}
+inline me::Member member(const nb::handle &h) {
+    me::Member m;
+    nb::dict d = nb::cast<nb::dict>(h);
+    m.ifc_class = nb::cast<std::string>(d["ifc_class"]);
+    m.guid = nb::cast<std::string>(d["guid"]);
+    m.name = nb::cast<std::string>(d["name"]);
+    m.description = str_or(get(d, "description"), m.has_description);
+    m.object_type = str_or(get(d, "object_type"), m.has_object_type);
+    nb::object pl = get(d, "placement");
+    if (!pl.is_none()) {
+        size_t i = 0;
+        for (nb::handle v : nb::cast<nb::sequence>(pl))
+            if (i < 16)
+                m.placement[i++] = nb::cast<double>(v);
+    }
+    nb::object axis = get(d, "axis");
+    if (!axis.is_none()) {
+        nb::sequence s = nb::cast<nb::sequence>(axis);
+        m.axis_p1 = v3(s[0]);
+        m.axis_p2 = v3(s[1]);
+        m.has_axis = true;
+    }
+    nb::dict prof = nb::cast<nb::dict>(d["profile"]);
+    m.profile.kind = nb::cast<std::string>(prof["kind"]);
+    m.profile.name = str_or(get(prof, "name"), m.profile.has_name);
+    m.profile.outer = curve(get(prof, "outer"));
+    nb::object inners = get(prof, "inners");
+    if (!inners.is_none())
+        for (nb::handle c : nb::cast<nb::sequence>(inners))
+            m.profile.inners.push_back(curve(nb::borrow<nb::object>(c)));
+    if (nb::object r = get(prof, "radius"); !r.is_none())
+        m.profile.radius = nb::cast<double>(r);
+    if (nb::object w = get(prof, "wall_thickness"); !w.is_none())
+        m.profile.wall_thickness = nb::cast<double>(w);
+    m.profile.properties = sets(get(prof, "properties"));
+    nb::dict ex = nb::cast<nb::dict>(d["extrusion"]);
+    m.ext_origin = v3(ex["origin"]);
+    m.ext_axis = v3(ex["axis"]);
+    m.ext_ref = v3(ex["ref"]);
+    m.ext_dir = v3(ex["direction"]);
+    m.depth = nb::cast<double>(ex["depth"]);
+    nb::object cuts = get(d, "cuts");
+    if (!cuts.is_none())
+        for (nb::handle ch : nb::cast<nb::sequence>(cuts)) {
+            nb::dict cd = nb::cast<nb::dict>(ch);
+            me::Cut c;
+            c.origin = v3(cd["origin"]);
+            c.normal = v3(cd["normal"]);
+            if (nb::object x = get(cd, "xdir"); !x.is_none()) {
+                c.xdir = v3(x);
+                c.has_xdir = true;
+            }
+            c.agreement = nb::cast<bool>(cd["agreement"]);
+            m.cuts.push_back(c);
+        }
+    nb::object mat = get(d, "material");
+    if (!mat.is_none()) {
+        nb::dict md = nb::cast<nb::dict>(mat);
+        m.has_material = true;
+        m.material.name = nb::cast<std::string>(md["name"]);
+        m.material.category = str_or(get(md, "category"), m.material.has_category);
+        bool has_pn = false;
+        m.material.properties_name = str_or(get(md, "properties_name"), has_pn);
+        nb::object props = get(md, "properties");
+        if (!props.is_none())
+            for (nb::handle ph : nb::cast<nb::sequence>(props)) {
+                nb::sequence p = nb::cast<nb::sequence>(ph);
+                me::Value v = value(p[1]);
+                if (nb::len(p) > 2 && !p[2].is_none())
+                    v.ifc_type = nb::cast<std::string>(p[2]);
+                m.material.properties.emplace_back(nb::cast<std::string>(p[0]), std::move(v));
+            }
+    }
+    m.psets = sets(get(d, "psets"));
+    nb::object col = get(d, "color");
+    if (!col.is_none()) {
+        m.color = nb::cast<std::array<float, 4>>(col);
+        m.has_color = true;
+    }
+    return m;
+}
+} // namespace member_parse
 
 // Attach a record's out-of-band metadata to a decoded root (the blob carries geometry + id only).
 // Template so both record forms share it: NgeomEmitRecord (Python-owned blob, the serial STEP/IFC
@@ -4707,6 +4905,62 @@ static adacpp::ifc_emit::FileStats stream_ngeom_to_step_impl(nb::iterable record
     return fs;
 }
 
+// A member's openings (member description "openings"): each solid is emitted by the NGEOM emitter
+// as the body of an IfcOpeningElement placed by its own world matrix, voiding `host`. An opening
+// whose solid does not emit is dropped (and logged by the count it returns being short).
+static int emit_member_openings(adacpp::ifc_emit::BrepEmitter &em, std::string &buf, long host,
+                                const nb::object &member, uint64_t guid_seed) {
+    using namespace adacpp::ifc_emit;
+    nb::dict d = nb::cast<nb::dict>(member);
+    if (!d.contains("openings") || d["openings"].is_none())
+        return 0;
+    int written = 0;
+    uint64_t k = 0;
+    for (nb::handle oh : nb::cast<nb::sequence>(d["openings"])) {
+        nb::dict od = nb::cast<nb::dict>(oh);
+        nb::bytes blob = nb::cast<nb::bytes>(od["blob"]);
+        adacpp::ngeom::NgeomDoc doc =
+            adacpp::ngeom::decode(reinterpret_cast<const uint8_t *>(blob.c_str()), blob.size());
+        if (doc.roots.empty())
+            continue;
+        std::string rep_type;
+        long solid = em.emit_solid(buf, doc.roots[0], rep_type);
+        if (!solid)
+            continue;
+        std::array<double, 16> M{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        if (od.contains("placement") && !od["placement"].is_none()) {
+            size_t i = 0;
+            for (nb::handle v : nb::cast<nb::sequence>(od["placement"]))
+                if (i < 16)
+                    M[i++] = nb::cast<double>(v);
+        }
+        namespace me = adacpp::ifc_member_emit;
+        auto R = [](double v) { return me::real(v); };
+        auto pt = [&](double x, double y, double z) {
+            return em.emit_entity(buf, "IFCCARTESIANPOINT((" + R(x) + "," + R(y) + "," + R(z) + "))");
+        };
+        auto dr = [&](double x, double y, double z) {
+            return em.emit_entity(buf, "IFCDIRECTION((" + R(x) + "," + R(y) + "," + R(z) + "))");
+        };
+        long loc = pt(M[12], M[13], M[14]), az = dr(M[8], M[9], M[10]), ax = dr(M[0], M[1], M[2]);
+        long a2 = em.emit_entity(buf, "IFCAXIS2PLACEMENT3D(#" + std::to_string(loc) + ",#" + std::to_string(az) + ",#" +
+                                          std::to_string(ax) + ")");
+        long lp = em.emit_entity(buf, "IFCLOCALPLACEMENT(#11,#" + std::to_string(a2) + ")");
+        long sr = em.emit_entity(buf, "IFCSHAPEREPRESENTATION(#6,'Body','" + rep_type + "',(#" + std::to_string(solid) +
+                                          "))");
+        long pds = em.emit_entity(buf, "IFCPRODUCTDEFINITIONSHAPE($,$,(#" + std::to_string(sr) + "))");
+        const std::string guid = od.contains("guid") ? nb::cast<std::string>(od["guid"]) : ifc_guid(guid_seed + k);
+        const std::string name = od.contains("name") ? nb::cast<std::string>(od["name"]) : std::string("opening");
+        long op = em.emit_entity(buf, "IFCOPENINGELEMENT('" + me::text(guid) + "',$,'" + me::text(name) + "',$,$,#" +
+                                          std::to_string(lp) + ",#" + std::to_string(pds) + ",$,.OPENING.)");
+        em.emit_entity(buf, "IFCRELVOIDSELEMENT('" + ifc_guid(0xC0000000ull + guid_seed + k) + "',$,$,$,#" +
+                                std::to_string(host) + ",#" + std::to_string(op) + ")");
+        ++written;
+        ++k;
+    }
+    return written;
+}
+
 // NGEOM records -> IFC file. The record-stream sibling of blobs_to_ifc_impl (which takes parallel
 // lists): same emit_solid_ifc + IfcStyledItem + spatial tree, but records are pulled lazily so a
 // generator streams at bounded memory.
@@ -4732,9 +4986,41 @@ static adacpp::ifc_emit::FileStats stream_ngeom_to_ifc_impl(nb::iterable records
     BrepEmitter em(100, nullptr, deflection, angular_deg);
     std::vector<long> proxies;
     std::vector<IfcPath> proxy_paths;
+    // Members (records with a member description) share the emitter's id counter; their own
+    // relationship guids live in a namespace disjoint from the proxies' and the spatial tree's.
+    adacpp::ifc_member_emit::MemberWriter members([&]() { return em.alloc_id(); },
+                                                  [](uint64_t n) { return ifc_guid(0xD0000000ull + n); }, 6, 11);
     long sid = 0;
     for (nb::handle item : records) {
         NgeomEmitRecord rec = parse_ngeom_record(item);
+        if (!rec.member.is_none()) {
+            adacpp::ifc_member_emit::Member m = member_parse::member(rec.member);
+            if (m.name.empty())
+                m.name = rec.name;
+            if (!m.has_color && rec.color[3] >= 0.0f) {
+                m.color = rec.color;
+                m.has_color = true;
+            }
+            ++sid;
+            ++fs.solids_in;
+            long product = members.emit(buf, m);
+            if (product) {
+                ++fs.solids_out;
+                ++fs.instances_out;
+                proxies.push_back(product);
+                proxy_paths.push_back(rec.paths.empty() ? IfcPath{} : rec.paths[0]);
+                emit_member_openings(em, buf, product, rec.member, (uint64_t) sid * 1000u);
+                flush(false);
+                continue;
+            }
+            --sid;
+            --fs.solids_in; // not writable as a member: written from its blob below, counted there
+            if (rec.blob.size() == 0) {
+                ++fs.solids_in;
+                ++fs.products_skipped; // and no blob to fall back on: counted, never silent
+                continue;
+            }
+        }
         adacpp::ngeom::NgeomDoc doc =
             adacpp::ngeom::decode(reinterpret_cast<const uint8_t *>(rec.blob.c_str()), rec.blob.size());
         for (NgeomRoot &root : doc.roots) {
@@ -4753,6 +5039,7 @@ static adacpp::ifc_emit::FileStats stream_ngeom_to_ifc_impl(nb::iterable records
         }
     }
     fs.products_total = fs.solids_in;
+    members.finish(buf);
     emit_spatial_tree(buf, [&]() { return em.alloc_id(); }, proxies, proxy_paths);
     buf += "ENDSEC;\nEND-ISO-10303-21;\n";
     flush(true);
@@ -5550,7 +5837,16 @@ void cad_module(nb::module_ &m) {
         "solid (IfcAdvancedBrep / IfcExtrudedAreaSolid / ...) + IfcStyledItem colour + the "
         "IfcSpatialZone tree from the record paths; multi-instance solids share geometry via "
         "IfcMappedItem. Records are pulled lazily (generator-friendly, bounded memory). schema: "
-        "'IFC4X3_ADD2' | 'IFC4'. Returns the losslessness audit dict.");
+        "'IFC4X3_ADD2' | 'IFC4'. Returns the losslessness audit dict. A record's optional sixth "
+        "element is a MEMBER description (dict): such a record is written as that structural member "
+        "-- IfcBeam / IfcPlate / ... with its axis, profile (arcs kept, profile properties), "
+        "half-space cuts as IfcBooleanClippingResult, material and property sets -- and its blob is "
+        "only the fallback (it may be empty). See ifc_member_records_version.");
+    m.def(
+        "ifc_member_records_version", []() { return 1; },
+        "Version of the member description stream_ngeom_to_ifc reads as a record's sixth element. A "
+        "build without this function ignores that element (and needs a blob). Bumped when the "
+        "description's meaning changes; adding a key does not need a bump.");
 
     m.def("stream_ngeom_to_glb", &stream_ngeom_to_glb_impl, "records"_a, "out_path"_a, "deflection"_a = 0.0,
           "angular_deg"_a = 20.0, "num_threads"_a = 0, "meshopt"_a = true, "model_scale"_a = 0.0,
