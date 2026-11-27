@@ -2,6 +2,15 @@
 
 
 
+## v0.48.0 (2026-11-27)
+
+### Feature
+
+* feat(ifc): native IFC member scan and writer carry cuts, profiles, materials and property sets (#91)
+
+Co-authored-by: Claude Opus 5.5 &lt;noreply@anthropic.com&gt; ([`13c01ee`](https://github.com/Krande/adacpp/commit/13c01ee5494749663eb42174b9620852c5a825a7))
+
+
 ## v0.47.0 (2026-11-27)
 
 ### Feature
