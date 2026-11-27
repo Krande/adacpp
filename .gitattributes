@@ -1,0 +1,2 @@
+# Vendored patches are applied with patch(1) on LF sources: never convert their line endings.
+cmake/patches/** -text

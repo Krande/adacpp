@@ -118,6 +118,19 @@ def main() -> int:
             zf.writestr(arcname, data)
             records.append(_record_line(arcname, data))
 
+        # Top-level modules staged next to adacpp/ (ADACPP_WITH_GMSH installs gmsh.py
+        # there), and the licences of anything bundled with them (<staged>/licenses/*).
+        for path in sorted(args.staged.glob("*.py")):
+            arcname = path.name
+            data = path.read_bytes()
+            zf.writestr(arcname, data)
+            records.append(_record_line(arcname, data))
+        for path in sorted((args.staged / "licenses").glob("*")):
+            arcname = f"{dist_info}/licenses/{path.name}"
+            data = path.read_bytes()
+            zf.writestr(arcname, data)
+            records.append(_record_line(arcname, data))
+
         # The licence text itself, so the artifact carries its own terms.
         lic_path = args.pyproject.parent / "LICENSE"
         if lic_path.is_file():
