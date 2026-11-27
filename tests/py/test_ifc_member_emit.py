@@ -223,6 +223,14 @@ def test_ifcopenshell_reads_the_members(written):
     }
 
 
+def test_a_class_outside_the_member_layout_falls_back_to_the_blob(tmp_path):
+    # emit() writes the nine-attribute element layout; a class it does not know is not guessed at.
+    out = tmp_path / "other.ifc"
+    stats = cad.stream_ngeom_to_ifc([("w", b"", None, None, None, _beam(ifc_class="IfcWall"))], str(out))
+    assert stats["solids_out"] == 0 and stats["solids_skipped"] == 1
+    assert "IFCWALL(" not in out.read_text(encoding="utf-8")
+
+
 def test_an_opening_is_written_as_an_opening_element_voiding_its_member(written, tmp_path):
     # A boolean that is not a half-space (a hole) is an IfcOpeningElement with its own solid and an
     # IfcRelVoidsElement to the member -- not a member of its own, and not part of the member's body.

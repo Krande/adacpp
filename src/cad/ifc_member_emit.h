@@ -182,7 +182,7 @@ public:
     // Emit one member; returns the product id, or 0 when the member is not writable as a member
     // (no profile curve, no depth) -- the caller then writes the product its other way.
     long emit(std::string &out, const Member &m) {
-        if (m.depth <= 0.0)
+        if (m.depth <= 0.0 || !member_class(m.ifc_class))
             return 0;
         long prof = profile(out, m.profile);
         if (!prof)
@@ -270,6 +270,17 @@ private:
         for (size_t i = 0; i < ids.size(); ++i)
             s += (i ? ",#" : "#") + std::to_string(ids[i]);
         return s + ")";
+    }
+    // The element classes written here: each has the same nine attributes in IFC4 and IFC4X3
+    // (GlobalId .. PredefinedType), which is the layout emit() writes.
+    static bool member_class(const std::string &cls) {
+        static const char *ok[] = {"IFCBEAM",  "IFCCOLUMN", "IFCMEMBER",
+                                   "IFCPLATE", "IFCSLAB",   "IFCBUILDINGELEMENTPROXY"};
+        const std::string u = upper(cls);
+        for (const char *k : ok)
+            if (u == k)
+                return true;
+        return false;
     }
     static std::string upper(std::string s) {
         for (char &c : s)
