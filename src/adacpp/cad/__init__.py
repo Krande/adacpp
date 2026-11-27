@@ -103,6 +103,7 @@ find_beam_joints = _cad.find_beam_joints
 fit_bspline_face_from_grid = _cad.fit_bspline_face_from_grid
 free_faces = _cad.free_faces
 from_topods_pointer = _cad.from_topods_pointer
+ifc_member_records_version = _cad.ifc_member_records_version
 ifc_taxonomy_settings = _cad.ifc_taxonomy_settings
 imprint_advanced_faces = _cad.imprint_advanced_faces
 imprint_planar_faces = _cad.imprint_planar_faces
@@ -245,6 +246,7 @@ __all__ = [
     "free_faces",
     "from_topods_pointer",
     "glb_diff",
+    "ifc_member_records_version",
     "ifc_taxonomy_settings",
     "imprint_advanced_faces",
     "imprint_planar_faces",
