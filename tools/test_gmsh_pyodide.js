@@ -7,6 +7,7 @@
 //
 //   node tools/test_gmsh_pyodide.js <wheel> [<wheel> ...]
 //   node tools/test_gmsh_pyodide.js --record <wheel> ...   (also print the raw results JSON)
+//   node tools/test_gmsh_pyodide.js --timing-only <wheel>  (sizes + cold start only; any wheel)
 //
 // Also measures and prints the cold-start split (fresh pyodide each time, node, warm disk cache):
 // loadPyodide, micropip install of the wheel(s) (+ numpy), `import adacpp`, `import gmsh` +
@@ -28,9 +29,11 @@ const check = (name, cond, detail) => {
     console.log(`  ${cond ? "ok  " : "FAIL"} ${name}${detail ? " — " + detail : ""}`);
 };
 
-const args = process.argv.slice(2);
-const record = args[0] === "--record";
-const wheels = (record ? args.slice(1) : args).map((w) => path.resolve(w));
+const flags = process.argv.slice(2).filter((a) => a.startsWith("--"));
+const record = flags.includes("--record");
+// --timing-only: sizes + cold start, no gmsh (for the baseline wheel without gmsh).
+const timingOnly = flags.includes("--timing-only");
+const wheels = process.argv.slice(2).filter((a) => !a.startsWith("--")).map((w) => path.resolve(w));
 if (!wheels.length) {
     console.error("usage: node tools/test_gmsh_pyodide.js [--record] <wheel> [<wheel> ...]");
     process.exit(2);
@@ -65,33 +68,46 @@ async function coldStart() {
     t0 = performance.now();
     py.runPython("import adacpp, adacpp.cad");
     t.import_adacpp = performance.now() - t0;
-    t0 = performance.now();
-    py.runPython("import gmsh; gmsh.initialize(interruptible=False); gmsh.finalize()");
-    t.import_gmsh_init = performance.now() - t0;
+    if (!timingOnly) {
+        t0 = performance.now();
+        py.runPython("import gmsh; gmsh.initialize(interruptible=False); gmsh.finalize()");
+        t.import_gmsh_init = performance.now() - t0;
+    }
     return {py, t};
 }
 
-// Element counts are compared exactly. Everything but the Blossom case must match the native run;
-// the Blossom case is reported (option A has no Blossom), not failed.
-const SOFT = new Set([ "lshape_recombine_blossom" ]);
+// Parity rules, per case:
+//  * nodes, points and lines (the geometry + 1D seeding) must equal the native run exactly;
+//  * the quad/triangle split after recombination is REPORTED when it differs, not failed. The simple
+//    (greedy) pairing sorts candidate pairs by quality with std::sort, which is not stable, so ties
+//    can resolve differently under emscripten's libc++ than under the native libstdc++ build;
+//  * lshape_recombine_blossom is reported only: option A builds without Blossom, so gmsh falls back
+//    to the simple pairing where native recombines into (almost) all quads.
+const BLOSSOM = "lshape_recombine_blossom";
+const sorted = (o) => JSON.stringify(Object.fromEntries(Object.entries(o || {}).sort()));
+const fixed = (e) => ({Point: (e || {}).Point, line: (e || {})["Line 2"]});
 
 function compare(got, want) {
     console.log("\n[parity] counts vs native (conda gmsh 4.15.2 + native adacpp)");
     for (const [name, w] of Object.entries(want)) {
-        if (typeof w !== "object" || w === null || !("nodes" in w || "skipped" in w))
+        if (typeof w !== "object" || w === null || !("nodes" in w))
             continue;
         const g = got[name] || {};
         if (g.error) {
             check(name, false, g.error);
             continue;
         }
-        const same = g.nodes === w.nodes && JSON.stringify(g.elements) === JSON.stringify(w.elements);
-        const detail = `wasm nodes=${g.nodes} ${JSON.stringify(g.elements)} | native nodes=${w.nodes} ${
-            JSON.stringify(w.elements)} | wasm ${g.seconds}s native ${w.seconds}s`;
-        if (SOFT.has(name) && !same)
-            console.log(`  diff ${name} — ${detail}`);
+        const exact = g.nodes === w.nodes && sorted(g.elements) === sorted(w.elements);
+        const detail = `wasm nodes=${g.nodes} ${sorted(g.elements)} | native nodes=${w.nodes} ${
+            sorted(w.elements)} | wasm ${g.seconds}s native ${w.seconds}s`;
+        if (exact)
+            check(`${name} identical`, true, detail);
+        else if (name === BLOSSOM)
+            console.log(`  diff ${name} (no Blossom in wasm) — ${detail}`);
+        else if (g.nodes === w.nodes && sorted(fixed(g.elements)) === sorted(fixed(w.elements)))
+            console.log(`  diff ${name}: same nodes/1D, quad-tri split differs — ${detail}`);
         else
-            check(name, same, detail);
+            check(name, false, detail);
     }
 }
 
@@ -106,6 +122,8 @@ async function main() {
         py = r.py;
         console.log("  " + Object.entries(r.t).map(([k, v]) => `${k}=${v.toFixed(0)}`).join(" "));
     }
+    if (timingOnly)
+        process.exit(0);
 
     console.log("\n[gmsh] shared cases (tools/gmsh_spike_cases.py)");
     py.FS.writeFile("/gmsh_spike_cases.py", fs.readFileSync(CASES));

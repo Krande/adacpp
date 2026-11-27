@@ -26,7 +26,8 @@ Cases (each starts from a fresh gmsh model):
   lshape_recombine_blossom the same with RecombinationAlgorithm=1 (gmsh's default, Blossom). Option A
                           builds without Blossom (licence), so this is where wasm and native may differ.
   plate_stiffener_fragment a 2 x 1 plate plus a perpendicular 0.3 high stiffener along y=0.5, both
-                          through the pointer bridge, occ.fragment, size 0.1, RecombineAll, alg 6.
+                          through the pointer bridge, occ.fragment, size 0.1, RecombineAll, alg 6,
+                          RecombinationAlgorithm=0.
                           Exercises fragment + shared-edge conformity, as ada's partitioning does.
   size_field              the L plate with a Distance(point)+Threshold background field (0.02 near the
                           re-entrant corner, 0.2 far), Min field, recombined: ada's overrides.py path.
@@ -48,7 +49,7 @@ def _counts(gmsh) -> dict:
     for t, tags in zip(types, elem_tags):
         name = gmsh.model.mesh.getElementProperties(t)[0]
         by_type[name] = int(len(tags))
-    return {"nodes": int(len(node_tags)), "elements": by_type}
+    return {"nodes": int(len(node_tags)), "elements": dict(sorted(by_type.items()))}
 
 
 def _fresh(gmsh, name: str):
@@ -137,6 +138,7 @@ def case_plate_stiffener_fragment(gmsh, cad):
     gmsh.option.setNumber("Mesh.MeshSizeMin", 0.1)
     gmsh.option.setNumber("Mesh.MeshSizeMax", 0.1)
     gmsh.option.setNumber("Mesh.RecombineAll", 1)
+    gmsh.option.setNumber("Mesh.RecombinationAlgorithm", 0)  # Blossom is measured in lshape_*
     gmsh.model.mesh.generate(2)
     out = _counts(gmsh)
     out["surfaces_after_fragment"] = len(_surfaces(out_dimtags))

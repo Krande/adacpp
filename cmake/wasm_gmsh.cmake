@@ -43,6 +43,15 @@ set(ADACPP_GMSH_SHA256
 
 # Fetch the source at CONFIGURE time (not inside the ExternalProject): the export list is parsed
 # out of api/gmshc.h and api/gmsh.py is patched and staged for install, both before any build.
+#
+# OCCT 8 source compatibility comes from conda-forge's gmsh-feedstock (recipe/patches, the same
+# patches the native conda gmsh 4.15.2 is built with), vendored in cmake/patches/gmsh/:
+#   cxx17_for_occt.patch      CMAKE_CXX_STANDARD 14 -> 17 (OCCT 8 headers use std::optional ...)
+#   occt800_api_compat.patch  removed Handle_* typedefs, iterator-typedef headers, Geom2dLProp
+# Plus one adacpp-only edit: gmsh enables OCC_CAF only when find_package(Freetype) succeeds, and
+# nothing on the STEP/XCAF import path uses freetype (it is for the GUI's text rendering), so the
+# probe is replaced instead of cross-building freetype.
+set(_GMSH_PATCH_DIR "${CMAKE_CURRENT_LIST_DIR}/patches/gmsh")
 FetchContent_Declare(
     gmsh_src
     URL https://gmsh.info/src/gmsh-${ADACPP_GMSH_VERSION}-source.tgz
@@ -55,27 +64,33 @@ if(NOT gmsh_src_POPULATED)
 endif()
 set(GMSH_SOURCE_DIR "${gmsh_src_SOURCE_DIR}")
 
-# gmsh enables OCC_CAF only when find_package(Freetype) succeeds; nothing on the STEP/XCAF import
-# path uses freetype (it is there for the GUI's text rendering), so skip the probe instead of
-# cross-building freetype. And OCCT 8's headers need C++17 (std::optional, std::in_place_t), while
-# gmsh pins a plain `set(CMAKE_CXX_STANDARD 14)` that -D cannot override. Conda-forge's gmsh against
-# occt 8 builds as C++17 too. Both replacements are idempotent.
-file(READ "${GMSH_SOURCE_DIR}/CMakeLists.txt" _gmsh_cml)
-set(_gmsh_cml_orig "${_gmsh_cml}")
-string(
-    REPLACE "find_package(Freetype)"
-    "set(FREETYPE_FOUND TRUE) # adacpp-wasm: no freetype"
-    _gmsh_cml
-    "${_gmsh_cml}"
-)
-string(
-    REPLACE "set(CMAKE_CXX_STANDARD 14)"
-    "set(CMAKE_CXX_STANDARD 17) # adacpp-wasm: OCCT 8 headers"
-    _gmsh_cml
-    "${_gmsh_cml}"
-)
-if(NOT _gmsh_cml STREQUAL _gmsh_cml_orig)
+set(_gmsh_patch_stamp "${GMSH_SOURCE_DIR}/.adacpp-wasm-patched")
+if(NOT EXISTS "${_gmsh_patch_stamp}")
+    # `patch`, not `git apply`: the build tree usually sits inside adacpp's own checkout, and git
+    # apply run there resolves the patch paths against adacpp's repo root instead of gmsh's tree.
+    find_program(ADACPP_PATCH_EXECUTABLE patch REQUIRED)
+    foreach(_p cxx17_for_occt.patch occt800_api_compat.patch)
+        execute_process(
+            COMMAND
+                "${ADACPP_PATCH_EXECUTABLE}" -p1 --forward --input
+                "${_GMSH_PATCH_DIR}/${_p}"
+            WORKING_DIRECTORY "${GMSH_SOURCE_DIR}"
+            RESULT_VARIABLE _rc
+            ERROR_VARIABLE _err
+        )
+        if(NOT _rc EQUAL 0)
+            message(FATAL_ERROR "gmsh-wasm: ${_p} does not apply: ${_err}")
+        endif()
+    endforeach()
+    file(READ "${GMSH_SOURCE_DIR}/CMakeLists.txt" _gmsh_cml)
+    string(
+        REPLACE "find_package(Freetype)"
+        "set(FREETYPE_FOUND TRUE) # adacpp-wasm: no freetype"
+        _gmsh_cml
+        "${_gmsh_cml}"
+    )
     file(WRITE "${GMSH_SOURCE_DIR}/CMakeLists.txt" "${_gmsh_cml}")
+    file(TOUCH "${_gmsh_patch_stamp}")
 endif()
 
 set(GMSH_BUILD_DIR "${CMAKE_BINARY_DIR}/_deps/gmsh-build")
@@ -137,7 +152,8 @@ set(_GMSH_CMAKE_ARGS
     -DENABLE_SLEPC=OFF
     -DENABLE_MUMPS=OFF
     -DENABLE_ZIPPER=OFF
-    -DENABLE_TINYOBJLOADER=OFF
+    # GModelIO_OBJ.cpp includes tiny_obj_loader.h unconditionally (small, bundled).
+    -DENABLE_TINYOBJLOADER=ON
     -DENABLE_CAIRO=OFF
     -DENABLE_TOUCHBAR=OFF
 )
