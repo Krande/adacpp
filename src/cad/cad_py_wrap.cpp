@@ -781,10 +781,98 @@ public:
             d["normal"] = nb::none();
             d["xdir"] = nb::none();
         }
+        d["unit_scale"] = unit_scale_;
+        nb::list pld;
+        for (double v : mi.placement_d)
+            pld.append(v);
+        d["placement_d"] = pld;
+        d["extrude_dir"] = nb::make_tuple(mi.extrude_dir[0], mi.extrude_dir[1], mi.extrude_dir[2]);
+        d["outer_curve"] = curve_obj(mi.outer_curve);
+        nb::list inner;
+        for (const auto &c : mi.inner_curves)
+            inner.append(curve_obj(c));
+        d["inner_curves"] = inner;
+        nb::dict pp;
+        for (const auto &kv : mi.profile_params)
+            pp[kv.first.c_str()] = kv.second;
+        d["profile_params"] = pp;
+        d["profile_properties"] = sets_obj(mi.profile_properties);
+        d["psets"] = sets_obj(mi.psets);
+        nb::list cuts;
+        for (const auto &c : mi.cuts) {
+            nb::dict cd;
+            cd["origin"] = nb::make_tuple(c.origin[0], c.origin[1], c.origin[2]);
+            cd["normal"] = nb::make_tuple(c.normal[0], c.normal[1], c.normal[2]);
+            cd["xdir"] = nb::make_tuple(c.xdir[0], c.xdir[1], c.xdir[2]);
+            cd["agreement"] = c.agreement;
+            cuts.append(cd);
+        }
+        d["cuts"] = cuts;
         return d;
     }
 
 private:
+    using MI = adacpp::ifc_read::MemberInfo;
+    // A profile curve as {"kind", "dim", "points": [(x, y[, z])...], "segments": [("line"|"arc",
+    // (i, ...)), ...] | None}; None when the profile has no curve this scan reads.
+    static nb::object curve_obj(const MI::ProfileCurve &c) {
+        if (c.kind.empty())
+            return nb::none();
+        nb::dict d;
+        d["kind"] = c.kind;
+        d["dim"] = c.dim;
+        nb::list pts;
+        for (const auto &p : c.points)
+            pts.append(c.dim == 3 ? nb::make_tuple(p[0], p[1], p[2]) : nb::make_tuple(p[0], p[1]));
+        d["points"] = pts;
+        if (c.kind == "indexed" && c.has_segments) {
+            nb::list segs;
+            for (const auto &s : c.segments) {
+                nb::list ix;
+                for (int i : s.second)
+                    ix.append(i);
+                segs.append(nb::make_tuple(s.first ? "arc" : "line", nb::tuple(ix)));
+            }
+            d["segments"] = segs;
+        } else {
+            d["segments"] = nb::none();
+        }
+        return d;
+    }
+    static nb::object value_obj(const MI::PropValue &v) {
+        using K = MI::PropValue::Kind;
+        switch (v.kind) {
+        case K::Real:
+            return nb::cast(v.d);
+        case K::Int:
+            return nb::cast(v.i);
+        case K::Bool:
+            return nb::cast(v.b);
+        case K::Text:
+            return nb::cast(v.s);
+        case K::List: {
+            nb::list l;
+            for (const auto &e : v.items)
+                l.append(value_obj(e));
+            return l;
+        }
+        default:
+            return nb::none();
+        }
+    }
+    // {set_name: {prop: value}}. A name stated twice keeps both sets' properties (the later wins a
+    // clash), as one set under the name would be read.
+    static nb::dict sets_obj(const std::vector<std::pair<std::string, MI::PropSet>> &sets) {
+        nb::dict out;
+        for (const auto &[name, props] : sets) {
+            nb::dict d = out.contains(name.c_str()) ? nb::cast<nb::dict>(out[name.c_str()]) : nb::dict();
+            for (const auto &[k, v] : props)
+                d[k.c_str()] = value_obj(v);
+            out[name.c_str()] = d;
+        }
+        return out;
+    }
+
     std::unique_ptr<adacpp::step::StreamIndex> idx_;
     std::unique_ptr<adacpp::ifc_read::IfcResolver> r_;
     std::vector<long> roots_;

@@ -93,6 +93,65 @@ struct MemberInfo {
     //! codebase writes "Grade", others write "StrengthGrade" -- and a reader that picked one
     //! would silently lose the other.
     std::vector<std::pair<std::string, std::string>> material_text_props;
+
+    //! The world matrix again, in double precision. `placement` is float for the renderer's sake,
+    //! which on a plant-sized model puts a member tens of micrometres off where the file has it --
+    //! fine for a picture, not for a consumer rebuilding the member and comparing it to its
+    //! neighbours. Column-major, like `placement`; file units are NOT applied to the translation
+    //! here either (the consumer scales by the file's unit, as it does every other local length).
+    std::array<double, 16> placement_d{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    //! The extrusion's direction, in the frame of its Position (normally +z).
+    std::array<double, 3> extrude_dir{0, 0, 1};
+
+    //! A profile boundary as the file states it, not as a polygon: an arc is reported as an arc.
+    //! `outline` (above) is the sampled polygon a renderer wants; a consumer that reconstructs a
+    //! SECTION needs to see that a corner is rounded and by how much, and a sampled arc says
+    //! neither.
+    struct ProfileCurve {
+        std::string kind;                          //!< "polyline" | "indexed"; empty = not a supported curve
+        std::vector<std::array<double, 3>> points; //!< metres, profile frame; z = 0 for a 2D list
+        int dim = 2;                               //!< 2 or 3, as the point list was written
+        //! IfcIndexedPolyCurve.Segments: (is_arc, 1-based point indices). Empty with
+        //! `has_segments` false when the curve states none (its points are one polyline).
+        std::vector<std::pair<bool, std::vector<int>>> segments;
+        bool has_segments = false;
+    };
+    ProfileCurve outer_curve;
+    std::vector<ProfileCurve> inner_curves;
+    //! A parametric profile's length attributes by their IFC names ("OverallDepth", "Radius",
+    //! "WallThickness", ...), in metres. Empty for an arbitrary (curve) profile.
+    std::vector<std::pair<std::string, double>> profile_params;
+
+    //! A property value as the file types it. Only the kinds a property set can carry as a
+    //! single value or a list: a reader that mapped them onto one numeric type would turn a
+    //! label that happens to be "12" into a number and a boolean into 1.0.
+    struct PropValue {
+        enum class Kind { None, Real, Int, Bool, Text, List } kind = Kind::None;
+        double d = 0.0;
+        long long i = 0;
+        bool b = false;
+        std::string s;
+        std::vector<PropValue> items;
+    };
+    using PropSet = std::vector<std::pair<std::string, PropValue>>;
+    //! The product's IfcPropertySets (IfcRelDefinesByProperties), by set name, holding their
+    //! IfcPropertySingleValue / IfcPropertyListValue properties. Values are NOT unit-scaled: a
+    //! property's unit is the property's business, not the geometry's.
+    std::vector<std::pair<std::string, PropSet>> psets;
+    //! The IfcProfileProperties sets attached to the swept profile, by set name (raw values).
+    std::vector<std::pair<std::string, PropSet>> profile_properties;
+
+    //! One planar half-space clipped off the swept body: the body is
+    //! IfcBooleanClippingResult(.DIFFERENCE., <body so far>, IfcHalfSpaceSolid(IfcPlane, flag)),
+    //! once per cut. Innermost first, i.e. in the order the cuts were applied. Plane in the
+    //! product's LOCAL frame (the frame the body is in), origin in metres.
+    struct HalfSpaceCut {
+        std::array<double, 3> origin{0, 0, 0};
+        std::array<double, 3> normal{0, 0, 1};
+        std::array<double, 3> xdir{1, 0, 0};
+        bool agreement = true; //!< IfcHalfSpaceSolid.AgreementFlag
+    };
+    std::vector<HalfSpaceCut> cuts;
 };
 
 class IfcResolver {
@@ -469,6 +528,31 @@ public:
                 long mat = ref_arg(*in, 3);
                 if (mat > 0)
                     mat_props_[mat].push_back(id);
+            } else if (iequals(t, "IFCPROFILEPROPERTIES")) {
+                // IfcProfileProperties(Name, Description, Properties, ProfileDefinition)
+                const Instance *in = inst(id);
+                if (!in || in->args.size() < 4)
+                    continue;
+                long prof = ref_arg(*in, 3);
+                if (prof > 0)
+                    profile_props_[prof].push_back(id);
+            } else if (iequals(t, "IFCRELDEFINESBYPROPERTIES")) {
+                // (GlobalId, OwnerHistory, Name, Description, RelatedObjects, RelatingPropertyDefinition);
+                // the definition is one set, or (IFC4) a set of them.
+                const Instance *in = inst(id);
+                if (!in || in->args.size() < 6 || !in->args[4].is_list())
+                    continue;
+                std::vector<long> sets;
+                if (in->args[5].is_ref())
+                    sets.push_back(in->args[5].i);
+                else if (in->args[5].is_list())
+                    for (const Value &e : in->args[5].items)
+                        if (e.is_ref())
+                            sets.push_back(e.i);
+                for (const Value &e : in->args[4].items)
+                    if (e.is_ref())
+                        for (long s : sets)
+                            psets_of_[e.i].push_back(s);
             }
         }
     }
@@ -823,8 +907,13 @@ public:
         m.guid = product_guid(pid);
         m.name = name_of(*p);
         m.placement = object_placement(ref_arg(*p, 5)); // ObjectPlacement = arg 5
+        m.placement_d = object_placement_d(ref_arg(*p, 5));
         fill_material(pid, m);
+        fill_psets(pid, m);
 
+        p = inst(pid);
+        if (!p)
+            return m;
         const Instance *pds = inst(ref_arg(*p, 6)); // Representation = arg 6
         if (!pds || pds->args.size() < 3)
             return m;
@@ -852,6 +941,18 @@ public:
                 const Instance *it = inst(item.i);
                 if (!it)
                     continue;
+                // A member cut by planar half-spaces is its swept solid inside one clipping result
+                // per cut. Read the member from the solid and report the cuts beside it, rather
+                // than skipping the body: the member is still the member, only shorter.
+                std::vector<MemberInfo::HalfSpaceCut> cuts;
+                if (rid != "Axis" && is_boolean_type(it->type)) {
+                    long inner = split_half_space_clips(item.i, cuts, us);
+                    if (!inner)
+                        continue; // a boolean that is not a chain of half-space clips: not a member body
+                    it = inst(inner);
+                    if (!it)
+                        continue;
+                }
                 if (rid == "Axis" && iequals(it->type, "IFCPOLYLINE") && !it->args.empty() && it->args[0].is_list()) {
                     const auto &pts = it->args[0].items;
                     if (pts.size() >= 2 && pts.front().is_ref() && pts.back().is_ref()) {
@@ -883,17 +984,22 @@ public:
                         m.has_position = true;
                     }
                     long d = ref_arg(*it, 2);
-                    if (d > 0)
+                    if (d > 0) {
                         ext_d = dir(d);
+                        m.extrude_dir = {ext_d.x, ext_d.y, ext_d.z};
+                    }
+                    const long prof_id = ref_arg(*it, 0);
                     // The outline, through the SAME profile walk the geometry path uses -- so a
                     // consumer's plate has the boundary the renderer would have drawn, rather than
                     // a second interpretation of the same entities.
-                    if (auto pf_face = profile_face(ref_arg(*it, 0))) {
+                    if (auto pf_face = profile_face(prof_id)) {
                         if (!pf_face->bounds.empty() && pf_face->bounds[0].loop && pf_face->bounds[0].loop->is_poly) {
                             for (const Vec3 &pt : pf_face->bounds[0].loop->polygon)
                                 m.outline.push_back({pt.x * us, pt.y * us});
                         }
                     }
+                    fill_profile(prof_id, m, us);
+                    m.cuts = std::move(cuts);
                     have_extrusion = true;
                 }
             }
@@ -907,6 +1013,331 @@ public:
         }
         return m;
     }
+
+    static bool is_boolean_type(std::string_view t) {
+        return iequals(t, "IFCBOOLEANCLIPPINGRESULT") || iequals(t, "IFCBOOLEANRESULT");
+    }
+
+    // A body written as one IfcBooleanClippingResult(.DIFFERENCE., <body so far>, IfcHalfSpaceSolid)
+    // per cut: the id of the solid at the bottom of the chain, with the cuts in the order they were
+    // applied (innermost first). 0 when the body is any other boolean -- a union, a solid operand, a
+    // BOUNDED half-space -- because reading part of such a boolean as the member would be a wrong
+    // member, not a partial one. Only the exact IfcHalfSpaceSolid over an IfcPlane is a cut here.
+    long split_half_space_clips(long body, std::vector<MemberInfo::HalfSpaceCut> &cuts, double us) {
+        cuts.clear();
+        int guard = 0;
+        while (guard++ < 256) {
+            const Instance *b = inst(body);
+            if (!b)
+                return 0;
+            if (!is_boolean_type(b->type))
+                break;
+            // (Operator, FirstOperand, SecondOperand)
+            if (!iequals(b->type, "IFCBOOLEANCLIPPINGRESULT") || b->args.size() < 3 ||
+                b->args[0].kind != adacpp::step::Kind::Enum || b->args[0].s != "DIFFERENCE")
+                return 0;
+            const long first = ref_arg(*b, 1);
+            const Instance *hs = inst(ref_arg(*b, 2));
+            if (!first || !hs || !iequals(hs->type, "IFCHALFSPACESOLID") || hs->args.size() < 2)
+                return 0;
+            // IfcHalfSpaceSolid(BaseSurface, AgreementFlag)
+            const long plane_id = ref_arg(*hs, 0);
+            const bool agreement = !(hs->args[1].kind == adacpp::step::Kind::Enum && hs->args[1].s == "F");
+            const Instance *pl = inst(plane_id);
+            if (!pl || !iequals(pl->type, "IFCPLANE"))
+                return 0;
+            Frame f = axis2(ref_arg(*pl, 0)); // IfcPlane(Position)
+            MemberInfo::HalfSpaceCut c;
+            c.origin = {f.o.x * us, f.o.y * us, f.o.z * us};
+            c.normal = {f.z.x, f.z.y, f.z.z};
+            c.xdir = {f.x.x, f.x.y, f.x.z};
+            c.agreement = agreement;
+            cuts.push_back(c);
+            body = first;
+        }
+        std::reverse(cuts.begin(), cuts.end());
+        return body;
+    }
+
+    // The swept profile as a section reader needs it: its curves with their arcs, its parametric
+    // length attributes, and the property sets attached to it.
+    void fill_profile(long prof_id, MemberInfo &m, double us) {
+        const Instance *prof = inst(prof_id);
+        if (!prof)
+            return;
+        build_material_maps(); // also collects IfcProfileProperties
+        if (iequals(prof->type, "IFCARBITRARYCLOSEDPROFILEDEF") ||
+            iequals(prof->type, "IFCARBITRARYPROFILEDEFWITHVOIDS")) {
+            // (ProfileType, ProfileName, OuterCurve[, InnerCurves])
+            read_profile_curve(ref_arg(*prof, 2), m.outer_curve, us);
+            prof = inst(prof_id);
+            if (prof && prof->args.size() > 3 && prof->args[3].is_list()) {
+                std::vector<long> inner_ids;
+                for (const Value &v : prof->args[3].items)
+                    if (v.is_ref())
+                        inner_ids.push_back(v.i);
+                for (long cid : inner_ids) {
+                    MemberInfo::ProfileCurve c;
+                    read_profile_curve(cid, c, us);
+                    m.inner_curves.push_back(std::move(c));
+                }
+            }
+        } else {
+            // Parametric profiles: their LENGTH attributes by IFC name (slopes are angles and stay out).
+            // (ProfileType, ProfileName, Position, <attributes from index 3>)
+            static const struct {
+                const char *type;
+                const char *names[8];
+            } table[] = {
+                {"IFCISHAPEPROFILEDEF",
+                 {"OverallWidth", "OverallDepth", "WebThickness", "FlangeThickness", "FilletRadius",
+                  "FlangeEdgeRadius"}},
+                {"IFCTSHAPEPROFILEDEF",
+                 {"Depth", "FlangeWidth", "WebThickness", "FlangeThickness", "FilletRadius", "FlangeEdgeRadius",
+                  "WebEdgeRadius"}},
+                {"IFCUSHAPEPROFILEDEF",
+                 {"Depth", "FlangeWidth", "WebThickness", "FlangeThickness", "FilletRadius", "EdgeRadius"}},
+                {"IFCLSHAPEPROFILEDEF", {"Depth", "Width", "Thickness", "FilletRadius", "EdgeRadius"}},
+                {"IFCRECTANGLEPROFILEDEF", {"XDim", "YDim"}},
+                {"IFCRECTANGLEHOLLOWPROFILEDEF",
+                 {"XDim", "YDim", "WallThickness", "InnerFilletRadius", "OuterFilletRadius"}},
+                {"IFCCIRCLEPROFILEDEF", {"Radius"}},
+                {"IFCCIRCLEHOLLOWPROFILEDEF", {"Radius", "WallThickness"}},
+            };
+            for (const auto &row : table) {
+                if (!iequals(prof->type, row.type))
+                    continue;
+                for (size_t k = 0; k < 8 && row.names[k]; ++k) {
+                    const size_t ai = 3 + k;
+                    if (ai < prof->args.size() && numeric(prof->args[ai]))
+                        m.profile_params.emplace_back(row.names[k], prof->args[ai].as_double() * us);
+                }
+                break;
+            }
+        }
+        auto it = profile_props_.find(prof_id);
+        if (it != profile_props_.end())
+            for (long set_id : it->second)
+                read_property_set(set_id, 0, m.profile_properties);
+    }
+
+    // IfcPolyline / IfcIndexedPolyCurve as stated (points scaled to metres, segments verbatim).
+    void read_profile_curve(long cid, MemberInfo::ProfileCurve &c, double us) {
+        const Instance *in = inst(cid);
+        if (!in)
+            return;
+        if (iequals(in->type, "IFCPOLYLINE")) {
+            std::vector<long> ids;
+            if (!in->args.empty() && in->args[0].is_list())
+                for (const Value &pr : in->args[0].items)
+                    if (pr.is_ref())
+                        ids.push_back(pr.i);
+            c.kind = "polyline";
+            c.dim = 2;
+            for (long id : ids) {
+                const Instance *cp = inst(id);
+                if (cp && !cp->args.empty() && cp->args[0].is_list() && cp->args[0].items.size() > 2)
+                    c.dim = 3;
+                Vec3 q = point(id);
+                c.points.push_back({q.x * us, q.y * us, q.z * us});
+            }
+            return;
+        }
+        if (!iequals(in->type, "IFCINDEXEDPOLYCURVE"))
+            return;
+        // (Points=IfcCartesianPointList2D|3D(CoordList), Segments, SelfIntersect)
+        const long pl_id = ref_arg(*in, 0);
+        std::vector<std::pair<bool, std::vector<int>>> segs;
+        bool has_segs = false;
+        if (in->args.size() > 1 && in->args[1].is_list()) {
+            has_segs = true;
+            // Typed select values: [Keyword, List(List(indices))] pairs.
+            const auto &items = in->args[1].items;
+            for (size_t k = 0; k + 1 < items.size(); k += 2) {
+                const Value &kw = items[k];
+                const Value &al = items[k + 1];
+                if (kw.kind != adacpp::step::Kind::Keyword || !al.is_list() || al.items.empty() ||
+                    !al.items[0].is_list())
+                    continue;
+                std::vector<int> ix;
+                for (const Value &iv : al.items[0].items)
+                    ix.push_back((int) (iv.kind == adacpp::step::Kind::Int ? iv.i : (long) iv.as_double()));
+                segs.emplace_back(iequals(kw.s, "IFCARCINDEX"), std::move(ix));
+            }
+        }
+        const Instance *pl = inst(pl_id);
+        if (!pl || pl->args.empty() || !pl->args[0].is_list())
+            return;
+        c.kind = "indexed";
+        c.dim = iequals(pl->type, "IFCCARTESIANPOINTLIST3D") ? 3 : 2;
+        for (const Value &row : pl->args[0].items)
+            if (row.is_list() && row.items.size() >= 2)
+                c.points.push_back({row.items[0].as_double() * us, row.items[1].as_double() * us,
+                                    row.items.size() > 2 ? row.items[2].as_double() * us : 0.0});
+        c.segments = std::move(segs);
+        c.has_segments = has_segs;
+    }
+
+    // SPF string -> text: undo the '' escape (the only one this codebase's writers produce).
+    static std::string spf_text(std::string_view s) {
+        std::string o;
+        o.reserve(s.size());
+        for (size_t i = 0; i < s.size(); ++i) {
+            o += s[i];
+            if (s[i] == '\'' && i + 1 < s.size() && s[i + 1] == '\'')
+                ++i;
+        }
+        return o;
+    }
+
+    // One (possibly typed) value starting at items[k]: a typed value is TWO adjacent Values, the type
+    // keyword and a one-element list (step_part21.h). Returns how many Values it consumed.
+    static size_t read_value(const std::vector<Value> &items, size_t k, MemberInfo::PropValue &out) {
+        using K = MemberInfo::PropValue::Kind;
+        out = MemberInfo::PropValue{};
+        if (k >= items.size())
+            return 0;
+        const Value *v = &items[k];
+        std::string_view type;
+        size_t used = 1;
+        if (v->kind == adacpp::step::Kind::Keyword && k + 1 < items.size() && items[k + 1].is_list()) {
+            type = v->s;
+            used = 2;
+            if (items[k + 1].items.empty())
+                return used;
+            v = &items[k + 1].items[0];
+        }
+        switch (v->kind) {
+        case adacpp::step::Kind::Str:
+            out.kind = K::Text;
+            out.s = spf_text(v->s);
+            break;
+        case adacpp::step::Kind::Int:
+            // An integer literal is an integer only where the type says so (or states none): an
+            // IFCREAL(1) written without its decimal point is still a real.
+            if (type.empty() || iequals(type, "IFCINTEGER") || iequals(type, "IFCCOUNTMEASURE") ||
+                iequals(type, "IFCPOSITIVEINTEGER")) {
+                out.kind = K::Int;
+                out.i = v->i;
+            } else {
+                out.kind = K::Real;
+                out.d = (double) v->i;
+            }
+            break;
+        case adacpp::step::Kind::Real:
+            out.kind = K::Real;
+            out.d = v->r;
+            break;
+        case adacpp::step::Kind::Enum:
+            if (v->s == "T" || v->s == "F") {
+                out.kind = K::Bool;
+                out.b = v->s == "T";
+            } else if (v->s != "U") {
+                out.kind = K::Text;
+                out.s = std::string(v->s);
+            }
+            break;
+        default:
+            break;
+        }
+        return used;
+    }
+
+    // IfcPropertySet(GlobalId, OwnerHistory, Name, Description, HasProperties) or
+    // IfcProfileProperties(Name, Description, Properties, ProfileDefinition): `name_at` is the Name's
+    // index (2 or 0); the property list follows the description. Single and list values only, the
+    // two kinds a set of flat values can hold.
+    void read_property_set(long set_id, int name_at, std::vector<std::pair<std::string, MemberInfo::PropSet>> &out) {
+        const Instance *ps = inst(set_id);
+        const size_t props_at = (size_t) name_at + 2;
+        if (!ps || ps->args.size() <= props_at)
+            return;
+        std::string set_name =
+            ps->args[name_at].kind == adacpp::step::Kind::Str ? spf_text(ps->args[name_at].s) : std::string();
+        std::vector<long> prop_ids;
+        if (ps->args[props_at].is_list())
+            for (const Value &pr : ps->args[props_at].items)
+                if (pr.is_ref())
+                    prop_ids.push_back(pr.i);
+        MemberInfo::PropSet set;
+        for (long pid : prop_ids) {
+            const Instance *pv = inst(pid);
+            if (!pv || pv->args.size() < 3 || pv->args[0].kind != adacpp::step::Kind::Str)
+                continue;
+            std::string name = spf_text(pv->args[0].s);
+            MemberInfo::PropValue val;
+            if (iequals(pv->type, "IFCPROPERTYSINGLEVALUE")) {
+                read_value(pv->args, 2, val); // (Name, Description, NominalValue, Unit)
+            } else if (iequals(pv->type, "IFCPROPERTYLISTVALUE")) {
+                val.kind = MemberInfo::PropValue::Kind::List; // (Name, Description, ListValues, Unit)
+                if (pv->args[2].is_list()) {
+                    const auto &items = pv->args[2].items;
+                    for (size_t k = 0; k < items.size();) {
+                        MemberInfo::PropValue e;
+                        size_t used = read_value(items, k, e);
+                        if (!used)
+                            break;
+                        val.items.push_back(std::move(e));
+                        k += used;
+                    }
+                }
+            } else {
+                continue;
+            }
+            set.emplace_back(std::move(name), std::move(val));
+        }
+        out.emplace_back(std::move(set_name), std::move(set));
+    }
+
+    // The product's property sets (IfcRelDefinesByProperties -> IfcPropertySet). Quantity sets and
+    // other definitions are not property sets and are left out.
+    void fill_psets(long pid, MemberInfo &m) {
+        build_material_maps();
+        auto it = psets_of_.find(pid);
+        if (it == psets_of_.end())
+            return;
+        for (long set_id : it->second) {
+            const Instance *ps = inst(set_id);
+            if (ps && iequals(ps->type, "IFCPROPERTYSET"))
+                read_property_set(set_id, 2, m.psets);
+        }
+    }
+
+    // object_placement in double precision (see MemberInfo::placement_d).
+    std::array<double, 16> object_placement_d(long id, int depth = 0) {
+        std::array<double, 16> I = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        const Instance *in = inst(id);
+        if (!in || depth > 64)
+            return I;
+        long axis_id = 0;
+        if (iequals(in->type, "IFCLOCALPLACEMENT"))
+            axis_id = ref_arg(*in, 1);
+        else if (iequals(in->type, "IFCLINEARPLACEMENT"))
+            axis_id = ref_arg(*in, 2);
+        else
+            return I;
+        const long parent = ref_arg(*in, 0);
+        std::array<double, 16> rel = I;
+        if (axis_id) {
+            Frame f = axis2(axis_id);
+            rel = {f.x.x, f.x.y, f.x.z, 0, f.y.x, f.y.y, f.y.z, 0, f.z.x, f.z.y, f.z.z, 0, f.o.x, f.o.y, f.o.z, 1};
+        }
+        if (!parent)
+            return rel;
+        const std::array<double, 16> P = object_placement_d(parent, depth + 1);
+        std::array<double, 16> R{};
+        for (int c = 0; c < 4; ++c)
+            for (int r = 0; r < 4; ++r) {
+                double s = 0;
+                for (int k = 0; k < 4; ++k)
+                    s += P[k * 4 + r] * rel[c * 4 + k];
+                R[c * 4 + r] = s;
+            }
+        return R;
+    }
+
+    std::unordered_map<long, std::vector<long>> psets_of_;      //!< product -> IfcRelDefinesByProperties sets
+    std::unordered_map<long, std::vector<long>> profile_props_; //!< IfcProfileDef -> IfcProfileProperties
 
     double us_cache_ = -1.0; //!< see unit_scale_cached()
     bool mat_maps_built_ = false;

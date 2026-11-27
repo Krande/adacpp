@@ -51,6 +51,89 @@ inline void str_field(std::string &o, const char *key, const std::string &v) {
     o += "\"";
 }
 
+inline void value(std::string &o, const MemberInfo::PropValue &v) {
+    using K = MemberInfo::PropValue::Kind;
+    switch (v.kind) {
+    case K::Real:
+        o += jsonw::num(v.d);
+        break;
+    case K::Int:
+        o += std::to_string(v.i);
+        break;
+    case K::Bool:
+        o += v.b ? "true" : "false";
+        break;
+    case K::Text:
+        o += "\"" + jsonw::escape(v.s) + "\"";
+        break;
+    case K::List:
+        o += "[";
+        for (size_t i = 0; i < v.items.size(); ++i) {
+            if (i)
+                o += ",";
+            value(o, v.items[i]);
+        }
+        o += "]";
+        break;
+    default:
+        o += "null";
+    }
+}
+
+// {set: {prop: value}} -- the same shape as the nanobind scan's dicts. A set name stated twice is
+// written twice; a JSON reader keeps the later one, where the dict form merges them.
+inline void sets(std::string &o, const std::vector<std::pair<std::string, MemberInfo::PropSet>> &ss) {
+    o += "{";
+    for (size_t i = 0; i < ss.size(); ++i) {
+        if (i)
+            o += ",";
+        o += "\"" + jsonw::escape(ss[i].first) + "\":{";
+        for (size_t j = 0; j < ss[i].second.size(); ++j) {
+            if (j)
+                o += ",";
+            o += "\"" + jsonw::escape(ss[i].second[j].first) + "\":";
+            value(o, ss[i].second[j].second);
+        }
+        o += "}";
+    }
+    o += "}";
+}
+
+inline void curve(std::string &o, const MemberInfo::ProfileCurve &c) {
+    if (c.kind.empty()) {
+        o += "null";
+        return;
+    }
+    o += "{\"kind\":\"" + c.kind + "\",\"dim\":" + std::to_string(c.dim) + ",\"points\":[";
+    for (size_t i = 0; i < c.points.size(); ++i) {
+        if (i)
+            o += ",";
+        o += "[" + jsonw::num(c.points[i][0]) + "," + jsonw::num(c.points[i][1]);
+        if (c.dim == 3)
+            o += "," + jsonw::num(c.points[i][2]);
+        o += "]";
+    }
+    o += "],\"segments\":";
+    if (c.kind == "indexed" && c.has_segments) {
+        o += "[";
+        for (size_t i = 0; i < c.segments.size(); ++i) {
+            if (i)
+                o += ",";
+            o += c.segments[i].first ? "[\"arc\",[" : "[\"line\",[";
+            for (size_t j = 0; j < c.segments[i].second.size(); ++j) {
+                if (j)
+                    o += ",";
+                o += std::to_string(c.segments[i].second[j]);
+            }
+            o += "]]";
+        }
+        o += "]";
+    } else {
+        o += "null";
+    }
+    o += "}";
+}
+
 } // namespace member_json_detail
 
 //: The record schema, written as the first line of every scan so a file found on its own says what
@@ -133,7 +216,48 @@ inline std::string member_to_json(const MemberInfo &mi) {
         o += jsonw::escape(kv.second);
         o += "\"";
     }
-    o += "}}";
+    o += "},";
+
+    o += "\"placement_d\":[";
+    for (size_t i = 0; i < mi.placement_d.size(); ++i) {
+        if (i)
+            o += ",";
+        o += jsonw::num(mi.placement_d[i]);
+    }
+    o += "],";
+    vec3(o, "extrude_dir", mi.extrude_dir.data(), true);
+    o += ",\"outer_curve\":";
+    curve(o, mi.outer_curve);
+    o += ",\"inner_curves\":[";
+    for (size_t i = 0; i < mi.inner_curves.size(); ++i) {
+        if (i)
+            o += ",";
+        curve(o, mi.inner_curves[i]);
+    }
+    o += "],\"profile_params\":{";
+    for (size_t i = 0; i < mi.profile_params.size(); ++i) {
+        if (i)
+            o += ",";
+        o += "\"" + jsonw::escape(mi.profile_params[i].first) + "\":" + jsonw::num(mi.profile_params[i].second);
+    }
+    o += "},\"profile_properties\":";
+    sets(o, mi.profile_properties);
+    o += ",\"psets\":";
+    sets(o, mi.psets);
+    o += ",\"cuts\":[";
+    for (size_t i = 0; i < mi.cuts.size(); ++i) {
+        const auto &c = mi.cuts[i];
+        if (i)
+            o += ",";
+        o += "{";
+        vec3(o, "origin", c.origin.data(), true);
+        o += ",";
+        vec3(o, "normal", c.normal.data(), true);
+        o += ",";
+        vec3(o, "xdir", c.xdir.data(), true);
+        o += c.agreement ? ",\"agreement\":true}" : ",\"agreement\":false}";
+    }
+    o += "]}";
     return o;
 }
 
