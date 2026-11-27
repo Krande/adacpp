@@ -81,8 +81,10 @@ async function coldStart() {
 //  * the quad/triangle split after recombination is REPORTED when it differs, not failed. The simple
 //    (greedy) pairing sorts candidate pairs by quality with std::sort, which is not stable, so ties
 //    can resolve differently under emscripten's libc++ than under the native libstdc++ build;
-//  * lshape_recombine_blossom is reported only: option A builds without Blossom, so gmsh falls back
-//    to the simple pairing where native recombines into (almost) all quads.
+//  * lshape_recombine_blossom is reported only. With ADACPP_GMSH_BLOSSOM=ON (default) both sides
+//    give an all-quad mesh but a slightly different one (wasm 232 nodes/199 quads vs native 234/201;
+//    probably the same order/libm sensitivity feeding Blossom's integer edge weights, unverified);
+//    with it OFF gmsh falls back to the simple pairing (quad-dominant).
 const BLOSSOM = "lshape_recombine_blossom";
 const sorted = (o) => JSON.stringify(Object.fromEntries(Object.entries(o || {}).sort()));
 const fixed = (e) => ({Point: (e || {}).Point, line: (e || {})["Line 2"]});
@@ -103,7 +105,7 @@ function compare(got, want) {
         if (exact)
             check(`${name} identical`, true, detail);
         else if (name === BLOSSOM)
-            console.log(`  diff ${name} (no Blossom in wasm) — ${detail}`);
+            console.log(`  diff ${name} (Blossom matching) —${detail}`);
         else if (g.nodes === w.nodes && sorted(fixed(g.elements)) === sorted(fixed(w.elements)))
             console.log(`  diff ${name}: same nodes/1D, quad-tri split differs — ${detail}`);
         else

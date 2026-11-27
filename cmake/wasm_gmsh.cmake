@@ -20,15 +20,27 @@
 #   core expects). Single-threaded (no OpenMP/MPI). No FLTK/GRAPHICS, HXT, NETGEN, MMG, METIS,
 #   ALGLIB, GMP, MED, CGNS, PETSc.
 #
-# BLOSSOM is OFF on purpose. contrib/blossom (Concorde/Blossom IV) is not GPL: Bill Cook's
-# permission covers use "within the Gmsh system" only (contrib/blossom/README.txt), an extra
-# restriction GPL-3 adacpp cannot pass on, and Fedora/Debian strip it as nonfree. The four-sided
-# plates are transfinite and come out as quads without any recombination algorithm; only
-# non-four-sided faces recombine, and there gmsh falls back to its greedy pairing when Blossom
-# is compiled out (meshGFaceOptimize.cpp, `#if defined(HAVE_BLOSSOM)`).
+# BLOSSOM (ADACPP_GMSH_BLOSSOM, default ON) is gmsh's default quad recombination (algorithm 1), as
+# in the native conda gmsh. contrib/blossom (Concorde/Blossom IV) is not GPL: Bill Cook's
+# permission covers use "within the Gmsh system" (contrib/blossom/README.txt). That is fine for
+# the internal-only viewer this wheel serves, but it is a restriction a GPL-3 wheel handed to third
+# parties could not pass on (Fedora/Debian strip it as nonfree), so it stays switchable. With it
+# OFF, gmsh falls back to its greedy pairing (meshGFaceOptimize.cpp, `#if defined(HAVE_BLOSSOM)`):
+# four-sided transfinite plates are unaffected, other outlines come out quad-dominant, not all-quad.
 
 include(ExternalProject)
 include(FetchContent)
+
+option(
+    ADACPP_GMSH_BLOSSOM
+    "Build gmsh's Blossom quad recombination (non-GPL contrib; internal use only)"
+    ON
+)
+if(ADACPP_GMSH_BLOSSOM)
+    set(_GMSH_BLOSSOM ON)
+else()
+    set(_GMSH_BLOSSOM OFF)
+endif()
 
 set(ADACPP_GMSH_VERSION
     "4.15.2"
@@ -136,7 +148,7 @@ set(_GMSH_CMAKE_ARGS
     -DENABLE_ANN=ON
     -DENABLE_MATHEX=ON
     -DENABLE_ONELAB=ON
-    -DENABLE_BLOSSOM=OFF
+    -DENABLE_BLOSSOM=${_GMSH_BLOSSOM}
     -DENABLE_OPENMP=OFF
     -DENABLE_MPI=OFF
     -DENABLE_HXT=OFF
