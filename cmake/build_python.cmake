@@ -168,6 +168,13 @@ if(EMSCRIPTEN)
     # 4.0.9 use native WebAssembly exception handling (-fwasm-exceptions); every
     # translation unit in the link (adacpp, OCCT, nanobind) must agree on the EH
     # model or thrown exceptions reach std::terminate instead of the catch.
+    # SPIKE (ADACPP_WITH_GMSH): export gmsh's C API from this side module so the shipped gmsh.py
+    # can ctypes.CDLL this very .so and call it. Everything else stays unexported, as above.
+    if(DEFINED ADACPP_GMSH_EXPORTS)
+        foreach(_sym IN LISTS ADACPP_GMSH_EXPORTS)
+            target_link_options(_ada_cpp_ext_impl PRIVATE "-Wl,--export=${_sym}")
+        endforeach()
+    endif()
     target_compile_options(_ada_cpp_ext_impl PRIVATE "-fwasm-exceptions")
     # nanobind's static lib (nanobind-static-abi3) holds the dispatch code that
     # actually converts C++ exceptions into Python ones — without -fwasm-exceptions
@@ -210,6 +217,16 @@ if(EMSCRIPTEN)
         FILES_MATCHING
         PATTERN "*.py"
     )
+    # SPIKE: upstream gmsh.py (library-path patch only) as the top-level `gmsh` module, and
+    # gmsh's licence beside it. tools/build_wheel.py packs top-level modules next to adacpp/.
+    if(DEFINED ADACPP_GMSH_PY)
+        install(FILES ${ADACPP_GMSH_PY} DESTINATION wheel)
+        install(
+            FILES ${ADACPP_GMSH_LICENSE}
+            DESTINATION wheel/licenses
+            RENAME LICENSE-gmsh.txt
+        )
+    endif()
 else()
     # Set Python site-packages directory (can be overridden via -DPYTHON_SITE_PACKAGES)
     if(NOT DEFINED PYTHON_SITE_PACKAGES)

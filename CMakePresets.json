@@ -158,6 +158,15 @@
       }
     },
     {
+      "name": "wasm-pyodide-gmsh",
+      "inherits": "wasm-pyodide",
+      "hidden": false,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "ADACPP_WITH_GMSH": "ON"
+      }
+    },
+    {
       "name": "pixi-test-linux",
       "generator": "Ninja",
       "hidden": false,

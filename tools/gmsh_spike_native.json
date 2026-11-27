@@ -1,0 +1,79 @@
+{
+ "gmsh_version": "4.15.2",
+ "lshape_recombine_blossom": {
+  "elements": {
+   "Line 2": 64,
+   "Point": 6,
+   "Quadrilateral 4": 201
+  },
+  "nodes": 234,
+  "seconds": 0.01
+ },
+ "lshape_recombine_simple": {
+  "elements": {
+   "Line 2": 64,
+   "Point": 6,
+   "Quadrilateral 4": 185,
+   "Triangle 3": 46
+  },
+  "nodes": 241,
+  "seconds": 0.008
+ },
+ "plate_native_pointer": {
+  "elements": {
+   "Line 2": 60,
+   "Point": 4,
+   "Quadrilateral 4": 200
+  },
+  "imported": [
+   [
+    2,
+    1
+   ]
+  ],
+  "nodes": 231,
+  "seconds": 0.001
+ },
+ "plate_stiffener_fragment": {
+  "elements": {
+   "Line 2": 112,
+   "Point": 8,
+   "Quadrilateral 4": 338
+  },
+  "nodes": 375,
+  "seconds": 0.01,
+  "surfaces_after_fragment": 3
+ },
+ "platform": "linux",
+ "rect_transfinite": {
+  "elements": {
+   "Line 2": 60,
+   "Point": 4,
+   "Quadrilateral 4": 200
+  },
+  "nodes": 231,
+  "seconds": 0.005
+ },
+ "size_field": {
+  "corner_points": 1,
+  "elements": {
+   "Line 2": 46,
+   "Point": 6,
+   "Quadrilateral 4": 141,
+   "Triangle 3": 38
+  },
+  "nodes": 184,
+  "seconds": 0.01
+ },
+ "step_import": {
+  "elements": {
+   "Line 2": 80,
+   "Point": 8,
+   "Quadrilateral 4": 209,
+   "Triangle 3": 70
+  },
+  "imported": 2,
+  "nodes": 286,
+  "seconds": 0.016
+ }
+}

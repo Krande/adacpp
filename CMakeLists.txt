@@ -50,6 +50,11 @@ option(
     "Build ONLY the OCC-free STP2GLB CLI — skip OCCT/CGAL/gmsh/IFC/Python"
     OFF
 )
+option(
+    ADACPP_WITH_GMSH
+    "SPIKE: cross-build gmsh and link it into the pyodide extension (BUILD_WASM + BUILD_PYTHON only)"
+    OFF
+)
 option(BUILD_PYTHON "Build the project for Python" ON)
 option(BUILD_STP2GLB "Build the STP2GLB executable" ON)
 option(BUILD_STP2GLB_TESTING "Build the testing tree." OFF)
@@ -271,6 +276,11 @@ if(BUILD_WASM)
         AND NOT BUILD_CLASH_WASM
     )
         include(cmake/wasm_occt.cmake)
+        # SPIKE: gmsh linked into the pyodide extension against the OCCT above (default OFF).
+        if(ADACPP_WITH_GMSH AND BUILD_PYTHON)
+            include(cmake/wasm_gmsh.cmake)
+            list(APPEND ADA_CPP_LINK_LIBS gmsh_wasm)
+        endif()
     endif()
 endif()
 

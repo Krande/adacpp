@@ -100,6 +100,13 @@ set(_WASM_OCCT_TOOLKITS
     TKMath
     TKernel
 )
+# gmsh's OCC kernel (wasm_gmsh.cmake, ADACPP_WITH_GMSH) also needs the IGES reader, the feature
+# toolkit and the two Visualization toolkits OCC_CAF's XCAF import references. All four are built
+# by the module set below and are in the published base image; the RESCAN link group takes care
+# of order.
+if(ADACPP_WITH_GMSH)
+    list(APPEND _WASM_OCCT_TOOLKITS TKDEIGES TKFeat TKV3d TKService)
+endif()
 
 if(NOT WASM_OCCT_PREBUILT_DIR)
     # ---- Build OCCT from source (the ~30-min cross-compile) ----------------
