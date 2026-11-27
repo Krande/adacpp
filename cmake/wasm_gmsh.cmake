@@ -24,8 +24,13 @@
 # gmsh options: everything off (-DDEFAULT=0) and then exactly what the mesh step uses switched on:
 #   MESH, POST (size fields), PARSER, SOLVER, OCC + OCC_CAF (STEP import with labels) on adacpp's
 #   OCCT, EIGEN (bundled; so no BLAS/LAPACK, no Fortran), ANN + MATHEX + ONELAB (small contribs the
-#   core expects). Single-threaded (no OpenMP/MPI). No FLTK/GRAPHICS, HXT, NETGEN, MMG, METIS,
-#   ALGLIB, GMP, MED, CGNS, PETSc.
+#   core expects), ALGLIB (bundled; see below). Single-threaded (no OpenMP/MPI). No FLTK/GRAPHICS,
+#   HXT, NETGEN, MMG, METIS, GMP, MED, CGNS, PETSc.
+#
+# ALGLIB is on because gmsh's generic closest-point search (GFace::closestPoint) needs it: when
+# OCCT's projection finds no point, OCCFace::closestPoint falls back to it, and without ALGLIB that
+# is an error ("Closest point not implemented for this type of surface"). ada's embed_points reaches
+# it on real models (a deck with point masses), and the native conda gmsh has ALGLIB.
 #
 # BLOSSOM (ADACPP_GMSH_BLOSSOM, default ON) is gmsh's default quad recombination (algorithm 1), as
 # in the native conda gmsh. contrib/blossom (Concorde/Blossom IV) is not GPL: Bill Cook's
@@ -159,7 +164,7 @@ set(_GMSH_OPTIONS
     -DENABLE_NETGEN=OFF
     -DENABLE_MMG=OFF
     -DENABLE_METIS=OFF
-    -DENABLE_ALGLIB=OFF
+    -DENABLE_ALGLIB=ON
     -DENABLE_GMP=OFF
     -DENABLE_KBIPACK=OFF
     -DENABLE_MED=OFF
