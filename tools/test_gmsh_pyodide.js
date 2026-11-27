@@ -17,17 +17,19 @@ const CASES = path.join(__dirname, "gmsh_spike_cases.py");
 // Native answers: conda-forge gmsh/python-gmsh 4.15.2 + ada-cpp 0.45.0 (linux-64), same cases file.
 // Structured (transfinite) meshes must match exactly.
 const NATIVE = {
-    rect_transfinite: {nodes: 231, quads: 200},
-    adacpp_plate: {nodes: 231, quads: 200},
+    rect_transfinite : {nodes : 231, quads : 200},
+    adacpp_plate : {nodes : 231, quads : 200},
     // the box solid via the pointer, fragmented by a gmsh plane: 2 volumes, 11 faces
-    adacpp_box_fragment: {nodes: 531, quads: 540, volumes: 2, surfaces: 11},
+    adacpp_box_fragment : {nodes : 531, quads : 540, volumes : 2, surfaces : 11},
 };
 // Unstructured Frontal-Delaunay + Blossom recombination is NOT bit-portable even between native
 // builds: on this face linux-64 conda gives 277/240 and win-64 conda the same, but their variants
 // already disagree (no smoothing: 277 vs 274; simple recombiner: 275 vs 277 nodes), and with the
 // topology pass off win-64 gives exactly what wasm gives (280/243). The triangulation itself
 // (275 nodes, 477 triangles) is identical. So: within 2% of linux-64, reported exactly.
-const NATIVE_UNSTRUCTURED = {rect_recombine_unstructured: {nodes: 277, quads: 240}};
+const NATIVE_UNSTRUCTURED = {
+    rect_recombine_unstructured : {nodes : 277, quads : 240}
+};
 
 let failures = 0;
 const check = (name, cond, detail) => {
@@ -109,7 +111,8 @@ json.dumps(gmsh_spike_cases.run_all())
         const topo = want.volumes === undefined || (r.volumes === want.volumes && r.surfaces === want.surfaces);
         check(`${name}: nodes/quads match native (${want.nodes}/${want.quads})`,
               r.nodes === want.nodes && quads === want.quads && topo,
-              r.error || `nodes=${r.nodes} quads=${quads}${want.volumes === undefined ? "" : ` volumes=${r.volumes} surfaces=${r.surfaces}`}`);
+              r.error || `nodes=${r.nodes} quads=${quads}${
+                             want.volumes === undefined ? "" : ` volumes=${r.volumes} surfaces=${r.surfaces}`}`);
     }
     for (const [name, want] of Object.entries(NATIVE_UNSTRUCTURED)) {
         const r = out[name] || {};

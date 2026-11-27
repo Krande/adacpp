@@ -19,7 +19,7 @@ import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from build_wheel import ABI_TAG, PLATFORM_TAG, PYTHON_TAG, _record_line  # noqa: E402
+from build_wheel import ABI_TAG, PLATFORM_TAG, PYTHON_TAG, _record_line
 
 
 def main() -> int:

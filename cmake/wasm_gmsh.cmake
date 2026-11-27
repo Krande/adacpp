@@ -18,7 +18,10 @@
 include(ExternalProject)
 
 if(NOT ADACPP_WASM_SHARED_OCCT)
-    message(FATAL_ERROR "ADACPP_WASM_GMSH needs ADACPP_WASM_SHARED_OCCT=ON (one OCCT for adacpp + gmsh)")
+    message(
+        FATAL_ERROR
+        "ADACPP_WASM_GMSH needs ADACPP_WASM_SHARED_OCCT=ON (one OCCT for adacpp + gmsh)"
+    )
 endif()
 
 set(GMSH_VERSION "4.15.2")
@@ -140,8 +143,8 @@ ExternalProject_Add(
         patch -p1 -d <SOURCE_DIR> -i
         ${CMAKE_CURRENT_LIST_DIR}/patches/gmsh/occt800_api_compat.patch
     COMMAND
-        sed -i
-        -e "s/TKXCAF TKLCAF TKVCAF TKCAF TKV3d TKService TKCDF)/TKXCAF TKLCAF TKVCAF TKCAF TKCDF)/"
+        sed -i -e
+        "s/TKXCAF TKLCAF TKVCAF TKCAF TKV3d TKService TKCDF)/TKXCAF TKLCAF TKVCAF TKCAF TKCDF)/"
         -e "s/^    find_package(Freetype)$/    set(FREETYPE_FOUND TRUE)/"
         ${GMSH_SOURCE_DIR}/CMakeLists.txt
     # gmsh appends $ENV{CMAKE_PREFIX_PATH}/include (and CMAKE_INCLUDE_PATH) to its include path. In a
@@ -169,7 +172,10 @@ endif()
 # symbol: the gmsh* C API that gmsh.py's ctypes calls (GMSH_API is visibility("default")), and gmsh's
 # C++ internals (harmless: nothing else carries gmsh).
 set(_gmsh_stub "${CMAKE_BINARY_DIR}/gmsh_shared_stub.c")
-file(WRITE "${_gmsh_stub}" "int adacpp_gmsh_shared_marker(void) { return 1; }\n")
+file(
+    WRITE "${_gmsh_stub}"
+    "int adacpp_gmsh_shared_marker(void) { return 1; }\n"
+)
 add_library(gmsh_shared SHARED "${_gmsh_stub}")
 set_target_properties(
     gmsh_shared

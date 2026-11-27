@@ -28,7 +28,7 @@ def _transfinite_quads(surfaces: list[int], size: float) -> None:
         for _, c in gmsh.model.getBoundary([(2, s)], oriented=False):
             x0, y0, z0, x1, y1, z1 = gmsh.model.getBoundingBox(1, abs(c))
             length = max(x1 - x0, y1 - y0, z1 - z0)
-            gmsh.model.mesh.setTransfiniteCurve(abs(c), int(round(length / size)) + 1)
+            gmsh.model.mesh.setTransfiniteCurve(abs(c), round(length / size) + 1)
         gmsh.model.mesh.setTransfiniteSurface(s)
         gmsh.model.mesh.setRecombine(2, s)
 
@@ -86,8 +86,9 @@ def rect_triangles_unstructured() -> dict:
 
 def adacpp_plate() -> dict:
     """The native-pointer bridge: a 10 x 5 face built by adacpp, handed to gmsh as a TopoDS_Shape*."""
-    import adacpp.cad as cad
     import gmsh
+
+    from adacpp import cad
 
     box = cad.make_box(10.0, 5.0, 1.0)  # centred on the origin
     # The bottom (z = -0.5) face of the box: a 10 x 5 plate in adacpp's OCCT.
@@ -114,8 +115,9 @@ def adacpp_plate() -> dict:
 def adacpp_box_fragment() -> dict:
     """adacpp's 10 x 5 x 1 box SOLID through the pointer, fragmented by a gmsh plane at x = 1, then
     every face transfinite at 0.5: OCCT booleans (BOPAlgo) in gmsh on a shape made by adacpp."""
-    import adacpp.cad as cad
     import gmsh
+
+    from adacpp import cad
 
     box = cad.make_box(10.0, 5.0, 1.0)
     gmsh.initialize(interruptible=False)
@@ -130,7 +132,7 @@ def adacpp_box_fragment() -> dict:
         gmsh.model.occ.synchronize()
         # drop the cutter's leftovers outside the box
         for d, t in gmsh.model.getEntities(2):
-            x0, y0, z0, x1, y1, z1 = gmsh.model.getBoundingBox(d, t)
+            _, y0, z0, _, y1, z1 = gmsh.model.getBoundingBox(d, t)
             if y0 < -2.6 or y1 > 2.6 or z0 < -0.6 or z1 > 0.6:
                 gmsh.model.removeEntities([(d, t)], recursive=True)
         surfaces = [t for _, t in gmsh.model.getEntities(2)]
@@ -169,7 +171,7 @@ def run_all() -> dict:
     for name, fn in CASES.items():
         try:
             out[name] = fn()
-        except Exception as e:  # report, keep going: one broken case must not hide the rest
+        except Exception as e:  # noqa: BLE001 -- report, keep going: one broken case must not hide the rest
             out[name] = {"error": f"{type(e).__name__}: {e}"}
     return out
 

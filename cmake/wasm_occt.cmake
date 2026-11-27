@@ -132,7 +132,14 @@ if(ADACPP_WASM_SHARED_OCCT)
     # Visualization module off): TKXCAF/TKVCAF objects reference Graphic3d_* vtables. A side module's
     # unresolved FUNCTION becomes a trapping stub, but an unresolved DATA symbol fails the load
     # ("bad export type for '_ZTV20Graphic3d_TextureSet'"), and whole-archive pulls every object in.
-    list(PREPEND _WASM_OCCT_TOOLKITS TKDEIGES TKDE TKFeat TKV3d TKService)
+    list(
+        PREPEND _WASM_OCCT_TOOLKITS
+        TKDEIGES
+        TKDE
+        TKFeat
+        TKV3d
+        TKService
+    )
 endif()
 
 if(NOT WASM_OCCT_PREBUILT_DIR)
@@ -332,7 +339,10 @@ if(ADACPP_WASM_SHARED_OCCT)
     # one file means one load and one place a second copy could come from.
     set_property(GLOBAL PROPERTY TARGET_SUPPORTS_SHARED_LIBS TRUE)
     set(_occt_stub "${CMAKE_BINARY_DIR}/occt_shared_stub.c")
-    file(WRITE "${_occt_stub}" "int adacpp_occt_shared_marker(void) { return 1; }\n")
+    file(
+        WRITE "${_occt_stub}"
+        "int adacpp_occt_shared_marker(void) { return 1; }\n"
+    )
     add_library(occt_shared SHARED "${_occt_stub}")
     set_target_properties(
         occt_shared
@@ -354,7 +364,11 @@ if(ADACPP_WASM_SHARED_OCCT)
             ${_occt_archives}
             "-Wl,--no-whole-archive"
     )
-    set_property(TARGET occt_shared APPEND PROPERTY LINK_DEPENDS ${_occt_archives})
+    set_property(
+        TARGET occt_shared
+        APPEND
+        PROPERTY LINK_DEPENDS ${_occt_archives}
+    )
     target_include_directories(occt_shared INTERFACE ${OCCT_INCLUDE_DIR})
     if(NOT WASM_OCCT_PREBUILT_DIR)
         add_dependencies(occt_shared occt_external)
