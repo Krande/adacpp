@@ -371,6 +371,17 @@ if(BUILD_WASM)
     include(cmake/wasm_build.cmake)
 endif()
 
+# SPIKE option B (adapy-plugins#177 step 2d): gmsh as its own Pyodide side module over the shared
+# OCCT. Default OFF; needs ADACPP_WASM_SHARED_OCCT=ON. Native builds never read it.
+option(
+    ADACPP_WASM_GMSH
+    "SPIKE: build gmsh 4.15.2 as libgmsh.so for Pyodide against the shared OCCT"
+    OFF
+)
+if(BUILD_WASM AND ADACPP_WASM_GMSH)
+    include(cmake/wasm_gmsh.cmake)
+endif()
+
 if(BUILD_DEBUG_TESTING)
     message(STATUS "Building the testing tree.")
     include(tests/cpp/test1.cmake)

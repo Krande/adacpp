@@ -225,6 +225,9 @@ wbuild-pyodide = { cmd = "emcmake cmake --preset wasm-pyodide -DPython_INCLUDE_D
 pack-wheel-pyodide = { cmd = "rm -rf build/wasm-pyodide/install dist && cmake --install build/wasm-pyodide --prefix build/wasm-pyodide/install && python tools/build_wheel.py build/wasm-pyodide/install/wheel dist", description = "Build a pyodide-tagged wheel from the wasm-pyodide build", depends-on = ["wbuild-pyodide"] }
 tools-install = { cmd = "cd tools && npm install --silent", description = "Install npm helpers (pyodide for the wheel sanity test) into tools/node_modules" }
 test-wheel-pyodide = { cmd = "node tools/test_wheel_pyodide.js", description = "Install the pyodide wheel under node-pyodide and assert its surface + a real STEP->GLB conversion", depends-on = ["pack-wheel-pyodide", "tools-install"] }
+# SPIKE (adapy-plugins#177 step 2d, option B): OCCT as a shared side module + gmsh as its own wheel.
+pack-gmsh-spike = { cmd = "bash tools/pack_gmsh_spike.sh", description = "SPIKE: build + pack ada_occt (shared libocct.so), ada_cpp (linked to it) and gmsh 4.15.2 Pyodide wheels into dist/" }
+test-gmsh-pyodide = { cmd = "ADACPP_PYODIDE_PREINSTALL=$(ls $PIXI_PROJECT_ROOT/dist/ada_occt-*.whl) node tools/test_wheel_pyodide.js && node tools/test_gmsh_pyodide.js", description = "SPIKE: the adacpp wheel test on the shared OCCT, then gmsh in node-Pyodide (transfinite, native-pointer bridge) vs native counts", depends-on = ["pack-gmsh-spike", "tools-install"] }
 # The embind STEP->GLB module the browser loads. The harness existed but was wired to nothing,
 # so a module that builds but cannot convert would have shipped unnoticed.
 test-stepglb-wasm = { cmd = "node tools/test_step_glb_wasm.mjs files/flat_plate_abaqus_10x10_m_wColors.stp", description = "Smoke-test the OCC-free STEP->GLB embind wasm module in node", depends-on = ["wbuild-stepglb"] }
