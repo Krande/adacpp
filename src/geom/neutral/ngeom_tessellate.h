@@ -122,4 +122,22 @@ struct PolyTriangulation {
 // boundary, exactly as the face path does.
 PolyTriangulation triangulate_polygon_with_holes(const std::vector<std::vector<std::array<double, 2>>> &loops);
 
+// Constrained-Delaunay (detria) triangulation of a planar polygon with holes. Unlike the libtess2
+// path above, the vertex set is EXACTLY the input: loop vertices in input order (loop 0, then each
+// hole), constraint edges never split, no Steiner or intersection points. A self-intersecting
+// boundary, a vertex on another edge, or a hole outside the outline is an error, not a repair.
+//
+// loops[0] is the outer boundary; further loops are holes. Winding is irrelevant. Loops are
+// implicitly closed; a trailing point equal to the first is dropped (so it is NOT in `verts`).
+// Triangles cover the polygon minus its holes and are all CCW (positive signed area).
+// Fail-soft: ok=false and `error` says why (fewer than 3 points, non-finite coordinates, all
+// collinear, duplicate points, intersecting constraints, ...).
+struct CdtPolyTriangulation {
+    std::vector<std::array<double, 2>> verts;
+    std::vector<std::array<uint32_t, 3>> tris;
+    bool ok = false;
+    std::string error;
+};
+CdtPolyTriangulation triangulate_polygon_cdt(const std::vector<std::vector<std::array<double, 2>>> &loops);
+
 } // namespace adacpp::ngeom

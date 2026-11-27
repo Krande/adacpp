@@ -234,6 +234,39 @@ def combine():
         }
     }
 
+    // ---- group 7: planar CDT (detria) — what param_models uses instead of `triangle` in the browser ----
+    console.log("\n[cdt] cad.triangulate_polygon matches the native contract");
+    {
+        const py = await fresh(wheel);
+        py.runPython(`
+import adacpp.cad as cad, numpy as np
+
+def cdt():
+    outer = [(0, 0), (10, 0), (10, 10), (0, 10)]
+    hole = [(4, 4), (6, 4), (6, 6), (4, 6)]
+    v, t = cad.triangulate_polygon([outer, hole])
+    a, b, c = v[t[:, 0]], v[t[:, 1]], v[t[:, 2]]
+    areas = 0.5 * ((b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (b[:, 1] - a[:, 1]) * (c[:, 0] - a[:, 0]))
+    try:
+        cad.triangulate_polygon([[(0, 0), (1, 1), (1, 0), (0, 1)]])
+        raised = "NO RAISE"
+    except ValueError:
+        raised = "ValueError"
+    except Exception as e:
+        raised = type(e).__name__
+    return {"verts": len(v), "tris": len(t), "area": float(areas.sum()), "ccw": bool((areas > 0).all()),
+            "same_verts": bool((v == np.asarray(outer + hole, dtype=float)).all()), "dtype": str(t.dtype),
+            "raised": raised}
+`);
+        const r = pyjson(py, "triangulate_polygon", "cdt()");
+        if (r) {
+            check("square with hole: input verts kept, 8 CCW tris, area 96",
+                  r.verts === 8 && r.tris === 8 && r.same_verts && r.ccw && r.area === 96 && r.dtype === "uint32",
+                  JSON.stringify(r));
+            check("a self-intersecting outline raises ValueError (no wasm trap)", r.raised === "ValueError", r.raised);
+        }
+    }
+
     console.log(failures === 0 ? "\nPYODIDE WHEEL OK ✓" : `\n${failures} CHECK(S) FAILED ✗`);
     process.exit(failures === 0 ? 0 : 1);
 }
