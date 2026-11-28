@@ -2,6 +2,15 @@
 
 
 
+## v0.49.0 (2026-11-28)
+
+### Feature
+
+* feat(ifc,ngeom): IFC length units, attributes and escapes; TRI_MESH records; B-spline faces without p-curves build (#92)
+
+Co-authored-by: Claude Opus 5.5 &lt;noreply@anthropic.com&gt; ([`c658573`](https://github.com/Krande/adacpp/commit/c6585731adf0d0e2bceebeb5529dd907aac8eda0))
+
+
 ## v0.48.0 (2026-11-27)
 
 ### Feature
