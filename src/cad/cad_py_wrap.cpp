@@ -174,6 +174,7 @@
 #include <TopTools_ListOfShape.hxx>
 #include <TopTools_MapOfOrientedShape.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
@@ -2935,11 +2936,17 @@ ShapeHandle build_advanced_face_bspline_impl(int u_degree, int v_degree,
     Handle(Geom_BSplineSurface) surf =
         make_bspline_surface(u_degree, v_degree, control_points, u_knots, v_knots, u_mults, v_mults, weights);
 
+    bool has_3d_edge = false;
     auto wire_of = [&](const std::vector<std::vector<double>> &edges) -> TopoDS_Wire {
         BRepBuilderAPI_MakeWire wm;
         for (const auto &rec : edges) {
             const int kind = static_cast<int>(std::lround(rec[0]));
-            wm.Add(kind == 6 ? edge_from_pcurve(rec, surf) : edge_from_record(rec));
+            if (kind == 6) {
+                wm.Add(edge_from_pcurve(rec, surf));
+            } else {
+                wm.Add(edge_from_record(rec));
+                has_3d_edge = true;
+            }
         }
         wm.Build();
         if (!wm.IsDone())
@@ -2954,6 +2961,42 @@ ShapeHandle build_advanced_face_bspline_impl(int u_degree, int v_degree,
         throw std::runtime_error("build_advanced_face: MakeFace failed");
     TopoDS_Face face = fm.Face();
     BRepLib::BuildCurves3d(face); // pcurve-built edges have no 3D curve yet
+    if (has_3d_edge) {
+        // A boundary given as 3D curves only (no 2D pcurve on the surface) leaves the face without
+        // the pcurves every downstream algorithm reads: BRepCheck calls it invalid, BRepMesh grids
+        // nothing, and BRepBuilderAPI_Sewing drops it -- a thickened curved shell's B-spline side
+        // walls (ruled strips between the two offset faces) then vanished from the sewn shell and
+        // only an end face survived. ShapeFix_Face projects each such edge onto the surface
+        // (ShapeFix_Edge::FixAddPCurve) and SameParameter reconciles 3D/2D, as the analytic-surface
+        // builder already does.
+        ShapeFix_Face fixer(face);
+        fixer.Perform();
+        face = fixer.Face();
+        try {
+            BRepLib::SameParameter(face, 1.0e-6, Standard_True);
+        } catch (const Standard_Failure &) {
+            // keep the ShapeFix'd face; BRepMesh rebuilds what it needs
+        }
+    }
+    // A loop running clockwise in the surface's own (u, v) bounds the face from outside: BRepCheck
+    // reports BadOrientationOfSubshape and the face measures a negative area. That is how a face
+    // whose sense is opposite to its surface's normal arrives (an AdvancedFace with
+    // same_sense=false: its loops are counter-clockwise about the FACE normal), and this builder is
+    // not told the sense. Turn the loops round and the face with them, so the region is the one the
+    // loops bound and the face keeps the side they imply.
+    {
+        GProp_GProps props;
+        BRepGProp::SurfaceProperties(face, props);
+        if (props.Mass() < 0.0) {
+            TopoDS_Face fwd = TopoDS::Face(face.Oriented(TopAbs_FORWARD));
+            TopoDS_Face turned = TopoDS::Face(fwd.EmptyCopied());
+            BRep_Builder bb;
+            for (TopoDS_Iterator it(fwd); it.More(); it.Next())
+                bb.Add(turned, it.Value().Reversed());
+            turned.Orientation(TopAbs_REVERSED);
+            face = turned;
+        }
+    }
     return ShapeHandle(face);
 }
 
