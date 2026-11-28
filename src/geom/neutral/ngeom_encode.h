@@ -42,6 +42,16 @@ public:
                 }
                 gi = add(tag::CURVE_SET, std::move(b));
             }
+            if (gi < 0 && root.trimesh) {
+                std::vector<uint8_t> b;
+                put_i32(b, (int) root.trimesh->positions.size());
+                for (const Vec3 &p : root.trimesh->positions)
+                    put_v3(b, p);
+                put_i32(b, (int) root.trimesh->indices.size());
+                for (int i : root.trimesh->indices)
+                    put_i32(b, i);
+                gi = add(tag::TRI_MESH, std::move(b));
+            }
             if (gi < 0 && (root.extrusion || root.revolve || root.boolean || root.sphere || root.sweep))
                 gi = solid_root(root);
             if (gi < 0) {

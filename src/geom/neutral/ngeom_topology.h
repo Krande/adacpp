@@ -519,6 +519,12 @@ struct SphereN {
     double radius = 0;
 };
 
+// A body that is already triangles (NGEOM TRI_MESH): positions + 0-based triangle corners.
+struct TriMeshN {
+    std::vector<Vec3> positions;
+    std::vector<int> indices;
+};
+
 // One top-level streamed Geometry instance + its stable id (for Mesh grouping).
 struct NgeomRoot {
     std::string id;
@@ -529,6 +535,7 @@ struct NgeomRoot {
     std::shared_ptr<BooleanN> boolean;                // set if this root is a boolean result
     std::shared_ptr<SphereN> sphere;                  // set if this root is a sphere primitive
     std::vector<std::vector<Vec3>> polylines;         // set if this root is a curve-only body (GL_LINES)
+    std::shared_ptr<TriMeshN> trimesh;                // set if this root is a pre-triangulated body
     // The product's representation WAS recognized but resolved to no drawable geometry because it is
     // degenerate (e.g. a zero-length DISCONTINUOUS IfcCurveSegment — a topological end-marker the
     // reference kernel also refuses). Distinguishes "intentionally empty" from "unsupported": the

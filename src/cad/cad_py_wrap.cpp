@@ -929,8 +929,8 @@ public:
             // in addition to face sets, so a procedural root carries real geometry. Only a root with
             // NO encodable geometry (empty faces + not one of those solids — e.g. an alignment sweep
             // or an unsupported product) still yields nothing; skip it for the kernel fallback.
-            bool has_solid =
-                root.extrusion || root.revolve || root.boolean || root.sphere || root.sweep || !root.polylines.empty();
+            bool has_solid = root.extrusion || root.revolve || root.boolean || root.sphere || root.sweep ||
+                             root.trimesh || !root.polylines.empty();
             if (root.faces.empty() && !has_solid) {
                 // recognized_empty => a degenerate product we DID understand (zero-length curve marker);
                 // don't count it as an unsupported skip (that would drive a wasted OCC fallback).
@@ -5155,7 +5155,9 @@ static void ngeom_tess_process(const NgeomTessRecord &rec, const adacpp::ngeom::
         NgeomDoc one;
         one.roots.push_back(std::move(root));
         TessMesh tm = tessellate_doc(one, tp);
-        if (tm.indices.empty()) {
+        // GlbSolid is triangles only: a curve-only body (CURVE_SET -> GL_LINES index pairs) would be
+        // written as triangles over its line indices. Skip it, counted, so the caller falls back.
+        if (tm.indices.empty() || tm.mesh_type == MeshType::LINES) {
             ++st.solids_skipped;
             continue;
         }
@@ -5893,6 +5895,18 @@ void cad_module(nb::module_ &m) {
         "Version of the member description stream_ngeom_to_ifc reads as a record's sixth element. A "
         "build without this function ignores that element (and needs a blob). Bumped when the "
         "description's meaning changes; adding a key does not need a bump.");
+
+    m.def(
+        "ngeom_mesh_record_tags",
+        []() {
+            namespace t = adacpp::ngeom::tag;
+            return std::vector<int>{
+                t::EXTRUDED_AREA_SOLID,   t::REVOLVED_AREA_SOLID, t::BOOLEAN_RESULT,     t::SPHERE_SOLID,
+                t::FIXED_REF_SWEPT_SOLID, t::FACE_SURFACE,        t::CONNECTED_FACE_SET, t::TRI_MESH};
+        },
+        "The NGEOM root record tags stream_ngeom_to_glb / stream_ngeom_to_mesh / tessellate_stream draw. "
+        "A caller asks before sending a kind an older build would skip (TRI_MESH: a body that is "
+        "already triangles).");
 
     m.def("stream_ngeom_to_glb", &stream_ngeom_to_glb_impl, "records"_a, "out_path"_a, "deflection"_a = 0.0,
           "angular_deg"_a = 20.0, "num_threads"_a = 0, "meshopt"_a = true, "model_scale"_a = 0.0,
