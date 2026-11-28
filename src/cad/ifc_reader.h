@@ -61,6 +61,9 @@ struct MemberInfo {
     std::string guid;                  //!< IfcRoot.GlobalId
     std::string name;                  //!< IfcRoot.Name, may be empty
     std::string ifc_class;             //!< "IFCBEAM", "IFCPLATE", "IFCCOLUMN", ... as written
+    std::string description;           //!< IfcRoot.Description, may be empty
+    std::string object_type;           //!< IfcObject.ObjectType, may be empty
+    std::string tag;                   //!< IfcElement.Tag, may be empty (or not an element)
     bool has_axis = false;             //!< whether p1/p2 carry a reference line
     std::array<double, 3> p1{0, 0, 0}; //!< axis start, WORLD coordinates, metres
     std::array<double, 3> p2{0, 0, 0}; //!< axis end
@@ -329,34 +332,100 @@ public:
         return us_cache_;
     }
 
-    // The file's length unit as metres-per-unit, from the first IfcSIUnit(*,.LENGTHUNIT.,prefix,.METRE.).
+    // Metres per unit of one IfcSIUnit(Dimensions, UnitType, Prefix, Name) that is a LENGTHUNIT in
+    // METRE, or -1 when `in` is not one.
+    static double si_length_scale(const Instance &in) {
+        if (in.args.size() < 4)
+            return -1.0;
+        bool is_len = in.args[1].kind == adacpp::step::Kind::Enum && in.args[1].s == "LENGTHUNIT";
+        bool is_metre = in.args[3].kind == adacpp::step::Kind::Enum && in.args[3].s == "METRE";
+        if (!is_len || !is_metre)
+            return -1.0;
+        if (in.args[2].kind != adacpp::step::Kind::Enum)
+            return 1.0; // no prefix -> METRE
+        std::string_view pf = in.args[2].s;
+        if (pf == "MILLI")
+            return 1e-3;
+        if (pf == "CENTI")
+            return 1e-2;
+        if (pf == "DECI")
+            return 1e-1;
+        if (pf == "KILO")
+            return 1e3;
+        if (pf == "MICRO")
+            return 1e-6;
+        return 1.0;
+    }
+
+    // Metres per unit of the length unit `id` names: an IfcSIUnit, or an IfcConversionBasedUnit
+    // (an inch, a foot) whose ConversionFactor -- IfcMeasureWithUnit(ValueComponent, UnitComponent)
+    // -- is that many of another length unit. -1 when `id` is no length unit.
+    double length_unit_scale(long id, int depth = 0) {
+        if (depth > 4)
+            return -1.0;
+        std::string scratch;
+        std::string_view t = type_of(id, scratch);
+        const Instance *in = inst(id);
+        if (!in)
+            return -1.0;
+        if (iequals(t, "IFCSIUNIT"))
+            return si_length_scale(*in);
+        if (!iequals(t, "IFCCONVERSIONBASEDUNIT") || in->args.size() < 4 ||
+            !(in->args[1].kind == adacpp::step::Kind::Enum && in->args[1].s == "LENGTHUNIT"))
+            return -1.0;
+        const Instance *mwu = inst(ref_arg(*in, 3));
+        if (!mwu)
+            return -1.0;
+        // IfcMeasureWithUnit(ValueComponent, UnitComponent). The value is a typed parameter --
+        // IfcLengthMeasure(x) parses to a keyword and a one-number list, as in plane_angle_scale --
+        // so take the first number for the value and the last reference for the unit.
+        double value = -1.0;
+        long unit = 0;
+        for (const Value &a : mwu->args) {
+            if (value < 0 && numeric(a))
+                value = a.as_double();
+            else if (value < 0 && a.is_list() && !a.items.empty() && numeric(a.items[0]))
+                value = a.items[0].as_double();
+            else if (a.is_ref())
+                unit = a.i;
+        }
+        if (!(value > 0) || unit <= 0)
+            return -1.0;
+        double base = length_unit_scale(unit, depth + 1);
+        return base > 0 ? value * base : -1.0;
+    }
+
+    // The file's length unit as metres-per-unit. The unit the project assigns
+    // (IfcUnitAssignment) wins: a file may state more than one length unit, and the first IfcSIUnit
+    // in it need not be the one in use. Without an assignment naming one, the first
+    // IfcSIUnit(*,.LENGTHUNIT.,prefix,.METRE.) is taken, as before.
     double unit_scale() {
         std::string scratch;
         for (long id : idx_.ids) {
-            std::string_view t = type_of(id, scratch);
-            if (!iequals(t, "IFCSIUNIT"))
+            if (!iequals(type_of(id, scratch), "IFCUNITASSIGNMENT"))
+                continue;
+            const Instance *ua = inst(id); // (Units)
+            if (!ua || ua->args.empty() || !ua->args[0].is_list())
+                continue;
+            std::vector<long> units; // copied: resolving a unit parses more statements
+            for (const Value &u : ua->args[0].items)
+                if (u.is_ref())
+                    units.push_back(u.i);
+            for (long u : units) {
+                double s = length_unit_scale(u);
+                if (s > 0)
+                    return s;
+            }
+        }
+        for (long id : idx_.ids) {
+            if (!iequals(type_of(id, scratch), "IFCSIUNIT"))
                 continue;
             const Instance *in = inst(id); // (Dimensions, UnitType, Prefix, Name)
-            if (!in || in->args.size() < 4)
+            if (!in)
                 continue;
-            bool is_len = in->args[1].kind == adacpp::step::Kind::Enum && in->args[1].s == "LENGTHUNIT";
-            bool is_metre = in->args[3].kind == adacpp::step::Kind::Enum && in->args[3].s == "METRE";
-            if (!is_len || !is_metre)
-                continue;
-            if (in->args[2].kind != adacpp::step::Kind::Enum)
-                return 1.0; // no prefix -> METRE
-            std::string_view pf = in->args[2].s;
-            if (pf == "MILLI")
-                return 1e-3;
-            if (pf == "CENTI")
-                return 1e-2;
-            if (pf == "DECI")
-                return 1e-1;
-            if (pf == "KILO")
-                return 1e3;
-            if (pf == "MICRO")
-                return 1e-6;
-            return 1.0;
+            double s = si_length_scale(*in);
+            if (s > 0)
+                return s;
         }
         return 1.0;
     }
@@ -906,6 +975,14 @@ public:
         m.ifc_class = p->type;
         m.guid = product_guid(pid);
         m.name = name_of(*p);
+        // IfcRoot.Description (arg 3), IfcObject.ObjectType (arg 4), IfcElement.Tag (arg 7).
+        auto text_arg = [&](size_t i) -> std::string {
+            return (p->args.size() > i && p->args[i].kind == adacpp::step::Kind::Str) ? spf_text(p->args[i].s)
+                                                                                      : std::string{};
+        };
+        m.description = text_arg(3);
+        m.object_type = text_arg(4);
+        m.tag = text_arg(7);
         m.placement = object_placement(ref_arg(*p, 5)); // ObjectPlacement = arg 5
         m.placement_d = object_placement_d(ref_arg(*p, 5));
         fill_material(pid, m);
@@ -1248,6 +1325,10 @@ public:
                 } else {
                     o += s[i]; // not a well-formed run: keep the text as written
                 }
+            } else if (s.substr(i, 3) == "\\X\\" && i + 4 < s.size() && hexv(s[i + 3]) >= 0 && hexv(s[i + 4]) >= 0) {
+                // \X\hh: one ISO 8859-1 character, e.g. \X\27 for an apostrophe some writers escape.
+                put(o, (unsigned) (hexv(s[i + 3]) * 16 + hexv(s[i + 4])));
+                i += 4;
             } else {
                 o += s[i];
             }

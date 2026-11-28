@@ -3374,6 +3374,37 @@ static void tessellate_one_root(const NgeomRoot &root, const TessParams &tp, Tes
     } else if (root.sphere) {
         Mesh m(out);
         tessellate_sphere(*root.sphere, tp, m);
+    } else if (root.trimesh) {
+        // Already triangles: pass the mesh through (area-weighted vertex normals, degenerate
+        // triangles dropped), no re-tessellation.
+        const TriMeshN &tm = *root.trimesh;
+        const uint32_t base = (uint32_t) (out.positions.size() / 3);
+        std::vector<Vec3> nrm(tm.positions.size(), Vec3{0, 0, 0});
+        for (size_t k = 0; k + 2 < tm.indices.size(); k += 3) {
+            const int a = tm.indices[k], b = tm.indices[k + 1], c = tm.indices[k + 2];
+            if (a == b || b == c || a == c)
+                continue;
+            const Vec3 n = (tm.positions[b] - tm.positions[a]).cross(tm.positions[c] - tm.positions[a]);
+            if (n.norm() <= 0.0)
+                continue;
+            nrm[a] = nrm[a] + n;
+            nrm[b] = nrm[b] + n;
+            nrm[c] = nrm[c] + n;
+            out.indices.push_back(base + (uint32_t) a);
+            out.indices.push_back(base + (uint32_t) b);
+            out.indices.push_back(base + (uint32_t) c);
+        }
+        for (size_t i = 0; i < tm.positions.size(); ++i) {
+            const Vec3 &p = tm.positions[i];
+            out.positions.push_back((float) p.x);
+            out.positions.push_back((float) p.y);
+            out.positions.push_back((float) p.z);
+            const double l = nrm[i].norm();
+            const Vec3 n = l > 0.0 ? nrm[i] * (1.0 / l) : Vec3{0, 0, 1};
+            out.normals.push_back((float) n.x);
+            out.normals.push_back((float) n.y);
+            out.normals.push_back((float) n.z);
+        }
     } else if (!root.polylines.empty()) {
         // Curve-only body -> GL_LINES: emit each polyline's points as a line strip (index pairs).
         out.mesh_type = MeshType::LINES;

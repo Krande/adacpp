@@ -94,10 +94,17 @@ inline void emit_solid_ifc(adacpp::ifc_emit::BrepEmitter &em, std::string &buf, 
         auto D = [&](float a, float b, float cc) {
             return em.emit_entity(buf, "IfcDirection((" + R(a) + "," + R(b) + "," + R(cc) + "))");
         };
-        long axx = D(T[0], T[1], T[2]), axy = D(T[4], T[5], T[6]), axz = D(T[8], T[9], T[10]);
+        // A uniform scale in the matrix (a reader folding a file's length unit into it) is the
+        // operator's Scale: IFC directions are normalised, so scaled axes alone would lose it.
+        float sc = std::sqrt(T[0] * T[0] + T[1] * T[1] + T[2] * T[2]);
+        if (!(sc > 0.0f))
+            sc = 1.0f;
+        long axx = D(T[0] / sc, T[1] / sc, T[2] / sc), axy = D(T[4] / sc, T[5] / sc, T[6] / sc),
+             axz = D(T[8] / sc, T[9] / sc, T[10] / sc);
         long org = em.emit_entity(buf, "IfcCartesianPoint((" + R(T[12]) + "," + R(T[13]) + "," + R(T[14]) + "))");
+        const std::string scale = std::fabs(sc - 1.0f) < 1e-6f ? std::string("1.") : R(sc);
         long op = em.emit_entity(buf, "IfcCartesianTransformationOperator3D(#" + std::to_string(axx) + ",#" +
-                                          std::to_string(axy) + ",#" + std::to_string(org) + ",1.,#" +
+                                          std::to_string(axy) + ",#" + std::to_string(org) + "," + scale + ",#" +
                                           std::to_string(axz) + ")");
         long mi = em.emit_entity(buf, "IfcMappedItem(#" + std::to_string(repmap) + ",#" + std::to_string(op) + ")");
         long sr = em.emit_entity(buf, "IfcShapeRepresentation(#6,'Body','MappedRepresentation',(#" +

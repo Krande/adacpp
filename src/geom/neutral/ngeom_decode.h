@@ -59,6 +59,10 @@ enum : int {
     FACE_SURFACE = 65,
     CONNECTED_FACE_SET = 66,
     CURVE_SET = 67, // a curve-only body: N polylines (GL_LINES). C++-only (not in the Python codec).
+    // A pre-triangulated body: [n_pos:i32][n_pos * vec3][n_idx:i32][n_idx * i32] (0-based triangle
+    // corners). Meshes that are already triangles (IfcTriangulatedFaceSet / PolygonalFaceSet, FEM
+    // shells, a body some other kernel already tessellated) pass straight to the writer.
+    TRI_MESH = 68,
 };
 }
 
@@ -157,6 +161,7 @@ struct Slot {
     std::shared_ptr<BooleanN> boolean;
     std::shared_ptr<SphereN> sphere;
     std::vector<std::vector<Vec3>> polylines;
+    std::shared_ptr<TriMeshN> trimesh;
     std::shared_ptr<OrientedEdgeN> oedge;
     // EDGE_CURVE intermediate
     Vec3 e_start, e_end;
@@ -455,6 +460,18 @@ inline NgeomDoc decode(const uint8_t *data, size_t n) {
             }
             break;
         }
+        case tag::TRI_MESH: {
+            auto tm = std::make_shared<TriMeshN>();
+            int np = r.i32();
+            tm->positions = r.vec3s(np);
+            int ni = r.i32();
+            tm->indices = r.i32s(ni);
+            for (int v : tm->indices)
+                if (v < 0 || v >= np)
+                    throw std::runtime_error("NGEOM: TRI_MESH index out of range");
+            slot.trimesh = tm;
+            break;
+        }
         case tag::EXTRUDED_AREA_SOLID: {
             auto ex = std::make_shared<ExtrusionN>();
             ex->profile = S.at(r.i32()).face; // profile FACE_SURFACE
@@ -537,6 +554,8 @@ inline NgeomDoc decode(const uint8_t *data, size_t n) {
             root.sphere = gs.sphere;
         } else if (!gs.polylines.empty()) {
             root.polylines = gs.polylines;
+        } else if (gs.trimesh) {
+            root.trimesh = gs.trimesh;
         } else if (gs.face) {
             root.faces.push_back(gs.face);
         } else if (gs.cfs) {

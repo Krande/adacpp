@@ -157,6 +157,12 @@ inline std::string member_to_json(const MemberInfo &mi) {
     o += ",";
     str_field(o, "ifc_class", mi.ifc_class);
     o += ",";
+    str_field(o, "description", mi.description);
+    o += ",";
+    str_field(o, "object_type", mi.object_type);
+    o += ",";
+    str_field(o, "tag", mi.tag);
+    o += ",";
     str_field(o, "profile_name", mi.profile_name);
     o += ",";
     str_field(o, "profile_type", mi.profile_type);
