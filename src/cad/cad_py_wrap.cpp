@@ -748,6 +748,9 @@ public:
         d["guid"] = mi.guid;
         d["name"] = mi.name;
         d["ifc_class"] = mi.ifc_class;
+        d["description"] = mi.description;
+        d["object_type"] = mi.object_type;
+        d["tag"] = mi.tag;
         d["profile_name"] = mi.profile_name;
         d["profile_type"] = mi.profile_type;
         d["depth"] = mi.depth;
